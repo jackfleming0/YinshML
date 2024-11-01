@@ -1,0 +1,54 @@
+# Ignore everything first
+*
+
+# Then un-ignore specific directories and files we want
+!scripts/
+!scripts/**
+!yinsh_ml/
+!yinsh_ml/**
+!pyproject.toml
+!requirements.txt
+!setup.py
+
+# Python virtual environment
+.venv/
+venv/
+ENV/
+
+# Ignore all model outputs
+models/**/*.pt
+models/**/*.mlpackage
+models/**/checkpoint_*
+models/**/games.npy
+models/**/metrics.json
+
+# But keep directory structure
+!models/
+!models/.gitkeep
+
+# Common Python files to ignore
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.env
+.venv
+venv/
+ENV/
+.DS_Store.idea/
