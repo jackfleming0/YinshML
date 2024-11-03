@@ -8,6 +8,9 @@ import random
 import logging
 from concurrent.futures import ProcessPoolExecutor
 import time
+import tempfile
+import os
+
 
 from ..utils.encoding import StateEncoder
 from ..game.game_state import GamePhase, GameState
@@ -195,23 +198,33 @@ class SelfPlay:
         self.logger.setLevel(logging.INFO)
 
     def generate_games(self, num_games: int = 100) -> List[Tuple[List[np.ndarray], List[np.ndarray], int]]:
-        """
-        Generate self-play games.
-
-        Args:
-            num_games (int): Number of games to generate.
-
-        Returns:
-            List[Tuple[List[np.ndarray], List[np.ndarray], int]]: A list containing tuples of (states, policies, outcome).
-        """
+        """Generate self-play games in parallel using multiple workers."""
         games = []
-        for game_id in range(1, num_games + 1):
-            try:
-                states, policies, outcome = self.play_game(game_id)
-                games.append((states, policies, outcome))
-                self.logger.info(f"Game {game_id} completed successfully.")
-            except Exception as e:
-                self.logger.error(f"Error in game {game_id}: {e}")
+        num_simulations = self.num_simulations
+        network_params = self.network.network.state_dict()
+
+        # Save the model to a temporary file for workers to load
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            torch.save(network_params, tmp.name)
+            model_path = tmp.name
+
+        try:
+            with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+                futures = [
+                    executor.submit(play_game_worker, model_path, game_id, num_simulations)
+                    for game_id in range(1, num_games + 1)
+                ]
+                for future in futures:
+                    try:
+                        result = future.result()
+                        games.append(result)
+                        self.logger.info("Game completed successfully.")
+                    except Exception as e:
+                        self.logger.error(f"Error in game generation: {e}")
+        finally:
+            # Clean up the temporary model file
+            os.unlink(model_path)
+
         return games
 
     def play_game(self, game_id: int) -> Tuple[List[np.ndarray], List[np.ndarray], int]:
@@ -316,3 +329,59 @@ class SelfPlay:
         }
         np.save(path, data)
         self.logger.info(f"Exported {len(games)} games to {path}")
+
+def play_game_worker(model_path, game_id, num_simulations):
+    """Worker function to play a single game."""
+    # Initialize the network in the worker
+    device = torch.device('cpu')  # Use 'cuda' or 'mps' if appropriate
+    network = NetworkWrapper(model_path=model_path, device=device)
+    mcts = MCTS(network, num_simulations=num_simulations)
+    state_encoder = StateEncoder()
+    state = GameState()
+    states = []
+    policies = []
+    max_moves = 500
+    move_count = 0
+
+    while not state.is_terminal() and move_count < max_moves:
+        # Run MCTS to get move probabilities
+        move_probs = mcts.search(state)
+        valid_moves = state.get_valid_moves()
+
+        if not valid_moves:
+            break
+
+        # Get probabilities for valid moves
+        valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
+        valid_probs = move_probs[valid_indices]
+
+        if valid_probs.sum() == 0:
+            break
+
+        # Normalize probabilities
+        valid_probs = valid_probs / valid_probs.sum()
+
+        # Select move based on probabilities
+        selected_idx = np.random.choice(len(valid_moves), p=valid_probs)
+        selected_move = valid_moves[selected_idx]
+
+        # Make the move
+        state.make_move(selected_move)
+
+        # Store state and policy
+        encoded_state = state_encoder.encode_state(state)
+        states.append(encoded_state)
+        policies.append(move_probs)
+
+        move_count += 1
+
+    # Determine game outcome
+    winner = state.get_winner()
+    if winner == Player.WHITE:
+        outcome = 1
+    elif winner == Player.BLACK:
+        outcome = -1
+    else:
+        outcome = 0
+
+    return states, policies, outcome
