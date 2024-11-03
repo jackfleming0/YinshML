@@ -23,7 +23,8 @@ class TrainingSupervisor:
                  save_dir: str,
                  num_workers: int = 4,
                  mcts_simulations: int = 100,
-                 mode: str = 'dev'  # Add mode parameter with default
+                 mode: str = 'dev',  # Add mode parameter with default
+                 device='cpu'
                  ):
         """
         Initialize the training supervisor.
@@ -46,7 +47,7 @@ class TrainingSupervisor:
             num_simulations=mcts_simulations,
             num_workers=num_workers
         )
-        self.trainer = YinshTrainer(network)
+        self.trainer = YinshTrainer(network, device=device)
         self.visualizer = TrainingVisualizer()
         self.state_encoder = StateEncoder()
         self.metrics = TrainingMetrics()
