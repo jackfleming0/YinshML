@@ -17,14 +17,22 @@ ModelOutput = namedtuple('ModelOutput', ['policy', 'value'])
 class NetworkWrapper:
     """Wrapper class for the YINSH neural network model."""
 
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None):
         """
         Initialize the network wrapper.
 
         Args:
             model_path: Optional path to load a pre-trained model
+            device: Device to use ('cuda', 'mps', or 'cpu')
         """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device:
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device(
+                "cuda" if torch.cuda.is_available() else (
+                    "mps" if torch.backends.mps.is_available() else "cpu"
+                )
+            )
         self.network = YinshNetwork().to(self.device)
 
         # Setup logging
@@ -95,11 +103,11 @@ class NetworkWrapper:
     def export_to_coreml(self, path: str):
         """Export model to CoreML format."""
         try:
-            # Set model to eval mode
-            self.network.eval()
+            # Set model to eval mode and move to CPU
+            self.network.eval().to('cpu')
 
-            # Create example input
-            example_input = torch.randn(1, 6, 11, 11)
+            # Create example input on CPU
+            example_input = torch.randn(1, 6, 11, 11).to('cpu')
 
             # Create a traced model with named outputs using NamedTuple
             class TracedModel(torch.nn.Module):
@@ -128,9 +136,12 @@ class NetworkWrapper:
                 compute_units=ct.ComputeUnit.CPU_AND_GPU
             )
 
-            # Save the model
+            # Save the CoreML model
             mlmodel.save(path)
             self.logger.info(f"Model exported to CoreML format at {path}")
+
+            # Move model back to MPS
+            self.network.to('mps')
 
         except Exception as e:
             self.logger.error(f"Error exporting to CoreML: {str(e)}")

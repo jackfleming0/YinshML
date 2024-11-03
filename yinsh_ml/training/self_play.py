@@ -55,31 +55,33 @@ class MCTS:
         """Perform MCTS search and return move probabilities."""
         root = Node(state)
 
+        # Ensure move_probs is float32
+        move_probs = np.zeros(self.state_encoder.num_positions ** 2 + 2 * self.state_encoder.num_positions,
+                              dtype=np.float32)
+
         for _ in range(self.num_simulations):
             node = root
             search_path = [node]
             current_state = state.copy()
 
-            # Selection - traverse tree to leaf node
+            # Selection
             while node.is_expanded and node.children:
                 action = self._select_action(node)
                 current_state.make_move(action)
                 node = node.children[action]
                 search_path.append(node)
 
-            # Get game outcome
+            # Evaluation
             value = self._get_value(current_state)
 
             if value is None:
-                # Expansion - use network to evaluate position
                 policy, value = self._evaluate_state(current_state)
                 valid_moves = current_state.get_valid_moves()
 
-                if valid_moves:  # Only expand if there are valid moves
+                if valid_moves:
                     node.is_expanded = True
                     policy = self._mask_invalid_moves(policy, valid_moves)
 
-                    # Create child nodes
                     for move in valid_moves:
                         node.children[move] = Node(
                             current_state.copy(),
@@ -91,26 +93,22 @@ class MCTS:
             self._backpropagate(search_path, value)
 
         # Calculate move probabilities from visit counts
-        move_probs = np.zeros(self.state_encoder.num_positions ** 2 + 2 * self.state_encoder.num_positions)
         valid_moves = state.get_valid_moves()
 
         if not valid_moves:
-            # Handle no valid moves scenario if applicable
             return move_probs
 
         visit_counts = np.array([
             root.children[move].visit_count
             for move in valid_moves
-        ])
+        ], dtype=np.float32)  # Ensure float32
 
-        # Convert visits to probabilities
         total_visits = visit_counts.sum()
         if total_visits > 0:
             visit_probs = visit_counts / total_visits
         else:
-            visit_probs = np.ones_like(visit_counts) / len(visit_counts)
+            visit_probs = np.ones_like(visit_counts, dtype=np.float32) / len(visit_counts)
 
-        # Assign probabilities to move indices
         for move, prob in zip(valid_moves, visit_probs):
             move_idx = self.state_encoder.move_to_index(move)
             move_probs[move_idx] = prob
@@ -136,11 +134,12 @@ class MCTS:
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
         """Get policy and value from neural network."""
         state_tensor = self.state_encoder.encode_state(state)
-        state_tensor = torch.FloatTensor(state_tensor).unsqueeze(0)
+        state_tensor = torch.FloatTensor(state_tensor).unsqueeze(0).to(
+            self.network.device)  # Ensure tensor is on the correct device
 
         with torch.no_grad():
             policy, value = self.network.predict(state_tensor)
-            return policy.squeeze().numpy(), value.item()
+            return policy.squeeze().cpu().numpy(), value.item()  # Move policy to CPU before conversion
 
     def _get_value(self, state: GameState) -> Optional[float]:
         """Get value if game is terminal, None otherwise."""

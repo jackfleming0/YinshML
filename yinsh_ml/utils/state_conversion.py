@@ -201,8 +201,8 @@ class StateConverter:
             Rotated state tensor
         """
         # Convert to numpy for easier manipulation
-        state_np = state.numpy()
-        rotated = np.zeros_like(state_np)
+        state_np = state.cpu().numpy()  # Move tensor to CPU before conversion
+        rotated = np.zeros_like(state_np, dtype=np.float32)  # Ensure float32
 
         # Process each channel separately
         for channel in range(state_np.shape[0]):

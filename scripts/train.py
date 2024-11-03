@@ -49,9 +49,14 @@ def parse_args():
                       help='Training mode (quick/dev/full)')
     parser.add_argument('--resume', type=str, default=None,
                       help='Path to checkpoint to resume training from')
-    parser.add_argument('--device', type=str,
-                      default='cuda' if torch.cuda.is_available() else 'cpu',
-                      help='Device to train on (cuda/cpu)')
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='cuda' if torch.cuda.is_available() else (
+            'mps' if torch.backends.mps.is_available() else 'cpu'
+        ),
+        help='Device to train on (cuda/mps/cpu)'
+    )
     parser.add_argument('--debug', action='store_true',
                       help='Enable debug logging')
 
@@ -122,7 +127,7 @@ def main():
 
     try:
         # Initialize network and training components
-        network = NetworkWrapper()
+        network = NetworkWrapper(device=args.device)
         if args.resume:
             logger.info(f'Resuming from checkpoint: {args.resume}')
             logger.debug('Loading model weights and optimizer state')
@@ -133,7 +138,8 @@ def main():
             save_dir=str(model_dir),
             num_workers=args.num_workers,
             mcts_simulations=settings['mcts_simulations'],
-            mode=args.mode  # Pass the mode
+            mode=args.mode,  # Pass the mode
+            device=args.device  # Pass the device
         )
         logger.debug(f'Training supervisor initialized with {args.num_workers} workers')
 
@@ -144,8 +150,13 @@ def main():
         for iteration in range(settings['num_iterations']):
             iteration_start = time.time()
             logger.info(f'Starting iteration {iteration + 1}/{settings["num_iterations"]}')
-            logger.debug(f'Memory usage before iteration: {torch.cuda.memory_allocated() if torch.cuda.is_available() else "N/A"}')
-
+            if torch.cuda.is_available():
+                memory_usage = torch.cuda.memory_allocated()
+            elif torch.backends.mps.is_available():
+                memory_usage = torch.mps.current_allocated_memory()
+            else:
+                memory_usage = "N/A"
+            logger.debug(f'Memory usage before iteration: {memory_usage}')
             # Training iteration
             supervisor.train_iteration(
                 num_games=settings['games_per_iteration'],
@@ -174,7 +185,13 @@ def main():
             logger.info(f'Iteration {iteration + 1} completed in {iteration_time:.1f}s')
             logger.info(f'Total training time so far: {elapsed_time/3600:.1f}h')
             logger.info(f'Saved checkpoint to {checkpoint_path}')
-            logger.debug(f'Memory usage after iteration: {torch.cuda.memory_allocated() if torch.cuda.is_available() else "N/A"}')
+            if torch.cuda.is_available():
+                memory_usage = torch.cuda.memory_allocated()
+            elif torch.backends.mps.is_available():
+                memory_usage = torch.mps.current_allocated_memory()
+            else:
+                memory_usage = "N/A"
+            logger.debug(f'Memory usage after iteration: {memory_usage}')
 
     except KeyboardInterrupt:
         logger.info('Training interrupted by user')

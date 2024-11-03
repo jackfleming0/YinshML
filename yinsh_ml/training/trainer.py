@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import logging
 from pathlib import Path
 import time
@@ -50,8 +50,8 @@ class GameExperience:
         """Sample a random batch of experiences."""
         indices = np.random.choice(len(self.states), batch_size)
 
-        states = torch.stack([torch.from_numpy(self.states[i]) for i in indices])
-        probs = torch.stack([torch.from_numpy(self.move_probs[i]) for i in indices])
+        states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])  # Ensure float32
+        probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])  # Ensure float32
         values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
 
         return states, probs, values.unsqueeze(1)
@@ -60,15 +60,23 @@ class GameExperience:
 class YinshTrainer:
     """Handles the training of the YINSH neural network."""
 
-    def __init__(self, network: NetworkWrapper, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+
+    def __init__(self, network: NetworkWrapper, device: Optional[str] = None):
         """
         Initialize the trainer.
 
         Args:
             network: NetworkWrapper instance
-            device: Device to train on ('cuda' or 'cpu')
+            device: Device to train on ('cuda', 'mps', or 'cpu')
         """
-        self.device = torch.device(device)
+        if device:
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device(
+                "cuda" if torch.cuda.is_available() else (
+                    "mps" if torch.backends.mps.is_available() else "cpu"
+                )
+            )
         self.network = network  # Store the wrapper
         self.network.network = self.network.network.to(self.device)  # Move the actual network to device
 
