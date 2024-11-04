@@ -47,21 +47,36 @@ class Node:
 class MCTS:
     """Monte Carlo Tree Search implementation."""
 
-    def __init__(self, network: NetworkWrapper, num_simulations: int = 100):
+    def __init__(self, network: NetworkWrapper,
+                 num_simulations: int = 100,
+                 initial_temp: float = 1.0,
+                 final_temp: float = 0.2,
+                 annealing_steps: int = 30):
         self.network = network
         self.num_simulations = num_simulations
-        self.state_encoder = StateEncoder()  # Initialize StateEncoder here as well
+        self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS")
-        self.logger.setLevel(logging.INFO)
 
-    def search(self, state: GameState) -> np.ndarray:
-        """Perform MCTS search and return move probabilities."""
+        # Temperature annealing parameters
+        self.initial_temp = initial_temp
+        self.final_temp = final_temp
+        self.annealing_steps = annealing_steps
+
+    def get_temperature(self, move_number: int) -> float:
+        """Calculate temperature based on move number."""
+        if move_number >= self.annealing_steps:
+            return self.final_temp
+
+        # Linear annealing
+        progress = move_number / self.annealing_steps
+        return self.initial_temp - (self.initial_temp - self.final_temp) * progress
+
+    def search(self, state: GameState, move_number: int) -> np.ndarray:
+        """Perform MCTS search with temperature-adjusted move probabilities."""
         root = Node(state)
+        move_probs = np.zeros(self.state_encoder.total_moves, dtype=np.float32)
 
-        # Ensure move_probs is float32
-        move_probs = np.zeros(self.state_encoder.num_positions ** 2 + 2 * self.state_encoder.num_positions,
-                              dtype=np.float32)
-
+        # Run simulations
         for _ in range(self.num_simulations):
             node = root
             search_path = [node]
@@ -74,9 +89,8 @@ class MCTS:
                 node = node.children[action]
                 search_path.append(node)
 
-            # Evaluation
+            # Expansion and evaluation
             value = self._get_value(current_state)
-
             if value is None:
                 policy, value = self._evaluate_state(current_state)
                 valid_moves = current_state.get_valid_moves()
@@ -95,23 +109,31 @@ class MCTS:
             # Backpropagation
             self._backpropagate(search_path, value)
 
-        # Calculate move probabilities from visit counts
-        valid_moves = state.get_valid_moves()
+        # Calculate visit count distribution
+        temp = self.get_temperature(move_number)
+        self.logger.debug(f"Using temperature {temp:.2f} at move {move_number}")
 
+        valid_moves = state.get_valid_moves()
         if not valid_moves:
             return move_probs
 
         visit_counts = np.array([
             root.children[move].visit_count
             for move in valid_moves
-        ], dtype=np.float32)  # Ensure float32
+        ], dtype=np.float32)
 
+        # Apply temperature
+        if temp != 0:
+            visit_counts = np.power(visit_counts, 1 / temp)
+
+        # Normalize
         total_visits = visit_counts.sum()
         if total_visits > 0:
             visit_probs = visit_counts / total_visits
         else:
-            visit_probs = np.ones_like(visit_counts, dtype=np.float32) / len(visit_counts)
+            visit_probs = np.ones_like(visit_counts) / len(visit_counts)
 
+        # Store probabilities
         for move, prob in zip(valid_moves, visit_probs):
             move_idx = self.state_encoder.move_to_index(move)
             move_probs[move_idx] = prob
@@ -192,8 +214,14 @@ class SelfPlay:
         self.num_simulations = num_simulations
         self.num_workers = num_workers
 
-        self.mcts = MCTS(network, num_simulations=num_simulations)
+        self.mcts = MCTS(network,
+                         num_simulations=num_simulations,
+                         initial_temp=1.2,  # Start with high exploration
+                         final_temp=0.1,  # End with focused exploitation
+                         annealing_steps=40  # Anneal over first 30 moves
+                         )
         self.state_encoder = StateEncoder()
+
         self.logger = logging.getLogger("SelfPlay")
         self.logger.setLevel(logging.INFO)
 
@@ -228,45 +256,29 @@ class SelfPlay:
         return games
 
     def play_game(self, game_id: int) -> Tuple[List[np.ndarray], List[np.ndarray], int]:
-        """Play a single game."""
+        """Play a single game with temperature annealing."""
         state = GameState()
         states = []
         policies = []
-
-        max_moves = 500
         move_count = 0
 
-        # Track game progress metrics
-        rings_placed = {Player.WHITE: 0, Player.BLACK: 0}
-        markers_placed = {Player.WHITE: 0, Player.BLACK: 0}
-        markers_removed = {Player.WHITE: 0, Player.BLACK: 0}
-        rings_removed = {Player.WHITE: 0, Player.BLACK: 0}
-
+        max_moves = 500  # Safety limit
         self.logger.info(f"\nStarting game {game_id}")
-        self.logger.info(f"Initial phase: {state.phase}")
-        self.logger.info(f"Initial player: {state.current_player}")
 
         while not state.is_terminal() and move_count < max_moves:
             self.logger.debug(f"\nMove {move_count}")
-            self.logger.debug(f"Current phase: {state.phase}")
-            self.logger.debug(f"Current player: {state.current_player}")
 
             # Get valid moves
             valid_moves = state.get_valid_moves()
-            self.logger.debug(f"Found {len(valid_moves)} valid moves")
-
             if not valid_moves:
-                self.logger.error("No valid moves available!")
                 break
 
-            # Run MCTS
-            move_probs = self.mcts.search(state)
+            # Run MCTS with current move number for temperature
+            move_probs = self.mcts.search(state, move_count)
 
             # Get probabilities for valid moves
             valid_indices = [self.state_encoder.move_to_index(move) for move in valid_moves]
             valid_probs = move_probs[valid_indices]
-
-            self.logger.debug(f"Valid move probabilities sum: {valid_probs.sum()}")
 
             if valid_probs.sum() == 0:
                 self.logger.error("All valid moves have zero probability!")
@@ -278,7 +290,6 @@ class SelfPlay:
             # Select move
             selected_idx = np.random.choice(len(valid_moves), p=valid_probs)
             selected_move = valid_moves[selected_idx]
-            self.logger.debug(f"Selected move: {selected_move}")
 
             # Try to make the move
             success = state.make_move(selected_move)
@@ -291,22 +302,7 @@ class SelfPlay:
             states.append(encoded_state)
             policies.append(move_probs)
 
-            # Update metrics
-            if selected_move.type == MoveType.PLACE_RING:
-                rings_placed[state.current_player] += 1
-            elif selected_move.type == MoveType.MOVE_RING:
-                markers_placed[state.current_player] += 1
-            elif selected_move.type == MoveType.REMOVE_MARKERS:
-                markers_removed[state.current_player] += 5
-            elif selected_move.type == MoveType.REMOVE_RING:
-                rings_removed[state.current_player] += 1
-
             move_count += 1
-
-        # Log final game state
-        self.logger.info(f"\nGame {game_id} completed in {move_count} moves")
-        self.logger.debug(f"Final state:\n{state}")
-        self.logger.info(f"Final score - White: {state.white_score}, Black: {state.black_score}")
 
         # Determine outcome
         winner = state.get_winner()
@@ -317,6 +313,7 @@ class SelfPlay:
         else:
             outcome = 0
 
+        self.logger.info(f"Game {game_id} completed in {move_count} moves")
         return states, policies, outcome
 
     def export_games(self, games: List[Tuple[List[np.ndarray], List[np.ndarray], int]],
@@ -330,58 +327,52 @@ class SelfPlay:
         np.save(path, data)
         self.logger.info(f"Exported {len(games)} games to {path}")
 
-def play_game_worker(model_path, game_id, num_simulations):
-    """Worker function to play a single game."""
-    # Initialize the network in the worker
-    device = torch.device('cpu')  # Use 'cuda' or 'mps' if appropriate
+
+def play_game_worker(model_path: str, game_id: int, num_simulations: int) -> Tuple[
+    List[np.ndarray], List[np.ndarray], int]:
+    """Worker function for parallel self-play."""
+    device = torch.device('cpu')
     network = NetworkWrapper(model_path=model_path, device=device)
-    mcts = MCTS(network, num_simulations=num_simulations)
+    mcts = MCTS(
+        network,
+        num_simulations=num_simulations,
+        initial_temp=1.0,
+        final_temp=0.2,
+        annealing_steps=30
+    )
     state_encoder = StateEncoder()
+
     state = GameState()
     states = []
     policies = []
-    max_moves = 500
     move_count = 0
+    max_moves = 500
 
     while not state.is_terminal() and move_count < max_moves:
-        # Run MCTS to get move probabilities
-        move_probs = mcts.search(state)
+        # Run MCTS with current move count for temperature
+        move_probs = mcts.search(state, move_count)
         valid_moves = state.get_valid_moves()
 
         if not valid_moves:
             break
 
-        # Get probabilities for valid moves
         valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
         valid_probs = move_probs[valid_indices]
 
         if valid_probs.sum() == 0:
             break
 
-        # Normalize probabilities
         valid_probs = valid_probs / valid_probs.sum()
-
-        # Select move based on probabilities
         selected_idx = np.random.choice(len(valid_moves), p=valid_probs)
         selected_move = valid_moves[selected_idx]
 
-        # Make the move
         state.make_move(selected_move)
-
-        # Store state and policy
         encoded_state = state_encoder.encode_state(state)
         states.append(encoded_state)
         policies.append(move_probs)
-
         move_count += 1
 
-    # Determine game outcome
     winner = state.get_winner()
-    if winner == Player.WHITE:
-        outcome = 1
-    elif winner == Player.BLACK:
-        outcome = -1
-    else:
-        outcome = 0
+    outcome = 1 if winner == Player.WHITE else (-1 if winner == Player.BLACK else 0)
 
     return states, policies, outcome

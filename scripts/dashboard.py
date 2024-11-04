@@ -291,6 +291,8 @@ def show_training_status(df: pd.DataFrame):
             delta_color="normal"
         )
 
+
+
 def main():
     st.set_page_config(
         page_title="YINSH Training Dashboard",
