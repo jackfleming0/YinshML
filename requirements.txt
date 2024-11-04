@@ -1,5 +1,9 @@
+# Python version constraint
+python>=3.8,<3.12
+
 #streamlit req
 setuptools>=65.0.0
+wheel>=0.38.0
 
 # Core ML requirements
 numpy==1.24.3
@@ -10,6 +14,7 @@ coremltools==6.3.0
 # Visualization requirements
 matplotlib==3.7.1
 seaborn==0.12.2
+plotly>=5.0.0
 
 # Training utilities
 tqdm==4.65.0  # For progress bars
