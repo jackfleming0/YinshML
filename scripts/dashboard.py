@@ -12,8 +12,9 @@ from typing import List, Dict
 import glob
 import logging
 
-logger = logging.getLogger(__name__)
+from train import get_mode_settings
 
+logger = logging.getLogger(__name__)
 
 def load_metrics(model_dir: Path) -> List[Dict]:
     """Load all metrics files from a training directory."""
@@ -36,7 +37,11 @@ def load_metrics(model_dir: Path) -> List[Dict]:
                     'win_rates': 0.0,
                     'draw_rates': 0.0,
                     'policy_losses': 0.0,
-                    'value_losses': 0.0
+                    'value_losses': 0.0,
+                    'avg_temperature': 0.0,
+                    'early_game_entropy': 0.0,
+                    'late_game_entropy': 0.0,
+                    'move_selection_confidence': 0.0
                 }
 
                 # Fill in missing fields with defaults
@@ -56,6 +61,82 @@ def load_metrics(model_dir: Path) -> List[Dict]:
 
     return all_metrics
 
+def plot_loss_curves(df: pd.DataFrame):
+    """Plot policy and value loss curves with temperature metrics."""
+    fig = go.Figure()
+
+    # Policy loss
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['policy_losses'],
+        name='Policy Loss',
+        line=dict(color='blue', width=2),
+        mode='lines+markers'
+    ))
+
+    # Value loss
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['value_losses'],
+        name='Value Loss',
+        line=dict(color='red', width=2),
+        mode='lines+markers'
+    ))
+
+    # Add temperature if available
+    if 'avg_temperature' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['avg_temperature'],
+            name='Temperature',
+            line=dict(color='green', width=2, dash='dot'),
+            yaxis='y2'
+        ))
+
+    fig.update_layout(
+        title='Training Losses & Temperature',
+        xaxis_title='Iteration',
+        yaxis_title='Loss',
+        yaxis2=dict(
+            title='Temperature',
+            overlaying='y',
+            side='right',
+            range=[0, 1]
+        ),
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def plot_entropy_curves(df: pd.DataFrame):
+    """Plot early vs late game entropy."""
+    if 'early_game_entropy' in df.columns and 'late_game_entropy' in df.columns:
+        fig = go.Figure()
+
+        # Early game entropy
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['early_game_entropy'],
+            name='Early Game Entropy',
+            line=dict(color='orange', width=2),
+            mode='lines+markers'
+        ))
+
+        # Late game entropy
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['late_game_entropy'],
+            name='Late Game Entropy',
+            line=dict(color='purple', width=2),
+            mode='lines+markers'
+        ))
+
+        fig.update_layout(
+            title='Policy Entropy Over Game Phases',
+            xaxis_title='Iteration',
+            yaxis_title='Entropy',
+            hovermode='x unified'
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 def create_metrics_df(metrics: List[Dict]) -> pd.DataFrame:
     """Convert metrics list to DataFrame with proper type conversion."""
@@ -63,7 +144,9 @@ def create_metrics_df(metrics: List[Dict]) -> pd.DataFrame:
 
     # Explicitly convert columns to float
     numeric_columns = ['ring_mobility', 'game_lengths', 'win_rates',
-                       'draw_rates', 'policy_losses', 'value_losses']
+                       'draw_rates', 'policy_losses', 'value_losses',
+                       'avg_temperature', 'early_game_entropy', 'late_game_entropy',
+                       'move_selection_confidence']
 
     for col in numeric_columns:
         if col in df.columns:
@@ -73,40 +156,37 @@ def create_metrics_df(metrics: List[Dict]) -> pd.DataFrame:
 
     return df
 
-
-def plot_loss_curves(df: pd.DataFrame):
-    """Plot policy and value loss curves."""
+def plot_temperature_metrics(df: pd.DataFrame):
+    """Plot temperature-related metrics."""
     fig = go.Figure()
 
-    # Policy loss
-    policy_cols = [col for col in df.columns if col.startswith('policy_losses_')]
-    for col in policy_cols:
-        fig.add_trace(go.Scatter(
-            y=df[col],
-            name='Policy Loss',
-            line=dict(color='blue', width=1),
-            opacity=0.6
-        ))
+    # Temperature
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['avg_temperature'],
+        name='Average Temperature',
+        line=dict(color='green', width=2),
+        mode='lines+markers'
+    ))
 
-    # Value loss
-    value_cols = [col for col in df.columns if col.startswith('value_losses_')]
-    for col in value_cols:
+    # Move selection confidence
+    if 'move_selection_confidence' in df.columns:
         fig.add_trace(go.Scatter(
-            y=df[col],
-            name='Value Loss',
-            line=dict(color='red', width=1),
-            opacity=0.6
+            x=df.index,
+            y=df['move_selection_confidence'],
+            name='Move Confidence',
+            line=dict(color='blue', width=2, dash='dot'),
+            mode='lines+markers'
         ))
 
     fig.update_layout(
-        title='Training Losses',
-        xaxis_title='Training Step',
-        yaxis_title='Loss',
-        height=400
+        title='Temperature and Move Selection Confidence',
+        xaxis_title='Iteration',
+        yaxis_title='Value',
+        yaxis_range=[0, 1],
+        hovermode='x unified'
     )
-
     st.plotly_chart(fig, use_container_width=True)
-
 
 def plot_win_rates(df: pd.DataFrame):
     """Plot win and draw rates."""
@@ -206,37 +286,6 @@ def plot_win_distribution(df: pd.DataFrame):
         fig.update_layout(title='Game Outcome Distribution')
         st.plotly_chart(fig, use_container_width=True)
 
-
-def plot_loss_curves(df: pd.DataFrame):
-    """Enhanced loss curve plotting."""
-    fig = go.Figure()
-
-    # Policy loss
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df['policy_losses'],
-        name='Policy Loss',
-        line=dict(color='blue', width=2),
-        mode='lines+markers'
-    ))
-
-    # Value loss
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df['value_losses'],
-        name='Value Loss',
-        line=dict(color='red', width=2),
-        mode='lines+markers'
-    ))
-
-    fig.update_layout(
-        title='Training Losses',
-        xaxis_title='Iteration',
-        yaxis_title='Loss',
-        hovermode='x unified'
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
 def check_training_stability(df: pd.DataFrame) -> Dict[str, bool]:
     """Check if training metrics indicate stability."""
     recent = df.iloc[-5:]
@@ -269,7 +318,7 @@ def show_config_info(mode: str):
 
 def show_training_status(df: pd.DataFrame):
     """Show training status indicators."""
-    status_cols = st.columns(4)
+    status_cols = st.columns(5)
 
     # Policy Loss Trend
     with status_cols[0]:
@@ -291,6 +340,40 @@ def show_training_status(df: pd.DataFrame):
             delta_color="normal"
         )
 
+    # Temperature Metrics
+    with status_cols[2]:
+        if 'avg_temperature' in df.columns:
+            current_temp = df['avg_temperature'].iloc[-1]
+            temp_trend = df['avg_temperature'].diff().mean()
+            st.metric(
+                "Avg Temperature",
+                f"{current_temp:.2f}",
+                delta=temp_trend,
+                delta_color="normal"
+            )
+
+    # Early vs Late Game Entropy
+    with status_cols[3]:
+        if 'early_game_entropy' in df.columns and 'late_game_entropy' in df.columns:
+            entropy_diff = df['early_game_entropy'].iloc[-1] - df['late_game_entropy'].iloc[-1]
+            st.metric(
+                "Early-Late Entropy Diff",
+                f"{entropy_diff:.2f}",
+                delta=entropy_diff,
+                delta_color="normal"
+            )
+
+    # Move Selection Confidence
+    with status_cols[4]:
+        if 'move_selection_confidence' in df.columns:
+            confidence = df['move_selection_confidence'].iloc[-1]
+            confidence_trend = df['move_selection_confidence'].diff().mean()
+            st.metric(
+                "Move Confidence",
+                f"{confidence:.2%}",
+                delta=confidence_trend,
+                delta_color="normal"
+            )
 
 
 def main():
@@ -323,7 +406,7 @@ def main():
     df = create_metrics_df(raw_metrics)
 
     # Main header with training info
-    col1, col2, col3 = st.columns([2,1,1])
+    col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
         st.title("YINSH Training Dashboard")
     with col2:
@@ -331,6 +414,9 @@ def main():
     with col3:
         training_time = (df['timestamp'].max() - df['timestamp'].min()) / 3600 if 'timestamp' in df.columns else 0
         st.metric("Training Time", f"{training_time:.1f}h")
+
+    # Show training status
+    show_training_status(df)
 
     # Key metrics in a row
     if len(df) > 0:
@@ -348,7 +434,7 @@ def main():
             latest_value_loss = df['value_losses'].iloc[-1] if 'value_losses' in df.columns else 0
             st.metric("Value Loss", f"{latest_value_loss:.4f}")
 
-    # Rest of your dashboard code...
+    # Training progress and game outcomes
     col1, col2 = st.columns(2)
 
     with col1:
@@ -365,11 +451,20 @@ def main():
         else:
             st.warning("No game outcome data available yet")
 
+    # Temperature metrics section
+    st.subheader("Temperature Analysis")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        plot_entropy_curves(df)
+    with col2:
+        plot_temperature_metrics(df)
+
+    # Ring mobility and game length
     if 'ring_mobility' in df.columns:
         st.subheader("Ring Mobility")
         plot_ring_mobility(df)
 
-    # Add game length histogram if data exists
     if 'game_lengths' in df.columns:
         st.subheader("Game Length Distribution")
         plot_game_length_histogram(df)

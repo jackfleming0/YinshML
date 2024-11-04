@@ -184,6 +184,9 @@ class TrainingSupervisor:
 
     def _save_metrics(self, iteration_dir: Path) -> None:
         """Save training metrics to file."""
+        # Get temperature metrics summary
+        temp_summary = self.self_play.temp_metrics.get_summary() if hasattr(self.self_play, 'temp_metrics') else {}
+
         metrics_dict = {
             'iteration': len(self.metrics.game_lengths),
             'game_lengths': float(np.mean(self.metrics.game_lengths[-1])) if self.metrics.game_lengths else 0,
@@ -192,6 +195,15 @@ class TrainingSupervisor:
             'draw_rates': float(np.mean(self.metrics.draw_rates[-1])) if self.metrics.draw_rates else 0,
             'policy_losses': float(np.mean(self.metrics.policy_losses[-1])) if self.metrics.policy_losses else 0,
             'value_losses': float(np.mean(self.metrics.value_losses[-1])) if self.metrics.value_losses else 0,
+
+            # Temperature annealing metrics
+            'avg_temperature': float(np.mean([t for _, t in self.self_play.temp_metrics.move_temps[-100:]])) if hasattr(
+                self.self_play, 'temp_metrics') else 0.0,
+            'early_game_entropy': float(np.mean(temp_summary.get('early_game', {}).get('avg_entropy', 0.0))),
+            'late_game_entropy': float(np.mean(temp_summary.get('late_game', {}).get('avg_entropy', 0.0))),
+            'move_selection_confidence': float(
+                np.mean(temp_summary.get('late_game', {}).get('avg_selected_prob', 0.0))),
+
             'timestamp': time.time()
         }
 

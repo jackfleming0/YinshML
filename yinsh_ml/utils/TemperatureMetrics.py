@@ -1,10 +1,43 @@
+from typing import Dict, List
+import numpy as np
+import logging
+from dataclasses import dataclass, field  # Optional, if you want to use @dataclass
+import matplotlib.pyplot as plt  # If you want to use the plotting functionality
+
 class TemperatureMetrics:
     """Tracks the effectiveness of temperature annealing."""
 
     def __init__(self):
-        self.early_game_stats = []  # High temperature phase
-        self.mid_game_stats = []  # Annealing phase
-        self.late_game_stats = []  # Low temperature phase
+        self.move_temps = []  # List of (move_number, temperature) tuples
+        self.move_entropies = []  # List of (move_number, entropy) tuples
+        self.early_game_stats = []  # Stats for moves 0-10
+        self.mid_game_stats = []  # Stats for moves 11-30
+        self.late_game_stats = []  # Stats for moves 31+
+
+    def add_move_data(self, move_number: int, temperature: float,
+                      move_probs: np.ndarray, selected_move_idx: int):
+        """Record data for a single move."""
+        # Store temperature
+        self.move_temps.append((move_number, temperature))
+
+        # Calculate and store policy entropy
+        entropy = -np.sum(move_probs * np.log(move_probs + 1e-10))
+        self.move_entropies.append((move_number, entropy))
+
+        # Record move statistics by game stage
+        move_stats = {
+            'temperature': temperature,
+            'entropy': entropy,
+            'top_prob': np.max(move_probs),
+            'selected_prob': move_probs[selected_move_idx] if selected_move_idx < len(move_probs) else 0.0
+        }
+
+        if move_number <= 10:
+            self.early_game_stats.append(move_stats)
+        elif move_number <= 30:
+            self.mid_game_stats.append(move_stats)
+        else:
+            self.late_game_stats.append(move_stats)
 
     def add_game_result(self, states: List[np.ndarray], policies: List[np.ndarray],
                         outcome: int, annealing_steps: int):
@@ -43,24 +76,20 @@ class TemperatureMetrics:
             })
 
     def get_summary(self) -> Dict[str, Dict[str, float]]:
-        """Get summary statistics for each game phase."""
+        """Get summary statistics for different game stages."""
 
-        def phase_stats(stats):
-            if not stats:
+        def summarize_stats(stats_list):
+            if not stats_list:
                 return {}
-
-            wins = sum(1 for s in stats if s['outcome'] == 1)
-            total = len(stats)
-            avg_entropy = np.mean([s['policy_entropy'] for s in stats])
-
             return {
-                'win_rate': wins / total if total > 0 else 0,
-                'avg_policy_entropy': avg_entropy,
-                'num_games': total
+                'avg_temp': np.mean([s['temperature'] for s in stats_list]),
+                'avg_entropy': np.mean([s['entropy'] for s in stats_list]),
+                'avg_top_prob': np.mean([s['top_prob'] for s in stats_list]),
+                'avg_selected_prob': np.mean([s['selected_prob'] for s in stats_list])
             }
 
         return {
-            'early_game': phase_stats(self.early_game_stats),
-            'mid_game': phase_stats(self.mid_game_stats),
-            'late_game': phase_stats(self.late_game_stats)
+            'early_game': summarize_stats(self.early_game_stats),
+            'mid_game': summarize_stats(self.mid_game_stats),
+            'late_game': summarize_stats(self.late_game_stats)
         }
