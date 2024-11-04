@@ -3,20 +3,20 @@ setuptools>=65.0.0
 wheel>=0.38.0
 
 # Core ML requirements
-numpy==1.24.3
-scipy==1.10.1
-torch==2.1.0
-coremltools==6.3.0
+numpy>=1.24.3
+scipy>=1.10.1
+torch>=2.1.0
+coremltools>=6.3.0
 
 # Visualization requirements
-matplotlib==3.7.1
-seaborn==0.12.2
+matplotlib>=3.7.1
+seaborn>=0.12.2
 plotly>=5.0.0
 
 # Training utilities
-tqdm==4.65.0  # For progress bars
-tensorboard==2.14.0  # For training monitoring
-pandas==2.0.3  # For data handling
+tqdm>=4.65.0  # For progress bars
+tensorboard>=2.14.0  # For training monitoring
+pandas>=2.0.3  # For data handling
 
 # Testing
-pytest==7.4.0  # For running tests
+pytest>=7.4.0  # For running tests
