@@ -16,6 +16,8 @@ from ..utils.encoding import StateEncoder
 from ..game.constants import Player, PieceType  # Added these imports
 from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics
+from ..utils.tournament import ModelTournament  # Add this import
+
 
 class TrainingSupervisor:
     def __init__(self,
@@ -23,8 +25,9 @@ class TrainingSupervisor:
                  save_dir: str,
                  num_workers: int = 4,
                  mcts_simulations: int = 100,
-                 mode: str = 'dev',  # Add mode parameter with default
-                 device='cpu'
+                 mode: str = 'dev',
+                 device='cpu',
+                 tournament_games: int = 10
                  ):
         """
         Initialize the training supervisor.
@@ -34,12 +37,17 @@ class TrainingSupervisor:
             save_dir: Directory to save models and logs
             num_workers: Number of parallel workers for self-play
             mcts_simulations: Number of MCTS simulations per move
+            mode: Training mode (dev/full)
+            device: Device to use for training
+            tournament_games: Number of games per match in tournaments
         """
+        # Initialize components
         self.network = network
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
-        self.mode = mode  # Store mode
-
+        self.mode = mode
+        self.device = device
+        self.tournament_games = tournament_games
 
         self.num_workers = num_workers
         self.self_play = SelfPlay(
@@ -52,12 +60,20 @@ class TrainingSupervisor:
         self.state_encoder = StateEncoder()
         self.metrics = TrainingMetrics()
 
+        # Initialize tournament system
+        self.tournament_manager = ModelTournament(
+            training_dir=self.save_dir,
+            device=device,
+            games_per_match=tournament_games
+        )
+
         # Setup logging
         self.logger = logging.getLogger("TrainingSupervisor")
         self.logger.setLevel(logging.INFO)
 
     def train_iteration(self, num_games: int = 100, epochs: int = 10):
         """Perform one training iteration."""
+        current_iteration = len(self.metrics.game_lengths)
         iteration_dir = self.save_dir / f"iteration_{int(time.time())}"
         iteration_dir.mkdir(exist_ok=True)
 
@@ -129,6 +145,15 @@ class TrainingSupervisor:
             value_loss=value_loss
         )
 
+        # Save checkpoint
+        checkpoint_path = self.save_dir / f"checkpoint_iteration_{current_iteration}.pt"
+        self.network.save_model(str(checkpoint_path))
+        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
+
+        # Run tournament against previous iterations
+        self.logger.info("Running tournament against previous iterations...")
+        self.tournament_manager.run_tournament(current_iteration)
+
         # Save metrics
         self._save_metrics(iteration_dir)
 
@@ -140,7 +165,7 @@ class TrainingSupervisor:
             else:
                 self.logger.info("Training not yet stable for full mode")
 
-        # Generate visualizations using the metrics object's properties
+        # Generate visualizations
         self.visualizer.plot_training_history(
             {
                 'policy_losses': self.metrics.policy_losses,
@@ -164,28 +189,13 @@ class TrainingSupervisor:
             'value_loss': value_loss
         }
 
-    def load_iteration(self, iteration_dir: str) -> Optional[int]:
-        """Load a previous training iteration."""
-        iteration_dir = Path(iteration_dir)
-
-        # Load metrics
-        metrics_path = iteration_dir / "metrics.json"
-        if metrics_path.exists():
-            with open(metrics_path, 'r') as f:
-                self.metrics = json.load(f)
-
-        # Find latest checkpoint
-        checkpoints = list(iteration_dir.glob("checkpoint_epoch_*.pt"))
-        if not checkpoints:
-            return None
-
-        latest_checkpoint = max(checkpoints, key=lambda p: int(p.stem.split('_')[-1]))
-        return self.trainer.load_checkpoint(str(latest_checkpoint))
-
     def _save_metrics(self, iteration_dir: Path) -> None:
         """Save training metrics to file."""
         # Get temperature metrics summary
         temp_summary = self.self_play.temp_metrics.get_summary() if hasattr(self.self_play, 'temp_metrics') else {}
+
+        # Get tournament results
+        tournament_summary = self.tournament_manager.get_latest_tournament_summary()
 
         metrics_dict = {
             'iteration': len(self.metrics.game_lengths),
@@ -203,6 +213,9 @@ class TrainingSupervisor:
             'late_game_entropy': float(np.mean(temp_summary.get('late_game', {}).get('avg_entropy', 0.0))),
             'move_selection_confidence': float(
                 np.mean(temp_summary.get('late_game', {}).get('avg_selected_prob', 0.0))),
+
+            # Tournament results
+            'tournament_results': tournament_summary if tournament_summary else {},
 
             'timestamp': time.time()
         }
@@ -249,7 +262,7 @@ class TrainingSupervisor:
 
         self.logger.info(f"Evaluation complete in {eval_time:.1f}s")
         self.logger.info(f"Results - White wins: {white_wins}, Black wins: {black_wins}, "
-                        f"Draws: {draws}")
+                         f"Draws: {draws}")
         self.logger.info(f"Win Rate: {win_rate:.2f}, Draw Rate: {draw_rate:.2f}")
 
         return win_rate, draw_rate

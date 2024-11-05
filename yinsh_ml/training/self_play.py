@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor
 import time
 import tempfile
 import os
+from pathlib import Path
 
 from ..utils.TemperatureMetrics import TemperatureMetrics
 from ..utils.encoding import StateEncoder
@@ -224,6 +225,28 @@ class SelfPlay:
         self.logger = logging.getLogger("SelfPlay")
         self.temp_metrics = TemperatureMetrics()
 
+    def save_draw_game(self, state: GameState, game_id: int, move_count: int, save_dir: str = "training_draw_games"):
+        """Save details of a draw game from training."""
+        save_dir = Path(save_dir)
+        save_dir.mkdir(exist_ok=True, parents=True)
+
+        # Save game details to text file
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        with open(save_dir / f"draw_game_{game_id}_{timestamp}.txt", "w") as f:
+            f.write(f"Training Draw Game {game_id}\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Total Moves: {move_count}\n")
+            f.write(f"Final Score - White: {state.white_score}, Black: {state.black_score}\n")
+            f.write("\nFinal Board State:\n")
+            f.write(str(state.board))
+
+            # Count pieces
+            for piece_type in [PieceType.WHITE_RING, PieceType.BLACK_RING,
+                               PieceType.WHITE_MARKER, PieceType.BLACK_MARKER]:
+                count = len(state.board.get_pieces_positions(piece_type))
+                f.write(f"\n{piece_type}: {count}")
+
+
     def generate_games(self, num_games: int = 100) -> List[Tuple[List[np.ndarray], List[np.ndarray], int]]:
         """Generate self-play games in parallel using multiple workers."""
         games = []
@@ -287,7 +310,7 @@ class SelfPlay:
 
         self.logger.info(f"\nStarting game {game_id}")
 
-        while not state.is_terminal() and move_count < 500:
+        while not state.is_terminal() and move_count < 5000:
             valid_moves = state.get_valid_moves()
             if not valid_moves:
                 break
@@ -381,7 +404,7 @@ def play_game_worker(model_path: str, game_id: int, num_simulations: int,
         'move_stats': []  # List of detailed move statistics
     }
 
-    while not state.is_terminal() and move_count < 500:
+    while not state.is_terminal() and move_count < 5000:
         valid_moves = state.get_valid_moves()
         if not valid_moves:
             break
