@@ -59,7 +59,11 @@ class YinshNetwork(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(32 * 11 * 11, self.total_moves)
+            nn.Linear(32 * 11 * 11, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, self.total_moves)
+            # No activation here - we want raw logits
         )
 
         # Value head
@@ -70,12 +74,30 @@ class YinshNetwork(nn.Module):
             nn.Flatten(),
             nn.Linear(32 * 11 * 11, 256),
             nn.ReLU(),
-            nn.Linear(256, 1),
+            nn.Dropout(0.3),  # Add dropout to prevent overconfidence
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 1),
             nn.Tanh()
         )
 
-        # Initialize weights
-        self.apply(self._init_weights)
+        # Initialize weights with different scaling
+        self._initialize_weights()
+
+
+
+    def _initialize_weights(self):
+        """Initialize weights with careful scaling."""
+        for module in self.modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                # Use a smaller initialization scale
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu', a=0.1)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
 
     def _init_weights(self, module):
         """Initialize weights using He initialization."""

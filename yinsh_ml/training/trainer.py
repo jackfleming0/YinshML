@@ -87,6 +87,15 @@ class YinshTrainer:
         )
         self.experience = GameExperience()
 
+        # Add learning rate scheduler
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=0.5,
+            patience=5,
+            verbose=True
+        )
+
         # Setup logging
         self.logger = logging.getLogger("YinshTrainer")
         self.logger.setLevel(logging.INFO)
@@ -97,12 +106,7 @@ class YinshTrainer:
         self.total_losses = []
 
     def train_step(self, batch_size: int) -> Tuple[float, float]:
-        """
-        Perform one training step on a batch of data.
-
-        Returns:
-            policy_loss, value_loss
-        """
+        """Improved training step with better loss calculations."""
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0
 
@@ -115,19 +119,29 @@ class YinshTrainer:
         target_values = target_values.to(self.device)
 
         # Forward pass
-        pred_probs, pred_values = self.network.network(states)
+        pred_logits, pred_values = self.network.network(states)
 
-        # Calculate losses
-        policy_loss = -torch.mean(torch.sum(target_probs * F.log_softmax(pred_probs, dim=1), dim=1))
-        value_loss = nn.MSELoss()(pred_values, target_values)
+        # Calculate policy loss using KL divergence
+        # This is more appropriate for probability distributions
+        log_pred_probs = F.log_softmax(pred_logits, dim=1)
+        policy_loss = -(target_probs * log_pred_probs).sum(dim=1).mean()
 
-        # Combined loss
+        # Calculate value loss with added L1 regularization
+        mse_loss = F.mse_loss(pred_values, target_values)
+        l1_loss = torch.abs(pred_values).mean()  # L1 regularization
+        value_loss = mse_loss + 0.01 * l1_loss  # Small L1 coefficient
+
+        # Combined loss with gradient clipping
         total_loss = policy_loss + value_loss
 
-        # Backward pass and optimization
+        # Backward pass with gradient clipping
         self.optimizer.zero_grad()
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.network.network.parameters(), max_norm=1.0)
         self.optimizer.step()
+
+        # Update learning rate
+        self.scheduler.step(total_loss)
 
         return policy_loss.item(), value_loss.item()
 
@@ -178,8 +192,23 @@ class YinshTrainer:
     def add_game_experience(self, states: List[np.ndarray],
                             policies: List[np.ndarray],
                             outcome: int):
-        """Add a completed game to the experience buffer."""
-        self.experience.add_game(states, policies, outcome)
+        """Modified experience addition with improved value targets."""
+        game_length = len(states)
+
+        # Calculate discounted values with better decay
+        for idx, (state, policy) in enumerate(zip(states, policies)):
+            # Use a slower decay rate for longer-term planning
+            discount = 0.95
+            steps_from_end = game_length - idx
+            value = outcome * (discount ** steps_from_end)
+
+            # Add some noise to prevent overfitting
+            value_noise = np.random.normal(0, 0.05)
+            value = np.clip(value + value_noise, -1, 1)
+
+            self.experience.states.append(state)
+            self.experience.move_probs.append(policy)
+            self.experience.values.append(value)
 
     def evaluate_position(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Evaluate a single position."""
