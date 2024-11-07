@@ -87,13 +87,14 @@ class YinshTrainer:
         )
         self.experience = GameExperience()
 
-        # Add learning rate scheduler
+        # Add learning rate scheduler. adjusting to try not to create such a steep curve.
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
-            factor=0.5,
-            patience=5,
-            verbose=True
+            factor=0.8,
+            patience=10,
+            verbose=True,
+            min_lr=1e-6  # Add minimum learning rate
         )
 
         # Setup logging
@@ -104,6 +105,8 @@ class YinshTrainer:
         self.policy_losses = []
         self.value_losses = []
         self.total_losses = []
+        self.learning_rates = []  # Add this line
+
 
     def train_step(self, batch_size: int) -> Tuple[float, float]:
         """Improved training step with better loss calculations."""
@@ -158,12 +161,17 @@ class YinshTrainer:
         avg_policy_loss = policy_loss_sum / batches_per_epoch
         avg_value_loss = value_loss_sum / batches_per_epoch
 
+        # Track current learning rate
+        current_lr = self.optimizer.param_groups[0]['lr']
+        self.learning_rates.append(current_lr)
+
         self.policy_losses.append(avg_policy_loss)
         self.value_losses.append(avg_value_loss)
         self.total_losses.append(avg_policy_loss + avg_value_loss)
 
         self.logger.info(f"Epoch complete - Policy Loss: {avg_policy_loss:.4f}, "
-                         f"Value Loss: {avg_value_loss:.4f}")
+                         f"Value Loss: {avg_value_loss:.4f}, "
+                         f"Learning Rate: {current_lr:.2e}")
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save a training checkpoint."""

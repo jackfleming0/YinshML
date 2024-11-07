@@ -36,23 +36,55 @@ class TrainingMetrics:
         self.value_losses.append(float(value_loss))
 
     def assess_stability(self, window_size: int = 5) -> Dict[str, bool]:
-        """Assess if training metrics are stable."""
+        """
+        Assess training stability based on loss trends, stability metrics,
+        and ELO progression.
+        """
         if len(self.policy_losses) < window_size:
             return {'stable': False, 'reason': 'Insufficient data'}
 
-        recent_policy = self.policy_losses[-window_size:]
-        recent_value = self.value_losses[-window_size:]
-        recent_mobility = self.ring_mobility[-window_size:]
+        # Calculate trends using linear regression
+        x = np.arange(window_size)
+        policy_trend = np.polyfit(x, self.policy_losses[-window_size:], 1)[0]
+        value_trend = np.polyfit(x, self.value_losses[-window_size:], 1)[0]
+
+        # Calculate variances to detect oscillation/instability
+        policy_variance = np.var(self.policy_losses[-window_size:])
+        value_variance = np.var(self.value_losses[-window_size:])
+
+        # Assess convergence - are we still making meaningful improvements?
+        policy_relative_change = abs(policy_trend) / np.mean(self.policy_losses[-window_size:])
+        value_relative_change = abs(value_trend) / np.mean(self.value_losses[-window_size:])
 
         checks = {
-            'policy_loss': np.mean(np.diff(recent_policy)) < 0,  # Decreasing
-            'value_loss': np.mean(np.diff(recent_value)) < 0,  # Decreasing
-            'mobility_healthy': np.mean(recent_mobility) > 2.0,  # Reasonable mobility
-            'game_quality': 20 < np.mean(self.game_lengths[-window_size:]) < 200
+            'policy_improving': policy_trend < 0,  # Policy loss is decreasing
+            'value_improving': value_trend < 0,  # Value loss is decreasing
+            'policy_stable': policy_variance < 0.1,  # Not oscillating too much
+            'value_stable': value_variance < 0.1,  # Not oscillating too much
+            'meaningful_changes': (policy_relative_change > 0.001 or value_relative_change > 0.001),
+            # Still making progress
         }
 
-        logger.info("Stability check results:")
-        for metric, is_stable in checks.items():
-            logger.info(f"{metric}: {'PASS' if is_stable else 'FAIL'}")
+        # Only assess ELO if we have tournament data
+        tournament_data = self.get_latest_tournament_summary()
+        if tournament_data:
+            # Compare current model's ELO with previous iteration
+            current_elo = tournament_data['current_elo']
+            previous_elo = tournament_data['previous_elo']
+            checks['elo_improving'] = current_elo > previous_elo
 
         return checks
+
+    def get_latest_tournament_summary(self) -> Optional[Dict]:
+        """Get ELO comparison data from the most recent tournament."""
+        if not hasattr(self, 'tournament_manager'):
+            return None
+
+        latest_results = self.tournament_manager.get_latest_tournament_summary()
+        if not latest_results:
+            return None
+
+        return {
+            'current_elo': latest_results['current_elo'],
+            'previous_elo': latest_results['previous_elo']
+        }

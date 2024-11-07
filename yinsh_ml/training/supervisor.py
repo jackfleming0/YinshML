@@ -157,13 +157,30 @@ class TrainingSupervisor:
         # Save metrics
         self._save_metrics(iteration_dir)
 
-        # Check stability if in dev mode
+        # Check stability for all modes
+        stability_checks = self.metrics.assess_stability()
+        stability_results = {k: v for k, v in stability_checks.items() if v is not False}
+        failed_checks = {k: v for k, v in stability_checks.items() if v is False}
+
+        self.logger.info("\nStability Check Results:")
+        for check, result in stability_checks.items():
+            self.logger.info(f"{check}: {'✓' if result else '✗'}")
+
+        if failed_checks:
+            self.logger.info("\nFailed checks:")
+            for check in failed_checks:
+                self.logger.info(f"- {check}")
+        else:
+            self.logger.info("\nAll stability checks passed!")
+
+        # Mode-specific messaging
         if self.mode == 'dev':
-            stability_checks = self.metrics.assess_stability()
             if all(stability_checks.values()):
                 self.logger.info("Training appears stable - consider moving to full mode")
             else:
                 self.logger.info("Training not yet stable for full mode")
+        elif self.mode == 'tiny' or self.mode == 'quick':
+            self.logger.info("Note: Stability checks in tiny/quick mode may not be meaningful due to limited training")
 
         # Generate visualizations
         self.visualizer.plot_training_history(
