@@ -52,9 +52,11 @@ class MCTS:
                  num_simulations: int = 100,
                  initial_temp: float = 1.0,
                  final_temp: float = 0.2,
-                 annealing_steps: int = 30):
+                 annealing_steps: int = 30,
+                 max_depth: int = 20):
         self.network = network
         self.num_simulations = num_simulations
+        self.max_depth = max_depth  # Store max depth
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS")
 
@@ -82,6 +84,7 @@ class MCTS:
             node = root
             search_path = [node]
             current_state = state.copy()
+            depth = 0  # Track depth
 
             # Selection
             while node.is_expanded and node.children:
@@ -89,6 +92,7 @@ class MCTS:
                 current_state.make_move(action)
                 node = node.children[action]
                 search_path.append(node)
+                depth += 1
 
             # Expansion and evaluation
             value = self._get_value(current_state)

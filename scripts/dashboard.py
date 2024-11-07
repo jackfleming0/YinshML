@@ -439,7 +439,7 @@ def main():
     st.sidebar.header("Settings")
     mode = st.sidebar.selectbox(
         "Training Mode",
-        ["tiny", "quick", "dev", "full"],
+        ["tiny", "quick", "dev","dev2", "full"],
         format_func=lambda x: x.capitalize()
     )
 
