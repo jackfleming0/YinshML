@@ -22,7 +22,7 @@ from ..game.moves import Move, MoveType
 class Node:
     """Monte Carlo Tree Search node."""
 
-    def __init__(self, state: GameState, parent=None, prior_prob=0.0):
+    def __init__(self, state: GameState, parent=None, prior_prob=0.0, c_puct=1.0):  # Add c_puct parameter
         self.state = state
         self.parent = parent
         self.children = {}  # Dictionary of move -> Node
@@ -30,6 +30,7 @@ class Node:
         self.value_sum = 0.0
         self.prior_prob = prior_prob
         self.is_expanded = False
+        self.c_puct = c_puct  # Store c_puct as instance variable
 
     def value(self) -> float:
         """Get mean value of node."""
@@ -37,11 +38,11 @@ class Node:
             return 0.0
         return self.value_sum / self.visit_count
 
-    def get_ucb_score(self, parent_visit_count: int, c_puct: float = 1.0) -> float:
+    def get_ucb_score(self, parent_visit_count: int) -> float:  # Remove c_puct parameter
         """Calculate Upper Confidence Bound score."""
         q_value = self.value()
         # Add small epsilon to prevent division by zero
-        u_value = (c_puct * self.prior_prob *
+        u_value = (self.c_puct * self.prior_prob *  # Use instance variable
                   np.sqrt(parent_visit_count) / (1 + self.visit_count))
         return q_value + u_value
 
@@ -53,10 +54,11 @@ class MCTS:
                  initial_temp: float = 1.0,
                  final_temp: float = 0.2,
                  annealing_steps: int = 30,
+                 c_puct: float = 1.0,
                  max_depth: int = 20):
         self.network = network
         self.num_simulations = num_simulations
-        self.max_depth = max_depth  # Store max depth
+        self.max_depth = max_depth
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS")
 
@@ -64,6 +66,10 @@ class MCTS:
         self.initial_temp = initial_temp
         self.final_temp = final_temp
         self.annealing_steps = annealing_steps
+
+        # MCTS exploration parameter
+        self.c_puct = c_puct
+
 
     def get_temperature(self, move_number: int) -> float:
         """Calculate temperature based on move number."""
@@ -108,7 +114,8 @@ class MCTS:
                         node.children[move] = Node(
                             current_state.copy(),
                             parent=node,
-                            prior_prob=self._get_move_prob(policy, move)
+                            prior_prob=self._get_move_prob(policy, move),
+                            c_puct=self.c_puct  # Pass the c_puct value
                         )
 
             # Backpropagation
@@ -208,7 +215,8 @@ class SelfPlay:
     """Handles self-play game generation with temperature annealing."""
 
     def __init__(self, network: NetworkWrapper, num_simulations: int = 100, num_workers: int = 4,
-                 initial_temp: float = 1.0, final_temp: float = 0.2, annealing_steps: int = 30):
+                 initial_temp: float = 1.0, final_temp: float = 0.2, annealing_steps: int = 30,
+                 c_puct: float = 1.0, max_depth: int = 20):  # Add new parameters
         self.network = network
         self.num_simulations = num_simulations
         self.num_workers = num_workers
@@ -223,11 +231,15 @@ class SelfPlay:
             num_simulations=num_simulations,
             initial_temp=initial_temp,
             final_temp=final_temp,
-            annealing_steps=annealing_steps
+            annealing_steps=annealing_steps,
+            c_puct=c_puct,         # Add new parameter
+            max_depth=max_depth    # Add new parameter
         )
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("SelfPlay")
         self.temp_metrics = TemperatureMetrics()
+        self.logger.setLevel(logging.ERROR)
+
 
     def save_draw_game(self, state: GameState, game_id: int, move_count: int, save_dir: str = "training_draw_games"):
         """Save details of a draw game from training."""

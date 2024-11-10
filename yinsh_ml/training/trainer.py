@@ -61,7 +61,8 @@ class YinshTrainer:
     """Handles the training of the YINSH neural network."""
 
 
-    def __init__(self, network: NetworkWrapper, device: Optional[str] = None):
+    def __init__(self, network: NetworkWrapper, device: Optional[str] = None,
+                 l2_reg: float = 0.0):
         """
         Initialize the trainer.
 
@@ -97,6 +98,8 @@ class YinshTrainer:
             min_lr=1e-6  # Add minimum learning rate
         )
 
+        self.l2_reg = l2_reg
+
         # Setup logging
         self.logger = logging.getLogger("YinshTrainer")
         self.logger.setLevel(logging.INFO)
@@ -106,7 +109,6 @@ class YinshTrainer:
         self.value_losses = []
         self.total_losses = []
         self.learning_rates = []  # Add this line
-
 
     def train_step(self, batch_size: int) -> Tuple[float, float]:
         """Improved training step with better loss calculations."""
@@ -125,7 +127,6 @@ class YinshTrainer:
         pred_logits, pred_values = self.network.network(states)
 
         # Calculate policy loss using KL divergence
-        # This is more appropriate for probability distributions
         log_pred_probs = F.log_softmax(pred_logits, dim=1)
         policy_loss = -(target_probs * log_pred_probs).sum(dim=1).mean()
 
@@ -134,8 +135,15 @@ class YinshTrainer:
         l1_loss = torch.abs(pred_values).mean()  # L1 regularization
         value_loss = mse_loss + 0.01 * l1_loss  # Small L1 coefficient
 
-        # Combined loss with gradient clipping
+        # Combined loss with L2 regularization
         total_loss = policy_loss + value_loss
+
+        # Add L2 regularization if specified
+        if self.l2_reg > 0:
+            l2_loss = 0
+            for param in self.network.network.parameters():
+                l2_loss += torch.norm(param)
+            total_loss = total_loss + self.l2_reg * l2_loss
 
         # Backward pass with gradient clipping
         self.optimizer.zero_grad()
