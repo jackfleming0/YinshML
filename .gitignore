@@ -9,6 +9,13 @@
 !pyproject.toml
 !requirements.txt
 !setup.py
+!experiments/
+!experiments/**
+!results/
+!logs/
+!runtime.txt
+!streamlit_run.py
+!test_experiments.py
 
 # Python virtual environment
 .venv/
@@ -21,6 +28,8 @@ models/**/*.mlpackage
 models/**/checkpoint_*
 models/**/games.npy
 models/**/metrics.json
+results/**/*.json
+
 
 # But keep directory structure
 !models/
