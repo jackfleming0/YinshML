@@ -18,7 +18,6 @@ from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics
 from ..utils.tournament import ModelTournament  # Add this import
 
-
 class TrainingSupervisor:
     def __init__(self,
                  network: NetworkWrapper,
@@ -27,8 +26,9 @@ class TrainingSupervisor:
                  mcts_simulations: int = 100,
                  mode: str = 'dev',
                  device='cpu',
-                 tournament_games: int = 10
-                 ):
+                 tournament_games: int = 10,
+                 **mode_settings  # Add this to accept additional settings
+        ):
         """
         Initialize the training supervisor.
 
@@ -40,6 +40,12 @@ class TrainingSupervisor:
             mode: Training mode (dev/full)
             device: Device to use for training
             tournament_games: Number of games per match in tournaments
+            **mode_settings: Additional settings including:
+                - initial_temp: Initial temperature for move selection
+                - final_temp: Final temperature after annealing
+                - c_puct: Exploration constant for MCTS
+                - max_depth: Maximum depth for MCTS
+                - l2_reg: L2 regularization coefficient
         """
         # Initialize components
         self.network = network
@@ -53,9 +59,18 @@ class TrainingSupervisor:
         self.self_play = SelfPlay(
             network=network,
             num_simulations=mcts_simulations,
-            num_workers=num_workers
+            num_workers=num_workers,
+            initial_temp=mode_settings.get('initial_temp', 1.0),
+            final_temp=mode_settings.get('final_temp', 0.2),
+            annealing_steps=mode_settings.get('annealing_steps', 30),
+            c_puct=mode_settings.get('c_puct', 1.0),
+            max_depth=mode_settings.get('max_depth', 20)
         )
-        self.trainer = YinshTrainer(network, device=device)
+        self.trainer = YinshTrainer(
+            network,
+            device=device,
+            l2_reg=mode_settings.get('l2_reg', 0.0)
+        )
         self.visualizer = TrainingVisualizer()
         self.state_encoder = StateEncoder()
         self.metrics = TrainingMetrics()
@@ -69,7 +84,7 @@ class TrainingSupervisor:
 
         # Setup logging
         self.logger = logging.getLogger("TrainingSupervisor")
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.WARNING)
 
     def train_iteration(self, num_games: int = 100, epochs: int = 10):
         """Perform one training iteration."""

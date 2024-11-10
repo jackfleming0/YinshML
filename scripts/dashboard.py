@@ -532,7 +532,27 @@ def main():
 
     # Show raw data if requested
     if st.sidebar.checkbox("Show raw data"):
-        st.subheader("Raw Metrics Data")
+        # Load ELO data
+        elo_df = load_elo_data(model_dir)
+
+        # If we have ELO data, add it to the metrics dataframe
+        if elo_df is not None:
+            # Load the ELO ratings file directly to get current ratings
+            ratings_file = model_dir / "elo_ratings.json"
+            with open(ratings_file, 'r') as f:
+                elo_data = json.load(f)
+                current_ratings = elo_data.get('current_ratings', {})
+
+            # Reset the index to get proper incrementing iteration numbers
+            df = df.reset_index(drop=True)
+
+            # Now add ELO ratings based on the index
+            df['ELO Rating'] = df.index.map(lambda x: current_ratings.get(f"iteration_{x}"))
+
+            # Reorder columns to put ELO rating near the beginning
+            cols = df.columns.tolist()
+            df = df[['iteration', 'ELO Rating'] + [c for c in cols if c not in ['iteration', 'ELO Rating']]]
+
         st.write(df)
 
     # Auto-refresh option

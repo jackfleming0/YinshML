@@ -20,9 +20,6 @@ from yinsh_ml.training.supervisor import TrainingSupervisor
 from yinsh_ml.utils.visualization import TrainingVisualizer
 
 logging.getLogger('coremltools').setLevel(logging.ERROR)
-logging.getLogger('NetworkWrapper').setLevel(logging.ERROR)
-logging.getLogger('StateEncoder').setLevel(logging.ERROR)
-logging.getLogger('TrainingSupervisor').setLevel(logging.ERROR)
 
 
 def setup_logging(log_dir: str, mode: str, debug: bool = False):
@@ -84,6 +81,11 @@ def get_mode_settings(mode: Literal['tiny','quick', 'dev', 'full']) -> dict:
             'games_per_iteration': 3,  # games played per study session
             'epochs_per_iteration': 1,  # number of teams each game is reviewed
             'mcts_simulations': 25,  # number of branches that the student considers in depth
+            'initial_temp': 1.0,
+            'final_temp': 0.2,
+            'c_puct': 1.0,
+            'max_depth': 20,
+            'l2_reg': 0.0,
             'export_every': 1 #how frequently we save and export
         },
         'quick': {  # For quick testing
@@ -91,6 +93,11 @@ def get_mode_settings(mode: Literal['tiny','quick', 'dev', 'full']) -> dict:
             'games_per_iteration': 10,
             'epochs_per_iteration': 2,
             'mcts_simulations': 25,  # Increased from 10
+            'initial_temp': 1.0,
+            'final_temp': 0.2,
+            'c_puct': 1.0,
+            'max_depth': 20,
+            'l2_reg': 0.0,
             'export_every': 1
         },
         'dev': {   # For development
@@ -98,6 +105,11 @@ def get_mode_settings(mode: Literal['tiny','quick', 'dev', 'full']) -> dict:
             'games_per_iteration': 50,
             'epochs_per_iteration': 5,
             'mcts_simulations': 100,  # Increased from 50
+            'initial_temp': 1.0,
+            'final_temp': 0.2,
+            'c_puct': 1.0,
+            'max_depth': 20,
+            'l2_reg': 0.0,
             'export_every': 5
         },
         'dev2': {  # For further dev testing, emphasis on MCTS.
@@ -105,7 +117,11 @@ def get_mode_settings(mode: Literal['tiny','quick', 'dev', 'full']) -> dict:
             'games_per_iteration': 50,
             'epochs_per_iteration': 8,
             'mcts_simulations': 300,  # Big bump
-
+            'initial_temp': 2.0,        # Start with more exploration
+            'final_temp': 0.5,         # Keep some exploration even late
+            'c_puct': 2.0,            # Increase exploration in MCTS
+            'max_depth': 15,          # Add depth limit
+            'l2_reg': 0.0001,         # Add regularization
             'export_every': 5
         },
         'full': {  # For full training
@@ -113,15 +129,35 @@ def get_mode_settings(mode: Literal['tiny','quick', 'dev', 'full']) -> dict:
             'games_per_iteration': 200,
             'epochs_per_iteration': 10,
             'mcts_simulations': 400,  # Increased from 200
+            'initial_temp': 1.0,
+            'final_temp': 0.2,
+            'c_puct': 1.0,
+            'max_depth': 20,
+            'l2_reg': 0.0,
             'export_every': 10
         }
     }
     return settings[mode]
 
 def main():
-    """Main training function."""
+    """
+    The main function orchestrates the training process of a network model.
+    It performs argument parsing, sets up directories and logging, initializes network and training components, and runs the main training loop.
+    It handles checkpoints, model exporting, and interrupt scenarios.
+
+    Args:
+        None
+
+    Raises:
+        Exception: If there is any error during the training process.
+        KeyboardInterrupt: If the training is manually interrupted by the user.
+    """
     args = parse_args()
     settings = get_mode_settings(args.mode)
+
+    # Remove mcts_simulations from settings since it's passed explicitly
+    mcts_simulations = settings.pop('mcts_simulations')  # Remove and store the value
+
 
     # Setup directories
     output_dir = Path(args.output_dir)
@@ -151,9 +187,10 @@ def main():
             network=network,
             save_dir=str(model_dir),
             num_workers=args.num_workers,
-            mcts_simulations=settings['mcts_simulations'],
+            mcts_simulations=mcts_simulations,
             mode=args.mode,  # Pass the mode
-            device=args.device  # Pass the device
+            device=args.device,  # Pass the device
+            **settings
         )
         logger.debug(f'Training supervisor initialized with {args.num_workers} workers')
 

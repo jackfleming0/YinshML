@@ -14,6 +14,9 @@ from ..game.game_state import GameState, GamePhase
 
 logger = logging.getLogger(__name__)
 
+logging.getLogger('StateEncoder').setLevel(logging.ERROR)
+
+
 class StateEncoder:
     """
     Handles encoding and decoding of YINSH game states and moves for the neural network.
@@ -62,6 +65,8 @@ class StateEncoder:
         self.logger.info(f"  Ring movement: {self.move_ring_range} (space: {self.move_ring_space})")
         self.logger.info(f"  Marker removal: {self.remove_markers_range} (space: {self.remove_markers_space})")
         self.logger.info(f"  Ring removal: {self.remove_ring_range}")
+        self.logger.setLevel(logging.ERROR)
+
 
     def _initialize_position_to_index(self) -> Dict[str, int]:
         """Create a mapping from position strings to unique indices."""
