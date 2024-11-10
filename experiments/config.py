@@ -13,98 +13,242 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 @dataclass
-class LearningRateConfig:
+class BaseExperimentConfig:
+    """Base configuration shared across all experiment types."""
+    num_iterations: int
+    games_per_iteration: int
+    epochs_per_iteration: int
+    batches_per_epoch: int
+
+    def __init__(self,
+                 num_iterations: int = 10,
+                 games_per_iteration: int = 100,
+                 epochs_per_iteration: int = 1,
+                 batches_per_epoch: int = 100):
+        self.num_iterations = num_iterations
+        self.games_per_iteration = games_per_iteration
+        self.epochs_per_iteration = epochs_per_iteration
+        self.batches_per_epoch = batches_per_epoch
+
+@dataclass
+class LearningRateConfig(BaseExperimentConfig):
+    """Learning rate specific configuration."""
     lr: float
     weight_decay: float
     batch_size: int
-    num_iterations: int = 5
-    games_per_iteration: int = 20
-    epochs_per_iteration: int = 2
-    batches_per_epoch: int = 100  # Added this parameter
+    lr_schedule: str = "constant"
+    warmup_steps: int = 0
 
+    def __init__(self,
+                 lr: float,
+                 weight_decay: float,
+                 batch_size: int,
+                 lr_schedule: str = "constant",
+                 warmup_steps: int = 0,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.batch_size = batch_size
+        self.lr_schedule = lr_schedule
+        self.warmup_steps = warmup_steps
 
 @dataclass
-class MCTSConfig:
+class MCTSConfig(BaseExperimentConfig):
+    """MCTS specific configuration."""
     num_simulations: int
-    num_iterations: int = 5
-    games_per_iteration: int = 20
-    epochs_per_iteration: int = 2
-    temperature: float = 1.0
+    c_puct: float = 1.0
+    dirichlet_alpha: float = 0.3
+    value_weight: float = 1.0
 
+    def __init__(self,
+                 num_simulations: int,
+                 c_puct: float = 1.0,
+                 dirichlet_alpha: float = 0.3,
+                 value_weight: float = 1.0,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.num_simulations = num_simulations
+        self.c_puct = c_puct
+        self.dirichlet_alpha = dirichlet_alpha
+        self.value_weight = value_weight
 
 @dataclass
-class TemperatureConfig:
+class TemperatureConfig(BaseExperimentConfig):
+    """Temperature annealing configuration."""
     initial_temp: float
     final_temp: float
     annealing_steps: int
-    num_iterations: int = 5
-    games_per_iteration: int = 20
-    epochs_per_iteration: int = 2
+    temp_schedule: str = "linear"
     mcts_simulations: int = 100
+
+    def __init__(self,
+                 initial_temp: float,
+                 final_temp: float,
+                 annealing_steps: int,
+                 temp_schedule: str = "linear",
+                 mcts_simulations: int = 100,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.initial_temp = initial_temp
+        self.final_temp = final_temp
+        self.annealing_steps = annealing_steps
+        self.temp_schedule = temp_schedule
+        self.mcts_simulations = mcts_simulations
 
 
 # Experiment configurations
 LEARNING_RATE_EXPERIMENTS = {
+    # Hypothesis: Current standard settings provide a good reference point
     "baseline": LearningRateConfig(
-        lr=0.001,            # Default learning rate
-        weight_decay=1e-4,   # Default weight decay
-        batch_size=256,      # Default batch size
-        num_iterations=5,
-        games_per_iteration=20,
-        epochs_per_iteration=2,
-        batches_per_epoch=100
-    ),
-    "low_lr": LearningRateConfig(
-        lr=0.0001,
+        lr=0.001,
         weight_decay=1e-4,
         batch_size=256
     ),
-    "high_regularization": LearningRateConfig(
+
+    # Hypothesis: Slower learning with cosine annealing might prevent the ELO decline
+    # we're seeing by avoiding overfitting early in training
+    "conservative": LearningRateConfig(
+        lr=0.0001,
+        weight_decay=1e-4,
+        batch_size=256,
+        lr_schedule="cosine"  # Add LR scheduling
+    ),
+
+    # Hypothesis: More aggressive initial learning with step schedule might help
+    # escape local optima in early training, while steps prevent divergence
+    "aggressive": LearningRateConfig(
+        lr=0.003,
+        weight_decay=1e-4,
+        batch_size=256,
+        lr_schedule="step"
+    ),
+
+    # Hypothesis: Stronger regularization might help align training loss with actual
+    # playing strength by preventing memorization of specific patterns
+    "high_reg": LearningRateConfig(
         lr=0.001,
         weight_decay=1e-3,
         batch_size=256
     ),
-    "large_batch": LearningRateConfig(
+
+    # Hypothesis: Gradual warmup might help establish better initial representations
+    # before full-speed learning begins
+    "warmup": LearningRateConfig(
         lr=0.001,
+        weight_decay=1e-4,
+        batch_size=256,
+        warmup_steps=1000,
+        lr_schedule="cosine"
+    ),
+
+    # Hypothesis: Larger batches with scaled learning rate might provide more
+    # stable gradient estimates and better generalization
+    "large_batch": LearningRateConfig(
+        lr=0.002,  # Increased LR for larger batch
         weight_decay=1e-4,
         batch_size=512
     )
 }
 
 MCTS_EXPERIMENTS = {
+
     "baseline": MCTSConfig(
-        num_simulations=100,  # Default MCTS simulations
-        num_iterations=5,
-        games_per_iteration=20,
-        epochs_per_iteration=2
+        num_simulations=100,
+        c_puct=1.0
     ),
+
+    # Hypothesis: More simulation depth might improve move quality but risks
+    # overfitting to specific positions
     "deep_search": MCTSConfig(
-        num_simulations=200
+        num_simulations=200,
+        c_puct=1.0
     ),
+
     "very_deep_search": MCTSConfig(
-        num_simulations=400
+        num_simulations=400,
+        c_puct=1.0
+    ),
+
+    # Hypothesis: More exploration in MCTS might help discover novel strategies
+    # that basic search misses, increasing strategic diversity
+    "exploratory": MCTSConfig(
+        num_simulations=100,
+        c_puct=2.0,  # More exploration
+        dirichlet_alpha=0.5  # More noise
+    ),
+
+    # Hypothesis: More exploration in MCTS might help discover novel strategies
+    # that basic search misses, increasing strategic diversity
+    "balanced": MCTSConfig(
+        num_simulations=200,
+        c_puct=1.5,
+        value_weight=0.7  # Balance between policy and value
     )
 }
 
 TEMPERATURE_EXPERIMENTS = {
     "baseline": TemperatureConfig(
-        initial_temp=1.0,     # Default temperature settings
+        initial_temp=1.0,
         final_temp=0.2,
-        annealing_steps=30,
-        num_iterations=5,
-        games_per_iteration=20,
-        epochs_per_iteration=2
+        annealing_steps=30
     ),
+
+    # Hypothesis: More early exploration followed by stronger exploitation
+    # might help discover better strategies before locking in behavior
     "high_exploration": TemperatureConfig(
         initial_temp=2.0,
         final_temp=0.1,
         annealing_steps=50
     ),
+
+    # Hypothesis: Maintaining higher randomness longer might prevent premature
+    # convergence to suboptimal strategies
     "slow_annealing": TemperatureConfig(
         initial_temp=1.0,
         final_temp=0.5,
         annealing_steps=40
+    ),
+
+    # Hypothesis: Exponential decay might provide better balance between
+    # exploration and exploitation than linear decay
+    "adaptive": TemperatureConfig(
+        initial_temp=1.5,
+        final_temp=0.2,
+        annealing_steps=40,
+        temp_schedule="exponential"  # Add different schedules
+    ),
+
+    # Hypothesis: Periodically increasing temperature might help escape local
+    # optima throughout training, similar to cyclical learning rates
+    "cyclical": TemperatureConfig(  # Temperature cycling
+        initial_temp=1.0,
+        final_temp=0.3,
+        annealing_steps=30,
+        temp_schedule="cyclical"
     )
+}
+
+COMBINED_EXPERIMENTS = {
+
+    # Hypothesis: A balanced approach combining moderate values of all parameters
+    # might provide more robust learning than extremes in any one dimension
+    "balanced_optimizer": {
+        "lr": 0.0005,
+        "weight_decay": 2e-4,
+        "num_simulations": 200,
+        "initial_temp": 1.5,
+        "temp_schedule": "cosine"
+    },
+
+    # Hypothesis: Combining deep search with high exploration might discover
+    # sophisticated strategies that simpler approaches miss
+    "aggressive_search": {
+        "lr": 0.001,
+        "num_simulations": 300,
+        "c_puct": 1.5,
+        "initial_temp": 2.0
+    }
 }
 
 # Results directory structure
