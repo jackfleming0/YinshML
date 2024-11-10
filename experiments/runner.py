@@ -81,7 +81,11 @@ class ExperimentRunner:
             "timestamps": []
         }
 
+        print(f"\nStarting learning rate experiment with config: {config}")
+
         # Initialize model and trainer
+        print("Initializing model and trainer...")
+
         network = NetworkWrapper(device=self.device)
         trainer = YinshTrainer(network, device=self.device)
 
@@ -91,8 +95,11 @@ class ExperimentRunner:
 
         for iteration in range(config.num_iterations):
             start_time = time.time()
+            print(f"\nIteration {iteration + 1}/{config.num_iterations}")
 
             # Generate self-play games
+            print(f"Generating {config.games_per_iteration} self-play games...")
+
             self_play = SelfPlay(
                 network=network,
                 num_workers=4,
@@ -102,23 +109,31 @@ class ExperimentRunner:
             games = self_play.generate_games(num_games=config.games_per_iteration)
 
             # Add games to trainer's experience
+            print("Adding games to trainer's experience...")
+
             for states, policies, outcome in games:
                 trainer.add_game_experience(states, policies, outcome)
 
             # Train on games
+            print(f"Training for {config.epochs_per_iteration} epochs...")
+
             for _ in range(config.epochs_per_iteration):
-                # Just call train_epoch without trying to capture returns
+                # Reduce batches_per_epoch for quick mode
+                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
                 trainer.train_epoch(
                     batch_size=config.batch_size,
-                    batches_per_epoch=100
+                    batches_per_epoch=actual_batches  # Use reduced number
                 )
+
+            print("Training completed")
 
             # Get the losses from trainer's stored metrics
             policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
             value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
 
             # Evaluate against baseline
-            elo_change = self._evaluate_against_baseline(network)
+            print("Evaluating against baseline...")
+            elo_change = self._evaluate_against_baseline(network, quick_eval=True)  # Changed quick_mode to quick_eval
 
             # Record metrics
             metrics["policy_losses"].append(float(policy_loss))
@@ -206,21 +221,22 @@ class ExperimentRunner:
     def _run_temperature_experiment(self, config: TemperatureConfig) -> Dict:
         """Run temperature annealing experiment."""
         metrics = {
-            "move_entropies": [],
-            "win_rates": [],
-            "game_lengths": [],
+            "policy_losses": [],
+            "value_losses": [],
             "elo_changes": [],
-            "timestamps": []
+            "game_lengths": [],
+            "timestamps": [],
+            "move_entropies": []  # Additional metric for temperature experiments
         }
 
-        # Initialize model
+        # Initialize model and trainer
         network = NetworkWrapper(device=self.device)
         trainer = YinshTrainer(network, device=self.device)
 
         for iteration in range(config.num_iterations):
             start_time = time.time()
 
-            # Configure self-play with temperature schedule
+            # Generate self-play games with temperature configuration
             self_play = SelfPlay(
                 network=network,
                 num_workers=4,
@@ -232,36 +248,59 @@ class ExperimentRunner:
 
             games = self_play.generate_games(num_games=config.games_per_iteration)
 
-            # Train on games
+            # Add games to trainer's experience
+            for states, policies, outcome in games:
+                trainer.add_game_experience(states, policies, outcome)
+
+            # Train for specified epochs
             for _ in range(config.epochs_per_iteration):
-                trainer.train_epoch(games=games)
+                trainer.train_epoch(
+                    batch_size=256,
+                    batches_per_epoch=100
+                )
+
+            # Get the latest losses
+            policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
+            value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
+
+            # Calculate average move entropy for this iteration
+            move_entropy = np.mean([
+                -np.sum(p * np.log(p + 1e-8))
+                for game in games
+                for p in game[1]  # game[1] contains policy vectors
+            ])
 
             # Evaluate against baseline
             elo_change = self._evaluate_against_baseline(network)
 
-            # Calculate metrics
-            move_entropy = self._calculate_move_entropy(games)
-            win_rate = self._calculate_win_rate(games)
-            avg_game_length = np.mean([len(g[0]) for g in games])
-
             # Record metrics
-            metrics["move_entropies"].append(float(move_entropy))
-            metrics["win_rates"].append(float(win_rate))
-            metrics["game_lengths"].append(float(avg_game_length))
+            metrics["policy_losses"].append(float(policy_loss))
+            metrics["value_losses"].append(float(value_loss))
             metrics["elo_changes"].append(float(elo_change))
+            metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
+            metrics["move_entropies"].append(float(move_entropy))
             metrics["timestamps"].append(time.time() - start_time)
 
             # Log progress
             self.logger.info(
                 f"Iteration {iteration + 1}/{config.num_iterations}: "
-                f"Move Entropy: {move_entropy:.3f}, Win Rate: {win_rate:.2%}, "
-                f"Game Length: {avg_game_length:.1f}, ELO Change: {elo_change:+.1f}"
+                f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, "
+                f"ELO Change: {elo_change:+.1f}, Move Entropy: {move_entropy:.3f}"
             )
+
+            # Early stopping check
+            if self._should_stop_early(metrics):
+                self.logger.info("Early stopping triggered")
+                break
 
         return metrics
 
-    def _evaluate_against_baseline(self, network: NetworkWrapper, num_games: int = 20) -> float:
+    def _evaluate_against_baseline(self, network: NetworkWrapper, num_games: int = 20, quick_eval: bool = False) -> float:
         """Evaluate network against baseline model."""
+
+        if quick_eval:
+            num_games = 2  # Drastically reduce evaluation games for quick testing
+
         wins = 0
         total_games = num_games * 2  # Play as both colors
 
@@ -357,6 +396,8 @@ class ExperimentRunner:
 
     def _win_rate_to_elo(self, win_rate: float) -> float:
         """Convert win rate to ELO difference."""
+        # Add bounds to prevent infinity
+        win_rate = max(0.001, min(0.999, win_rate))
         return -400 * np.log10(1 / win_rate - 1)
 
     def _play_evaluation_game(self,
