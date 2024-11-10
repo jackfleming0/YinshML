@@ -67,7 +67,7 @@ def plot_loss_curves(df: pd.DataFrame):
 
     # Policy loss
     fig.add_trace(go.Scatter(
-        x=df.index,
+        x=df['iteration'],
         y=df['policy_losses'],
         name='Policy Loss',
         line=dict(color='blue', width=2),
@@ -76,7 +76,7 @@ def plot_loss_curves(df: pd.DataFrame):
 
     # Value loss
     fig.add_trace(go.Scatter(
-        x=df.index,
+        x=df['iteration'],
         y=df['value_losses'],
         name='Value Loss',
         line=dict(color='red', width=2),
@@ -86,7 +86,7 @@ def plot_loss_curves(df: pd.DataFrame):
     # Add temperature if available
     if 'avg_temperature' in df.columns:
         fig.add_trace(go.Scatter(
-            x=df.index,
+            x=df['iteration'],
             y=df['avg_temperature'],
             name='Temperature',
             line=dict(color='green', width=2, dash='dot'),
@@ -114,7 +114,7 @@ def plot_entropy_curves(df: pd.DataFrame):
 
         # Early game entropy
         fig.add_trace(go.Scatter(
-            x=df.index,
+            x=df['iteration'],
             y=df['early_game_entropy'],
             name='Early Game Entropy',
             line=dict(color='orange', width=2),
@@ -123,7 +123,7 @@ def plot_entropy_curves(df: pd.DataFrame):
 
         # Late game entropy
         fig.add_trace(go.Scatter(
-            x=df.index,
+            x=df['iteration'],
             y=df['late_game_entropy'],
             name='Late Game Entropy',
             line=dict(color='purple', width=2),
@@ -162,7 +162,7 @@ def plot_temperature_metrics(df: pd.DataFrame):
 
     # Temperature
     fig.add_trace(go.Scatter(
-        x=df.index,
+        x=df['iteration'],
         y=df['avg_temperature'],
         name='Average Temperature',
         line=dict(color='green', width=2),
@@ -172,7 +172,7 @@ def plot_temperature_metrics(df: pd.DataFrame):
     # Move selection confidence
     if 'move_selection_confidence' in df.columns:
         fig.add_trace(go.Scatter(
-            x=df.index,
+            x=df['iteration'],
             y=df['move_selection_confidence'],
             name='Move Confidence',
             line=dict(color='blue', width=2, dash='dot'),
@@ -197,6 +197,7 @@ def plot_win_rates(df: pd.DataFrame):
     if win_cols:
         win_rates = df[win_cols].mean(axis=1)
         fig.add_trace(go.Scatter(
+            x=df['iteration'],
             y=win_rates,
             name='Win Rate',
             line=dict(color='green', width=2)
@@ -207,6 +208,7 @@ def plot_win_rates(df: pd.DataFrame):
     if draw_cols:
         draw_rates = df[draw_cols].mean(axis=1)
         fig.add_trace(go.Scatter(
+            x=df['iteration'],
             y=draw_rates,
             name='Draw Rate',
             line=dict(color='gray', width=2)
@@ -237,6 +239,7 @@ def plot_ring_mobility(df: pd.DataFrame):
     # Check if we have the ring_mobility column
     if 'ring_mobility' in df.columns:
         fig.add_trace(go.Scatter(
+            x=df['iteration'],
             y=df['ring_mobility'],  # Use single column instead of trying to average
             name='Ring Mobility',
             line=dict(color='purple', width=2)
@@ -375,6 +378,55 @@ def show_training_status(df: pd.DataFrame):
                 delta_color="normal"
             )
 
+def load_elo_data(model_dir: Path) -> pd.DataFrame:
+    """Load ELO ratings and rating history."""
+    ratings_file = model_dir / "elo_ratings.json"
+    if not ratings_file.exists():
+        st.warning("No ELO data available yet")
+        return None
+
+    with open(ratings_file, 'r') as f:
+        data = json.load(f)
+
+    rating_history = data.get('rating_history', {})
+
+    # Convert rating history into a DataFrame
+    # rating_history is a dict: model_id -> list of (timestamp, rating)
+    # We need to create a DataFrame with columns: ['model_id', 'timestamp', 'rating']
+    rows = []
+    for model_id, history in rating_history.items():
+        for timestamp, rating in history:
+            rows.append({'model_id': model_id, 'timestamp': timestamp, 'rating': rating})
+
+    df = pd.DataFrame(rows)
+    # Convert timestamp to datetime
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # Sort the DataFrame
+    df = df.sort_values(by=['timestamp'])
+    return df
+
+def plot_elo_progress(df: pd.DataFrame):
+    """Plot ELO ratings over time for each model."""
+    if df is None or df.empty:
+        st.warning("No ELO data to display")
+        return
+
+    fig = px.line(
+        df,
+        x='timestamp',
+        y='rating',
+        color='model_id',
+        title='ELO Ratings Over Time',
+        labels={'timestamp': 'Timestamp', 'rating': 'ELO Rating', 'model_id': 'Model'}
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def display_current_elo_ratings(elo_df: pd.DataFrame):
+    """Display current ELO ratings for each model."""
+    # Get the latest rating for each model
+    latest_ratings = elo_df.sort_values('timestamp').groupby('model_id').tail(1)
+    latest_ratings = latest_ratings.sort_values(by='rating', ascending=False)
+    st.table(latest_ratings[['model_id', 'rating']])
 
 def main():
     st.set_page_config(
@@ -387,7 +439,7 @@ def main():
     st.sidebar.header("Settings")
     mode = st.sidebar.selectbox(
         "Training Mode",
-        ["tiny", "quick", "dev", "full"],
+        ["tiny", "quick", "dev","dev2", "full"],
         format_func=lambda x: x.capitalize()
     )
 
@@ -469,9 +521,38 @@ def main():
         st.subheader("Game Length Distribution")
         plot_game_length_histogram(df)
 
+    # ELO Progress section
+    st.subheader("ELO Ratings Over Time")
+    elo_df = load_elo_data(model_dir)
+    if elo_df is not None:
+        plot_elo_progress(elo_df)
+        display_current_elo_ratings(elo_df)
+    else:
+        st.warning("No ELO data available yet")
+
     # Show raw data if requested
     if st.sidebar.checkbox("Show raw data"):
-        st.subheader("Raw Metrics Data")
+        # Load ELO data
+        elo_df = load_elo_data(model_dir)
+
+        # If we have ELO data, add it to the metrics dataframe
+        if elo_df is not None:
+            # Load the ELO ratings file directly to get current ratings
+            ratings_file = model_dir / "elo_ratings.json"
+            with open(ratings_file, 'r') as f:
+                elo_data = json.load(f)
+                current_ratings = elo_data.get('current_ratings', {})
+
+            # Reset the index to get proper incrementing iteration numbers
+            df = df.reset_index(drop=True)
+
+            # Now add ELO ratings based on the index
+            df['ELO Rating'] = df.index.map(lambda x: current_ratings.get(f"iteration_{x}"))
+
+            # Reorder columns to put ELO rating near the beginning
+            cols = df.columns.tolist()
+            df = df[['iteration', 'ELO Rating'] + [c for c in cols if c not in ['iteration', 'ELO Rating']]]
+
         st.write(df)
 
     # Auto-refresh option
