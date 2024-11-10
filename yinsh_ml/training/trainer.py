@@ -61,7 +61,8 @@ class YinshTrainer:
     """Handles the training of the YINSH neural network."""
 
 
-    def __init__(self, network: NetworkWrapper, device: Optional[str] = None):
+    def __init__(self, network: NetworkWrapper, device: Optional[str] = None,
+                 l2_reg: float = 0.0):
         """
         Initialize the trainer.
 
@@ -87,6 +88,18 @@ class YinshTrainer:
         )
         self.experience = GameExperience()
 
+        # Add learning rate scheduler. adjusting to try not to create such a steep curve.
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=0.8,
+            patience=10,
+            verbose=True,
+            min_lr=1e-6  # Add minimum learning rate
+        )
+
+        self.l2_reg = l2_reg
+
         # Setup logging
         self.logger = logging.getLogger("YinshTrainer")
         self.logger.setLevel(logging.INFO)
@@ -95,14 +108,10 @@ class YinshTrainer:
         self.policy_losses = []
         self.value_losses = []
         self.total_losses = []
+        self.learning_rates = []  # Add this line
 
     def train_step(self, batch_size: int) -> Tuple[float, float]:
-        """
-        Perform one training step on a batch of data.
-
-        Returns:
-            policy_loss, value_loss
-        """
+        """Improved training step with better loss calculations."""
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0
 
@@ -115,19 +124,35 @@ class YinshTrainer:
         target_values = target_values.to(self.device)
 
         # Forward pass
-        pred_probs, pred_values = self.network.network(states)
+        pred_logits, pred_values = self.network.network(states)
 
-        # Calculate losses
-        policy_loss = -torch.mean(torch.sum(target_probs * F.log_softmax(pred_probs, dim=1), dim=1))
-        value_loss = nn.MSELoss()(pred_values, target_values)
+        # Calculate policy loss using KL divergence
+        log_pred_probs = F.log_softmax(pred_logits, dim=1)
+        policy_loss = -(target_probs * log_pred_probs).sum(dim=1).mean()
 
-        # Combined loss
+        # Calculate value loss with added L1 regularization
+        mse_loss = F.mse_loss(pred_values, target_values)
+        l1_loss = torch.abs(pred_values).mean()  # L1 regularization
+        value_loss = mse_loss + 0.01 * l1_loss  # Small L1 coefficient
+
+        # Combined loss with L2 regularization
         total_loss = policy_loss + value_loss
 
-        # Backward pass and optimization
+        # Add L2 regularization if specified
+        if self.l2_reg > 0:
+            l2_loss = 0
+            for param in self.network.network.parameters():
+                l2_loss += torch.norm(param)
+            total_loss = total_loss + self.l2_reg * l2_loss
+
+        # Backward pass with gradient clipping
         self.optimizer.zero_grad()
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.network.network.parameters(), max_norm=1.0)
         self.optimizer.step()
+
+        # Update learning rate
+        self.scheduler.step(total_loss)
 
         return policy_loss.item(), value_loss.item()
 
@@ -144,12 +169,17 @@ class YinshTrainer:
         avg_policy_loss = policy_loss_sum / batches_per_epoch
         avg_value_loss = value_loss_sum / batches_per_epoch
 
+        # Track current learning rate
+        current_lr = self.optimizer.param_groups[0]['lr']
+        self.learning_rates.append(current_lr)
+
         self.policy_losses.append(avg_policy_loss)
         self.value_losses.append(avg_value_loss)
         self.total_losses.append(avg_policy_loss + avg_value_loss)
 
         self.logger.info(f"Epoch complete - Policy Loss: {avg_policy_loss:.4f}, "
-                         f"Value Loss: {avg_value_loss:.4f}")
+                         f"Value Loss: {avg_value_loss:.4f}, "
+                         f"Learning Rate: {current_lr:.2e}")
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save a training checkpoint."""
@@ -178,8 +208,23 @@ class YinshTrainer:
     def add_game_experience(self, states: List[np.ndarray],
                             policies: List[np.ndarray],
                             outcome: int):
-        """Add a completed game to the experience buffer."""
-        self.experience.add_game(states, policies, outcome)
+        """Modified experience addition with improved value targets."""
+        game_length = len(states)
+
+        # Calculate discounted values with better decay
+        for idx, (state, policy) in enumerate(zip(states, policies)):
+            # Use a slower decay rate for longer-term planning
+            discount = 0.95
+            steps_from_end = game_length - idx
+            value = outcome * (discount ** steps_from_end)
+
+            # Add some noise to prevent overfitting
+            value_noise = np.random.normal(0, 0.05)
+            value = np.clip(value + value_noise, -1, 1)
+
+            self.experience.states.append(state)
+            self.experience.move_probs.append(policy)
+            self.experience.values.append(value)
 
     def evaluate_position(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Evaluate a single position."""

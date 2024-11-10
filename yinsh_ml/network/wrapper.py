@@ -1,11 +1,13 @@
 """Network wrapper for YINSH ML model."""
 
+import random
 import torch
 import coremltools as ct
 import logging
-from typing import Optional, Tuple, NamedTuple
+from typing import Optional, Tuple, NamedTuple, List
 import os
 from collections import namedtuple
+from ..game.moves import Move, MoveType
 
 from .model import YinshNetwork
 from ..utils.encoding import StateEncoder  # Add this line
@@ -13,6 +15,8 @@ import torch.nn.functional as F
 
 # Define output type for traced model
 ModelOutput = namedtuple('ModelOutput', ['policy', 'value'])
+
+logging.getLogger('NetworkWrapper').setLevel(logging.ERROR)
 
 class NetworkWrapper:
     """Wrapper class for the YINSH neural network model."""
@@ -37,7 +41,7 @@ class NetworkWrapper:
 
         # Setup logging
         self.logger = logging.getLogger("NetworkWrapper")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.ERROR)
 
         if model_path and os.path.exists(model_path):
             self.load_model(model_path)
@@ -61,15 +65,6 @@ class NetworkWrapper:
         """
         self.network.eval()
         with torch.no_grad():
-            # Move tensors to correct device
-            state_tensor = state_tensor.to(self.device)
-            if move_mask is not None:
-                move_mask = move_mask.to(self.device)
-
-            # Add batch dimension if needed
-            if len(state_tensor.shape) == 3:
-                state_tensor = state_tensor.unsqueeze(0)
-
             # Get network predictions
             move_logits, value = self.network(state_tensor)
 
@@ -77,10 +72,58 @@ class NetworkWrapper:
             if move_mask is not None:
                 move_logits = move_logits * move_mask
 
-            # Convert to probabilities
-            move_probabilities = F.softmax(move_logits, dim=1)
+            # Apply temperature scaling to logits
+            # This helps control the sharpness of the distribution
+            temperature = 1.0  # This could be made configurable
+            scaled_logits = move_logits / temperature
 
-            return move_probabilities.squeeze(), value.squeeze()
+            # Convert to probabilities with proper scaling
+            move_probabilities = F.softmax(scaled_logits, dim=1)
+
+            return move_probabilities, value
+
+    def select_move(self, move_probs: torch.Tensor, valid_moves: List[Move], temperature: float = 1.0) -> Move:
+        """Select a move using the policy probabilities."""
+        # Debug logging
+        self.logger.debug(f"Move probs shape: {move_probs.shape}")
+        self.logger.debug(f"Number of valid moves: {len(valid_moves)}")
+
+        # Ensure move_probs is 1D
+        if len(move_probs.shape) > 1:
+            move_probs = move_probs.squeeze()
+
+        # Create tensor of valid move probabilities
+        valid_probs = torch.zeros(len(valid_moves), device=self.device)
+        for i, move in enumerate(valid_moves):
+            idx = self.state_encoder.move_to_index(move)
+            valid_probs[i] = move_probs[idx].item()  # Extract scalar value
+
+        # Debug log the sum of probabilities
+        self.logger.debug(f"Sum of valid probabilities before normalization: {valid_probs.sum()}")
+
+        # If all probabilities are zero or invalid, use uniform distribution
+        if valid_probs.sum() <= 0 or torch.isnan(valid_probs.sum()):
+            self.logger.warning("Invalid probabilities detected, using uniform distribution")
+            valid_probs = torch.ones(len(valid_moves), device=self.device)
+
+        # Normalize probabilities
+        valid_probs = valid_probs / valid_probs.sum()
+
+        # Apply temperature
+        if temperature != 0:
+            valid_probs = torch.pow(valid_probs, 1.0 / temperature)
+            valid_probs = valid_probs / valid_probs.sum()
+
+        try:
+            # Move to CPU for multinomial sampling
+            valid_probs = valid_probs.cpu()
+            selected_idx = torch.multinomial(valid_probs, 1).item()
+            return valid_moves[selected_idx]
+        except Exception as e:
+            self.logger.error(f"Error in move selection: {e}")
+            self.logger.debug(f"Probabilities: {valid_probs}")
+            # Fallback to random selection
+            return random.choice(valid_moves)
 
     def save_model(self, path: str):
         """Save model weights to file."""
