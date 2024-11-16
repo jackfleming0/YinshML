@@ -2,7 +2,9 @@ from experiments.config import get_experiment_config, BaseExperimentConfig
 from experiments.runner import ExperimentRunner
 import torch
 import argparse
+import warnings
 
+warnings.filterwarnings('ignore', message='Torch version.*has not been tested with coremltools')
 
 def test_experiment_configs(quick_test: bool = True):
     """Test experiment configurations systematically."""
@@ -59,6 +61,25 @@ def test_experiment_configs(quick_test: bool = True):
                 annealing_steps=10,  # Reduced from typical values like 30-50
                 temp_schedule=original_config.temp_schedule,
                 mcts_simulations=50,  # Reduced from 100
+                **quick_params
+            )
+
+
+        # Override combined experiments for quick testing
+        for config_name in COMBINED_EXPERIMENTS:
+            original_config = COMBINED_EXPERIMENTS[config_name]
+            COMBINED_EXPERIMENTS[config_name] = CombinedConfig(
+                lr=original_config.lr,
+                weight_decay=original_config.weight_decay,
+                batch_size=16,  # Reduced for quick testing
+                num_simulations=25,  # Reduced for quick testing
+                c_puct=original_config.c_puct,
+                dirichlet_alpha=original_config.dirichlet_alpha,
+                value_weight=original_config.value_weight,
+                initial_temp=original_config.initial_temp,
+                final_temp=original_config.final_temp,
+                lr_schedule=original_config.lr_schedule,
+                temp_schedule=original_config.temp_schedule,
                 **quick_params
             )
 
@@ -142,12 +163,13 @@ def test_temperature_experiment():
 
 def test_all_experiments():
     """Run all experiments (full version)."""
-    runner = ExperimentRunner(device='cuda' if torch.cuda.is_available() else 'cpu')
+    runner = ExperimentRunner(device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
 
     experiment_types = {
-        "learning_rate": ["baseline", "low_lr", "high_regularization", "large_batch"],
-        "mcts": ["baseline", "deep_search", "very_deep_search"],
-        "temperature": ["baseline", "high_exploration"]
+        "learning_rate": ["baseline", "conservative", "aggressive", "high_reg", "warmup", "large_batch"],
+        "mcts": ["baseline", "deep_search", "very_deep_search", "exploratory", "balanced"],
+        "temperature": ["baseline", "high_exploration", "slow_annealing", "adaptive", "cyclical"],
+        "combined": ["aggressive_search","balanced_optimizer"]
     }
 
     for exp_type, configs in experiment_types.items():
@@ -162,36 +184,46 @@ def test_combined_configs(quick_test: bool = True):
     """Test combined experiment configurations."""
     runner = ExperimentRunner(device='cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Override base config for quick tests
-    if quick_test:
-        BaseExperimentConfig.num_iterations = 2
-        BaseExperimentConfig.games_per_iteration = 5
-        BaseExperimentConfig.epochs_per_iteration = 1
+    # Import necessary configs
+    from experiments.config import COMBINED_EXPERIMENTS, CombinedConfig
 
-    combined_configs = {
-        "balanced_optimizer": {
-            "lr": 0.0005,
-            "weight_decay": 2e-4,
-            "num_simulations": 200,
-            "initial_temp": 1.5,
-            "temp_schedule": "cosine"
-        },
-        "aggressive_search": {
-            "lr": 0.001,
-            "num_simulations": 300,
-            "c_puct": 1.5,
-            "initial_temp": 2.0
+    if quick_test:
+        # Quick test parameters
+        quick_params = {
+            'num_iterations': 3,
+            'games_per_iteration': 10,  # Reduced from 5
+            'epochs_per_iteration': 1,
+            'batches_per_epoch': 10
         }
-    }
+
+        # Override COMBINED_EXPERIMENTS with quick test values
+        COMBINED_EXPERIMENTS["balanced_optimizer"] = CombinedConfig(
+            lr=0.0005,
+            weight_decay=2e-4,
+            batch_size=16,  # Reduced batch size
+            num_simulations=25,  # Reduced simulations
+            initial_temp=1.5,
+            temp_schedule="cosine",
+            **quick_params
+        )
+
+        COMBINED_EXPERIMENTS["aggressive_search"] = CombinedConfig(
+            lr=0.001,
+            weight_decay=1e-4,
+            batch_size=16,  # Reduced batch size
+            num_simulations=25,  # Reduced simulations
+            c_puct=1.5,
+            initial_temp=2.0,
+            **quick_params
+        )
 
     results = {}
     failed_configs = []
 
     print("\nTesting combined configurations:")
-    for config_name, settings in combined_configs.items():
+    for config_name in ["balanced_optimizer", "aggressive_search"]:
         print(f"\nTesting {config_name}...")
         try:
-            # Create combined experiment configuration
             result = runner.run_experiment(
                 experiment_type="combined",
                 config_name=config_name

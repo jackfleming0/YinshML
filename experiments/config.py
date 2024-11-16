@@ -22,9 +22,9 @@ class BaseExperimentConfig:
 
     def __init__(self,
                  num_iterations: int = 10,
-                 games_per_iteration: int = 100,
-                 epochs_per_iteration: int = 1,
-                 batches_per_epoch: int = 100):
+                 games_per_iteration: int = 75,
+                 epochs_per_iteration: int = 3,
+                 batches_per_epoch: int = 75):
         self.num_iterations = num_iterations
         self.games_per_iteration = games_per_iteration
         self.epochs_per_iteration = epochs_per_iteration
@@ -96,6 +96,54 @@ class TemperatureConfig(BaseExperimentConfig):
         self.temp_schedule = temp_schedule
         self.mcts_simulations = mcts_simulations
 
+@dataclass
+class CombinedConfig(BaseExperimentConfig):
+    """Configuration for combined experiments."""
+    # Learning rate params
+    lr: float
+    weight_decay: float
+    batch_size: int
+    lr_schedule: str = "constant"
+    warmup_steps: int = 0
+
+    # MCTS params
+    num_simulations: int = 100
+    c_puct: float = 1.0
+    dirichlet_alpha: float = 0.3
+    value_weight: float = 1.0
+
+    # Temperature params
+    initial_temp: float = 1.0
+    final_temp: float = 0.2
+    temp_schedule: str = "linear"
+
+    def __init__(self,
+                 lr: float,
+                 weight_decay: float,
+                 batch_size: int,
+                 num_simulations: int = 100,
+                 c_puct: float = 1.0,
+                 dirichlet_alpha: float = 0.3,
+                 value_weight: float = 1.0,
+                 initial_temp: float = 1.0,
+                 final_temp: float = 0.2,
+                 lr_schedule: str = "constant",
+                 temp_schedule: str = "linear",
+                 warmup_steps: int = 0,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.batch_size = batch_size
+        self.lr_schedule = lr_schedule
+        self.warmup_steps = warmup_steps
+        self.num_simulations = num_simulations
+        self.c_puct = c_puct
+        self.dirichlet_alpha = dirichlet_alpha
+        self.value_weight = value_weight
+        self.initial_temp = initial_temp
+        self.final_temp = final_temp
+        self.temp_schedule = temp_schedule
 
 # Experiment configurations
 LEARNING_RATE_EXPERIMENTS = {
@@ -178,8 +226,8 @@ MCTS_EXPERIMENTS = {
         dirichlet_alpha=0.5  # More noise
     ),
 
-    # Hypothesis: More exploration in MCTS might help discover novel strategies
-    # that basic search misses, increasing strategic diversity
+    # Hypothesis: Rebalancing between policy and value networks might help
+    # align immediate moves with long-term strategy better
     "balanced": MCTSConfig(
         num_simulations=200,
         c_puct=1.5,
@@ -233,22 +281,25 @@ COMBINED_EXPERIMENTS = {
 
     # Hypothesis: A balanced approach combining moderate values of all parameters
     # might provide more robust learning than extremes in any one dimension
-    "balanced_optimizer": {
-        "lr": 0.0005,
-        "weight_decay": 2e-4,
-        "num_simulations": 200,
-        "initial_temp": 1.5,
-        "temp_schedule": "cosine"
-    },
+    "balanced_optimizer": CombinedConfig(
+        lr=0.0005,
+        weight_decay=2e-4,
+        batch_size=256,
+        num_simulations=200,
+        initial_temp=1.5,
+        temp_schedule="cosine"
+    ),
 
     # Hypothesis: Combining deep search with high exploration might discover
     # sophisticated strategies that simpler approaches miss
-    "aggressive_search": {
-        "lr": 0.001,
-        "num_simulations": 300,
-        "c_puct": 1.5,
-        "initial_temp": 2.0
-    }
+    "aggressive_search": CombinedConfig(
+        lr=0.001,
+        weight_decay=1e-4,
+        batch_size=256,
+        num_simulations=300,
+        c_puct=1.5,
+        initial_temp=2.0
+    )
 }
 
 # Results directory structure
@@ -256,7 +307,9 @@ RESULTS_DIR = Path("results")
 RESULTS_SUBDIRS = {
     "learning_rate": RESULTS_DIR / "learning_rate",
     "mcts": RESULTS_DIR / "mcts",
-    "temperature": RESULTS_DIR / "temperature"
+    "temperature": RESULTS_DIR / "temperature",
+    "combined": RESULTS_DIR / "combined"
+
 }
 
 # Create results directories
@@ -301,7 +354,8 @@ def get_experiment_config(experiment_type: str, config_name: str) -> Optional[ob
     config_maps = {
         "learning_rate": LEARNING_RATE_EXPERIMENTS,
         "mcts": MCTS_EXPERIMENTS,
-        "temperature": TEMPERATURE_EXPERIMENTS
+        "temperature": TEMPERATURE_EXPERIMENTS,
+        "combined": COMBINED_EXPERIMENTS
     }
 
     if experiment_type not in config_maps:

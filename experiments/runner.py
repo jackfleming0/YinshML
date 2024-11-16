@@ -21,7 +21,8 @@ from experiments.config import (
     RESULTS_SUBDIRS,
     LearningRateConfig,
     MCTSConfig,
-    TemperatureConfig
+    TemperatureConfig,
+    CombinedConfig
 )
 
 
@@ -59,6 +60,8 @@ class ExperimentRunner:
                 metrics = self._run_mcts_experiment(config)
             elif experiment_type == "temperature":
                 metrics = self._run_temperature_experiment(config)
+            elif experiment_type == "combined":  # Add this case
+                metrics = self._run_combined_experiment(config)
             else:
                 raise ValueError(f"Unknown experiment type: {experiment_type}")
 
@@ -295,6 +298,88 @@ class ExperimentRunner:
 
         return metrics
 
+    def _run_combined_experiment(self, config: CombinedConfig) -> Dict:
+        """Run combined experiment using multiple parameter types."""
+        metrics = {
+            "policy_losses": [],
+            "value_losses": [],
+            "elo_changes": [],
+            "game_lengths": [],
+            "timestamps": []
+        }
+
+        print(f"Starting combined experiment with config: {config}")
+        total_start_time = time.time()
+
+        # Initialize model and trainer
+        print("Initializing model and trainer...")
+        network = NetworkWrapper(device=self.device)
+        trainer = YinshTrainer(network, device=self.device)
+
+        # Set learning rate configuration
+        trainer.optimizer.param_groups[0]['lr'] = config.lr
+        trainer.optimizer.param_groups[0]['weight_decay'] = config.weight_decay
+
+        for iteration in range(config.num_iterations):
+            iter_start_time = time.time()
+            print(f"\nIteration {iteration + 1}/{config.num_iterations}")
+
+            # Generate self-play games with MCTS parameters
+            print(f"Generating {config.games_per_iteration} self-play games...")
+            game_start_time = time.time()
+            self_play = SelfPlay(
+                network=network,
+                num_workers=4,
+                num_simulations=config.num_simulations,
+                initial_temp=config.initial_temp,
+                final_temp=config.final_temp,
+                c_puct=config.c_puct
+            )
+
+            games = self_play.generate_games(num_games=config.games_per_iteration)
+            print(f"Games generated in {time.time() - game_start_time:.2f} seconds")
+
+            # Add games to trainer's experience
+            print("Adding games to trainer's experience...")
+            exp_start_time = time.time()
+            for states, policies, outcome in games:
+                trainer.add_game_experience(states, policies, outcome)
+            print(f"Experience added in {time.time() - exp_start_time:.2f} seconds")
+
+            # Train on games
+            print(f"Training for {config.epochs_per_iteration} epochs...")
+            train_start_time = time.time()
+            for _ in range(config.epochs_per_iteration):
+                trainer.train_epoch(
+                    batch_size=config.batch_size,
+                    batches_per_epoch=config.batches_per_epoch
+                )
+            print(f"Training completed in {time.time() - train_start_time:.2f} seconds")
+
+            # Get the latest losses
+            policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
+            value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
+
+            # Evaluate against baseline
+            print("Evaluating against baseline...")
+            eval_start_time = time.time()
+            elo_change = self._evaluate_against_baseline(network, quick_eval=True)
+            print(f"Evaluation completed in {time.time() - eval_start_time:.2f} seconds")
+
+            # Record metrics
+            metrics["policy_losses"].append(float(policy_loss))
+            metrics["value_losses"].append(float(value_loss))
+            metrics["elo_changes"].append(float(elo_change))
+            metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
+            metrics["timestamps"].append(time.time() - iter_start_time)
+
+            print(f"Iteration completed in {time.time() - iter_start_time:.2f} seconds")
+            print(f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, ELO Change: {elo_change:+.1f}")
+
+        total_time = time.time() - total_start_time
+        print(f"\nExperiment completed in {total_time / 60:.2f} minutes")
+        return metrics
+
     def _evaluate_against_baseline(self, network: NetworkWrapper, num_games: int = 20, quick_eval: bool = False) -> float:
         """Evaluate network against baseline model."""
 
@@ -396,7 +481,11 @@ class ExperimentRunner:
 
     def _win_rate_to_elo(self, win_rate: float) -> float:
         """Convert win rate to ELO difference."""
-        # Add bounds to prevent infinity
+        # Add stricter bounds and handling
+        if win_rate == 0:
+            return -400  # Cap minimum
+        if win_rate == 1:
+            return 400  # Cap maximum
         win_rate = max(0.001, min(0.999, win_rate))
         return -400 * np.log10(1 / win_rate - 1)
 
