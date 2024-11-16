@@ -40,7 +40,7 @@ class ExperimentDashboard:
         # Sidebar navigation
         experiment_type = st.sidebar.selectbox(
             "Experiment Type",
-            ["learning_rate", "mcts", "temperature"]
+            ["learning_rate", "mcts", "temperature","combined"]
         )
 
         # Load data

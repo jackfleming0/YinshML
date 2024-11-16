@@ -194,28 +194,59 @@ class MetricsTracker:
             # Analyze based on experiment type
             if experiment_type == "learning_rate":
                 policy_trends = analysis_df['policy_loss_trend']
-                if all(trend > 0 for trend in policy_trends):
+                elo_stability = analysis_df['final_elo']
+                policy_stability = analysis_df['policy_stability']
+
+                # Check for problematic increasing trends
+                if any(trend > 0 for trend in policy_trends):
                     recommendations['suggestions'].append(
-                        "Consider lower learning rates - all configurations show increasing losses"
+                        "Some configurations show increasing losses - consider lowering their learning rates"
                     )
-                elif any(trend > 0 for trend in policy_trends):
+
+                # Add recommendations based on policy stability
+                low_stability_configs = analysis_df[analysis_df['policy_stability'] < 0.8]['config'].tolist()
+                if low_stability_configs:
                     recommendations['suggestions'].append(
-                        "Some learning rates may be too high - check stability metrics"
+                        f"Configurations {', '.join(low_stability_configs)} show training instability - "
+                        "consider adding warmup or reducing learning rate"
+                    )
+
+                # Add recommendations based on ELO performance
+                best_elo_config = analysis_df.loc[analysis_df['final_elo'].idxmax(), 'config']
+                if best_elo_config != best_config:
+                    recommendations['suggestions'].append(
+                        f"Consider hybrid of {best_config} (best overall) and {best_elo_config} "
+                        "(best ELO) configurations"
+                    )
+
+                # Add convergence recommendations
+                non_converged = analysis_df[~analysis_df['policy_converged']]['config'].tolist()
+                if non_converged:
+                    recommendations['suggestions'].append(
+                        f"Configurations {', '.join(non_converged)} haven't converged - "
+                        "consider longer training"
                     )
 
             elif experiment_type == "mcts":
-                best_row = analysis_df[analysis_df['config'] == best_config].iloc[0]
-                if best_row['final_elo'] < 50:  # Arbitrary threshold
+                # Add MCTS-specific recommendations
+                best_elo = analysis_df['final_elo'].max()
+                if best_elo < 50:  # Arbitrary threshold
                     recommendations['suggestions'].append(
-                        "MCTS improvements show limited ELO gains - consider other areas"
+                        "MCTS improvements show limited ELO gains - consider adjusting c_puct or "
+                        "number of simulations"
                     )
 
             elif experiment_type == "temperature":
-                best_row = analysis_df[analysis_df['config'] == best_config].iloc[0]
-                if 'move_entropies' in best_row and np.mean(best_row['move_entropies']) < 0.5:
-                    recommendations['suggestions'].append(
-                        "Move diversity is low - consider higher temperature or slower annealing"
-                    )
+                # Add temperature-specific recommendations
+                if 'move_entropies' in analysis_df.columns:
+                    low_entropy_configs = analysis_df[
+                        analysis_df['move_entropies'].apply(lambda x: np.mean(x) < 0.5)
+                    ]['config'].tolist()
+                    if low_entropy_configs:
+                        recommendations['suggestions'].append(
+                            f"Configurations {', '.join(low_entropy_configs)} show low move diversity - "
+                            "consider higher temperature or slower annealing"
+                        )
 
             return recommendations
 
