@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Dict, Tuple, Optional
 import logging
 from pathlib import Path
 import time
