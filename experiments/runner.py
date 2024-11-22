@@ -6,6 +6,8 @@ from pathlib import Path
 import logging
 from typing import Dict, List, Optional, Tuple
 import torch
+from yinsh_ml.game.moves import Move
+from yinsh_ml.game.game_state import GameState
 import numpy as np
 
 
@@ -390,18 +392,18 @@ class ExperimentRunner:
         total_games = num_games * 2  # Play as both colors
 
         for game_idx in range(total_games):
-            # Alternate colors
             test_is_white = game_idx % 2 == 0
             white_model = network if test_is_white else self.baseline_model
             black_model = self.baseline_model if test_is_white else network
 
             winner = self._play_evaluation_game(white_model, black_model)
 
-            if winner is not None:
+            if winner is not None:  # Not a draw
                 if (test_is_white and winner == 1) or (not test_is_white and winner == -1):
                     wins += 1
 
-        win_rate = wins / total_games
+        # Use more stable ELO formula
+        win_rate = (wins + draws * 0.5) / total_games
         return self._win_rate_to_elo(win_rate)
 
     def _save_results(self, experiment_type: str, config_name: str,
@@ -448,6 +450,123 @@ class ExperimentRunner:
                 entropy = -np.sum(policy * np.log(policy + 1e-8))
                 entropies.append(entropy)
         return np.mean(entropies)
+
+    def _calculate_move_accuracy(self, pred_moves: np.ndarray,
+                                 actual_moves: List[Move],
+                                 game_state: GameState) -> Dict[str, float]:
+        """
+        Calculate move prediction accuracy metrics.
+
+        Args:
+            pred_moves: Network's move probability distribution
+            actual_moves: List of moves actually made in the game
+            game_state: Current game state for move validation
+
+        Returns:
+            Dictionary containing various accuracy metrics
+        """
+        try:
+            metrics = {}
+
+            # Convert actual moves to indices for comparison
+            actual_indices = [
+                self.network.state_encoder.move_to_index(move)
+                for move in actual_moves
+            ]
+
+            # Get top-k predictions for different k values
+            for k in [1, 3, 5]:
+                top_k_indices = np.argpartition(pred_moves, -k)[-k:]
+                # Calculate how often actual move is in top k predictions
+                accuracy = sum(
+                    any(actual_idx in top_k_indices for actual_idx in actual_indices)
+                ) / len(actual_moves)
+                metrics[f'top_{k}_accuracy'] = accuracy
+
+            # Calculate average predicted probability of chosen moves
+            move_confidences = [
+                pred_moves[idx] for idx in actual_indices
+                if idx < len(pred_moves)  # Bounds check
+            ]
+            if move_confidences:
+                metrics['mean_move_confidence'] = float(np.mean(move_confidences))
+                metrics['min_move_confidence'] = float(np.min(move_confidences))
+                metrics['max_move_confidence'] = float(np.max(move_confidences))
+
+            # Policy entropy to measure exploration
+            valid_probs = pred_moves[pred_moves > 0]  # Avoid log(0)
+            if len(valid_probs) > 0:
+                entropy = -np.sum(valid_probs * np.log(valid_probs + 1e-10))
+                metrics['policy_entropy'] = float(entropy)
+
+            return metrics
+
+        except Exception as e:
+            self.logger.error(f"Error calculating move accuracy: {e}")
+            return {
+                'top_1_accuracy': 0.0,
+                'top_3_accuracy': 0.0,
+                'top_5_accuracy': 0.0,
+                'mean_move_confidence': 0.0,
+                'policy_entropy': 0.0
+            }
+
+    def _track_metrics(self, metrics: Dict):
+        """
+        Track and log enhanced training metrics.
+
+        Args:
+            metrics: Dictionary of metrics to track
+        """
+        try:
+            # Create a metrics summary
+            summary = {
+                'timestamp': time.time(),
+                'iteration': len(self.tracked_metrics) + 1
+            }
+
+            # Track basic metrics
+            if 'policy_loss' in metrics:
+                summary['policy_loss'] = float(metrics['policy_loss'])
+            if 'value_loss' in metrics:
+                summary['value_loss'] = float(metrics['value_loss'])
+
+            # Track accuracy metrics
+            if 'value_accuracy' in metrics:
+                summary['value_accuracy'] = float(metrics['value_accuracy'])
+            if 'move_accuracies' in metrics:
+                for k, v in metrics['move_accuracies'].items():
+                    summary[f'move_{k}'] = float(v)
+
+            # Track ELO if available
+            if 'elo_change' in metrics:
+                summary['elo_change'] = float(metrics['elo_change'])
+
+            # Track learning parameters
+            current_lr = self.optimizer.param_groups[0]['lr']
+            summary['learning_rate'] = float(current_lr)
+
+            # Log important metrics
+            self.logger.info(
+                f"Iteration {summary['iteration']} - "
+                f"Policy Loss: {summary.get('policy_loss', 'N/A'):.4f}, "
+                f"Value Loss: {summary.get('value_loss', 'N/A'):.4f}, "
+                f"Value Acc: {summary.get('value_accuracy', 'N/A'):.2%}, "
+                f"Top-1 Move Acc: {summary.get('move_top_1_accuracy', 'N/A'):.2%}, "
+                f"LR: {current_lr:.2e}"
+            )
+
+            # Store metrics
+            self.tracked_metrics.append(summary)
+
+            # Optionally save to file
+            if hasattr(self, 'metrics_file'):
+                with open(self.metrics_file, 'a') as f:
+                    json.dump(summary, f)
+                    f.write('\n')
+
+        except Exception as e:
+            self.logger.error(f"Error tracking metrics: {e}")
 
     def _calculate_average_search_time(self, games: List) -> float:
         """Calculate average MCTS search time."""

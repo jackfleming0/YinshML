@@ -60,7 +60,6 @@ class GameExperience:
 class YinshTrainer:
     """Handles the training of the YINSH neural network."""
 
-
     def __init__(self, network: NetworkWrapper, device: Optional[str] = None,
                  l2_reg: float = 0.0):
         """
@@ -69,7 +68,9 @@ class YinshTrainer:
         Args:
             network: NetworkWrapper instance
             device: Device to train on ('cuda', 'mps', or 'cpu')
+            l2_reg: L2 regularization coefficient
         """
+        # Device setup remains the same
         if device:
             self.device = torch.device(device)
         else:
@@ -78,9 +79,10 @@ class YinshTrainer:
                     "mps" if torch.backends.mps.is_available() else "cpu"
                 )
             )
-        self.network = network  # Store the wrapper
-        self.network.network = self.network.network.to(self.device)  # Move the actual network to device
+        self.network = network
+        self.network.network = self.network.network.to(self.device)
 
+        # Keep the same optimizer settings for now
         self.optimizer = optim.Adam(
             self.network.network.parameters(),
             lr=0.001,
@@ -88,14 +90,11 @@ class YinshTrainer:
         )
         self.experience = GameExperience()
 
-        # Add learning rate scheduler. adjusting to try not to create such a steep curve.
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        # Replace ReduceLROnPlateau with CosineAnnealingLR
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            mode='min',
-            factor=0.8,
-            patience=10,
-            verbose=True,
-            min_lr=1e-6  # Add minimum learning rate
+            T_max=1000,  # Will adjust based on iterations * epochs
+            eta_min=1e-5
         )
 
         self.l2_reg = l2_reg
@@ -104,14 +103,21 @@ class YinshTrainer:
         self.logger = logging.getLogger("YinshTrainer")
         self.logger.setLevel(logging.INFO)
 
-        # Training metrics
+        # Enhanced metrics tracking
         self.policy_losses = []
         self.value_losses = []
         self.total_losses = []
         self.learning_rates = []
+        self.value_accuracies = []  # Track value prediction accuracy
+        self.move_accuracies = []  # Track move prediction accuracy
+
+    def _smooth_policy_targets(self, targets: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
+        n_classes = targets.shape[1]
+        uniform = torch.ones_like(targets) / n_classes
+        return (1 - epsilon) * targets + epsilon * uniform
 
     def train_step(self, batch_size: int) -> Tuple[float, float]:
-        """Improved training step with better loss calculations."""
+        """Training step with proper binary outcomes and loss calculations."""
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0
 
@@ -126,19 +132,43 @@ class YinshTrainer:
         # Forward pass
         pred_logits, pred_values = self.network.network(states)
 
-        # Calculate policy loss using KL divergence
-        log_pred_probs = F.log_softmax(pred_logits, dim=1)
-        policy_loss = -(target_probs * log_pred_probs).sum(dim=1).mean()
+        # Ensure predictions are in [-1, 1] (though network should do this with tanh)
+        pred_values = torch.tanh(pred_values)
 
-        # Calculate value loss with added L1 regularization
-        mse_loss = F.mse_loss(pred_values, target_values)
-        l1_loss = torch.abs(pred_values).mean()  # L1 regularization
-        value_loss = mse_loss + 0.01 * l1_loss  # Small L1 coefficient
+        # After forward pass but before loss calculation
+        accuracies = self._calculate_accuracies(pred_values, target_values,
+                                                pred_logits, target_probs)
+
+        # Update tracking metrics
+        self.value_accuracies.append(accuracies['value_accuracy'])
+        self.move_accuracies.append(accuracies['move_accuracy'])
+
+        # Calculate value loss using binary cross entropy
+        # Scale from [-1,1] to [0,1] for BCE
+        scaled_pred_values = (pred_values + 1) / 2
+        scaled_target_values = (target_values + 1) / 2
+        value_loss = F.binary_cross_entropy(
+            scaled_pred_values,
+            scaled_target_values,
+            reduction='mean'
+        )
+
+        # Calculate policy loss with label smoothing
+        temperature = 1.0  # Could make configurable
+        scaled_logits = pred_logits / temperature
+        log_probs = F.log_softmax(scaled_logits, dim=1)
+
+        # Apply label smoothing to policy targets
+        n_classes = target_probs.shape[1]
+        epsilon = 0.1
+        uniform = torch.ones_like(target_probs) / n_classes
+        smoothed_targets = (1 - epsilon) * target_probs + epsilon * uniform
+        policy_loss = -(smoothed_targets * log_probs).sum(dim=1).mean()
 
         # Combined loss with L2 regularization
         total_loss = policy_loss + value_loss
 
-        # Add L2 regularization if specified
+        # Add L2 regularization if specified (keep as is)
         if self.l2_reg > 0:
             l2_loss = 0
             for param in self.network.network.parameters():
@@ -151,8 +181,8 @@ class YinshTrainer:
         torch.nn.utils.clip_grad_norm_(self.network.network.parameters(), max_norm=1.0)
         self.optimizer.step()
 
-        # Update learning rate
-        self.scheduler.step(total_loss)
+        # Update learning rate (changed from step(total_loss) for CosineAnnealingLR)
+        self.scheduler.step()
 
         return policy_loss.item(), value_loss.item()
 
@@ -208,23 +238,13 @@ class YinshTrainer:
     def add_game_experience(self, states: List[np.ndarray],
                             policies: List[np.ndarray],
                             outcome: int):
-        """Modified experience addition with improved value targets."""
-        game_length = len(states)
-
-        # Calculate discounted values with better decay
-        for idx, (state, policy) in enumerate(zip(states, policies)):
-            # Use a slower decay rate for longer-term planning
-            discount = 0.95
-            steps_from_end = game_length - idx
-            value = outcome * (discount ** steps_from_end)
-
-            # Add some noise to prevent overfitting
-            value_noise = np.random.normal(0, 0.05)
-            value = np.clip(value + value_noise, -1, 1)
-
+        """Add game experience with pure win/loss values."""
+        # Simple addition of experiences with pure outcome values
+        for state, policy in zip(states, policies):
+            # No discounting or noise - pure win/loss signal
             self.experience.states.append(state)
             self.experience.move_probs.append(policy)
-            self.experience.values.append(value)
+            self.experience.values.append(outcome)  # Pure -1 or 1
 
     def evaluate_position(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Evaluate a single position."""
@@ -236,3 +256,47 @@ class YinshTrainer:
                 torch.softmax(policy, dim=1).squeeze().cpu().numpy(),
                 value.item()
             )
+
+    def _calculate_accuracies(self, pred_values: torch.Tensor, target_values: torch.Tensor,
+                              pred_logits: torch.Tensor, target_probs: torch.Tensor) -> Tuple[float, float]:
+        """
+        Calculate value and move prediction accuracies.
+
+        Args:
+            pred_values: Predicted values [-1, 1]
+            target_values: True values [-1, 1]
+            pred_logits: Raw move prediction logits
+            target_probs: True move probabilities
+
+        Returns:
+            Tuple of (value_accuracy, move_accuracy)
+        """
+        with torch.no_grad():
+            # Value accuracy: Check if we correctly predict win/loss
+            # Convert from [-1,1] to binary predictions
+            pred_outcomes = (pred_values > 0).float()
+            true_outcomes = (target_values > 0).float()
+            value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
+
+            # Move accuracy: Check if highest probability move matches
+            # Note: This is a strict metric - only counts exact matches
+            pred_moves = torch.argmax(pred_logits, dim=1)
+            true_moves = torch.argmax(target_probs, dim=1)
+            move_accuracy = (pred_moves == true_moves).float().mean().item()
+
+            # Could also add top-k accuracy for moves if desired
+            k = 5  # Consider top 5 moves
+            _, pred_top_k = torch.topk(pred_logits, k, dim=1)
+            _, true_top_k = torch.topk(target_probs, k, dim=1)
+
+            # Check if true best move is in predicted top k
+            top_k_accuracy = torch.any(
+                pred_top_k == true_moves.unsqueeze(1),
+                dim=1
+            ).float().mean().item()
+
+            return {
+                'value_accuracy': value_accuracy,
+                'move_accuracy': move_accuracy,
+                'top_k_accuracy': top_k_accuracy
+            }

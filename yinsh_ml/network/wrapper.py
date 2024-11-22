@@ -52,13 +52,15 @@ class NetworkWrapper:
         self.state_encoder = StateEncoder()
 
     def predict(self, state_tensor: torch.Tensor,
-                move_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+                move_mask: Optional[torch.Tensor] = None,
+                temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Make a prediction for the given state.
 
         Args:
             state_tensor: Game state tensor of shape (6, 11, 11)
-            move_mask: Optional mask for valid moves
+            move_mask: Optional mask for valid moves (True for valid moves)
+            temperature: Temperature for move probability scaling
 
         Returns:
             Tuple of (move_probabilities, value)
@@ -68,53 +70,81 @@ class NetworkWrapper:
             # Get network predictions
             move_logits, value = self.network(state_tensor)
 
-            # Apply move mask if provided
+            # Ensure value predictions are in [-1, 1]
+            value = torch.tanh(value)
+
+            # Apply move mask using proper masking
             if move_mask is not None:
-                move_logits = move_logits * move_mask
+                # Use masked_fill for proper handling of invalid moves
+                move_logits = move_logits.masked_fill(~move_mask, float('-inf'))
 
             # Apply temperature scaling to logits
-            # This helps control the sharpness of the distribution
-            temperature = 1.0  # This could be made configurable
-            scaled_logits = move_logits / temperature
+            if temperature != 0:
+                scaled_logits = move_logits / temperature
+            else:
+                # If temperature is 0, just take argmax
+                scaled_logits = move_logits
 
-            # Convert to probabilities with proper scaling
+            # Convert to probabilities
             move_probabilities = F.softmax(scaled_logits, dim=1)
 
             return move_probabilities, value
 
-    def select_move(self, move_probs: torch.Tensor, valid_moves: List[Move], temperature: float = 1.0) -> Move:
-        """Select a move using the policy probabilities."""
-        # Debug logging
-        self.logger.debug(f"Move probs shape: {move_probs.shape}")
-        self.logger.debug(f"Number of valid moves: {len(valid_moves)}")
+    def select_move(self, move_probs: torch.Tensor, valid_moves: List[Move],
+                    temperature: float = 1.0) -> Move:
+        """
+        Select a move using the policy probabilities with better numerical stability.
 
+        Args:
+            move_probs: Probability distribution over all moves
+            valid_moves: List of valid moves
+            temperature: Temperature for probability scaling
+
+        Returns:
+            Selected move
+        """
         # Ensure move_probs is 1D
         if len(move_probs.shape) > 1:
             move_probs = move_probs.squeeze()
 
         # Create tensor of valid move probabilities
         valid_probs = torch.zeros(len(valid_moves), device=self.device)
+        valid_moves_indices = []
+
         for i, move in enumerate(valid_moves):
-            idx = self.state_encoder.move_to_index(move)
-            valid_probs[i] = move_probs[idx].item()  # Extract scalar value
+            try:
+                idx = self.state_encoder.move_to_index(move)
+                valid_moves_indices.append(idx)
+                if idx < len(move_probs):  # Bounds check
+                    valid_probs[i] = move_probs[idx].item()
+            except Exception as e:
+                self.logger.warning(f"Error processing move {move}: {e}")
+                continue
 
-        # Debug log the sum of probabilities
-        self.logger.debug(f"Sum of valid probabilities before normalization: {valid_probs.sum()}")
+        # Better handling of edge cases
+        if len(valid_moves_indices) == 0:
+            self.logger.warning("No valid moves could be processed")
+            return random.choice(valid_moves)
 
-        # If all probabilities are zero or invalid, use uniform distribution
-        if valid_probs.sum() <= 0 or torch.isnan(valid_probs.sum()):
-            self.logger.warning("Invalid probabilities detected, using uniform distribution")
-            valid_probs = torch.ones(len(valid_moves), device=self.device)
+        if valid_probs.max() < 1e-8 or torch.isnan(valid_probs.sum()):
+            self.logger.warning("Very low or invalid probabilities detected")
+            return random.choice(valid_moves)
 
-        # Normalize probabilities
-        valid_probs = valid_probs / valid_probs.sum()
-
-        # Apply temperature
-        if temperature != 0:
-            valid_probs = torch.pow(valid_probs, 1.0 / temperature)
-            valid_probs = valid_probs / valid_probs.sum()
+        # Apply temperature and normalization with better numerical stability
+        if temperature > 0:
+            # Use log space for numerical stability
+            log_probs = torch.log(valid_probs + 1e-10)
+            scaled_log_probs = log_probs / temperature
+            valid_probs = F.softmax(scaled_log_probs, dim=0)
+        else:
+            # Temperature 0 means greedy selection
+            max_idx = torch.argmax(valid_probs).item()
+            return valid_moves[max_idx]
 
         try:
+            # Ensure probs sum to 1
+            valid_probs = valid_probs / valid_probs.sum()
+
             # Move to CPU for multinomial sampling
             valid_probs = valid_probs.cpu()
             selected_idx = torch.multinomial(valid_probs, 1).item()
