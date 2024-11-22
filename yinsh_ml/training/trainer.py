@@ -116,10 +116,10 @@ class YinshTrainer:
         uniform = torch.ones_like(targets) / n_classes
         return (1 - epsilon) * targets + epsilon * uniform
 
-    def train_step(self, batch_size: int) -> Tuple[float, float]:
-        """Training step with proper binary outcomes and loss calculations."""
+    def train_step(self, batch_size: int) -> Tuple[float, float, float, Dict]:
+        """Training step with additional metrics."""
         if len(self.experience.states) < batch_size:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, {'top_1_accuracy': 0.0, 'top_3_accuracy': 0.0, 'top_5_accuracy': 0.0}
 
         self.network.network.train()
         states, target_probs, target_values = self.experience.sample_batch(batch_size)
@@ -131,20 +131,9 @@ class YinshTrainer:
 
         # Forward pass
         pred_logits, pred_values = self.network.network(states)
+        pred_values = torch.tanh(pred_values)  # Ensure [-1,1] range
 
-        # Ensure predictions are in [-1, 1] (though network should do this with tanh)
-        pred_values = torch.tanh(pred_values)
-
-        # After forward pass but before loss calculation
-        accuracies = self._calculate_accuracies(pred_values, target_values,
-                                                pred_logits, target_probs)
-
-        # Update tracking metrics
-        self.value_accuracies.append(accuracies['value_accuracy'])
-        self.move_accuracies.append(accuracies['move_accuracy'])
-
-        # Calculate value loss using binary cross entropy
-        # Scale from [-1,1] to [0,1] for BCE
+        # Calculate value loss and accuracy
         scaled_pred_values = (pred_values + 1) / 2
         scaled_target_values = (target_values + 1) / 2
         value_loss = F.binary_cross_entropy(
@@ -153,38 +142,57 @@ class YinshTrainer:
             reduction='mean'
         )
 
-        # Calculate policy loss with label smoothing
-        temperature = 1.0  # Could make configurable
+        # Calculate value accuracy
+        pred_outcomes = (pred_values > 0).float()
+        true_outcomes = (target_values > 0).float()
+        value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
+
+        # Calculate policy loss with temperature scaling
+        temperature = 1.0
         scaled_logits = pred_logits / temperature
         log_probs = F.log_softmax(scaled_logits, dim=1)
+        policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
 
-        # Apply label smoothing to policy targets
-        n_classes = target_probs.shape[1]
-        epsilon = 0.1
-        uniform = torch.ones_like(target_probs) / n_classes
-        smoothed_targets = (1 - epsilon) * target_probs + epsilon * uniform
-        policy_loss = -(smoothed_targets * log_probs).sum(dim=1).mean()
+        # Calculate move accuracies
+        with torch.no_grad():
+            pred_moves = torch.argmax(pred_logits, dim=1)
+            true_moves = torch.argmax(target_probs, dim=1)
+            top1_acc = (pred_moves == true_moves).float().mean().item()
 
-        # Combined loss with L2 regularization
+            _, pred_top3 = torch.topk(pred_logits, k=3, dim=1)
+            top3_acc = torch.any(pred_top3 == true_moves.unsqueeze(1), dim=1).float().mean().item()
+
+            _, pred_top5 = torch.topk(pred_logits, k=5, dim=1)
+            top5_acc = torch.any(pred_top5 == true_moves.unsqueeze(1), dim=1).float().mean().item()
+
+        move_accuracies = {
+            'top_1_accuracy': top1_acc,
+            'top_3_accuracy': top3_acc,
+            'top_5_accuracy': top5_acc
+        }
+
+        # Combined loss and backward pass
         total_loss = policy_loss + value_loss
 
-        # Add L2 regularization if specified (keep as is)
         if self.l2_reg > 0:
             l2_loss = 0
             for param in self.network.network.parameters():
                 l2_loss += torch.norm(param)
             total_loss = total_loss + self.l2_reg * l2_loss
 
-        # Backward pass with gradient clipping
         self.optimizer.zero_grad()
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.network.network.parameters(), max_norm=1.0)
         self.optimizer.step()
 
-        # Update learning rate (changed from step(total_loss) for CosineAnnealingLR)
         self.scheduler.step()
 
-        return policy_loss.item(), value_loss.item()
+        return (
+            policy_loss.item(),
+            value_loss.item(),
+            value_accuracy,
+            move_accuracies
+        )
 
     def train_epoch(self, batch_size: int, batches_per_epoch: int) -> Dict:
         """Train for one epoch and return comprehensive stats."""

@@ -406,11 +406,12 @@ class ExperimentRunner:
         print(f"\nExperiment completed in {total_time / 60:.2f} minutes")
         return metrics
 
-    def _evaluate_against_baseline(self, network: NetworkWrapper, num_games: int = 20, quick_eval: bool = False) -> float:
+    def _evaluate_against_baseline(self, network: NetworkWrapper,
+                                   num_games: int = 20,
+                                   quick_eval: bool = False) -> float:
         """Evaluate network against baseline model."""
-
         if quick_eval:
-            num_games = 2  # Drastically reduce evaluation games for quick testing
+            num_games = 2  # Reduce games for quick testing
 
         wins = 0
         total_games = num_games * 2  # Play as both colors
@@ -422,12 +423,12 @@ class ExperimentRunner:
 
             winner = self._play_evaluation_game(white_model, black_model)
 
-            if winner is not None:  # Not a draw
+            if winner is not None:  # Should always be true for YINSH
                 if (test_is_white and winner == 1) or (not test_is_white and winner == -1):
                     wins += 1
 
-        # Use more stable ELO formula
-        win_rate = (wins + draws * 0.5) / total_games
+        # Simple win rate calculation - no draws possible
+        win_rate = wins / total_games
         return self._win_rate_to_elo(win_rate)
 
     def _save_results(self, experiment_type: str, config_name: str,
