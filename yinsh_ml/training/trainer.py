@@ -108,7 +108,7 @@ class YinshTrainer:
         self.policy_losses = []
         self.value_losses = []
         self.total_losses = []
-        self.learning_rates = []  # Add this line
+        self.learning_rates = []
 
     def train_step(self, batch_size: int) -> Tuple[float, float]:
         """Improved training step with better loss calculations."""

@@ -227,26 +227,85 @@ class MetricsTracker:
                         "consider longer training"
                     )
 
+
             elif experiment_type == "mcts":
-                # Add MCTS-specific recommendations
-                best_elo = analysis_df['final_elo'].max()
-                if best_elo < 50:  # Arbitrary threshold
+                best_row = analysis_df[analysis_df['config'] == best_config].iloc[0]
+                # Check ELO gains
+                if best_row['final_elo'] < 50:
                     recommendations['suggestions'].append(
-                        "MCTS improvements show limited ELO gains - consider adjusting c_puct or "
-                        "number of simulations"
+                        "MCTS improvements show limited ELO gains - consider other areas"
+                    )
+
+                # Analyze search depth effectiveness
+                if 'deep_search' in analysis_df['config'].values:
+                    deep_search = analysis_df[analysis_df['config'] == 'deep_search'].iloc[0]
+                    if deep_search['final_elo'] <= best_row['final_elo']:
+                        recommendations['suggestions'].append(
+                            "Deeper search not improving performance - consider focusing on exploration parameters"
+                        )
+
+                # Check exploration balance
+                if best_row['policy_stability'] < 0.7:  # Low stability might indicate exploration issues
+                    recommendations['suggestions'].append(
+                        "High policy instability - consider adjusting exploration parameters (c_puct)"
                     )
 
             elif experiment_type == "temperature":
-                # Add temperature-specific recommendations
-                if 'move_entropies' in analysis_df.columns:
-                    low_entropy_configs = analysis_df[
-                        analysis_df['move_entropies'].apply(lambda x: np.mean(x) < 0.5)
-                    ]['config'].tolist()
-                    if low_entropy_configs:
-                        recommendations['suggestions'].append(
-                            f"Configurations {', '.join(low_entropy_configs)} show low move diversity - "
-                            "consider higher temperature or slower annealing"
-                        )
+                best_row = analysis_df[analysis_df['config'] == best_config].iloc[0]
+                # Analyze move diversity
+                if hasattr(best_row, 'move_entropies') and np.mean(best_row['move_entropies']) < 0.5:
+                    recommendations['suggestions'].append(
+                        "Move diversity is low - consider higher temperature or slower annealing"
+                    )
+
+                # Check convergence
+                if not best_row['policy_converged']:
+                    recommendations['suggestions'].append(
+                        "Policy not converged - consider extending annealing period"
+                    )
+
+                # Analyze exploration-exploitation balance
+                if best_row['final_elo'] < analysis_df['final_elo'].mean():
+                    recommendations['suggestions'].append(
+                        "Below-average performance - may need better balance between exploration and exploitation"
+                    )
+
+                # Check adaptation speed
+                if best_row['training_time'] > analysis_df['training_time'].mean() * 1.2:
+                    recommendations['suggestions'].append(
+                        "Slow training convergence - consider faster temperature annealing"
+                    )
+
+            elif experiment_type == "combined":
+                best_row = analysis_df[analysis_df['config'] == best_config].iloc[0]
+
+                # Analyze synergy between parameters
+                if best_row['policy_loss_trend'] > 0 or best_row['value_loss_trend'] > 0:
+                    recommendations['suggestions'].append(
+                        "Loss trends indicate parameter conflict - consider decoupling learning rate and MCTS depth adjustments"
+                    )
+
+                # Check computational efficiency
+                if best_row['training_time'] > analysis_df['training_time'].mean() * 1.2:
+                    recommendations['suggestions'].append(
+                        "Training significantly slower - evaluate trade-off between MCTS depth and batch size"
+                    )
+
+                # Evaluate parameter balance
+                if best_row['policy_stability'] < 0.7 or best_row['value_stability'] < 0.7:
+                    recommendations['suggestions'].append(
+                        "Unstable training dynamics - consider more conservative parameter combinations"
+                    )
+
+                # Check overall effectiveness
+                baseline_elo = analysis_df[analysis_df['config'] == 'baseline']['final_elo'].iloc[0] if 'baseline' in \
+                                                                                                        analysis_df[
+                                                                                                            'config'].values else 0
+
+                if best_row['final_elo'] < baseline_elo * 1.1:
+                    recommendations['suggestions'].append(
+                        "Limited improvement over baseline - try alternative parameter combinations"
+                    )
 
             return recommendations
 
