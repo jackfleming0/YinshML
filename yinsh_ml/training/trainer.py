@@ -186,30 +186,59 @@ class YinshTrainer:
 
         return policy_loss.item(), value_loss.item()
 
-    def train_epoch(self, batch_size: int, batches_per_epoch: int):
-        """Train for one epoch."""
+    def train_epoch(self, batch_size: int, batches_per_epoch: int) -> Dict:
+        """Train for one epoch and return comprehensive stats."""
         policy_loss_sum = 0
         value_loss_sum = 0
+        value_acc_sum = 0
+        move_accuracies_list = []
+        policy_entropy_sum = 0
 
         for _ in range(batches_per_epoch):
-            p_loss, v_loss = self.train_step(batch_size)
+            p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
             policy_loss_sum += p_loss
             value_loss_sum += v_loss
+            value_acc_sum += v_acc
+            move_accuracies_list.append(move_accs)
 
-        avg_policy_loss = policy_loss_sum / batches_per_epoch
-        avg_value_loss = value_loss_sum / batches_per_epoch
+            # Calculate policy entropy from last batch if available
+            if hasattr(self, 'last_policy_entropy'):
+                policy_entropy_sum += self.last_policy_entropy
 
-        # Track current learning rate
-        current_lr = self.optimizer.param_groups[0]['lr']
-        self.learning_rates.append(current_lr)
+        # Calculate averages
+        stats = {
+            'policy_loss': policy_loss_sum / batches_per_epoch,
+            'value_loss': value_loss_sum / batches_per_epoch,
+            'value_accuracy': value_acc_sum / batches_per_epoch,
+            'policy_entropy': policy_entropy_sum / batches_per_epoch,
+            'learning_rate': self.optimizer.param_groups[0]['lr']
+        }
 
-        self.policy_losses.append(avg_policy_loss)
-        self.value_losses.append(avg_value_loss)
-        self.total_losses.append(avg_policy_loss + avg_value_loss)
+        # Average move accuracies across batches
+        if move_accuracies_list:
+            avg_move_accuracies = {
+                'top_1_accuracy': np.mean([x['top_1_accuracy'] for x in move_accuracies_list]),
+                'top_3_accuracy': np.mean([x['top_3_accuracy'] for x in move_accuracies_list]),
+                'top_5_accuracy': np.mean([x['top_5_accuracy'] for x in move_accuracies_list])
+            }
+            stats['move_accuracies'] = avg_move_accuracies
 
-        self.logger.info(f"Epoch complete - Policy Loss: {avg_policy_loss:.4f}, "
-                         f"Value Loss: {avg_value_loss:.4f}, "
-                         f"Learning Rate: {current_lr:.2e}")
+        # Store in instance variables
+        self.policy_losses.append(stats['policy_loss'])
+        self.value_losses.append(stats['value_loss'])
+        self.total_losses.append(stats['policy_loss'] + stats['value_loss'])
+        self.learning_rates.append(stats['learning_rate'])
+
+        self.logger.info(
+            f"Epoch complete - "
+            f"Policy Loss: {stats['policy_loss']:.4f}, "
+            f"Value Loss: {stats['value_loss']:.4f}, "
+            f"Value Acc: {stats['value_accuracy']:.2%}, "
+            f"Move Acc: {stats['move_accuracies']['top_1_accuracy']:.2%}, "
+            f"LR: {stats['learning_rate']:.2e}"
+        )
+
+        return stats
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save a training checkpoint."""

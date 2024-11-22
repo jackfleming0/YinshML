@@ -83,7 +83,10 @@ class ExperimentRunner:
             "value_losses": [],
             "elo_changes": [],
             "game_lengths": [],
-            "timestamps": []
+            "timestamps": [],
+            "value_accuracies": [],
+            "move_accuracies": [],
+            "policy_entropy": []
         }
 
         print(f"\nStarting learning rate experiment with config: {config}")
@@ -123,11 +126,10 @@ class ExperimentRunner:
             print(f"Training for {config.epochs_per_iteration} epochs...")
 
             for _ in range(config.epochs_per_iteration):
-                # Reduce batches_per_epoch for quick mode
                 actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
-                trainer.train_epoch(
+                epoch_stats = trainer.train_epoch(
                     batch_size=config.batch_size,
-                    batches_per_epoch=actual_batches  # Use reduced number
+                    batches_per_epoch=actual_batches
                 )
 
             print("Training completed")
@@ -141,8 +143,11 @@ class ExperimentRunner:
             elo_change = self._evaluate_against_baseline(network, quick_eval=True)  # Changed quick_mode to quick_eval
 
             # Record metrics
-            metrics["policy_losses"].append(float(policy_loss))
-            metrics["value_losses"].append(float(value_loss))
+            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+            metrics["value_losses"].append(float(epoch_stats['value_loss']))
+            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
             metrics["timestamps"].append(time.time() - start_time)
@@ -168,9 +173,11 @@ class ExperimentRunner:
             "value_losses": [],
             "elo_changes": [],
             "game_lengths": [],
-            "timestamps": []
+            "timestamps": [],
+            "value_accuracies": [],
+            "move_accuracies": [],
+            "policy_entropy": []
         }
-
         # Initialize model and trainer
         network = NetworkWrapper(device=self.device)
         trainer = YinshTrainer(network, device=self.device)
@@ -196,9 +203,10 @@ class ExperimentRunner:
 
             # Train for specified epochs
             for _ in range(config.epochs_per_iteration):
-                trainer.train_epoch(
-                    batch_size=256,  # Use default or config value
-                    batches_per_epoch=100
+                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+                epoch_stats = trainer.train_epoch(
+                    batch_size=config.batch_size,
+                    batches_per_epoch=actual_batches
                 )
 
             # Get the latest losses
@@ -209,8 +217,11 @@ class ExperimentRunner:
             elo_change = self._evaluate_against_baseline(network)
 
             # Record metrics
-            metrics["policy_losses"].append(float(policy_loss))
-            metrics["value_losses"].append(float(value_loss))
+            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+            metrics["value_losses"].append(float(epoch_stats['value_loss']))
+            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
             metrics["timestamps"].append(time.time() - start_time)
@@ -231,7 +242,10 @@ class ExperimentRunner:
             "elo_changes": [],
             "game_lengths": [],
             "timestamps": [],
-            "move_entropies": []  # Additional metric for temperature experiments
+            "value_accuracies": [],
+            "move_accuracies": [],
+            "policy_entropy": [],
+            "move_entropies": []
         }
 
         # Initialize model and trainer
@@ -259,9 +273,10 @@ class ExperimentRunner:
 
             # Train for specified epochs
             for _ in range(config.epochs_per_iteration):
-                trainer.train_epoch(
-                    batch_size=256,
-                    batches_per_epoch=100
+                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+                epoch_stats = trainer.train_epoch(
+                    batch_size=config.batch_size,
+                    batches_per_epoch=actual_batches
                 )
 
             # Get the latest losses
@@ -279,11 +294,13 @@ class ExperimentRunner:
             elo_change = self._evaluate_against_baseline(network)
 
             # Record metrics
-            metrics["policy_losses"].append(float(policy_loss))
-            metrics["value_losses"].append(float(value_loss))
+            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+            metrics["value_losses"].append(float(epoch_stats['value_loss']))
+            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
-            metrics["move_entropies"].append(float(move_entropy))
             metrics["timestamps"].append(time.time() - start_time)
 
             # Log progress
@@ -307,7 +324,10 @@ class ExperimentRunner:
             "value_losses": [],
             "elo_changes": [],
             "game_lengths": [],
-            "timestamps": []
+            "timestamps": [],
+            "value_accuracies": [],
+            "move_accuracies": [],
+            "policy_entropy": []
         }
 
         print(f"Starting combined experiment with config: {config}")
@@ -352,9 +372,10 @@ class ExperimentRunner:
             print(f"Training for {config.epochs_per_iteration} epochs...")
             train_start_time = time.time()
             for _ in range(config.epochs_per_iteration):
-                trainer.train_epoch(
+                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+                epoch_stats = trainer.train_epoch(
                     batch_size=config.batch_size,
-                    batches_per_epoch=config.batches_per_epoch
+                    batches_per_epoch=actual_batches
                 )
             print(f"Training completed in {time.time() - train_start_time:.2f} seconds")
 
@@ -369,11 +390,14 @@ class ExperimentRunner:
             print(f"Evaluation completed in {time.time() - eval_start_time:.2f} seconds")
 
             # Record metrics
-            metrics["policy_losses"].append(float(policy_loss))
-            metrics["value_losses"].append(float(value_loss))
+            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+            metrics["value_losses"].append(float(epoch_stats['value_loss']))
+            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
-            metrics["timestamps"].append(time.time() - iter_start_time)
+            metrics["timestamps"].append(time.time() - start_time)
 
             print(f"Iteration completed in {time.time() - iter_start_time:.2f} seconds")
             print(f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, ELO Change: {elo_change:+.1f}")

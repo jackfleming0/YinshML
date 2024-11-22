@@ -138,6 +138,16 @@ def _print_metrics(result: dict):
     print(f"Policy Loss: {result['policy_losses'][-1]:.4f}")
     print(f"Value Loss: {result['value_losses'][-1]:.4f}")
     print(f"ELO Change: {result['elo_changes'][-1]:.1f}")
+
+    # New metrics
+    if 'value_accuracies' in result:
+        print(f"Value Accuracy: {result['value_accuracies'][-1]:.2%}")
+    if 'move_accuracies' in result:
+        print(f"Move Top-1 Accuracy: {result['move_accuracies'][-1].get('top_1_accuracy', 0):.2%}")
+        print(f"Move Top-3 Accuracy: {result['move_accuracies'][-1].get('top_3_accuracy', 0):.2%}")
+    if 'policy_entropy' in result:
+        print(f"Policy Entropy: {result['policy_entropy'][-1]:.3f}")
+
     if 'move_entropies' in result:
         print(f"Move Entropy: {result['move_entropies'][-1]:.3f}")
     print("-" * 40)
