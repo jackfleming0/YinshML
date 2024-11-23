@@ -133,18 +133,28 @@ class YinshTrainer:
         pred_logits, pred_values = self.network.network(states)
         pred_values = torch.tanh(pred_values)  # Ensure [-1,1] range
 
+        # Add value confidence tracking
+        value_confidence = torch.abs(pred_values)
+        high_confidence = (value_confidence > 0.8).float().mean()
+        print(f"\nValue Prediction Analysis:")
+        print(f"  Mean confidence: {value_confidence.mean():.3f}")
+        print(f"  High confidence predictions (>0.8): {high_confidence:.1%}")
+        print(f"  Value distribution: {pred_values.mean():.3f} ± {pred_values.std():.3f}")
+
         # Calculate value loss and accuracy
-        scaled_pred_values = (pred_values + 1) / 2
-        scaled_target_values = (target_values + 1) / 2
-        value_loss = F.binary_cross_entropy(
-            scaled_pred_values,
-            scaled_target_values,
-            reduction='mean'
-        )
+        value_loss = F.mse_loss(pred_values, target_values)
+        # scaled_pred_values = (pred_values + 1) / 2
+        # scaled_target_values = (target_values + 1) / 2
+        # value_loss = F.binary_cross_entropy(
+        #     scaled_pred_values,
+        #     scaled_target_values,
+        #     reduction='mean'
+        # )
 
         # Calculate value accuracy
         pred_outcomes = (pred_values > 0).float()
         true_outcomes = (target_values > 0).float()
+
         value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
 
         # Calculate policy loss with temperature scaling
@@ -277,6 +287,7 @@ class YinshTrainer:
                             outcome: int):
         """Add game experience with pure win/loss values."""
         # Simple addition of experiences with pure outcome values
+        #print(f"Received outcome value: {outcome}")  # Debug
         for state, policy in zip(states, policies):
             # No discounting or noise - pure win/loss signal
             self.experience.states.append(state)
