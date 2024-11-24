@@ -73,6 +73,7 @@ class YinshNetwork(nn.Module):
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(32 * 11 * 11, 256),
+
             nn.ReLU(),
             nn.Dropout(0.3),  # Add dropout to prevent overconfidence
             nn.Linear(256, 128),

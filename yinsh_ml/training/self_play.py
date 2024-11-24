@@ -12,6 +12,7 @@ import tempfile
 import os
 from pathlib import Path
 
+from experiments.mcts_metrics import MCTSMetrics
 from ..utils.TemperatureMetrics import TemperatureMetrics
 from ..utils.encoding import StateEncoder
 from ..game.game_state import GamePhase, GameState
@@ -66,6 +67,9 @@ class MCTS:
         self.initial_temp = initial_temp
         self.final_temp = final_temp
         self.annealing_steps = annealing_steps
+
+        self.metrics = MCTSMetrics()
+        self.current_iteration = 0
 
         # MCTS exploration parameter
         self.c_puct = c_puct
@@ -168,39 +172,29 @@ class MCTS:
             for move in valid_moves
         ])
 
-        # Log only when we see interesting value patterns
+        # Record interesting positions
         if len(values) > 0:  # Make sure we have moves to analyze
             value_range = np.max(values) - np.min(values)
             best_by_value = valid_moves[np.argmax(values)]
             best_by_ucb = valid_moves[np.argmax(ucb_scores)]
             max_visits = np.max(visit_counts)
 
-            # Only log if:
-            # 1. Large value range (>1.0) WITH significant visits (>20)
-            # 2. Strong disagreement between value and UCB
-            # 3. Filter out zero-value states entirely
+            # Only record if position is interesting
             if (values.max() > 0 and  # Skip all-zero states
                     ((value_range > 1.0 and max_visits > 20) or
                      (best_by_value != best_by_ucb and
                       visit_counts[np.argmax(ucb_scores)] > 20 and
                       value_range > 0.5))):
-
-                print(f"\nSignificant Position Analysis (Visits: {max_visits}, Range: {value_range:.3f}):")
-                print("\nInteresting Position Analysis:")
-                print(f"Value range: {value_range:.3f}")
-                print(f"Top 3 moves by value:")
-                top_by_value = np.argsort(values)[-3:]
-                for idx in reversed(top_by_value):
-                    move = valid_moves[idx]
-                    print(f"  {move}:")
-                    print(f"    Value: {values[idx]:.3f}")
-                    print(f"    Visits: {visit_counts[idx]}")
-                    print(f"    UCB: {ucb_scores[idx]:.3f}")
-
-                if best_by_value != best_by_ucb:
-                    print(f"Value vs UCB disagreement:")
-                    print(f"  Value choice: {best_by_value}")
-                    print(f"  UCB choice: {best_by_ucb}")
+                self.metrics.record_position(self.current_iteration, {
+                    'value_range': value_range,
+                    'max_visits': max_visits,
+                    'moves': [
+                        (str(valid_moves[i]), values[i], visit_counts[i], ucb_scores[i])
+                        for i in np.argsort(values)[-3:]  # Top 3 moves
+                    ],
+                    'value_ucb_disagreement': best_by_value != best_by_ucb,
+                    'game_phase': str(node.state.phase)
+                })
 
         best_move = valid_moves[np.argmax(ucb_scores)]
         return best_move
@@ -257,6 +251,7 @@ class SelfPlay:
         self.network = network
         self.num_simulations = num_simulations
         self.num_workers = num_workers
+        self.current_iteration = 0
 
         # Temperature annealing parameters
         self.initial_temp = initial_temp
@@ -308,6 +303,9 @@ class SelfPlay:
 
         # Reset temperature metrics for new batch
         self.temp_metrics = TemperatureMetrics()
+
+        #record metrics for mcts metric tracker
+        self.mcts.current_iteration = self.current_iteration
 
         # Save the model to a temporary file for workers to load
         with tempfile.NamedTemporaryFile(delete=False) as tmp:

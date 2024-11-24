@@ -265,6 +265,7 @@ def run_quick_test(experiment_type: str = None, config_name: str = None):
 
 
 def main():
+    failures = []
     parser = argparse.ArgumentParser(description='Test YINSH experiment configurations')
     parser.add_argument('--quick', action='store_true',
                         help='Run quick validation with minimal iterations')
