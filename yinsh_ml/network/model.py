@@ -66,21 +66,32 @@ class YinshNetwork(nn.Module):
             # No activation here - we want raw logits
         )
 
-        # Modified value head with activation hooks
         self.value_head_activations = {}
+        # Modified value head with better scaling and normalization
         self.value_head = nn.Sequential(
+            # Initial convolution with batch norm
             nn.Conv2d(num_channels, 32, 1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Flatten(),
+
+            # First dense layer with careful initialization
             nn.Linear(32 * 11 * 11, 256),
-            nn.LayerNorm(256),
+            nn.BatchNorm1d(256),  # Changed from LayerNorm to BatchNorm
             nn.ReLU(),
             nn.Dropout(0.1),
+
+            # Second dense layer
             nn.Linear(256, 64),
-            nn.LayerNorm(64),
+            nn.BatchNorm1d(64),  # Changed from LayerNorm to BatchNorm
             nn.ReLU(),
-            nn.Linear(64, 1),
+
+            # Final prediction layer with careful initialization and normalization
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.BatchNorm1d(1),  # Add BatchNorm before tanh
             nn.Tanh()
         )
 
@@ -91,6 +102,22 @@ class YinshNetwork(nn.Module):
 
         # Initialize weights with different scaling
         self._initialize_weights()
+        self._initialize_value_head()  # Add our new specific initialization for value head
+
+    def _initialize_value_head(self):
+        """Careful initialization of value head weights."""
+        for m in self.value_head.modules():
+            if isinstance(m, nn.Linear):
+                # Smaller initialization scale for final layer
+                if m.out_features == 1:
+                    nn.init.uniform_(m.weight, -0.01, 0.01)
+                    nn.init.constant_(m.bias, 0)
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
     def _make_activation_hook(self, name: str):
         def hook(module, input, output):

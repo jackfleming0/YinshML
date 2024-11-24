@@ -106,8 +106,13 @@ class ExperimentRunner:
         trainer = YinshTrainer(network, device=self.device)
 
         # Set learning rate configuration
-        trainer.optimizer.param_groups[0]['lr'] = config.lr
-        trainer.optimizer.param_groups[0]['weight_decay'] = config.weight_decay
+        trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
+        trainer.value_optimizer.param_groups[0]['lr'] = config.lr * 0.1  # Value head uses lower lr
+
+        # Set weight decay
+        trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay
+        trainer.value_optimizer.param_groups[0][
+            'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
 
         for iteration in range(config.num_iterations):
             start_time = time.time()
@@ -149,7 +154,7 @@ class ExperimentRunner:
 
             # Evaluate against baseline
             print("Evaluating against baseline...")
-            elo_change = self._evaluate_against_baseline(network, quick_eval=True)  # Changed quick_mode to quick_eval
+            elo_change = self._evaluate_against_baseline(network, quick_eval=True)
 
             # Record metrics
             metrics["policy_losses"].append(float(epoch_stats['policy_loss']))

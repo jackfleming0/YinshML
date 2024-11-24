@@ -82,19 +82,44 @@ class YinshTrainer:
         self.network = network
         self.network.network = self.network.network.to(self.device)
 
-        # Keep the same optimizer settings for now
-        self.optimizer = optim.Adam(
-            self.network.network.parameters(),
+        # Separate out value head and policy parameters
+        value_params = [p for n, p in self.network.network.named_parameters()
+                        if 'value_head' in n]
+        policy_params = [p for n, p in self.network.network.named_parameters()
+                         if 'value_head' not in n]
+
+        # Separate optimizers for policy and value
+        self.policy_optimizer = optim.Adam(
+            policy_params,
             lr=0.001,
             weight_decay=1e-4
         )
+
+        # Use SGD with momentum for value head to support cyclical learning rates
+        self.value_optimizer = optim.SGD(
+            value_params,
+            lr=0.0001,  # Lower learning rate for value head
+            momentum=0.9,
+            weight_decay=1e-3  # Stronger regularization
+        )
+
         self.experience = GameExperience()
 
-        # Replace ReduceLROnPlateau with CosineAnnealingLR
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
+        # Scheduler for policy head
+        self.policy_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.policy_optimizer,
             T_max=1000,  # Will adjust based on iterations * epochs
             eta_min=1e-5
+        )
+
+        # Cyclical learning rate for value head
+        self.value_scheduler = optim.lr_scheduler.CyclicLR(
+            self.value_optimizer,
+            base_lr=1e-5,
+            max_lr=1e-4,
+            step_size_up=500,
+            mode='triangular2',
+            cycle_momentum=True  # Enable momentum cycling
         )
 
         self.l2_reg = l2_reg
@@ -103,13 +128,24 @@ class YinshTrainer:
         self.logger = logging.getLogger("YinshTrainer")
         self.logger.setLevel(logging.INFO)
 
+        # Add iteration counter
+        self.current_iteration = 0
+
         # Enhanced metrics tracking
         self.policy_losses = []
         self.value_losses = []
         self.total_losses = []
-        self.learning_rates = []
-        self.value_accuracies = []  # Track value prediction accuracy
-        self.move_accuracies = []  # Track move prediction accuracy
+        self.learning_rates = {'policy': [], 'value': []}  # Track both learning rates
+        self.value_accuracies = []
+        self.move_accuracies = []
+
+        # Track value head specific metrics
+        self.value_metrics = {
+            'pre_tanh_stats': [],  # Track pre-tanh activation statistics
+            'layer_stats': [],  # Track per-layer statistics
+            'prediction_stats': [],  # Track prediction statistics
+            'sign_match': []  # Track sign matching accuracy
+        }
 
     def _smooth_policy_targets(self, targets: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
         n_classes = targets.shape[1]
@@ -117,7 +153,7 @@ class YinshTrainer:
         return (1 - epsilon) * targets + epsilon * uniform
 
     def train_step(self, batch_size: int) -> Tuple[float, float, float, Dict]:
-        """Training step with additional metrics."""
+        """Training step with separate policy and value optimization."""
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0, 0.0, {'top_1_accuracy': 0.0, 'top_3_accuracy': 0.0, 'top_5_accuracy': 0.0}
 
@@ -132,62 +168,98 @@ class YinshTrainer:
         # Forward pass
         pred_logits, pred_values = self.network.network(states)
 
-        # Add comprehensive value head monitoring
+        # Monitor value head metrics
         value_metrics = self._monitor_value_head(
             pred_values,
             target_values,
-            log_activations=(self.iteration % 10 == 0)  # Log full activations every 10 iterations
+            log_activations=(self.current_iteration % 10 == 0)
         )
         self._log_value_head_metrics(value_metrics)
 
-        # Add pre-tanh activation monitoring
-        with torch.no_grad():
-            value_head_layers = [module for name, module in self.network.network.value_head.named_modules()
-                                 if isinstance(module, (nn.Linear, nn.ReLU))]
-            activations = []
-            for layer in value_head_layers:
-                activations.append(layer)
+        # Policy optimization step
+        self.policy_optimizer.zero_grad()
 
-        # Add value confidence tracking with more detailed metrics
-        value_confidence = torch.abs(pred_values)
-        high_confidence = (value_confidence > 0.8).float().mean()
-        print(f"\nValue Prediction Analysis:")
-        print(f"  Mean confidence: {value_confidence.mean():.3f}")
-        print(f"  High confidence predictions (>0.8): {high_confidence:.1%}")
-        print(f"  Value distribution: {pred_values.mean():.3f} ± {pred_values.std():.3f}")
-        print(f"  Pre-tanh activation range: [{pred_values.min():.3f}, {pred_values.max():.3f}]")
+        # Calculate policy loss
+        temperature = 1.0
+        scaled_logits = pred_logits / temperature
+        log_probs = F.log_softmax(scaled_logits, dim=1)
+        policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
 
-        # Calculate value loss using Huber loss instead of MSE
-        value_loss = F.smooth_l1_loss(pred_values, target_values, beta=0.5)
-
-        # Rest of the code remains the same until the combined loss section
-
-        # Modified loss combination with increased value loss weight
-        total_loss = policy_loss + 2.0 * value_loss
-
+        # Add L2 regularization for policy if needed
         if self.l2_reg > 0:
             l2_loss = 0
-            for param in self.network.network.parameters():
-                l2_loss += torch.norm(param)
-            total_loss = total_loss + self.l2_reg * l2_loss
+            for name, param in self.network.network.named_parameters():
+                if 'value_head' not in name:
+                    l2_loss += torch.norm(param)
+            policy_loss = policy_loss + self.l2_reg * l2_loss
 
-        self.optimizer.zero_grad()
-        total_loss.backward()
+        # Backward pass for policy
+        policy_loss.backward(retain_graph=True)
 
-        # Add separate gradient clipping for value head
-        value_params = [p for n, p in self.network.network.named_parameters() if 'value_head' in n]
+        # Clip policy gradients
+        policy_params = [p for n, p in self.network.network.named_parameters()
+                         if 'value_head' not in n]
+        torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
+
+        self.policy_optimizer.step()
+        self.policy_scheduler.step()
+
+        # Value optimization step
+        self.value_optimizer.zero_grad()
+
+        # Calculate value loss with stability term
+        huber_loss = F.smooth_l1_loss(pred_values, target_values, beta=0.5)
+        stability_loss = torch.mean(torch.square(pred_values))  # Penalize large values
+        value_loss = huber_loss + 0.01 * stability_loss
+
+        # Add L2 regularization for value head
+        if self.l2_reg > 0:
+            l2_loss = 0
+            for name, param in self.network.network.named_parameters():
+                if 'value_head' in name:
+                    l2_loss += torch.norm(param)
+            value_loss = value_loss + (self.l2_reg * 2) * l2_loss  # Increased L2 reg for value head
+
+        # Backward pass for value
+        value_loss.backward()
+
+        # Clip value gradients
+        value_params = [p for n, p in self.network.network.named_parameters()
+                        if 'value_head' in n]
         torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
 
-        # Keep general gradient clipping as well
-        torch.nn.utils.clip_grad_norm_(self.network.network.parameters(), max_norm=1.0)
+        self.value_optimizer.step()
+        self.value_scheduler.step()
 
-        # Add gradient norm monitoring for value head
+        # Calculate metrics
         with torch.no_grad():
-            value_grad_norm = torch.norm(torch.stack([p.grad.norm() for p in value_params]))
-            print(f"  Value head gradient norm: {value_grad_norm:.3f}")
+            # Value accuracy
+            pred_outcomes = (pred_values > 0).float()
+            true_outcomes = (target_values > 0).float()
+            value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
 
-        self.optimizer.step()
-        self.scheduler.step()
+            # Move accuracies
+            pred_moves = torch.argmax(pred_logits, dim=1)
+            true_moves = torch.argmax(target_probs, dim=1)
+            top1_acc = (pred_moves == true_moves).float().mean().item()
+
+            _, pred_top3 = torch.topk(pred_logits, k=3, dim=1)
+            top3_acc = torch.any(pred_top3 == true_moves.unsqueeze(1), dim=1).float().mean().item()
+
+            _, pred_top5 = torch.topk(pred_logits, k=5, dim=1)
+            top5_acc = torch.any(pred_top5 == true_moves.unsqueeze(1), dim=1).float().mean().item()
+
+            move_accuracies = {
+                'top_1_accuracy': top1_acc,
+                'top_3_accuracy': top3_acc,
+                'top_5_accuracy': top5_acc
+            }
+
+            # Update learning rate tracking
+            self.learning_rates['policy'].append(self.policy_optimizer.param_groups[0]['lr'])
+            self.learning_rates['value'].append(self.value_optimizer.param_groups[0]['lr'])
+
+        self.current_iteration += 1
 
         return (
             policy_loss.item(),
