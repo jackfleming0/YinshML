@@ -66,27 +66,36 @@ class YinshNetwork(nn.Module):
             # No activation here - we want raw logits
         )
 
-        # Value head
+        # Modified value head with activation hooks
+        self.value_head_activations = {}
         self.value_head = nn.Sequential(
             nn.Conv2d(num_channels, 32, 1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(32 * 11 * 11, 256),
-
+            nn.LayerNorm(256),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Add dropout to prevent overconfidence
-            nn.Linear(256, 128),
+            nn.Dropout(0.1),
+            nn.Linear(256, 64),
+            nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 1),
+            nn.Linear(64, 1),
             nn.Tanh()
         )
+
+        # Register hooks for activation tracking
+        for name, module in self.value_head.named_modules():
+            if isinstance(module, (nn.Linear, nn.ReLU, nn.LayerNorm)):
+                module.register_forward_hook(self._make_activation_hook(name))
 
         # Initialize weights with different scaling
         self._initialize_weights()
 
-
+    def _make_activation_hook(self, name: str):
+        def hook(module, input, output):
+            self.value_head_activations[name] = output
+        return hook
 
     def _initialize_weights(self):
         """Initialize weights with careful scaling."""
