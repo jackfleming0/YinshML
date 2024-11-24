@@ -40,11 +40,12 @@ class ExperimentRunner:
         """Initialize baseline model for comparisons."""
         try:
             model = NetworkWrapper(device=self.device)
-            # Load your current best model weights
-            model.load_model("models/training_dev2/checkpoint_iteration_10.pt")
+            # Comment out model loading for testing new architecture
+            # model.load_model("models/training_dev2/checkpoint_iteration_10.pt")
+            self.logger.info("Initialized fresh baseline model for testing")
             return model
         except Exception as e:
-            self.logger.error(f"Failed to load baseline model: {e}")
+            self.logger.error(f"Failed to initialize baseline model: {e}")
             raise
 
     def run_experiment(self, experiment_type: str, config_name: str) -> Dict:
