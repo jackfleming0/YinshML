@@ -131,58 +131,39 @@ class YinshTrainer:
 
         # Forward pass
         pred_logits, pred_values = self.network.network(states)
-        pred_values = torch.tanh(pred_values)  # Ensure [-1,1] range
 
-        # Add value confidence tracking
+        # Add comprehensive value head monitoring
+        value_metrics = self._monitor_value_head(
+            pred_values,
+            target_values,
+            log_activations=(self.iteration % 10 == 0)  # Log full activations every 10 iterations
+        )
+        self._log_value_head_metrics(value_metrics)
+
+        # Add pre-tanh activation monitoring
+        with torch.no_grad():
+            value_head_layers = [module for name, module in self.network.network.value_head.named_modules()
+                                 if isinstance(module, (nn.Linear, nn.ReLU))]
+            activations = []
+            for layer in value_head_layers:
+                activations.append(layer)
+
+        # Add value confidence tracking with more detailed metrics
         value_confidence = torch.abs(pred_values)
         high_confidence = (value_confidence > 0.8).float().mean()
         print(f"\nValue Prediction Analysis:")
         print(f"  Mean confidence: {value_confidence.mean():.3f}")
         print(f"  High confidence predictions (>0.8): {high_confidence:.1%}")
         print(f"  Value distribution: {pred_values.mean():.3f} ± {pred_values.std():.3f}")
+        print(f"  Pre-tanh activation range: [{pred_values.min():.3f}, {pred_values.max():.3f}]")
 
-        # Calculate value loss and accuracy
-        value_loss = F.mse_loss(pred_values, target_values)
-        # scaled_pred_values = (pred_values + 1) / 2
-        # scaled_target_values = (target_values + 1) / 2
-        # value_loss = F.binary_cross_entropy(
-        #     scaled_pred_values,
-        #     scaled_target_values,
-        #     reduction='mean'
-        # )
+        # Calculate value loss using Huber loss instead of MSE
+        value_loss = F.smooth_l1_loss(pred_values, target_values, beta=0.5)
 
-        # Calculate value accuracy
-        pred_outcomes = (pred_values > 0).float()
-        true_outcomes = (target_values > 0).float()
+        # Rest of the code remains the same until the combined loss section
 
-        value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
-
-        # Calculate policy loss with temperature scaling
-        temperature = 1.0
-        scaled_logits = pred_logits / temperature
-        log_probs = F.log_softmax(scaled_logits, dim=1)
-        policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
-
-        # Calculate move accuracies
-        with torch.no_grad():
-            pred_moves = torch.argmax(pred_logits, dim=1)
-            true_moves = torch.argmax(target_probs, dim=1)
-            top1_acc = (pred_moves == true_moves).float().mean().item()
-
-            _, pred_top3 = torch.topk(pred_logits, k=3, dim=1)
-            top3_acc = torch.any(pred_top3 == true_moves.unsqueeze(1), dim=1).float().mean().item()
-
-            _, pred_top5 = torch.topk(pred_logits, k=5, dim=1)
-            top5_acc = torch.any(pred_top5 == true_moves.unsqueeze(1), dim=1).float().mean().item()
-
-        move_accuracies = {
-            'top_1_accuracy': top1_acc,
-            'top_3_accuracy': top3_acc,
-            'top_5_accuracy': top5_acc
-        }
-
-        # Combined loss and backward pass
-        total_loss = policy_loss + value_loss
+        # Modified loss combination with increased value loss weight
+        total_loss = policy_loss + 2.0 * value_loss
 
         if self.l2_reg > 0:
             l2_loss = 0
@@ -192,9 +173,20 @@ class YinshTrainer:
 
         self.optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.network.network.parameters(), max_norm=1.0)
-        self.optimizer.step()
 
+        # Add separate gradient clipping for value head
+        value_params = [p for n, p in self.network.network.named_parameters() if 'value_head' in n]
+        torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
+
+        # Keep general gradient clipping as well
+        torch.nn.utils.clip_grad_norm_(self.network.network.parameters(), max_norm=1.0)
+
+        # Add gradient norm monitoring for value head
+        with torch.no_grad():
+            value_grad_norm = torch.norm(torch.stack([p.grad.norm() for p in value_params]))
+            print(f"  Value head gradient norm: {value_grad_norm:.3f}")
+
+        self.optimizer.step()
         self.scheduler.step()
 
         return (
@@ -203,6 +195,98 @@ class YinshTrainer:
             value_accuracy,
             move_accuracies
         )
+
+    def _monitor_value_head(self, pred_values: torch.Tensor,
+                            target_values: torch.Tensor,
+                            log_activations: bool = False) -> Dict:
+        """Monitor value head performance and distributions.
+
+        Args:
+            pred_values: Predicted values from the network
+            target_values: Target values
+            log_activations: Whether to log full activation distributions
+
+        Returns:
+            Dict of monitoring metrics
+        """
+        with torch.no_grad():
+            metrics = {}
+
+            # 1. Pre-tanh activation monitoring
+            pre_tanh = pred_values  # These are now pre-tanh values
+            metrics['pre_tanh'] = {
+                'mean': float(pre_tanh.mean()),
+                'std': float(pre_tanh.std()),
+                'min': float(pre_tanh.min()),
+                'max': float(pre_tanh.max()),
+                'saturated_pct': float((torch.abs(pre_tanh) > 0.99).float().mean() * 100)
+            }
+
+            # 2. Layer-wise activation tracking
+            if log_activations:
+                activations = self.network.network.value_head_activations
+                for name, activation in activations.items():
+                    metrics[f'layer_{name}'] = {
+                        'mean': float(activation.mean()),
+                        'std': float(activation.std()),
+                        'zeros_pct': float((activation == 0).float().mean() * 100)
+                    }
+
+            # 3. Value prediction analysis
+            value_confidence = torch.abs(pred_values)
+            high_confidence = (value_confidence > 0.8).float().mean()
+            metrics['predictions'] = {
+                'mean_confidence': float(value_confidence.mean()),
+                'high_confidence_pct': float(high_confidence * 100),
+                'mean': float(pred_values.mean()),
+                'std': float(pred_values.std())
+            }
+
+            # 4. Target analysis
+            metrics['targets'] = {
+                'mean': float(target_values.mean()),
+                'std': float(target_values.std()),
+                'positive_pct': float((target_values > 0).float().mean() * 100)
+            }
+
+            # 5. Prediction-target alignment
+            pred_signs = torch.sign(pred_values)
+            target_signs = torch.sign(target_values)
+            metrics['alignment'] = {
+                'sign_match_pct': float((pred_signs == target_signs).float().mean() * 100),
+                'mse': float(F.mse_loss(pred_values, target_values)),
+                'mae': float(F.l1_loss(pred_values, target_values))
+            }
+
+            return metrics
+
+    def _log_value_head_metrics(self, metrics: Dict):
+        """Log value head metrics in a readable format."""
+        print("\nValue Head Analysis:")
+
+        print("Pre-tanh Activations:")
+        print(f"  Range: [{metrics['pre_tanh']['min']:.3f}, {metrics['pre_tanh']['max']:.3f}]")
+        print(f"  Distribution: {metrics['pre_tanh']['mean']:.3f} ± {metrics['pre_tanh']['std']:.3f}")
+        print(f"  Saturated: {metrics['pre_tanh']['saturated_pct']:.1f}%")
+
+        print("\nPredictions:")
+        print(f"  Confidence: {metrics['predictions']['mean_confidence']:.3f}")
+        print(f"  High Confidence: {metrics['predictions']['high_confidence_pct']:.1f}%")
+        print(f"  Distribution: {metrics['predictions']['mean']:.3f} ± {metrics['predictions']['std']:.3f}")
+
+        print("\nAlignment with Targets:")
+        print(f"  Sign Match: {metrics['alignment']['sign_match_pct']:.1f}%")
+        print(f"  MSE: {metrics['alignment']['mse']:.3f}")
+        print(f"  MAE: {metrics['alignment']['mae']:.3f}")
+
+        if any(k.startswith('layer_') for k in metrics.keys()):
+            print("\nLayer-wise Activations:")
+            for name, layer_metrics in metrics.items():
+                if name.startswith('layer_'):
+                    print(f"  {name}:")
+                    print(f"    Mean: {layer_metrics['mean']:.3f}")
+                    print(f"    Std: {layer_metrics['std']:.3f}")
+                    print(f"    Zeros: {layer_metrics['zeros_pct']:.1f}%")
 
     def train_epoch(self, batch_size: int, batches_per_epoch: int) -> Dict:
         """Train for one epoch and return comprehensive stats."""
