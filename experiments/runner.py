@@ -70,7 +70,14 @@ class ExperimentRunner:
             # Save results
             self._save_results(experiment_type, config_name, config, metrics)
 
+            # Save MCTS metrics
+            mcts_metrics_path = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_mcts_metrics.json"
+            if hasattr(self.self_play.mcts, 'metrics'):
+                self.self_play.mcts.metrics.save(str(mcts_metrics_path))
+                self.logger.info(f"MCTS metrics saved to {mcts_metrics_path}")
+
             return metrics
+
 
         except Exception as e:
             self.logger.error(f"Experiment failed: {e}")
@@ -113,6 +120,7 @@ class ExperimentRunner:
                 num_workers=4,
                 num_simulations=100
             )
+            self_play.current_iteration = iteration
 
             games = self_play.generate_games(num_games=config.games_per_iteration)
 
@@ -194,6 +202,7 @@ class ExperimentRunner:
                 final_temp=0.2,
                 annealing_steps=30
             )
+            self_play.current_iteration = iteration
 
             games = self_play.generate_games(num_games=config.games_per_iteration)
 
@@ -264,6 +273,8 @@ class ExperimentRunner:
                 final_temp=config.final_temp,
                 annealing_steps=config.annealing_steps
             )
+            self_play.current_iteration = iteration
+
 
             games = self_play.generate_games(num_games=config.games_per_iteration)
 
@@ -357,6 +368,7 @@ class ExperimentRunner:
                 final_temp=config.final_temp,
                 c_puct=config.c_puct
             )
+            self_play.current_iteration = iteration
 
             games = self_play.generate_games(num_games=config.games_per_iteration)
             print(f"Games generated in {time.time() - game_start_time:.2f} seconds")
