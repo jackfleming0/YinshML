@@ -180,37 +180,41 @@ class YinshTrainer:
         self.policy_optimizer.zero_grad()
 
         # Calculate policy loss
-        temperature = 1.0
-        scaled_logits = pred_logits / temperature
-        log_probs = F.log_softmax(scaled_logits, dim=1)
-        policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
+        with torch.set_grad_enabled(True):
+            temperature = 1.0
+            scaled_logits = pred_logits / temperature
+            log_probs = F.log_softmax(scaled_logits, dim=1)
+            policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
 
-        # Add L2 regularization for policy if needed
-        if self.l2_reg > 0:
-            l2_loss = 0
-            for name, param in self.network.network.named_parameters():
-                if 'value_head' not in name:
-                    l2_loss += torch.norm(param)
-            policy_loss = policy_loss + self.l2_reg * l2_loss
+            # Add L2 regularization for policy if needed
+            if self.l2_reg > 0:
+                l2_loss = 0
+                for name, param in self.network.network.named_parameters():
+                    if 'value_head' not in name:
+                        l2_loss += torch.norm(param)
+                policy_loss = policy_loss + self.l2_reg * l2_loss
 
-        # Backward pass for policy
-        policy_loss.backward(retain_graph=True)
+            # Backward pass for policy
+            policy_loss.backward()
 
-        # Clip policy gradients
-        policy_params = [p for n, p in self.network.network.named_parameters()
-                         if 'value_head' not in n]
-        torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
+            # Clip policy gradients
+            policy_params = [p for n, p in self.network.network.named_parameters()
+                             if 'value_head' not in n]
+            torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
 
-        self.policy_optimizer.step()
-        self.policy_scheduler.step()
+            self.policy_optimizer.step()
+            self.policy_scheduler.step()
 
         # Value optimization step
         self.value_optimizer.zero_grad()
 
         # Calculate value loss with stability term
-        huber_loss = F.smooth_l1_loss(pred_values, target_values, beta=0.5)
-        stability_loss = torch.mean(torch.square(pred_values))  # Penalize large values
-        value_loss = huber_loss + 0.01 * stability_loss
+        with torch.set_grad_enabled(True):
+            # Recompute forward pass for value head
+            _, pred_values = self.network.network(states)
+            huber_loss = F.smooth_l1_loss(pred_values, target_values, beta=0.5)
+            stability_loss = torch.mean(torch.square(pred_values))  # Penalize large values
+            value_loss = huber_loss + 0.01 * stability_loss
 
         # Add L2 regularization for value head
         if self.l2_reg > 0:
