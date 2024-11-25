@@ -302,7 +302,6 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "short_baseline": CombinedConfig(
-        # Comments explaining the test:
         # This configuration is designed to thoroughly evaluate the new value head by:
         # 1. Using longer training to see if value predictions remain stable
         # 2. Starting with high temperature to encourage exploration
@@ -312,8 +311,8 @@ COMBINED_EXPERIMENTS = {
         #
         # Training parameters
 
-        num_iterations=10,
-        games_per_iteration=25,
+        num_iterations=10, #  was 10
+        games_per_iteration=25, #  was 25
         epochs_per_iteration=3,
         batches_per_epoch=25,
 
@@ -325,7 +324,7 @@ COMBINED_EXPERIMENTS = {
         warmup_steps=1000,  # Gradual warmup for stability
 
         # MCTS parameters
-        num_simulations=200,  # Deep enough to test value predictions
+        num_simulations=200,  # Deep enough to test value predictions (200)
         c_puct=1.5,  # Slightly higher exploration
         dirichlet_alpha=0.3,  # Standard noise
         value_weight=1.0,  # Full value weighting
