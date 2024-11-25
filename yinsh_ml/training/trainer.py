@@ -14,6 +14,8 @@ from collections import deque
 import random
 
 from ..network.wrapper import NetworkWrapper
+from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
+
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -146,6 +148,7 @@ class YinshTrainer:
             'prediction_stats': [],  # Track prediction statistics
             'sign_match': []  # Track sign matching accuracy
         }
+        self.value_metrics = ValueHeadMetrics()
 
     def _smooth_policy_targets(self, targets: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
         n_classes = targets.shape[1]
@@ -175,6 +178,17 @@ class YinshTrainer:
             log_activations=(self.current_iteration % 10 == 0)
         )
         self._log_value_head_metrics(value_metrics)
+
+        # After forward pass, record value head metrics
+        if hasattr(states, 'game_state'):  # If game state info is available
+            self.value_metrics.record_evaluation(
+                state=states.game_state,
+                value_pred=pred_values.detach().cpu().numpy(),
+                policy_probs=F.softmax(pred_logits, dim=-1).detach().cpu().numpy(),
+                chosen_move=None,  # We'll need to add this
+                temperature=temperature,
+                actual_outcome=target_values.detach().cpu().numpy()
+            )
 
         # Policy optimization step
         self.policy_optimizer.zero_grad()
@@ -389,7 +403,8 @@ class YinshTrainer:
             'value_loss': value_loss_sum / batches_per_epoch,
             'value_accuracy': value_acc_sum / batches_per_epoch,
             'policy_entropy': policy_entropy_sum / batches_per_epoch,
-            'learning_rate': self.optimizer.param_groups[0]['lr']
+            'policy_lr': self.policy_optimizer.param_groups[0]['lr'],
+            'value_lr': self.value_optimizer.param_groups[0]['lr']
         }
 
         # Average move accuracies across batches
@@ -405,7 +420,8 @@ class YinshTrainer:
         self.policy_losses.append(stats['policy_loss'])
         self.value_losses.append(stats['value_loss'])
         self.total_losses.append(stats['policy_loss'] + stats['value_loss'])
-        self.learning_rates.append(stats['learning_rate'])
+        self.learning_rates['policy'].append(stats['policy_lr'])
+        self.learning_rates['value'].append(stats['value_lr'])
 
         self.logger.info(
             f"Epoch complete - "
@@ -413,7 +429,8 @@ class YinshTrainer:
             f"Value Loss: {stats['value_loss']:.4f}, "
             f"Value Acc: {stats['value_accuracy']:.2%}, "
             f"Move Acc: {stats['move_accuracies']['top_1_accuracy']:.2%}, "
-            f"LR: {stats['learning_rate']:.2e}"
+            f"Policy LR: {stats['policy_lr']:.2e}, "
+            f"Value LR: {stats['value_lr']:.2e}"
         )
 
         return stats

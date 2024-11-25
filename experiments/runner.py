@@ -9,7 +9,7 @@ import torch
 from yinsh_ml.game.moves import Move
 from yinsh_ml.game.game_state import GameState
 import numpy as np
-
+from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 # Import YINSH specific modules
 from yinsh_ml.game.game_state import GameState, GamePhase
@@ -17,6 +17,8 @@ from yinsh_ml.game.constants import Player
 from yinsh_ml.training.trainer import YinshTrainer
 from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.training.self_play import SelfPlay
+from yinsh_ml.utils.tournament import ModelTournament
+
 
 from experiments.config import (
     get_experiment_config,
@@ -33,8 +35,20 @@ class ExperimentRunner:
         self.device = device
         self.logger = logging.getLogger("ExperimentRunner")
 
+        # Add checkpoint directory
+        self.checkpoint_dir = Path("checkpoints")
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
         # Initialize baseline model
         self.baseline_model = self._init_baseline_model()
+
+        # Initialize tournament manager
+        self.tournament_manager = ModelTournament(
+            training_dir=self.checkpoint_dir,
+            device=self.device,
+            games_per_match=10,
+            temperature=0.1
+        )
 
     def _init_baseline_model(self) -> NetworkWrapper:
         """Initialize baseline model for comparisons."""
@@ -56,6 +70,11 @@ class ExperimentRunner:
 
         self.logger.info(f"Starting experiment: {experiment_type}/{config_name}")
 
+        # Create experiment-specific checkpoint directory
+        experiment_dir = self.checkpoint_dir / experiment_type / config_name
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+
+
         try:
             if experiment_type == "learning_rate":
                 metrics = self._run_learning_rate_experiment(config)
@@ -69,20 +88,49 @@ class ExperimentRunner:
                 raise ValueError(f"Unknown experiment type: {experiment_type}")
 
             # Save results
-            self._save_results(experiment_type, config_name, config, metrics)
+            results_dir = RESULTS_SUBDIRS[experiment_type]
+            results_file = results_dir / f"{config_name}.json"
+            result_data = {
+                "config": vars(config),
+                "metrics": metrics,
+                "timestamp": time.time()
+            }
 
-            # Save MCTS metrics
-            mcts_metrics_path = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_mcts_metrics.json"
-            if hasattr(self.self_play.mcts, 'metrics'):
-                self.self_play.mcts.metrics.save(str(mcts_metrics_path))
+            with open(results_file, 'w') as f:
+                json.dump(result_data, f, indent=2)
+            self.logger.info(f"Results saved to {results_file}")
+
+            # Save MCTS metrics if they exist
+            # Store the SelfPlay instance during learning rate experiments
+            if hasattr(self, '_current_selfplay') and hasattr(self._current_selfplay.mcts, 'metrics'):
+                mcts_metrics_path = results_dir / f"{config_name}_mcts_metrics.json"
+                self._current_selfplay.mcts.metrics.save(str(mcts_metrics_path))
                 self.logger.info(f"MCTS metrics saved to {mcts_metrics_path}")
 
             return metrics
 
-
         except Exception as e:
             self.logger.error(f"Experiment failed: {e}")
             raise
+
+    def _save_checkpoint(self, network: NetworkWrapper, experiment_type: str,
+                        config_name: str, iteration: int):
+        """Save model checkpoint."""
+        checkpoint_path = (self.checkpoint_dir / experiment_type / config_name /
+                         f"checkpoint_iteration_{iteration}.pt")
+        network.save_model(str(checkpoint_path))
+        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
+
+    def _load_checkpoint(self, experiment_type: str, config_name: str,
+                        iteration: int) -> Optional[NetworkWrapper]:
+        """Load model from checkpoint."""
+        checkpoint_path = (self.checkpoint_dir / experiment_type / config_name /
+                         f"checkpoint_iteration_{iteration}.pt")
+        if checkpoint_path.exists():
+            network = NetworkWrapper(device=self.device)
+            network.load_model(str(checkpoint_path))
+            return network
+        return None
 
     def _run_learning_rate_experiment(self, config: LearningRateConfig) -> Dict:
         """Run learning rate experiment."""
@@ -90,6 +138,7 @@ class ExperimentRunner:
             "policy_losses": [],
             "value_losses": [],
             "elo_changes": [],
+            "tournament_elo": [],
             "game_lengths": [],
             "timestamps": [],
             "value_accuracies": [],
@@ -121,15 +170,16 @@ class ExperimentRunner:
             # Generate self-play games
             print(f"Generating {config.games_per_iteration} self-play games...")
 
-            self_play = SelfPlay(
+            self._current_selfplay = SelfPlay(
                 network=network,
                 num_workers=4,
                 num_simulations=100
             )
-            self_play.current_iteration = iteration
+            self._current_selfplay.current_iteration = iteration
 
-            games = self_play.generate_games(num_games=config.games_per_iteration)
+            games = self._current_selfplay.generate_games(num_games=config.games_per_iteration)
 
+            # Rest of the method remains the same...
             # Add games to trainer's experience
             print("Adding games to trainer's experience...")
 
@@ -156,6 +206,23 @@ class ExperimentRunner:
             print("Evaluating against baseline...")
             elo_change = self._evaluate_against_baseline(network, quick_eval=True)
 
+            # Save checkpoint for this iteration
+            self._save_checkpoint(network, "learning_rate", config_name, iteration)
+
+            # Run tournament evaluation if we have previous iterations
+            tournament_elo = 0.0  # Default if no tournament run
+            if iteration > 0:
+                print("Running tournament evaluation...")
+                self.tournament_manager.run_tournament(
+                    experiment_type="learning_rate",
+                    config_name=config_name,
+                    current_iteration=iteration
+                )
+                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+                tournament_elo = tournament_stats['current_rating']
+                print(f"Tournament ELO: {tournament_elo:+.1f}")
+
+
             # Record metrics
             metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
             metrics["value_losses"].append(float(epoch_stats['value_loss']))
@@ -173,10 +240,19 @@ class ExperimentRunner:
                 f"ELO Change: {elo_change:+.1f}"
             )
 
-            # Early stopping check
-            if self._should_stop_early(metrics):
-                self.logger.info("Early stopping triggered")
-                break
+        # After training completes
+        # Save value head metrics
+        value_metrics_path = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_value_metrics.json"
+        value_metrics_plots = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_value_diagnostics.png"
+
+        trainer.value_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
+
+        with open(value_metrics_path, 'w') as f:
+            json.dump(trainer.value_metrics.generate_report(), f, indent=2)
+
+        self.logger.info(f"Value head metrics saved to {value_metrics_path}")
+        self.logger.info(f"Value head diagnostics plotted to {value_metrics_plots}")
+
 
         return metrics
 
@@ -186,6 +262,7 @@ class ExperimentRunner:
             "policy_losses": [],
             "value_losses": [],
             "elo_changes": [],
+            "tournament_elo": [],
             "game_lengths": [],
             "timestamps": [],
             "value_accuracies": [],
@@ -231,6 +308,23 @@ class ExperimentRunner:
             # Evaluate against baseline
             elo_change = self._evaluate_against_baseline(network)
 
+            # Save checkpoint for this iteration
+            self._save_checkpoint(network, "mcts", config_name, iteration)
+
+            # Run tournament evaluation if we have previous iterations
+            tournament_elo = 0.0  # Default if no tournament run
+            if iteration > 0:
+                print("Running tournament evaluation...")
+                self.tournament_manager.run_tournament(
+                    experiment_type="mcts",
+                    config_name=config_name,
+                    current_iteration=iteration
+                )
+                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+                tournament_elo = tournament_stats['current_rating']
+                print(f"Tournament ELO: {tournament_elo:+.1f}")
+
+
             # Record metrics
             metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
             metrics["value_losses"].append(float(epoch_stats['value_loss']))
@@ -255,6 +349,7 @@ class ExperimentRunner:
             "policy_losses": [],
             "value_losses": [],
             "elo_changes": [],
+            "tournament_elo": [],
             "game_lengths": [],
             "timestamps": [],
             "value_accuracies": [],
@@ -310,6 +405,23 @@ class ExperimentRunner:
             # Evaluate against baseline
             elo_change = self._evaluate_against_baseline(network)
 
+            # Save checkpoint for this iteration
+            self._save_checkpoint(network, "temperature", config_name, iteration)
+
+            # Run tournament evaluation if we have previous iterations
+            tournament_elo = 0.0  # Default if no tournament run
+            if iteration > 0:
+                print("Running tournament evaluation...")
+                self.tournament_manager.run_tournament(
+                    experiment_type="temperature",
+                    config_name=config_name,
+                    current_iteration=iteration
+                )
+                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+                tournament_elo = tournament_stats['current_rating']
+                print(f"Tournament ELO: {tournament_elo:+.1f}")
+
+
             # Record metrics
             metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
             metrics["value_losses"].append(float(epoch_stats['value_loss']))
@@ -340,6 +452,7 @@ class ExperimentRunner:
             "policy_losses": [],
             "value_losses": [],
             "elo_changes": [],
+            "tournament_elo": [],
             "game_lengths": [],
             "timestamps": [],
             "value_accuracies": [],
@@ -355,9 +468,14 @@ class ExperimentRunner:
         network = NetworkWrapper(device=self.device)
         trainer = YinshTrainer(network, device=self.device)
 
-        # Set learning rate configuration
-        trainer.optimizer.param_groups[0]['lr'] = config.lr
-        trainer.optimizer.param_groups[0]['weight_decay'] = config.weight_decay
+        # Set learning rate configuration for both optimizers
+        trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
+        trainer.value_optimizer.param_groups[0]['lr'] = config.lr * 0.1  # Value head uses lower lr
+
+        # Set weight decay for both optimizers
+        trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay
+        trainer.value_optimizer.param_groups[0][
+            'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
 
         for iteration in range(config.num_iterations):
             iter_start_time = time.time()
@@ -407,6 +525,23 @@ class ExperimentRunner:
             elo_change = self._evaluate_against_baseline(network, quick_eval=True)
             print(f"Evaluation completed in {time.time() - eval_start_time:.2f} seconds")
 
+            # Save checkpoint for this iteration
+            self._save_checkpoint(network, "combined", config_name, iteration)
+
+            # Run tournament evaluation if we have previous iterations
+            tournament_elo = 0.0  # Default if no tournament run
+            if iteration > 0:
+                print("Running tournament evaluation...")
+                self.tournament_manager.run_tournament(
+                    experiment_type="combined",
+                    config_name=config_name,
+                    current_iteration=iteration
+                )
+                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+                tournament_elo = tournament_stats['current_rating']
+                print(f"Tournament ELO: {tournament_elo:+.1f}")
+
+
             # Record metrics
             metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
             metrics["value_losses"].append(float(epoch_stats['value_loss']))
@@ -415,7 +550,7 @@ class ExperimentRunner:
             metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
-            metrics["timestamps"].append(time.time() - start_time)
+            metrics["timestamps"].append(time.time() - iter_start_time)
 
             print(f"Iteration completed in {time.time() - iter_start_time:.2f} seconds")
             print(f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, ELO Change: {elo_change:+.1f}")
