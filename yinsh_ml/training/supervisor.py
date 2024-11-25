@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 import time
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 import numpy as np
 import os
 import json
@@ -92,7 +92,7 @@ class TrainingSupervisor:
         iteration_dir = self.save_dir / f"iteration_{int(time.time())}"
         iteration_dir.mkdir(exist_ok=True)
 
-        # Generate self-play games
+        # Generate self-play training games
         self.logger.info(f"Generating {num_games} self-play games...")
         start_time = time.time()
         games = self.self_play.generate_games(num_games=num_games)
@@ -115,7 +115,7 @@ class TrainingSupervisor:
             ring_mobilities.append(mobility)
         avg_ring_mobility = sum(ring_mobilities) / len(ring_mobilities) if ring_mobilities else 0
 
-        # Calculate win/draw rates
+        # Calculate win/draw rates from training games
         outcomes = [game[2] for game in games]
         white_wins = sum(1 for o in outcomes if o == 1)
         black_wins = sum(1 for o in outcomes if o == -1)
@@ -123,7 +123,8 @@ class TrainingSupervisor:
         win_rate = (white_wins + black_wins) / len(outcomes)
         draw_rate = draws / len(outcomes)
 
-        # Log current metrics
+        # Log training game metrics
+        self.logger.info(f"Training Games Summary:")
         self.logger.info(f"Average game length: {avg_game_length:.1f} moves")
         self.logger.info(f"Average ring mobility: {avg_ring_mobility:.1f} moves per ring")
         self.logger.info(f"Game outcomes - White wins: {white_wins}, Black wins: {black_wins}, "
@@ -150,29 +151,46 @@ class TrainingSupervisor:
         policy_loss = np.mean(self.trainer.policy_losses) if self.trainer.policy_losses else 0
         value_loss = np.mean(self.trainer.value_losses) if self.trainer.value_losses else 0
 
-        # Update metrics
+        # Save checkpoint
+        checkpoint_path = self.save_dir / f"checkpoint_iteration_{current_iteration}.pt"
+        self.network.save_model(str(checkpoint_path))
+        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
+
+        # Run both types of evaluation
+        self.logger.info("\nRunning model evaluations...")
+
+        # 1. Self-play evaluation
+        eval_win_rate, eval_draw_rate = self.evaluate_self_play(num_games=25)  # Reduced games for speed
+        self.logger.info(f"Self-play Evaluation:")
+        self.logger.info(f"Win Rate: {eval_win_rate:.2f}, Draw Rate: {eval_draw_rate:.2f}")
+
+        # 2. Tournament evaluation against previous iterations
+        self.logger.info(f"\nRunning tournament evaluation...")
+        self.tournament_manager.run_tournament(current_iteration)
+        tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{current_iteration}")
+
+        self.logger.info(f"Tournament Results:")
+        self.logger.info(f"Current Rating: {tournament_stats['current_rating']:.1f}")
+        self.logger.info(f"Win Rate vs Previous: {tournament_stats['win_rate']:.2%}")
+
+        # Update metrics with all results
         self.metrics.add_iteration_metrics(
             avg_game_length=avg_game_length,
             avg_ring_mobility=avg_ring_mobility,
             win_rate=win_rate,
             draw_rate=draw_rate,
             policy_loss=policy_loss,
-            value_loss=value_loss
+            value_loss=value_loss,
+            eval_win_rate=eval_win_rate,
+            eval_draw_rate=eval_draw_rate,
+            tournament_rating=tournament_stats['current_rating'],
+            tournament_win_rate=tournament_stats['win_rate']
         )
-
-        # Save checkpoint
-        checkpoint_path = self.save_dir / f"checkpoint_iteration_{current_iteration}.pt"
-        self.network.save_model(str(checkpoint_path))
-        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
-
-        # Run tournament against previous iterations
-        self.logger.info("Running tournament against previous iterations...")
-        self.tournament_manager.run_tournament(current_iteration)
 
         # Save metrics
         self._save_metrics(iteration_dir)
 
-        # Check stability for all modes
+        # Check stability
         stability_checks = self.metrics.assess_stability()
         stability_results = {k: v for k, v in stability_checks.items() if v is not False}
         failed_checks = {k: v for k, v in stability_checks.items() if v is False}
@@ -203,22 +221,39 @@ class TrainingSupervisor:
                 'policy_losses': self.metrics.policy_losses,
                 'value_losses': self.metrics.value_losses,
                 'win_rates': self.metrics.win_rates,
-                'draw_rates': self.metrics.draw_rates
+                'draw_rates': self.metrics.draw_rates,
+                'tournament_ratings': self.metrics.tournament_ratings
             },
             save_path=str(iteration_dir / "training_history.png")
         )
 
-        # Return metrics for this iteration
+        # Return comprehensive metrics
         return {
-            'white_wins': white_wins,
-            'black_wins': black_wins,
-            'draws': draws,
-            'win_rate': win_rate,
-            'draw_rate': draw_rate,
-            'game_time': game_time,
-            'training_time': training_time,
-            'policy_loss': policy_loss,
-            'value_loss': value_loss
+            'training_games': {
+                'white_wins': white_wins,
+                'black_wins': black_wins,
+                'draws': draws,
+                'win_rate': win_rate,
+                'draw_rate': draw_rate,
+                'avg_game_length': avg_game_length,
+                'avg_ring_mobility': avg_ring_mobility
+            },
+            'training': {
+                'game_time': game_time,
+                'training_time': training_time,
+                'policy_loss': policy_loss,
+                'value_loss': value_loss
+            },
+            'evaluation': {
+                'self_play': {
+                    'win_rate': eval_win_rate,
+                    'draw_rate': eval_draw_rate
+                },
+                'tournament': {
+                    'rating': tournament_stats['current_rating'],
+                    'win_rate': tournament_stats['win_rate']
+                }
+            }
         }
 
     def _save_metrics(self, iteration_dir: Path) -> None:
@@ -298,3 +333,36 @@ class TrainingSupervisor:
         self.logger.info(f"Win Rate: {win_rate:.2f}, Draw Rate: {draw_rate:.2f}")
 
         return win_rate, draw_rate
+
+    def _evaluate_model(self, network: NetworkWrapper, iteration: int) -> Dict:
+        """Enhanced evaluation using both baseline and tournament evaluation."""
+        results = {}
+
+        # 1. Quick baseline check (existing functionality)
+        baseline_elo = self._evaluate_against_baseline(network, quick_eval=True)
+        results['baseline_elo'] = baseline_elo
+
+        # 2. Tournament evaluation
+        if not hasattr(self, 'tournament_manager'):
+            self.tournament_manager = ModelTournament(
+                training_dir=self.save_dir,
+                device=self.device,
+                games_per_match=10,  # Reduced from default for speed
+                temperature=0.1  # Lower temp for more deterministic evaluation
+            )
+
+        # Run tournament against previous iterations
+        self.tournament_manager.run_tournament(iteration)
+
+        # Get tournament results
+        tournament_summary = self.tournament_manager.get_latest_tournament_summary()
+        current_performance = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+
+        results.update({
+            'tournament_elo': current_performance['current_rating'],
+            'win_rate': current_performance['win_rate'],
+            'total_games': current_performance['total_games'],
+            'avg_game_length': tournament_summary.get('avg_game_length', 0),
+        })
+
+        return results

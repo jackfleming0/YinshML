@@ -299,6 +299,78 @@ COMBINED_EXPERIMENTS = {
         num_simulations=300,
         c_puct=1.5,
         initial_temp=2.0
+    ),
+
+    "short_baseline": CombinedConfig(
+        # Comments explaining the test:
+        # This configuration is designed to thoroughly evaluate the new value head by:
+        # 1. Using longer training to see if value predictions remain stable
+        # 2. Starting with high temperature to encourage exploration
+        # 3. Transitioning to low temperature to test value head's exploitation
+        # 4. Using deeper MCTS to get better value estimates
+        # 5. Employing cosine learning rate schedule for better convergence
+        #
+        # Training parameters
+
+        num_iterations=10,
+        games_per_iteration=25,
+        epochs_per_iteration=3,
+        batches_per_epoch=25,
+
+        # Learning rate parameters
+        lr=0.0005,  # Conservative base learning rate
+        weight_decay=2e-4,  # Moderate regularization
+        batch_size=256,  # Standard batch size
+        lr_schedule="cosine",  # Smooth learning rate decay
+        warmup_steps=1000,  # Gradual warmup for stability
+
+        # MCTS parameters
+        num_simulations=200,  # Deep enough to test value predictions
+        c_puct=1.5,  # Slightly higher exploration
+        dirichlet_alpha=0.3,  # Standard noise
+        value_weight=1.0,  # Full value weighting
+
+        # Temperature parameters - crucial for testing value head
+        initial_temp=2.0,  # Start with high exploration
+        final_temp=0.1,  # End with strong exploitation
+        temp_schedule="exponential"  # Faster transition once value head stabilizes
+
+    ),
+
+    "value_head_eval": CombinedConfig(
+        # Comments explaining the test:
+        # This configuration is designed to thoroughly evaluate the new value head by:
+        # 1. Using longer training to see if value predictions remain stable
+        # 2. Starting with high temperature to encourage exploration
+        # 3. Transitioning to low temperature to test value head's exploitation
+        # 4. Using deeper MCTS to get better value estimates
+        # 5. Employing cosine learning rate schedule for better convergence
+        #
+        # Training parameters
+
+        num_iterations=40,  # Longer run to see learning dynamics
+        games_per_iteration=75,  # Decent sample size
+        epochs_per_iteration=5,  # More training per batch
+        batches_per_epoch=50,  # Substantial training
+
+        # Learning rate parameters
+        lr=0.0005,  # Conservative base learning rate
+        weight_decay=2e-4,  # Moderate regularization
+        batch_size=256,  # Standard batch size
+        lr_schedule="cosine",  # Smooth learning rate decay
+        warmup_steps=1000,  # Gradual warmup for stability
+
+        # MCTS parameters
+        num_simulations=200,  # Deep enough to test value predictions
+        c_puct=1.5,  # Slightly higher exploration
+        dirichlet_alpha=0.3,  # Standard noise
+        value_weight=1.0,  # Full value weighting
+
+        # Temperature parameters - crucial for testing value head
+        initial_temp=2.0,  # Start with high exploration
+        final_temp=0.1,  # End with strong exploitation
+        temp_schedule="exponential"  # Faster transition once value head stabilizes
+
     )
 }
 

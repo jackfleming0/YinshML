@@ -3,6 +3,11 @@ from experiments.runner import ExperimentRunner
 import torch
 import argparse
 import warnings
+from yinsh_ml.training.trainer import YinshTrainer  # Add this import
+from typing import List, Dict
+import  numpy as np
+
+
 
 warnings.filterwarnings('ignore', message='Torch version.*has not been tested with coremltools')
 
@@ -249,19 +254,59 @@ def test_combined_configs(quick_test: bool = True):
 
     return results, failed_configs
 
-def run_quick_test(experiment_type: str = None, config_name: str = None):
-    """Run a quick test of specific or all configurations."""
-    if experiment_type and config_name:
-        runner = ExperimentRunner(device='cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"\nQuick test of {experiment_type}/{config_name}")
-        result = runner.run_experiment(experiment_type, config_name)
-        _print_metrics(result)
-    else:
-        results, failures = test_experiment_configs(quick_test=True)
-        if failures:
-            print("\nFailed configurations:")
-            for exp_type, config, error in failures:
-                print(f"• {exp_type}/{config}: {error}")
+
+def run_quick_test(experiment_type: str, config_name: str):
+    """Run a quick validation test for the experiment configuration."""
+    print("Running quick validation tests...")
+
+    # Create a very small config for testing
+    if experiment_type == "learning_rate":
+        config = get_experiment_config(experiment_type, config_name)
+        if config:
+            # Override with tiny values for quick testing
+            config.num_iterations = 1  # Just one iteration
+            config.games_per_iteration = 2  # Minimal games
+            config.epochs_per_iteration = 1  # One epoch
+            config.batches_per_epoch = 2  # Just two batches
+            config.batch_size = 32  # Smaller batch size
+
+            print(f"\nQuick test of {experiment_type}/{config_name}")
+            print("Using minimal configuration for rapid testing:")
+            print(f"- {config.num_iterations} iteration")
+            print(f"- {config.games_per_iteration} games per iteration")
+            print(f"- {config.epochs_per_iteration} epoch with {config.batches_per_epoch} batches")
+            print(f"- Batch size of {config.batch_size}")
+            print("\nStarting test...")
+
+            runner = ExperimentRunner(device='cpu')  # Use CPU for testing
+            result = runner.run_experiment(experiment_type, config_name)
+
+            if result:
+                print("\nQuick test completed successfully!")
+                return True
+
+    return False
+
+# Update check_value_head_health function for quick debugging
+def check_value_head_health(trainer: YinshTrainer, game_states: List[np.ndarray],
+                            game_outcomes: List[int]) -> Dict:
+    """Run a quick health check on value head predictions."""
+    with torch.no_grad():
+        states = torch.FloatTensor(game_states).to(trainer.device)
+        outcomes = torch.FloatTensor(game_outcomes).to(trainer.device)
+
+        _, values = trainer.network.network(states)
+
+        stats = {
+            'mean_pred': float(values.mean()),
+            'std_pred': float(values.std()),
+            'max_pred': float(values.max()),
+            'min_pred': float(values.min()),
+            'num_saturated': float((torch.abs(values) > 0.99).sum()),
+            'correlation': float(torch.corrcoef(torch.stack([values.squeeze(), outcomes]))[0, 1])
+        }
+
+        return stats
 
 
 def main():
