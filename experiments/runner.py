@@ -42,13 +42,6 @@ class ExperimentRunner:
         # Initialize baseline model
         self.baseline_model = self._init_baseline_model()
 
-        # Initialize tournament manager
-        self.tournament_manager = ModelTournament(
-            training_dir=self.checkpoint_dir,
-            device=self.device,
-            games_per_match=10,
-            temperature=0.1
-        )
 
     def _init_baseline_model(self) -> NetworkWrapper:
         """Initialize baseline model for comparisons."""
@@ -70,6 +63,14 @@ class ExperimentRunner:
 
         self.logger.info(f"Starting experiment: {experiment_type}/{config_name}")
 
+        # Initialize tournament manager with correct path
+        self.tournament_manager = ModelTournament(
+            training_dir=self.checkpoint_dir / experiment_type / config_name,
+            device=self.device,
+            games_per_match=10,
+            temperature=0.1
+        )
+
         # Create experiment-specific checkpoint directory
         experiment_dir = self.checkpoint_dir / experiment_type / config_name
         experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -77,13 +78,13 @@ class ExperimentRunner:
 
         try:
             if experiment_type == "learning_rate":
-                metrics = self._run_learning_rate_experiment(config)
+                metrics = self._run_learning_rate_experiment(config, config_name)
             elif experiment_type == "mcts":
-                metrics = self._run_mcts_experiment(config)
+                metrics = self._run_mcts_experiment(config, config_name)
             elif experiment_type == "temperature":
-                metrics = self._run_temperature_experiment(config)
+                metrics = self._run_temperature_experiment(config, config_name)
             elif experiment_type == "combined":  # Add this case
-                metrics = self._run_combined_experiment(config)
+                metrics = self._run_combined_experiment(config, config_name)
             else:
                 raise ValueError(f"Unknown experiment type: {experiment_type}")
 
@@ -132,7 +133,7 @@ class ExperimentRunner:
             return network
         return None
 
-    def _run_learning_rate_experiment(self, config: LearningRateConfig) -> Dict:
+    def _run_learning_rate_experiment(self, config: LearningRateConfig, config_name: str) -> Dict:
         """Run learning rate experiment."""
         metrics = {
             "policy_losses": [],
@@ -172,7 +173,7 @@ class ExperimentRunner:
 
             self._current_selfplay = SelfPlay(
                 network=network,
-                num_workers=4,
+            #    num_workers=self._get_optimal_workers(), # 4 on local, will use more cores on cloud compute
                 num_simulations=100
             )
             self._current_selfplay.current_iteration = iteration
@@ -256,7 +257,7 @@ class ExperimentRunner:
 
         return metrics
 
-    def _run_mcts_experiment(self, config: MCTSConfig) -> Dict:
+    def _run_mcts_experiment(self, config: MCTSConfig, config_name: str) -> Dict:
         """Run MCTS simulation experiment."""
         metrics = {
             "policy_losses": [],
@@ -279,7 +280,7 @@ class ExperimentRunner:
             # Generate games with specified MCTS depth
             self_play = SelfPlay(
                 network=network,
-                num_workers=4,
+            #     num_workers=4,
                 num_simulations=config.num_simulations,
                 initial_temp=1.0,  # Use your default values
                 final_temp=0.2,
@@ -343,7 +344,7 @@ class ExperimentRunner:
 
         return metrics
 
-    def _run_temperature_experiment(self, config: TemperatureConfig) -> Dict:
+    def _run_temperature_experiment(self, config: TemperatureConfig, config_name: str) -> Dict:
         """Run temperature annealing experiment."""
         metrics = {
             "policy_losses": [],
@@ -368,7 +369,7 @@ class ExperimentRunner:
             # Generate self-play games with temperature configuration
             self_play = SelfPlay(
                 network=network,
-                num_workers=4,
+            #     num_workers=4,
                 num_simulations=config.mcts_simulations,
                 initial_temp=config.initial_temp,
                 final_temp=config.final_temp,
@@ -446,7 +447,7 @@ class ExperimentRunner:
 
         return metrics
 
-    def _run_combined_experiment(self, config: CombinedConfig) -> Dict:
+    def _run_combined_experiment(self, config: CombinedConfig, config_name: str) -> Dict:
         """Run combined experiment using multiple parameter types."""
         metrics = {
             "policy_losses": [],
@@ -486,7 +487,7 @@ class ExperimentRunner:
             game_start_time = time.time()
             self_play = SelfPlay(
                 network=network,
-                num_workers=4,
+                # num_workers=4,
                 num_simulations=config.num_simulations,
                 initial_temp=config.initial_temp,
                 final_temp=config.final_temp,
@@ -532,15 +533,10 @@ class ExperimentRunner:
             tournament_elo = 0.0  # Default if no tournament run
             if iteration > 0:
                 print("Running tournament evaluation...")
-                self.tournament_manager.run_tournament(
-                    experiment_type="combined",
-                    config_name=config_name,
-                    current_iteration=iteration
-                )
+                self.tournament_manager.run_tournament(current_iteration=iteration)
                 tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
                 tournament_elo = tournament_stats['current_rating']
                 print(f"Tournament ELO: {tournament_elo:+.1f}")
-
 
             # Record metrics
             metrics["policy_losses"].append(float(epoch_stats['policy_loss']))

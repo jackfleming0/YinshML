@@ -11,6 +11,8 @@ import time
 import tempfile
 import os
 from pathlib import Path
+import concurrent.futures
+import psutil
 
 from experiments.mcts_metrics import MCTSMetrics
 from ..utils.TemperatureMetrics import TemperatureMetrics
@@ -19,6 +21,29 @@ from ..game.game_state import GamePhase, GameState
 from ..game.constants import Player, Position
 from ..network.wrapper import NetworkWrapper
 from ..game.moves import Move, MoveType
+
+# Configure the logger at the module level
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Set the desired logging level
+
+# Create handlers (console and file handlers can be added as needed)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)  # Set the console handler level
+
+# Optionally, add a file handler
+# file_handler = logging.FileHandler('play_game_worker.log')
+# file_handler.setLevel(logging.DEBUG)
+
+# Create a formatter and set it for the handlers
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+console_handler.setFormatter(formatter)
+# file_handler.setFormatter(formatter)
+
+# Add handlers to the logger
+logger.addHandler(console_handler)
+# logger.addHandler(file_handler)
 
 class Node:
     """Monte Carlo Tree Search node."""
@@ -245,12 +270,22 @@ class MCTS:
 class SelfPlay:
     """Handles self-play game generation with temperature annealing."""
 
-    def __init__(self, network: NetworkWrapper, num_simulations: int = 100, num_workers: int = 4,
-                 initial_temp: float = 1.0, final_temp: float = 0.2, annealing_steps: int = 30,
-                 c_puct: float = 1.0, max_depth: int = 20):  # Add new parameters
+    def __init__(self, network: NetworkWrapper, num_simulations: int = 100,
+                 initial_temp: float = 1.0, final_temp: float = 0.2,
+                 annealing_steps: int = 30, c_puct: float = 1.0,
+                 max_depth: int = 20):
         self.network = network
         self.num_simulations = num_simulations
-        self.num_workers = num_workers
+
+        # Calculate optimal workers
+        cpu_count = psutil.cpu_count(logical=True)
+        if cpu_count >= 32:
+            self.num_workers = min(24, cpu_count - 4)
+        elif cpu_count >= 16:
+            self.num_workers = min(12, cpu_count - 2)
+        else:
+            self.num_workers = max(4, psutil.cpu_count(logical=False) - 1)
+
         self.current_iteration = 0
 
         # Temperature annealing parameters
@@ -271,6 +306,18 @@ class SelfPlay:
         self.logger = logging.getLogger("SelfPlay")
         self.temp_metrics = TemperatureMetrics()
         self.logger.setLevel(logging.ERROR)
+
+    def _get_optimal_workers(self) -> int:
+        """Calculate optimal number of workers based on CPU cores."""
+        cpu_count = psutil.cpu_count(logical=True)  # Get total cores including hyperthreading
+        physical_cores = psutil.cpu_count(logical=False)  # Get physical cores only
+
+        if cpu_count >= 32:  # For A10G and similar
+            return min(24, cpu_count - 4)  # Leave some cores for overhead
+        elif cpu_count >= 16:  # For T4-16CPU
+            return min(12, cpu_count - 2)
+        else:  # For smaller instances or local machine
+            return max(4, physical_cores - 1)  # Leave one core free
 
 
     def save_draw_game(self, state: GameState, game_id: int, move_count: int, save_dir: str = "training_draw_games"):
@@ -294,9 +341,9 @@ class SelfPlay:
                 count = len(state.board.get_pieces_positions(piece_type))
                 f.write(f"\n{piece_type}: {count}")
 
-
     def generate_games(self, num_games: int = 100) -> List[Tuple[List[np.ndarray], List[np.ndarray], int]]:
         """Generate self-play games in parallel using multiple workers."""
+        print(f"\nStarting generation of {num_games} games using {self.num_workers} workers")
         games = []
         num_simulations = self.num_simulations
         network_params = self.network.network.state_dict()
@@ -304,13 +351,16 @@ class SelfPlay:
         # Reset temperature metrics for new batch
         self.temp_metrics = TemperatureMetrics()
 
-        #record metrics for mcts metric tracker
+        # Record metrics for mcts metric tracker
         self.mcts.current_iteration = self.current_iteration
 
-        # Save the model to a temporary file for workers to load
+        # Save model to temporary file for workers
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             torch.save(network_params, tmp.name)
             model_path = tmp.name
+
+        start_time = time.time()
+        games_completed = 0
 
         try:
             with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
@@ -326,29 +376,53 @@ class SelfPlay:
                     )
                     for game_id in range(1, num_games + 1)
                 ]
-                for future in futures:
-                    try:
-                        states, policies, outcome, temp_data = future.result()
-                        games.append((states, policies, outcome))
 
-                        # Create a dummy probability distribution for metrics
-                        dummy_probs = np.array([0.8, 0.2])  # Just for metrics tracking
+                while futures:
+                    done, futures = concurrent.futures.wait(
+                        futures,
+                        timeout=10,
+                        return_when=concurrent.futures.FIRST_COMPLETED
+                    )
 
-                        # Update temperature metrics from this game's data
-                        for move_stat in temp_data['move_stats']:
-                            self.temp_metrics.add_move_data(
-                                move_number=move_stat['move_number'],
-                                temperature=move_stat['temperature'],
-                                move_probs=dummy_probs,  # Using dummy probs instead of entropy
-                                selected_move_idx=0
-                            )
+                    # Print CPU usage
+                    cpu_percent = psutil.cpu_percent(percpu=True)
+                    avg_cpu = sum(cpu_percent) / len(cpu_percent)
+                    print(f"\nCPU Usage: {avg_cpu:.1f}% (across {len(cpu_percent)} cores)")
+                    print(f"Active workers: {len(futures)}")
 
-                        self.logger.info("Game completed successfully.")
-                    except Exception as e:
-                        self.logger.error(f"Error in game generation: {e}")
+                    # Process completed games
+                    for future in done:
+                        try:
+                            states, policies, outcome, temp_data = future.result()
+                            games_completed += 1
+                            games.append((states, policies, outcome))
+                            elapsed = time.time() - start_time
+                            rate = games_completed / elapsed
+
+                            print(f"\nGame {games_completed}/{num_games} completed:")
+                            print(f"- Game length: {len(states)} moves")
+                            print(f"- Current rate: {rate:.2f} games/second")
+                            print(f"- Est. time remaining: {(num_games - games_completed) / rate:.1f} seconds")
+
+                            # Update temperature metrics
+                            for move_stat in temp_data['move_stats']:
+                                self.temp_metrics.add_move_data(
+                                    move_number=move_stat['move_number'],
+                                    temperature=move_stat['temperature'],
+                                    move_probs=np.array([0.8, 0.2]),
+                                    selected_move_idx=0
+                                )
+                        except Exception as e:
+                            self.logger.error(f"Error in game generation: {e}")
+                            print(f"Game generation error: {e}")
         finally:
-            # Clean up the temporary model file
             os.unlink(model_path)
+
+        total_time = time.time() - start_time
+        print(f"\nGame generation complete:")
+        print(f"- Total time: {total_time:.1f} seconds")
+        print(f"- Average time per game: {total_time / num_games:.1f} seconds")
+        print(f"- Final rate: {num_games / total_time:.2f} games/second")
 
         return games
 
@@ -426,90 +500,157 @@ class SelfPlay:
         self.logger.info(f"Exported {len(games)} games to {path}")
 
 
-def play_game_worker(model_path: str, game_id: int, num_simulations: int,
-                     initial_temp: float = 1.0, final_temp: float = 0.2,
-                     annealing_steps: int = 30) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict]:
-    """Worker function to play a single game with temperature metrics."""
-    # Initialize the network and MCTS in the worker
-    device = torch.device('cpu')
-    network = NetworkWrapper(model_path=model_path, device=device)
-    mcts = MCTS(
-        network,
-        num_simulations=num_simulations,
-        initial_temp=initial_temp,
-        final_temp=final_temp,
-        annealing_steps=annealing_steps
-    )
-    state_encoder = StateEncoder()
-    state = GameState()
+def play_game_worker(
+    model_path: str,
+    game_id: int,
+    num_simulations: int,
+    initial_temp: float = 1.0,
+    final_temp: float = 0.2,
+    annealing_steps: int = 30
+) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict]:
+    """
+    Worker function to play a single game with temperature metrics and robust logging.
 
-    # Initialize game data
-    states = []
-    policies = []
-    move_count = 0
+    Args:
+        model_path (str): Path to the model file.
+        game_id (int): Unique identifier for the game.
+        num_simulations (int): Number of MCTS simulations to run.
+        initial_temp (float, optional): Initial temperature for move selection. Defaults to 1.0.
+        final_temp (float, optional): Final temperature after annealing. Defaults to 0.2.
+        annealing_steps (int, optional): Number of steps over which to anneal the temperature. Defaults to 30.
 
-    # Initialize temperature metrics for this game
-    temp_data = {
-        'temperatures': [],  # List of (move_number, temp) tuples
-        'entropies': [],  # List of (move_number, entropy) tuples
-        'move_stats': []  # List of detailed move statistics
-    }
+    Returns:
+        Tuple[List[np.ndarray], List[np.ndarray], int, Dict]: A tuple containing:
+            - List of encoded game states.
+            - List of policy vectors.
+            - Game outcome.
+            - Temperature metrics and move statistics.
+    """
+    logger.info(f"Worker {game_id} starting...")
+    device = torch.device('cpu')  # Force CPU for workers
+    logger.debug(f"Worker {game_id} using device: {device}")
 
-    while not state.is_terminal() and move_count < 5000:
-        valid_moves = state.get_valid_moves()
-        if not valid_moves:
-            break
+    try:
+        logger.info(f"Worker {game_id} loading model from '{model_path}'...")
+        network = NetworkWrapper(model_path=model_path, device=device)
+        logger.info(f"Worker {game_id} successfully loaded the model.")
 
-        # Get current temperature
-        temp = mcts.get_temperature(move_count)
+        logger.info(f"Worker {game_id} initializing MCTS with {num_simulations} simulations...")
+        mcts = MCTS(
+            network,
+            num_simulations=num_simulations,
+            initial_temp=initial_temp,
+            final_temp=final_temp,
+            annealing_steps=annealing_steps
+        )
+        logger.info(f"Worker {game_id} successfully initialized MCTS.")
 
-        # Run MCTS to get move probabilities
-        move_probs = mcts.search(state, move_count)
+        logger.info(f"Worker {game_id} initializing game state...")
+        state = GameState()
+        logger.info(f"Worker {game_id} initialized game state.")
 
-        # Get probabilities for valid moves
-        valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
-        valid_probs = move_probs[valid_indices]
+        state_encoder = StateEncoder()
+        logger.debug(f"Worker {game_id} initialized state encoder.")
 
-        if valid_probs.sum() == 0:
-            break
+        # Initialize game data
+        states: List[np.ndarray] = []
+        policies: List[np.ndarray] = []
+        move_count = 0
 
-        # Normalize probabilities
-        valid_probs = valid_probs / valid_probs.sum()
+        # Initialize temperature metrics for this game
+        temp_data: Dict[str, List] = {
+            'temperatures': [],  # List of (move_number, temp) tuples
+            'entropies': [],      # List of (move_number, entropy) tuples
+            'move_stats': []      # List of detailed move statistics
+        }
 
-        # Apply temperature
-        if temp > 0:
-            adj_probs = np.power(valid_probs, 1 / temp)
-            adj_probs = adj_probs / adj_probs.sum()
+        logger.info(f"Worker {game_id} starting game loop...")
+        while not state.is_terminal() and move_count < 5000:
+            logger.debug(f"Worker {game_id} move {move_count}: Checking if the game is terminal.")
+            valid_moves = state.get_valid_moves()
+            if not valid_moves:
+                logger.warning(f"Worker {game_id} move {move_count}: No valid moves available. Terminating game.")
+                break
+
+            # Get current temperature
+            temp = mcts.get_temperature(move_count)
+            logger.debug(f"Worker {game_id} move {move_count}: Current temperature: {temp}")
+
+            # Run MCTS to get move probabilities
+            logger.debug(f"Worker {game_id} move {move_count}: Running MCTS search...")
+            move_probs = mcts.search(state, move_count)
+            logger.debug(f"Worker {game_id} move {move_count}: MCTS search completed.")
+
+            # Get probabilities for valid moves
+            valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
+            valid_probs = move_probs[valid_indices]
+            logger.debug(f"Worker {game_id} move {move_count}: Valid move probabilities extracted.")
+
+            if valid_probs.sum() == 0:
+                logger.warning(f"Worker {game_id} move {move_count}: Sum of valid move probabilities is zero. Terminating game.")
+                break
+
+            # Normalize probabilities
+            valid_probs = valid_probs / valid_probs.sum()
+            logger.debug(f"Worker {game_id} move {move_count}: Valid move probabilities normalized.")
+
+            # Apply temperature
+            if temp > 0:
+                adj_probs = np.power(valid_probs, 1 / temp)
+                adj_probs = adj_probs / adj_probs.sum()
+                logger.debug(f"Worker {game_id} move {move_count}: Temperature applied to probabilities.")
+            else:
+                adj_probs = valid_probs
+                logger.debug(f"Worker {game_id} move {move_count}: Temperature is zero; using original probabilities.")
+
+            # Select move
+            selected_idx = np.random.choice(len(valid_moves), p=adj_probs)
+            selected_move = valid_moves[selected_idx]
+            logger.info(f"Worker {game_id} move {move_count}: Selected move {selected_move} with probability {valid_probs[selected_idx]:.4f}.")
+
+            # Record temperature metrics
+            entropy = -np.sum(valid_probs * np.log(valid_probs + 1e-10))
+            temp_data['temperatures'].append((move_count, temp))
+            temp_data['entropies'].append((move_count, entropy))
+            temp_data['move_stats'].append({
+                'move_number': move_count,
+                'temperature': temp,
+                'entropy': entropy,
+                'top_prob': float(np.max(valid_probs)),
+                'selected_prob': float(valid_probs[selected_idx])
+            })
+            logger.debug(f"Worker {game_id} move {move_count}: Recorded temperature and entropy.")
+
+            # Store state and policy
+            encoded_state = state_encoder.encode_state(state)
+            states.append(encoded_state)
+            policies.append(move_probs)
+            logger.debug(f"Worker {game_id} move {move_count}: Stored encoded state and policy.")
+
+            # Make move
+            state.make_move(selected_move)
+            logger.debug(f"Worker {game_id} move {move_count}: Made move {selected_move}.")
+            move_count += 1
+
+        # Determine outcome
+        logger.info(f"Worker {game_id} game ended after {move_count} moves.")
+        winner = state.get_winner()
+        if winner is None:
+            outcome = 0
+            logger.info(f"Worker {game_id} game outcome: Draw.")
+        elif winner == Player.WHITE:
+            outcome = 1
+            logger.info(f"Worker {game_id} game outcome: Player.WHITE wins.")
+        elif winner == Player.BLACK:
+            outcome = -1
+            logger.info(f"Worker {game_id} game outcome: Player.BLACK wins.")
         else:
-            adj_probs = valid_probs
+            outcome = 0
+            logger.warning(f"Worker {game_id} game outcome: Unknown winner '{winner}'. Defaulting to draw.")
 
-        # Select move
-        selected_idx = np.random.choice(len(valid_moves), p=adj_probs)
-        selected_move = valid_moves[selected_idx]
+        logger.debug(f"Worker {game_id} returning game data.")
+        return states, policies, outcome, temp_data
 
-        # Record temperature metrics
-        entropy = -np.sum(valid_probs * np.log(valid_probs + 1e-10))
-        temp_data['temperatures'].append((move_count, temp))
-        temp_data['entropies'].append((move_count, entropy))
-        temp_data['move_stats'].append({
-            'move_number': move_count,
-            'temperature': temp,
-            'entropy': entropy,
-            'top_prob': np.max(valid_probs),
-            'selected_prob': valid_probs[selected_idx]
-        })
-
-        # Store state and policy
-        encoded_state = state_encoder.encode_state(state)
-        states.append(encoded_state)
-        policies.append(move_probs)
-
-        # Make move
-        state.make_move(selected_move)
-        move_count += 1
-
-    # Determine outcome
-    winner = state.get_winner()
-    outcome = 1 if winner == Player.WHITE else (-1 if winner == Player.BLACK else 0)
-
-    return states, policies, outcome, temp_data
+    except Exception as e:
+        logger.exception(f"Worker {game_id} encountered an error: {e}")
+        raise  # Re-raise the exception after logging

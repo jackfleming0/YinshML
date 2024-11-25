@@ -5,7 +5,8 @@ import argparse
 import warnings
 from yinsh_ml.training.trainer import YinshTrainer  # Add this import
 from typing import List, Dict
-import  numpy as np
+import numpy as np
+import multiprocessing
 
 
 
@@ -309,7 +310,62 @@ def check_value_head_health(trainer: YinshTrainer, game_states: List[np.ndarray]
         return stats
 
 
+def check_hardware():
+    import torch
+    import platform
+    import psutil
+    import os
+
+    print("\n=== Hardware Configuration ===")
+
+    # CPU Info
+    print("\nCPU Information:")
+    print(f"CPU Count: {psutil.cpu_count()} cores")
+    print(f"CPU Usage: {psutil.cpu_percent(interval=1)}%")
+    print(f"Memory: {psutil.virtual_memory().total / (1024 ** 3):.1f} GB")
+
+
+    # GPU Info
+    print("\nGPU Information:")
+    print(f"CUDA Available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"GPU Count: {torch.cuda.device_count()}")
+        print(f"GPU Name: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / (1024 ** 3):.1f} GB")
+        gpu_allocated = torch.cuda.memory_allocated()
+        gpu_max_allocated = torch.cuda.max_memory_allocated()
+
+        if gpu_max_allocated != 0:
+            gpu_usage = gpu_allocated / gpu_max_allocated
+        else:
+            gpu_usage = 0  # or any other default value that makes sense for your application
+
+        print(f"GPU Usage: {gpu_usage:.2%}")
+
+    # PyTorch device that will be used
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\nPyTorch will use device: {device}")
+
+    print("\n===========================\n")
+
+    # Test tensor operations
+    if torch.cuda.is_available():
+        print("Running quick GPU test...")
+        x = torch.randn(1000, 1000).cuda()
+        y = torch.randn(1000, 1000).cuda()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
+        start.record()
+        z = torch.matmul(x, y)
+        end.record()
+        torch.cuda.synchronize()
+        print(f"Matrix multiplication time: {start.elapsed_time(end):.2f} ms")
+
+
 def main():
+    check_hardware()
+
     failures = []
     parser = argparse.ArgumentParser(description='Test YINSH experiment configurations')
     parser.add_argument('--quick', action='store_true',
@@ -352,4 +408,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # multiprocessing.set_start_method('spawn')
     main()

@@ -22,7 +22,6 @@ class TrainingSupervisor:
     def __init__(self,
                  network: NetworkWrapper,
                  save_dir: str,
-                 num_workers: int = 4,
                  mcts_simulations: int = 100,
                  mode: str = 'dev',
                  device='cpu',
@@ -55,17 +54,28 @@ class TrainingSupervisor:
         self.device = device
         self.tournament_games = tournament_games
 
+        # Calculate optimal workers based on CPU count
+        cpu_count = psutil.cpu_count(logical=True)
+        if cpu_count >= 32:
+            num_workers = min(24, cpu_count - 4)
+        elif cpu_count >= 16:
+            num_workers = min(12, cpu_count - 2)
+        else:
+            num_workers = max(4, psutil.cpu_count(logical=False) - 1)
+
         self.num_workers = num_workers
         self.self_play = SelfPlay(
             network=network,
             num_simulations=mcts_simulations,
-            num_workers=num_workers,
+            # now handling worker count by lookin at specs
+            # num_workers=num_workers,
             initial_temp=mode_settings.get('initial_temp', 1.0),
             final_temp=mode_settings.get('final_temp', 0.2),
             annealing_steps=mode_settings.get('annealing_steps', 30),
             c_puct=mode_settings.get('c_puct', 1.0),
             max_depth=mode_settings.get('max_depth', 20)
         )
+
         self.trainer = YinshTrainer(
             network,
             device=device,
