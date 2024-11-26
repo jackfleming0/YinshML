@@ -10,9 +10,10 @@ from typing import List, Dict, Tuple, Optional
 import logging
 from pathlib import Path
 import time
-from collections import deque
+from collections import deque, defaultdict
 import random
 
+from ..utils.metrics_logger import MetricsLogger, EpochMetrics
 from ..network.wrapper import NetworkWrapper
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
@@ -62,8 +63,11 @@ class GameExperience:
 class YinshTrainer:
     """Handles the training of the YINSH neural network."""
 
-    def __init__(self, network: NetworkWrapper, device: Optional[str] = None,
-                 l2_reg: float = 0.0):
+    def __init__(self,
+                 network: NetworkWrapper,
+                 device: Optional[str] = None,
+                 l2_reg: float = 0.0,
+                 metrics_logger: Optional[MetricsLogger] = None):
         """
         Initialize the trainer.
 
@@ -71,6 +75,8 @@ class YinshTrainer:
             network: NetworkWrapper instance
             device: Device to train on ('cuda', 'mps', or 'cpu')
             l2_reg: L2 regularization coefficient
+            metrics_logger: Optional MetricsLogger instance
+
         """
         # Device setup remains the same
         if device:
@@ -83,6 +89,8 @@ class YinshTrainer:
             )
         self.network = network
         self.network.network = self.network.network.to(self.device)
+        self.metrics_logger = metrics_logger  # Store the metrics_logger
+
 
         # Separate out value head and policy parameters
         value_params = [p for n, p in self.network.network.named_parameters()
@@ -149,6 +157,9 @@ class YinshTrainer:
             'sign_match': []  # Track sign matching accuracy
         }
         self.value_metrics = ValueHeadMetrics()
+
+        self.metrics_logger = metrics_logger
+
 
     def _smooth_policy_targets(self, targets: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
         n_classes = targets.shape[1]
@@ -380,60 +391,83 @@ class YinshTrainer:
 
     def train_epoch(self, batch_size: int, batches_per_epoch: int) -> Dict:
         """Train for one epoch and return comprehensive stats."""
-        policy_loss_sum = 0
-        value_loss_sum = 0
-        value_acc_sum = 0
-        move_accuracies_list = []
-        policy_entropy_sum = 0
-
-        for _ in range(batches_per_epoch):
-            p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
-            policy_loss_sum += p_loss
-            value_loss_sum += v_loss
-            value_acc_sum += v_acc
-            move_accuracies_list.append(move_accs)
-
-            # Calculate policy entropy from last batch if available
-            if hasattr(self, 'last_policy_entropy'):
-                policy_entropy_sum += self.last_policy_entropy
-
-        # Calculate averages
-        stats = {
-            'policy_loss': policy_loss_sum / batches_per_epoch,
-            'value_loss': value_loss_sum / batches_per_epoch,
-            'value_accuracy': value_acc_sum / batches_per_epoch,
-            'policy_entropy': policy_entropy_sum / batches_per_epoch,
-            'policy_lr': self.policy_optimizer.param_groups[0]['lr'],
-            'value_lr': self.value_optimizer.param_groups[0]['lr']
+        stats_accum = {
+            'policy_loss': 0,
+            'value_loss': 0,
+            'value_accuracy': 0,
+            'policy_entropy': 0,
+            'move_accuracies': defaultdict(float),
+            'gradient_norm': 0,  # Initialize gradient tracking
+            'loss_improvement': 0  # Initialize loss improvement tracking
         }
 
-        # Average move accuracies across batches
-        if move_accuracies_list:
-            avg_move_accuracies = {
-                'top_1_accuracy': np.mean([x['top_1_accuracy'] for x in move_accuracies_list]),
-                'top_3_accuracy': np.mean([x['top_3_accuracy'] for x in move_accuracies_list]),
-                'top_5_accuracy': np.mean([x['top_5_accuracy'] for x in move_accuracies_list])
-            }
-            stats['move_accuracies'] = avg_move_accuracies
+        prev_total_loss = float('inf')  # For tracking loss improvement
 
-        # Store in instance variables
-        self.policy_losses.append(stats['policy_loss'])
-        self.value_losses.append(stats['value_loss'])
-        self.total_losses.append(stats['policy_loss'] + stats['value_loss'])
-        self.learning_rates['policy'].append(stats['policy_lr'])
-        self.learning_rates['value'].append(stats['value_lr'])
+        for batch in range(batches_per_epoch):
+            p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
 
-        self.logger.info(
-            f"Epoch complete - "
-            f"Policy Loss: {stats['policy_loss']:.4f}, "
-            f"Value Loss: {stats['value_loss']:.4f}, "
-            f"Value Acc: {stats['value_accuracy']:.2%}, "
-            f"Move Acc: {stats['move_accuracies']['top_1_accuracy']:.2%}, "
-            f"Policy LR: {stats['policy_lr']:.2e}, "
-            f"Value LR: {stats['value_lr']:.2e}"
+            # Accumulate stats
+            stats_accum['policy_loss'] += p_loss
+            stats_accum['value_loss'] += v_loss
+            stats_accum['value_accuracy'] += v_acc
+            for k, v in move_accs.items():
+                stats_accum['move_accuracies'][k] += v
+
+            # Calculate gradient norm
+            total_norm = 0.0
+            for p in self.network.network.parameters():
+                if p.grad is not None:
+                    total_norm += p.grad.data.norm(2).item() ** 2
+            stats_accum['gradient_norm'] += np.sqrt(total_norm)
+
+            if hasattr(self, 'last_policy_entropy'):
+                stats_accum['policy_entropy'] += self.last_policy_entropy
+
+        # Calculate averages
+        for key in ['policy_loss', 'value_loss', 'value_accuracy', 'policy_entropy', 'gradient_norm']:
+            stats_accum[key] /= batches_per_epoch
+
+        for k in stats_accum['move_accuracies']:
+            stats_accum['move_accuracies'][k] /= batches_per_epoch
+
+        # Calculate loss improvement with protection against zero division
+        current_total_loss = stats_accum['policy_loss'] + stats_accum['value_loss']
+        if prev_total_loss != float('inf') and prev_total_loss != 0:
+            stats_accum['loss_improvement'] = (prev_total_loss - current_total_loss) / (prev_total_loss + 1e-8)
+        else:
+            stats_accum['loss_improvement'] = 0.0
+
+        # Create metrics object
+        metrics = EpochMetrics(
+            policy_loss=stats_accum['policy_loss'],
+            value_loss=stats_accum['value_loss'],
+            value_accuracy=stats_accum['value_accuracy'],
+            move_accuracies=dict(stats_accum['move_accuracies']),
+            learning_rates={
+                'policy': self.policy_optimizer.param_groups[0]['lr'],
+                'value': self.value_optimizer.param_groups[0]['lr']
+            },
+            gradient_norm=stats_accum['gradient_norm'],
+            loss_improvement=stats_accum['loss_improvement']
         )
 
-        return stats
+        # Store metrics
+        if self.metrics_logger is not None:
+            self.metrics_logger.log_training(metrics)
+
+        # Single clear log message
+        self.logger.info(
+            f"\n{'=' * 20} Epoch Summary {'=' * 20}\n"
+            f"Policy: loss={metrics.policy_loss:.4f}, lr={metrics.learning_rates['policy']:.2e}\n"
+            f"Value:  loss={metrics.value_loss:.4f}, acc={metrics.value_accuracy:.2%}, "
+            f"lr={metrics.learning_rates['value']:.2e}\n"
+            f"Moves:  acc={metrics.move_accuracies['top_1_accuracy']:.2%}, "
+            f"top3={metrics.move_accuracies['top_3_accuracy']:.2%}\n"
+            f"Grad norm: {metrics.gradient_norm:.2e}, Loss improvement: {metrics.loss_improvement:.2%}\n"
+            f"{'=' * 50}"
+        )
+
+        return vars(metrics)
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save a training checkpoint."""
