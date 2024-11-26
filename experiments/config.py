@@ -20,6 +20,7 @@ class BaseExperimentConfig:
     epochs_per_iteration: int
     batches_per_epoch: int
 
+
     def __init__(self,
                  num_iterations: int = 10,
                  games_per_iteration: int = 75,
@@ -370,7 +371,61 @@ COMBINED_EXPERIMENTS = {
         final_temp=0.1,  # End with strong exploitation
         temp_schedule="exponential"  # Faster transition once value head stabilizes
 
-    )
+    ),
+
+    # gonna run this for a week while i'm out of town and i'm hoping I see some dang improvements!
+    "week_run": CombinedConfig(
+        # Training parameters
+        num_iterations=100,  # About 1 week with current timing
+        games_per_iteration=75,  # 50 was about 55 minutes per iteration.
+        epochs_per_iteration=5,  # Increased from 3 for better learning
+        batches_per_epoch=50,
+
+        # Learning rates - more conservative
+        lr=0.0002,  # Reduced from 0.0005
+        weight_decay=5e-4,  # Increased from 2e-4
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=2000,  # Longer warmup
+
+        # MCTS parameters
+        num_simulations=200,  # Slight increase from 100
+        c_puct=1.2,  # Slightly more exploratory
+        dirichlet_alpha=0.3,
+        value_weight=0.8,  # Reduced from 1.0 to rely less on struggling value head
+
+        # Temperature parameters
+        initial_temp=1.5,  # Higher initial exploration
+        final_temp=0.2,
+        temp_schedule="exponential"  # Smoother transition
+    ),
+
+    # gonna run this for a week while i'm out of town and i'm hoping I see some dang improvements!
+    "smoke": CombinedConfig(
+        # Training parameters
+        num_iterations=3,  # About 1 week with current timing
+        games_per_iteration=2,  # Reduced from 75 for speed
+        epochs_per_iteration=2,  # Increased from 3 for better learning
+        batches_per_epoch=50,
+
+        # Learning rates - more conservative
+        lr=0.0002,  # Reduced from 0.0005
+        weight_decay=5e-4,  # Increased from 2e-4
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=2000,  # Longer warmup
+
+        # MCTS parameters
+        num_simulations=2,  # Slight increase from 100
+        c_puct=1.2,  # Slightly more exploratory
+        dirichlet_alpha=0.3,
+        value_weight=0.8,  # Reduced from 1.0 to rely less on struggling value head
+
+        # Temperature parameters
+        initial_temp=1.5,  # Higher initial exploration
+        final_temp=0.2,
+        temp_schedule="exponential"  # Smoother transition
+    ),
 }
 
 # Results directory structure

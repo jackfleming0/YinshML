@@ -18,6 +18,7 @@ from yinsh_ml.training.trainer import YinshTrainer
 from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.training.self_play import SelfPlay
 from yinsh_ml.utils.tournament import ModelTournament
+from yinsh_ml.utils.metrics_logger import MetricsLogger
 
 
 from experiments.config import (
@@ -31,9 +32,27 @@ from experiments.config import (
 
 
 class ExperimentRunner:
-    def __init__(self, device: str = 'cuda'):
+    def __init__(self, device: str = 'cuda', debug: bool = False):
         self.device = device
         self.logger = logging.getLogger("ExperimentRunner")
+
+        # Initialize metrics logger
+        self.metrics_logger = MetricsLogger(
+            save_dir=Path("results"),
+            debug=debug
+        )
+
+        # Set logging levels
+        loggers = [
+            logging.getLogger("ExperimentRunner"),
+            logging.getLogger("SelfPlay"),
+            logging.getLogger("YinshTrainer"),
+            logging.getLogger("ModelTournament")
+        ]
+
+        level = logging.DEBUG if debug else logging.INFO
+        for logger in loggers:
+            logger.setLevel(level)
 
         # Add checkpoint directory
         self.checkpoint_dir = Path("checkpoints")
@@ -165,6 +184,8 @@ class ExperimentRunner:
             'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
 
         for iteration in range(config.num_iterations):
+            # Tell metrics logger we're starting a new iteration
+            self.metrics_logger.start_iteration(iteration)
             start_time = time.time()
             print(f"\nIteration {iteration + 1}/{config.num_iterations}")
 
@@ -275,6 +296,8 @@ class ExperimentRunner:
         trainer = YinshTrainer(network, device=self.device)
 
         for iteration in range(config.num_iterations):
+            # Tell metrics logger we're starting a new iteration
+            self.metrics_logger.start_iteration(iteration)
             start_time = time.time()
 
             # Generate games with specified MCTS depth
@@ -364,6 +387,8 @@ class ExperimentRunner:
         trainer = YinshTrainer(network, device=self.device)
 
         for iteration in range(config.num_iterations):
+            # Tell metrics logger we're starting a new iteration
+            self.metrics_logger.start_iteration(iteration)
             start_time = time.time()
 
             # Generate self-play games with temperature configuration
@@ -467,7 +492,11 @@ class ExperimentRunner:
         # Initialize model and trainer
         print("Initializing model and trainer...")
         network = NetworkWrapper(device=self.device)
-        trainer = YinshTrainer(network, device=self.device)
+        trainer = YinshTrainer(network,
+                               device=self.device,
+                                l2_reg=0.0,
+                               metrics_logger=self.metrics_logger
+                               )
 
         # Set learning rate configuration for both optimizers
         trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
@@ -479,6 +508,8 @@ class ExperimentRunner:
             'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
 
         for iteration in range(config.num_iterations):
+            # Tell metrics logger we're starting a new iteration
+            self.metrics_logger.start_iteration(iteration)
             iter_start_time = time.time()
             print(f"\nIteration {iteration + 1}/{config.num_iterations}")
 
@@ -488,6 +519,7 @@ class ExperimentRunner:
             self_play = SelfPlay(
                 network=network,
                 # num_workers=4,
+                metrics_logger=self.metrics_logger,
                 num_simulations=config.num_simulations,
                 initial_temp=config.initial_temp,
                 final_temp=config.final_temp,
@@ -547,6 +579,11 @@ class ExperimentRunner:
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
             metrics["timestamps"].append(time.time() - iter_start_time)
+
+            # Add explicit save at end of iteration
+            self.metrics_logger.summarize_iteration()  # Generate summary stats
+            self.metrics_logger.plot_current_metrics()  # Generate plots
+            self.metrics_logger.save_iteration()  # Save to disk
 
             print(f"Iteration completed in {time.time() - iter_start_time:.2f} seconds")
             print(f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, ELO Change: {elo_change:+.1f}")
