@@ -68,30 +68,59 @@ class YinshNetwork(nn.Module):
 
         self.value_head_activations = {}
         # Modified value head with better scaling and normalization
+        # self.value_head = nn.Sequential(
+        #     # Initial convolution with batch norm
+        #     nn.Conv2d(num_channels, 32, 1),
+        #     nn.BatchNorm2d(32),
+        #     nn.ReLU(),
+        #     nn.Flatten(),
+        #
+        #     # First dense layer with careful initialization
+        #     nn.Linear(32 * 11 * 11, 256),
+        #     nn.BatchNorm1d(256),  # Changed from LayerNorm to BatchNorm
+        #     nn.ReLU(),
+        #     nn.Dropout(0.1),
+        #
+        #     # Second dense layer
+        #     nn.Linear(256, 64),
+        #     nn.BatchNorm1d(64),  # Changed from LayerNorm to BatchNorm
+        #     nn.ReLU(),
+        #
+        #     # Final prediction layer with careful initialization and normalization
+        #     nn.Linear(64, 32),
+        #     nn.BatchNorm1d(32),
+        #     nn.ReLU(),
+        #     nn.Linear(32, 1),
+        #     nn.BatchNorm1d(1),  # Add BatchNorm before tanh
+        #     nn.Tanh()
+        # )
         self.value_head = nn.Sequential(
-            # Initial convolution with batch norm
+            # Kept same: Initial feature extraction
             nn.Conv2d(num_channels, 32, 1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Flatten(),
 
-            # First dense layer with careful initialization
-            nn.Linear(32 * 11 * 11, 256),
-            nn.BatchNorm1d(256),  # Changed from LayerNorm to BatchNorm
+            # Changed: Reduced width from 256->128 to prevent overconfidence
+            # and force the network to be more selective about features
+            nn.Linear(32 * 11 * 11, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            # Increased dropout from 0.1->0.2 to reduce overfitting
+            nn.Dropout(0.2),
 
-            # Second dense layer
-            nn.Linear(256, 64),
-            nn.BatchNorm1d(64),  # Changed from LayerNorm to BatchNorm
-            nn.ReLU(),
-
-            # Final prediction layer with careful initialization and normalization
-            nn.Linear(64, 32),
+            # Simplified: Removed intermediate 64-unit layer
+            # Direct path to final 32 units helps clearer value signals
+            nn.Linear(128, 32),
             nn.BatchNorm1d(32),
             nn.ReLU(),
+            # Added second dropout layer for more regularization
+            nn.Dropout(0.2),
+
+            # Simplified final layers: Removed extra BatchNorm
+            # Direct path from 32->1 with immediate Tanh
+            # This should reduce "wavering" in value predictions
             nn.Linear(32, 1),
-            nn.BatchNorm1d(1),  # Add BatchNorm before tanh
             nn.Tanh()
         )
 

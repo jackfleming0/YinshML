@@ -137,45 +137,50 @@ class ModelTournament:
         return match_result
 
     def run_tournament(self, current_iteration: int):
-        """
-        Run a tournament for the current iteration.
-
-        Will play the current model against all previous models from this training run.
-        """
+        """Run tournament for current iteration against previous models."""
         tournament_id = f"tournament_{current_iteration}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.current_tournament_id = tournament_id
 
-        # Get all available models up to current iteration
-        model_paths = []
-        for i in range(current_iteration + 1):
-            checkpoint_path = self.training_dir / f"checkpoint_iteration_{i}.pt"
-            if checkpoint_path.exists():
-                model_paths.append((i, checkpoint_path))
+        # Silently get model paths
+        model_paths = [
+            (i, self.training_dir / f"checkpoint_iteration_{i}.pt")
+            for i in range(current_iteration + 1)
+            if (self.training_dir / f"checkpoint_iteration_{i}.pt").exists()
+        ]
 
         if len(model_paths) < 2:
-            self.logger.info("Not enough models for tournament yet")
+            self.logger.info("Skipping tournament - need at least 2 models")
             return
+
+        # Single log at start
+        self.logger.info(f"\nStarting tournament for iteration {current_iteration}")
+        self.logger.info(f"Playing against {len(model_paths) - 1} previous models")
 
         tournament_results = []
         current_model = self._load_model(model_paths[-1][1])
         current_id = f"iteration_{current_iteration}"
 
-        # Play against each previous model
         for prev_iter, prev_path in model_paths[:-1]:
             prev_id = f"iteration_{prev_iter}"
             prev_model = self._load_model(prev_path)
 
-            # Play match with current model as White
-            white_result = self._play_match(current_model, prev_model, current_id, prev_id)
-            tournament_results.append(white_result)
-            self.elo_tracker.update_ratings(white_result)
+            # Log start of match
+            self.logger.info(f"\nMatching iteration {current_iteration} vs {prev_iter}")
 
-            # Play match with current model as Black
+            # Play both colors
+            white_result = self._play_match(current_model, prev_model, current_id, prev_id)
             black_result = self._play_match(prev_model, current_model, prev_id, current_id)
-            tournament_results.append(black_result)
+
+            tournament_results.extend([white_result, black_result])
+            self.elo_tracker.update_ratings(white_result)
             self.elo_tracker.update_ratings(black_result)
 
-        # Save tournament results
+            # Log match result
+            total_wins = white_result.white_wins + black_result.black_wins
+            total_games = white_result.total_games() + black_result.total_games()
+            self.logger.info(f"Win rate vs iter {prev_iter}: {total_wins / total_games:.1%}")
+
+        # Save results silently
         self.tournament_history[tournament_id] = {
             'iteration': current_iteration,
             'timestamp': datetime.now().isoformat(),
@@ -183,11 +188,14 @@ class ModelTournament:
         }
         self._save_tournament_history()
 
-        # Log summary
-        self.logger.info(f"\nTournament {tournament_id} complete")
-        self.logger.info("Current ratings:")
+        # Single summary at end
+        self.logger.info(f"\n{'=' * 20} Tournament Summary {'=' * 20}")
+        self.logger.info(f"Current model: iteration {current_iteration}")
+        self.logger.info("\nELO Ratings:")
         for model_id, rating in sorted(self.elo_tracker.ratings.items()):
-            self.logger.info(f"{model_id}: {rating:.1f}")
+            prefix = "→" if model_id == current_id else " "
+            self.logger.info(f"{prefix} {model_id}: {rating:.1f}")
+        self.logger.info("=" * 50)
 
     def get_latest_tournament_summary(self) -> Dict:
         """Get summary of the most recent tournament."""
