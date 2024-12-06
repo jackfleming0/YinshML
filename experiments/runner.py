@@ -82,6 +82,16 @@ class ExperimentRunner:
 
         self.logger.info(f"Starting experiment: {experiment_type}/{config_name}")
 
+        # Create experiment-specific metrics directory
+        metrics_dir = Path("results") / experiment_type / config_name / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize metrics logger with experiment-specific path
+        self.metrics_logger = MetricsLogger(
+            save_dir=metrics_dir,
+            debug=False
+        )
+
         # Initialize tournament manager with correct path
         self.tournament_manager = ModelTournament(
             training_dir=self.checkpoint_dir / experiment_type / config_name,

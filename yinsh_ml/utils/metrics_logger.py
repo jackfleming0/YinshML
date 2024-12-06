@@ -9,6 +9,8 @@ from datetime import datetime
 import numpy as np
 from collections import defaultdict
 import matplotlib.pyplot as plt
+from .enhanced_metrics import EnhancedMetricsCollector
+
 
 
 @dataclass
@@ -35,6 +37,7 @@ class EpochMetrics:
 
 class MetricsLogger:
     def __init__(self, save_dir: Path, debug: bool = False):
+        self.enhanced_metrics = EnhancedMetricsCollector()
         self.save_dir = Path(save_dir)
         self.metrics_dir = self.save_dir / "metrics"
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -186,11 +189,13 @@ class MetricsLogger:
         print("\nMetrics structure before conversion:")
         print(json.dumps(self._debug_structure(self.current_metrics), indent=2))
 
+        # Combine standard and enhanced metrics
         output_file = self.metrics_dir / f"iteration_{self.current_iteration}.json"
         metrics = {
             'iteration': self.current_iteration,
             'timestamp': datetime.now().isoformat(),
-            'metrics': self._convert_to_serializable(self.current_metrics)
+            'metrics': self._convert_to_serializable(self.current_metrics),
+            'enhanced_metrics': self.enhanced_metrics.get_serializable_data()
         }
 
         self.logger.info(f"Saving metrics to {output_file}")

@@ -14,6 +14,7 @@ from collections import deque, defaultdict
 import random
 
 from ..utils.metrics_logger import MetricsLogger, EpochMetrics
+from ..utils.enhanced_metrics import EnhancedMetricsCollector
 from ..network.wrapper import NetworkWrapper
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
@@ -78,6 +79,8 @@ class YinshTrainer:
             metrics_logger: Optional MetricsLogger instance
 
         """
+        self.state_encoder = network.state_encoder
+
         # Device setup remains the same
         if device:
             self.device = torch.device(device)
@@ -405,6 +408,23 @@ class YinshTrainer:
 
         for batch in range(batches_per_epoch):
             p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
+
+            if self.metrics_logger is not None:
+                states, target_probs, target_values = self.experience.sample_batch(batch_size)
+                start_time = time.time()
+                policy_logits, value_preds = self.network.network(states)
+                batch_time = time.time() - start_time
+
+                for i in range(len(states)):
+                    game_state = self.state_encoder.decode_state(states[i].cpu().numpy())
+                    self.metrics_logger.enhanced_metrics.add_state_metrics(
+                        phase=str(game_state.phase),
+                        board_state=str(game_state.board),
+                        value_pred=value_preds[i].item(),
+                        actual_outcome=target_values[i].item(),
+                        move_time=batch_time / batch_size,
+                        confidence=torch.max(F.softmax(policy_logits[i], dim=0)).item()
+                    )
 
             # Accumulate stats
             stats_accum['policy_loss'] += p_loss
