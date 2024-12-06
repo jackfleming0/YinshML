@@ -419,6 +419,23 @@ class SelfPlay:
                             )
                             final_confidence = abs(final_value.item())
 
+                            if self.metrics_logger:
+                                # Record metrics for each state in the game
+                                for i, state_tensor in enumerate(states):
+                                    state_phase = "placement" if i < 10 else "main_game" if i < len(
+                                        states) - 5 else "ring_removal"
+                                    _, value = self.network.predict(
+                                        torch.FloatTensor(state_tensor).unsqueeze(0).to(self.network.device)
+                                    )
+                                    self.metrics_logger.enhanced_metrics.add_state_metrics(
+                                        phase=state_phase,
+                                        board_state=str(self.state_encoder.decode_state(state_tensor).board),
+                                        value_pred=value.item(),
+                                        actual_outcome=outcome,  # Final game outcome
+                                        move_time=temp_data['move_stats'][i]['move_time'],
+                                        confidence=temp_data['move_stats'][i].get('top_prob', 0.0)
+                                    )
+
                             # Enhanced game metrics
                             game_metrics = GameMetrics(
                                 length=len(states),
