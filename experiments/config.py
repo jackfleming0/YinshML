@@ -400,7 +400,32 @@ COMBINED_EXPERIMENTS = {
         temp_schedule="exponential"  # Smoother transition
     ),
 
-    # gonna run this for a week while i'm out of town and i'm hoping I see some dang improvements!
+    "value_head_config" : CombinedConfig(
+    # Core training settings
+    num_iterations=100,
+    games_per_iteration=75,
+    epochs_per_iteration=7,  # Increased from 5
+    batches_per_epoch=50,
+
+    # Value head focus
+    lr=0.0001,  # Lower learning rate
+    weight_decay=5e-4,  # Keep current regularization
+    batch_size=256,
+    lr_schedule="cosine",
+    warmup_steps=2000,
+
+    # MCTS parameters
+    num_simulations=250,  # Increased from 200
+    c_puct=1.0,  # More conservative
+    dirichlet_alpha=0.3,
+    value_weight=1.2,  # Increased value influence
+
+    # Temperature parameters
+    initial_temp=1.8,  # Higher exploration
+    final_temp=0.1,  # Stronger exploitation
+    temp_schedule="exponential"
+    ),
+
     "smoke": CombinedConfig(
         # Training parameters
         num_iterations=3,  # About 1 week with current timing
@@ -425,7 +450,7 @@ COMBINED_EXPERIMENTS = {
         initial_temp=1.5,  # Higher initial exploration
         final_temp=0.2,
         temp_schedule="exponential"  # Smoother transition
-    ),
+    )
 }
 
 # Results directory structure
