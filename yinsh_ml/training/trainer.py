@@ -152,6 +152,8 @@ class YinshTrainer:
         self.value_accuracies = []
         self.move_accuracies = []
 
+        self.temperature = 1.0  # Add base temperature
+
         # Track value head specific metrics
         self.value_metrics = {
             'pre_tanh_stats': [],  # Track pre-tanh activation statistics
@@ -209,10 +211,10 @@ class YinshTrainer:
 
         # Calculate policy loss
         with torch.set_grad_enabled(True):
-            temperature = 1.0
-            scaled_logits = pred_logits / temperature
+            scaled_logits = pred_logits / self.temperature  # Use self.temperature instead of local var
             log_probs = F.log_softmax(scaled_logits, dim=1)
             policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
+            policy_loss_val = float(policy_loss.item())  # Store raw loss value
 
             # Add L2 regularization for policy if needed
             if self.l2_reg > 0:
@@ -241,27 +243,37 @@ class YinshTrainer:
             # Recompute forward pass for value head
             _, pred_values = self.network.network(states)
             huber_loss = F.smooth_l1_loss(pred_values, target_values, beta=0.5)
-            stability_loss = torch.mean(torch.square(pred_values))  # Penalize large values
+            stability_loss = torch.mean(torch.square(pred_values))
             value_loss = huber_loss + 0.01 * stability_loss
+            value_loss_val = float(value_loss.item())  # Store raw loss value
 
-        # Add L2 regularization for value head
-        if self.l2_reg > 0:
-            l2_loss = 0
-            for name, param in self.network.network.named_parameters():
-                if 'value_head' in name:
-                    l2_loss += torch.norm(param)
-            value_loss = value_loss + (self.l2_reg * 2) * l2_loss  # Increased L2 reg for value head
+            # Add L2 regularization for value head
+            if self.l2_reg > 0:
+                l2_loss = 0
+                for name, param in self.network.network.named_parameters():
+                    if 'value_head' in name:
+                        l2_loss += torch.norm(param)
+                value_loss = value_loss + (self.l2_reg * 2) * l2_loss
 
-        # Backward pass for value
-        value_loss.backward()
+            # Backward pass for value
+            value_loss.backward()
 
-        # Clip value gradients
-        value_params = [p for n, p in self.network.network.named_parameters()
-                        if 'value_head' in n]
-        torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
+            # Clip value gradients
+            value_params = [p for n, p in self.network.network.named_parameters()
+                            if 'value_head' in n]
+            torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
 
-        self.value_optimizer.step()
-        self.value_scheduler.step()
+            self.value_optimizer.step()
+            self.value_scheduler.step()
+
+        if hasattr(self, 'logger'):
+            self.logger.debug(
+                f"Step {self.current_iteration} - "
+                f"Policy Loss: {policy_loss_val:.4f}, "
+                f"Value Loss: {value_loss_val:.4f}, "
+                f"Policy LR: {self.policy_optimizer.param_groups[0]['lr']:.2e}, "
+                f"Value LR: {self.value_optimizer.param_groups[0]['lr']:.2e}"
+            )
 
         # Calculate metrics
         with torch.no_grad():
@@ -406,8 +418,24 @@ class YinshTrainer:
 
         prev_total_loss = float('inf')  # For tracking loss improvement
 
+        # Track learning rates for each batch
+        current_policy_lr = float(self.policy_optimizer.param_groups[0]['lr'])
+        current_value_lr = float(self.value_optimizer.param_groups[0]['lr'])
+
+        stats_accum['learning_rates'] = {
+            'policy': current_policy_lr,
+            'value': current_value_lr
+        }
+
         for batch in range(batches_per_epoch):
             p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
+
+            # Add explicit logging of loss values
+            self.logger.debug(f"Batch {batch} losses - Policy: {p_loss:.4f}, Value: {v_loss:.4f}")
+
+            # Convert loss values explicitly to float
+            stats_accum['policy_loss'] += float(p_loss)
+            stats_accum['value_loss'] += float(v_loss)
 
             if self.metrics_logger is not None:
                 states, target_probs, target_values = self.experience.sample_batch(batch_size)
@@ -459,15 +487,15 @@ class YinshTrainer:
 
         # Create metrics object
         metrics = EpochMetrics(
-            policy_loss=stats_accum['policy_loss'],
-            value_loss=stats_accum['value_loss'],
+            policy_loss=max(stats_accum['policy_loss'], 1e-8),  # Prevent exact zeros
+            value_loss=max(stats_accum['value_loss'], 1e-8),
             value_accuracy=stats_accum['value_accuracy'],
             move_accuracies=dict(stats_accum['move_accuracies']),
             learning_rates={
-                'policy': self.policy_optimizer.param_groups[0]['lr'],
-                'value': self.value_optimizer.param_groups[0]['lr']
+                'policy': current_policy_lr,
+                'value': current_value_lr
             },
-            gradient_norm=stats_accum['gradient_norm'],
+            gradient_norm=max(stats_accum['gradient_norm'], 1e-8),
             loss_improvement=stats_accum['loss_improvement']
         )
 
@@ -537,7 +565,8 @@ class YinshTrainer:
             )
 
     def _calculate_accuracies(self, pred_values: torch.Tensor, target_values: torch.Tensor,
-                              pred_logits: torch.Tensor, target_probs: torch.Tensor) -> Tuple[float, float]:
+                              pred_logits: torch.Tensor, target_probs: torch.Tensor) -> Dict:
+
         """
         Calculate value and move prediction accuracies.
 
@@ -551,28 +580,24 @@ class YinshTrainer:
             Tuple of (value_accuracy, move_accuracy)
         """
         with torch.no_grad():
-            # Value accuracy: Check if we correctly predict win/loss
-            # Convert from [-1,1] to binary predictions
+            # Value accuracy
             pred_outcomes = (pred_values > 0).float()
             true_outcomes = (target_values > 0).float()
-            value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
+            value_accuracy = float((pred_outcomes == true_outcomes).float().mean().item())
 
-            # Move accuracy: Check if highest probability move matches
-            # Note: This is a strict metric - only counts exact matches
+            # Move accuracy
             pred_moves = torch.argmax(pred_logits, dim=1)
             true_moves = torch.argmax(target_probs, dim=1)
-            move_accuracy = (pred_moves == true_moves).float().mean().item()
+            move_accuracy = float((pred_moves == true_moves).float().mean().item())
 
-            # Could also add top-k accuracy for moves if desired
-            k = 5  # Consider top 5 moves
+            k = 5
             _, pred_top_k = torch.topk(pred_logits, k, dim=1)
             _, true_top_k = torch.topk(target_probs, k, dim=1)
 
-            # Check if true best move is in predicted top k
-            top_k_accuracy = torch.any(
+            top_k_accuracy = float(torch.any(
                 pred_top_k == true_moves.unsqueeze(1),
                 dim=1
-            ).float().mean().item()
+            ).float().mean().item())
 
             return {
                 'value_accuracy': value_accuracy,

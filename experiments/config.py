@@ -426,6 +426,43 @@ COMBINED_EXPERIMENTS = {
     temp_schedule="exponential"
     ),
 
+    # This configuration (value_head_config2) balances three key insights:
+    # First, the moderate increase in learning rate (0.0002) paired with cosine scheduling should allow
+    # more effective learning while maintaining stability.
+    # Second, the combination of higher initial temperature (2.0) and moderate MCTS depth (300 simulations)
+    # creates more diverse training positions - particularly important in the complex placement and main game
+    # phases where the move space is large.
+    # Third, the slight increase in value weight (1.2) and regularization (1e-3) aims to improve value head
+    # learning without overwhelming the successful policy learning we've observed.
+    # This balanced approach should help the value head learn better position evaluation while
+    # preserving the strong move accuracy we've already achieved.
+
+    "value_head_config2": CombinedConfig(
+        # Training parameters
+        num_iterations=100,
+        games_per_iteration=75,
+        epochs_per_iteration=7,
+        batches_per_epoch=50,
+
+        # Learning rates
+        lr=0.0002,  # Modest increase for learning
+        weight_decay=1e-3,  # Increased regularization
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=1000,
+
+        # MCTS parameters
+        num_simulations=300,  # Moderate simulation depth
+        c_puct=1.5,  # Balanced exploration
+        dirichlet_alpha=0.3,
+        value_weight=1.2,  # Slight emphasis on value prediction
+
+        # Temperature parameters - accounting for move space complexity
+        initial_temp=2.0,  # Higher early exploration
+        final_temp=0.1,  # Strong final exploitation
+        temp_schedule="exponential"  # Smoother transition
+    ),
+
     "smoke": CombinedConfig(
         # Training parameters
         num_iterations=3,  # About 1 week with current timing
