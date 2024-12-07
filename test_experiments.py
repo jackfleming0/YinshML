@@ -114,7 +114,8 @@ def test_experiment_configs(quick_test: bool = True):
         ],
         "combined": [
             "balanced_optimizer",
-            "aggressive_search"
+            "aggressive_search",
+            "value_head_config"
         ]
     }
 
