@@ -623,6 +623,8 @@ def play_game_worker(
             'move_stats': []
         }
 
+        move_start = time.time()
+
         # Main game loop - remove all debug logs
         while not state.is_terminal() and move_count < 5000:
             valid_moves = state.get_valid_moves()
@@ -656,6 +658,8 @@ def play_game_worker(
             #if move_count % 10 == 0 or "removes" in str(selected_move):
             #    logger.info(f"Worker {game_id} move {move_count}: {selected_move}")
 
+            move_time = time.time() - move_start
+
             # Record metrics without logging
             entropy = -np.sum(valid_probs * np.log(valid_probs + 1e-10))
             temp_data['temperatures'].append((move_count, temp))
@@ -665,13 +669,16 @@ def play_game_worker(
                 'temperature': temp,
                 'entropy': entropy,
                 'top_prob': float(np.max(valid_probs)),
-                'selected_prob': float(valid_probs[selected_idx])
+                'selected_prob': float(valid_probs[selected_idx]),
+                'move_time': move_time
             })
 
             states.append(state_encoder.encode_state(state))
             policies.append(move_probs)
             state.make_move(selected_move)
             move_count += 1
+
+
 
         # Keep game outcome logging
         logger.info(f"Worker {game_id} completed: {move_count} moves")
