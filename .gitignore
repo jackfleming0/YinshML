@@ -16,6 +16,8 @@
 !runtime.txt
 !streamlit_run.py
 !test_experiments.py
+!analysis/
+!analysis/**
 
 # Python virtual environment
 .venv/
