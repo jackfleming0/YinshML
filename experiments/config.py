@@ -400,44 +400,45 @@ COMBINED_EXPERIMENTS = {
         temp_schedule="exponential"  # Smoother transition
     ),
 
-    "value_head_config" : CombinedConfig(
-    # Core training settings
-    num_iterations=100,
-    games_per_iteration=75,
-    epochs_per_iteration=7,  # Increased from 5
-    batches_per_epoch=50,
+    "value_head_config": CombinedConfig(
+        # Core training settings
+        num_iterations=100,
+        games_per_iteration=75,
+        epochs_per_iteration=7,  # Increased from 5
+        batches_per_epoch=50,
 
-    # Value head focus
-    lr=0.0001,  # Lower learning rate
-    weight_decay=5e-4,  # Keep current regularization
-    batch_size=256,
-    lr_schedule="cosine",
-    warmup_steps=2000,
+        # Value head focus
+        lr=0.0001,  # Lower learning rate
+        weight_decay=5e-4,  # Keep current regularization
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=2000,
 
-    # MCTS parameters
-    num_simulations=250,  # Increased from 200
-    c_puct=1.0,  # More conservative
-    dirichlet_alpha=0.3,
-    value_weight=1.2,  # Increased value influence
+        # MCTS parameters
+        num_simulations=250,  # Increased from 200
+        c_puct=1.0,  # More conservative
+        dirichlet_alpha=0.3,
+        value_weight=1.2,  # Increased value influence
 
-    # Temperature parameters
-    initial_temp=1.8,  # Higher exploration
-    final_temp=0.1,  # Stronger exploitation
-    temp_schedule="exponential"
+        # Temperature parameters
+        initial_temp=1.8,  # Higher exploration
+        final_temp=0.1,  # Stronger exploitation
+        temp_schedule="exponential"
     ),
 
-    # This configuration (value_head_config2) balances three key insights:
-    # First, the moderate increase in learning rate (0.0002) paired with cosine scheduling should allow
-    # more effective learning while maintaining stability.
-    # Second, the combination of higher initial temperature (2.0) and moderate MCTS depth (300 simulations)
-    # creates more diverse training positions - particularly important in the complex placement and main game
-    # phases where the move space is large.
-    # Third, the slight increase in value weight (1.2) and regularization (1e-3) aims to improve value head
-    # learning without overwhelming the successful policy learning we've observed.
-    # This balanced approach should help the value head learn better position evaluation while
-    # preserving the strong move accuracy we've already achieved.
-
     "value_head_config2": CombinedConfig(
+
+        # This configuration (value_head_config2) balances three key insights:
+        # First, the moderate increase in learning rate (0.0002) paired with cosine scheduling should allow
+        # more effective learning while maintaining stability.
+        # Second, the combination of higher initial temperature (2.0) and moderate MCTS depth (300 simulations)
+        # creates more diverse training positions - particularly important in the complex placement and main game
+        # phases where the move space is large.
+        # Third, the slight increase in value weight (1.2) and regularization (1e-3) aims to improve value head
+        # learning without overwhelming the successful policy learning we've observed.
+        # This balanced approach should help the value head learn better position evaluation while
+        # preserving the strong move accuracy we've already achieved.
+
         # Training parameters
         num_iterations=100,
         games_per_iteration=75,
@@ -461,6 +462,50 @@ COMBINED_EXPERIMENTS = {
         initial_temp=2.0,  # Higher early exploration
         final_temp=0.1,  # Strong final exploitation
         temp_schedule="exponential"  # Smoother transition
+    ),
+
+    "attention_config": CombinedConfig(
+
+        # The attention_config builds on our learnings from value_head_config2 and addresses its limitations:
+        # While value_head_config2 showed strong ring removal performance (64.9%) but struggled with placement
+        # (48.7%) and main game phases (51.4%), this configuration adds spatial attention to help capture
+        # complex board relationships.
+
+        # Key architectural changes are paired with specific parameter choices:
+        # 1. The attention mechanisms need a lower learning rate (0.0005) and higher regularization (2e-4) for
+        #    stable training of the new spatial attention parameters.
+        # 2. We reduce batch size to 32 (from 256) to allow more frequent updates during the initial learning
+        #    of attention patterns.
+        # 3. We maintain the higher initial temperature (1.5) but reduce simulations (100 from 300) as the
+        #    attention mechanism should provide better immediate position evaluation.
+
+        # The hypothesis is that attention will help the model understand spatial relationships between pieces,
+        # particularly in the placement and main game phases where value_head_config2 struggled to learn
+        # beyond random performance.
+
+        # Training parameters
+        num_iterations=100,
+        games_per_iteration=75,     # Keep same as value_head_config2
+        epochs_per_iteration=5,     # Reduced from 7 due to smaller batches
+        batches_per_epoch=200,      # Increased to compensate for smaller batch size
+
+        # Learning parameters
+        lr=0.0005,                  # Higher than value_head but with smaller batches
+        weight_decay=2e-4,          # Moderate regularization for attention
+        batch_size=32,              # Smaller batches for attention training
+        lr_schedule="cosine",
+        warmup_steps=1000,          # Keep warmup for attention training
+
+        # MCTS parameters
+        num_simulations=100,        # Reduced from 300, relying more on attention
+        c_puct=1.5,                 # Keep balanced exploration
+        dirichlet_alpha=0.3,
+        value_weight=1.0,           # Neutral weight to start
+
+        # Temperature parameters
+        initial_temp=1.5,           # High but not as extreme as value_head_config2
+        final_temp=0.1,             # Keep strong final exploitation
+        temp_schedule="exponential"  # Keep smooth transition
     ),
 
     "smoke": CombinedConfig(
@@ -556,3 +601,10 @@ def get_experiment_config(experiment_type: str, config_name: str) -> Optional[ob
         return None
 
     return config_dict[config_name]
+
+if __name__ == "__main__":
+    config = get_experiment_config("combined", "attention_config")
+    if config:
+        print("Attention Config Loaded Successfully!")
+    else:
+        print("Failed to Load Attention Config.")

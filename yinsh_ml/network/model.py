@@ -25,6 +25,50 @@ class ResBlock(nn.Module):
         return F.relu(out)
 
 
+class SpatialAttention(nn.Module):
+    """Spatial attention module for YINSH board."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels // 2, 1)
+        self.conv2 = nn.Conv2d(channels // 2, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch_size, channels, 11, 11)
+        Returns:
+            Attention weights of shape (batch_size, 1, 11, 11)
+        """
+        attention = F.relu(self.conv1(x))
+        attention = torch.sigmoid(self.conv2(attention))
+        return attention
+
+
+class AttentionBlock(nn.Module):
+    """Combines spatial attention with residual connection."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.attention = SpatialAttention(channels)
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+
+        # Compute attention weights
+        attention = self.attention(x)
+
+        # Apply attention and residual connection
+        out = F.relu(self.bn1(self.conv1(x * attention)))
+        out = self.bn2(self.conv2(out))
+        out = out * attention  # Re-weight after processing
+
+        return F.relu(out + identity)
+
 class YinshNetwork(nn.Module):
     """
     Neural network for YINSH game prediction.
@@ -35,7 +79,7 @@ class YinshNetwork(nn.Module):
     - Value head (position evaluation)
     """
 
-    def __init__(self, num_channels: int = 128, num_blocks: int = 10):
+    def __init__(self, num_channels: int = 128, num_blocks: int = 8):  # Reduced blocks for attention
         super().__init__()
 
         # Fixed output size
@@ -48,10 +92,13 @@ class YinshNetwork(nn.Module):
             nn.ReLU()
         )
 
-        # Residual blocks
-        self.res_blocks = nn.ModuleList([
-            ResBlock(num_channels) for _ in range(num_blocks)
-        ])
+        # Alternate between residual and attention blocks
+        self.main_blocks = nn.ModuleList()
+        for i in range(num_blocks):
+            if i % 2 == 0:
+                self.main_blocks.append(ResBlock(num_channels))
+            else:
+                self.main_blocks.append(AttentionBlock(num_channels))
 
         # Policy head (outputs move probabilities)
         self.policy_head = nn.Sequential(
@@ -67,59 +114,27 @@ class YinshNetwork(nn.Module):
         )
 
         self.value_head_activations = {}
-        # Modified value head with better scaling and normalization
-        # self.value_head = nn.Sequential(
-        #     # Initial convolution with batch norm
-        #     nn.Conv2d(num_channels, 32, 1),
-        #     nn.BatchNorm2d(32),
-        #     nn.ReLU(),
-        #     nn.Flatten(),
-        #
-        #     # First dense layer with careful initialization
-        #     nn.Linear(32 * 11 * 11, 256),
-        #     nn.BatchNorm1d(256),  # Changed from LayerNorm to BatchNorm
-        #     nn.ReLU(),
-        #     nn.Dropout(0.1),
-        #
-        #     # Second dense layer
-        #     nn.Linear(256, 64),
-        #     nn.BatchNorm1d(64),  # Changed from LayerNorm to BatchNorm
-        #     nn.ReLU(),
-        #
-        #     # Final prediction layer with careful initialization and normalization
-        #     nn.Linear(64, 32),
-        #     nn.BatchNorm1d(32),
-        #     nn.ReLU(),
-        #     nn.Linear(32, 1),
-        #     nn.BatchNorm1d(1),  # Add BatchNorm before tanh
-        #     nn.Tanh()
-        # )
+
+        # Value head with attention
+        self.value_attention = SpatialAttention(num_channels)
         self.value_head = nn.Sequential(
-            # Kept same: Initial feature extraction
+            # Initial feature extraction
             nn.Conv2d(num_channels, 32, 1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Flatten(),
 
-            # Changed: Reduced width from 256->128 to prevent overconfidence
-            # and force the network to be more selective about features
+            # Reduced width architecture
             nn.Linear(32 * 11 * 11, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            # Increased dropout from 0.1->0.2 to reduce overfitting
             nn.Dropout(0.2),
 
-            # Simplified: Removed intermediate 64-unit layer
-            # Direct path to final 32 units helps clearer value signals
             nn.Linear(128, 32),
             nn.BatchNorm1d(32),
             nn.ReLU(),
-            # Added second dropout layer for more regularization
             nn.Dropout(0.2),
 
-            # Simplified final layers: Removed extra BatchNorm
-            # Direct path from 32->1 with immediate Tanh
-            # This should reduce "wavering" in value predictions
             nn.Linear(32, 1),
             nn.Tanh()
         )
@@ -129,9 +144,9 @@ class YinshNetwork(nn.Module):
             if isinstance(module, (nn.Linear, nn.ReLU, nn.LayerNorm)):
                 module.register_forward_hook(self._make_activation_hook(name))
 
-        # Initialize weights with different scaling
+        # Initialize weights
         self._initialize_weights()
-        self._initialize_value_head()  # Add our new specific initialization for value head
+        self._initialize_value_head()
 
     def _initialize_value_head(self):
         """Careful initialization of value head weights."""
@@ -191,21 +206,26 @@ class YinshNetwork(nn.Module):
 
         Returns:
             Tuple of:
-            - move_probabilities: Shape (batch_size, 14641)
+            - move_probabilities: Shape (batch_size, total_moves)
             - value: Shape (batch_size, 1)
         """
         # Initial convolution
         x = self.conv_block(x)
 
-        # Residual tower
-        for block in self.res_blocks:
+        # Process through main blocks
+        attn_maps = []
+        for block in self.main_blocks:
             x = block(x)
+            if isinstance(block, AttentionBlock):
+                attn_maps.append(block.attention(x))
 
         # Policy head
         policy = self.policy_head(x)
 
-        # Value head
-        value = self.value_head(x)
+        # Value head with attention
+        value_attn = self.value_attention(x)
+        value_features = x * value_attn
+        value = self.value_head(value_features)
 
         return policy, value
 
