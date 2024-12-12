@@ -1,4 +1,7 @@
 """Multi-model tournament management for YINSH."""
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import json
 from pathlib import Path
@@ -10,9 +13,7 @@ import numpy as np
 import torch
 from collections import defaultdict
 import argparse
-import os
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from yinsh_ml.network.wrapper import NetworkWrapper
 
 @dataclass
 class ModelInfo:
@@ -121,12 +122,26 @@ class GlobalTournamentManager:
 
         # Load models with error handling
         try:
+            # Check compatibility first
+            if not self._check_network_compatibility(white_model, black_model):
+                print(f"Match skipped due to incompatible architectures")
+                return {
+                    'white_wins': 0,
+                    'black_wins': 0,
+                    'total_games': 0,
+                    'avg_game_length': 0,
+                    'game_lengths': [],
+                    'error': 'Incompatible architectures',
+                    'skipped': True
+                }
+
+            # Then load models if compatible
             white = NetworkWrapper(model_path=str(white_model.file_path))
             black = NetworkWrapper(model_path=str(black_model.file_path))
+
         except Exception as e:
-            print(f"Skipping match due to model incompatibility:")
-            print(f"  {white_model.tournament_id} vs {black_model.tournament_id}")
-            print(f"  Error: {e}")
+            print(f"Model loading failed: {white_model.tournament_id} vs {black_model.tournament_id}")
+            print(f"Error: {e}")
             return {
                 'white_wins': 0,
                 'black_wins': 0,
@@ -140,6 +155,7 @@ class GlobalTournamentManager:
         results = {
             'white_wins': 0,
             'black_wins': 0,
+            'completed_games': 0,  # Add this
             'total_games': num_games,
             'avg_game_length': 0,
             'game_lengths': [],
@@ -185,8 +201,15 @@ class GlobalTournamentManager:
             winner = game_state.get_winner()
             if winner == Player.WHITE:
                 results['white_wins'] += 1
+                results['completed_games'] += 1  # Add this
+
             elif winner == Player.BLACK:
                 results['black_wins'] += 1
+                results['completed_games'] += 1  # Add this
+
+            # Calculate average using completed games:
+            if results['completed_games'] > 0:
+                results['avg_game_length'] = total_moves / results['completed_games']
 
         if total_moves > 0:  # Only calculate average if games were played
             results['avg_game_length'] = total_moves / num_games
@@ -194,26 +217,42 @@ class GlobalTournamentManager:
         return results
 
     def update_elo(self, white_id: str, black_id: str, white_score: float, k_factor: float = 32.0):
-        """Update ELO ratings after a match."""
-        # Get current ratings
         white_rating = self.ratings["ratings"].get(white_id, 1500)
         black_rating = self.ratings["ratings"].get(black_id, 1500)
 
-        # Calculate expected scores
+        # Scale K-factor by game count and margin
+        games_multiplier = min(1.0, total_games / 20)  # Stabilize with more games
+        margin_multiplier = abs(white_score - 0.5) * 2  # Higher K for decisive results
+        adjusted_k = k_factor * games_multiplier * margin_multiplier
+
         expected_white = 1 / (1 + 10 ** ((black_rating - white_rating) / 400))
-        expected_black = 1 - expected_white
+        rating_change = adjusted_k * (white_score - expected_white)
 
-        # Update ratings
-        white_new = white_rating + k_factor * (white_score - expected_white)
-        black_new = black_rating + k_factor * ((1 - white_score) - expected_black)
+        new_white = white_rating + rating_change
+        new_black = black_rating - rating_change
 
-        # Store new ratings
-        self.ratings["ratings"][white_id] = white_new
-        self.ratings["ratings"][black_id] = black_new
-        self.ratings["total_games"] += 1
-        self.ratings["last_updated"] = datetime.now().isoformat()
+        self.ratings["ratings"][white_id] = new_white
+        self.ratings["ratings"][black_id] = new_black
 
-        return white_new, black_new
+        return new_white, new_black
+
+    def _check_network_compatibility(self, white_model: ModelInfo, black_model: ModelInfo) -> bool:
+        """Check if models should be allowed to play based on their configs."""
+        # Map model IDs to their experiment types
+        white_config = white_model.config_name
+        black_config = black_model.config_name
+
+        # Define compatible groups
+        residual_configs = {'smoke', 'short_baseline', 'value_head_config', 'week_run'}
+        attention_configs = {'attention_config', 'value_head_config2'}
+
+        # Only allow matches within same architecture group
+        if white_config in residual_configs and black_config in residual_configs:
+            return True
+        if white_config in attention_configs and black_config in attention_configs:
+            return True
+
+        return False
 
     def save_ratings(self):
         """Save current ratings to file."""
@@ -300,7 +339,8 @@ class GlobalTournamentManager:
                 print(f"  ... and {len(skipped_matches) - 5} more")
 
     def sample_models_for_tournament(self, models: List[ModelInfo],
-                                   target_games_per_config: int = 50) -> List[ModelInfo]:
+                                   target_games_per_config: int =
+                                   50) -> List[ModelInfo]:
         """Sample models to get reasonable tournament size with good coverage."""
         sampled = []
         by_config = defaultdict(list)
