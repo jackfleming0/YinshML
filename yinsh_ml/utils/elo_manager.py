@@ -44,18 +44,15 @@ class EloTracker:
     def __init__(self, save_dir: Path, k_factor: float = 32, initial_rating: float = 1500):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True, parents=True)
-
         self.k_factor = k_factor
         self.initial_rating = initial_rating
-
         self.ratings: Dict[str, float] = {}
-        self.rating_history: Dict[str, List[Tuple[str, float]]] = {}  # model_id -> [(timestamp, rating)]
+        self.rating_history: Dict[str, List[Tuple[str, float]]] = {}
         self.match_history: List[MatchResult] = []
 
+        # Setup logging
         self.logger = logging.getLogger("EloTracker")
-
-        # Try to load existing data
-        self._load_data()
+        self.logger.setLevel(logging.INFO)
 
     def _load_data(self):
         """Load existing ratings and match history."""
@@ -104,11 +101,35 @@ class EloTracker:
         """Calculate expected score using ELO formula."""
         return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
 
-    def _update_rating_history(self, model_id: str, rating: float):
+    def _update_single_game(self, white_id: str, black_id: str, white_won: bool):
+        """Update ratings for a single game."""
+        # Get or initialize ratings
+        white_rating = self.ratings.get(white_id, self.initial_rating)
+        black_rating = self.ratings.get(black_id, self.initial_rating)
+
+        # Calculate expected scores
+        white_expected = self._expected_score(white_rating, black_rating)
+        black_expected = 1 - white_expected
+
+        # Actual scores (1 for win, 0 for loss)
+        white_actual = 1.0 if white_won else 0.0
+        black_actual = 1.0 - white_actual
+
+        # Update ratings
+        white_new = white_rating + self.k_factor * (white_actual - white_expected)
+        black_new = black_rating + self.k_factor * (black_actual - black_expected)
+
+        # Store new ratings
+        self.ratings[white_id] = white_new
+        self.ratings[black_id] = black_new
+
+        return white_new, black_new
+
+    def _update_rating_history(self, model_id: str, rating: float, timestamp: str):
         """Add a new rating to a model's history."""
         if model_id not in self.rating_history:
             self.rating_history[model_id] = []
-        self.rating_history[model_id].append((datetime.now().isoformat(), rating))
+        self.rating_history[model_id].append((timestamp, rating))
 
     def get_rating(self, model_id: str) -> float:
         """Get current rating for a model, initializing if necessary."""
@@ -118,44 +139,44 @@ class EloTracker:
         return self.ratings[model_id]
 
     def update_ratings(self, match_result: MatchResult):
-        """Update ratings based on a match result."""
-        # Get or initialize ratings
-        white_rating = self.get_rating(match_result.white_model)
-        black_rating = self.get_rating(match_result.black_model)
+        """Update ratings based on match result, processing each game individually."""
+        white_id = match_result.white_model
+        black_id = match_result.black_model
 
-        # Calculate actual scores
-        total_games = match_result.total_games()
-        if total_games == 0:
-            return
+        # Process white wins
+        for _ in range(match_result.white_wins):
+            self._update_single_game(white_id, black_id, white_won=True)
 
-        white_score = match_result.white_score()
-        black_score = 1 - white_score
+        # Process black wins
+        for _ in range(match_result.black_wins):
+            self._update_single_game(white_id, black_id, white_won=False)
 
-        # Calculate expected scores
-        white_expected = self._expected_score(white_rating, black_rating)
-        black_expected = 1 - white_expected
+        # Record final ratings in history
+        final_white = self.ratings[white_id]
+        final_black = self.ratings[black_id]
 
-        # Update ratings
-        white_new = white_rating + self.k_factor * (white_score - white_expected)
-        black_new = black_rating + self.k_factor * (black_score - black_expected)
+        timestamp = datetime.now().isoformat()
+        self._update_rating_history(white_id, final_white, timestamp)
+        self._update_rating_history(black_id, final_black, timestamp)
 
-        # Store new ratings
-        self.ratings[match_result.white_model] = white_new
-        self.ratings[match_result.black_model] = black_new
+        # Add match to history with final ratings
+        self.match_history.append(MatchResult(
+            white_model=white_id,
+            black_model=black_id,
+            white_wins=match_result.white_wins,
+            black_wins=match_result.black_wins,
+            draws=0,  # Yinsh has no draws
+            timestamp=timestamp,
+            avg_game_length=match_result.avg_game_length
+        ))
 
-        # Update history
-        self._update_rating_history(match_result.white_model, white_new)
-        self._update_rating_history(match_result.black_model, black_new)
-
-        # Add match to history
-        self.match_history.append(match_result)
+        # Log the overall rating changes
+        self.logger.info(f"Updated ratings after match:")
+        self.logger.info(f"  {white_id}: {final_white:.1f}")
+        self.logger.info(f"  {black_id}: {final_black:.1f}")
 
         # Save updated data
         self._save_data()
-
-        self.logger.info(f"Updated ratings after match:")
-        self.logger.info(f"  {match_result.white_model}: {white_rating:.1f} -> {white_new:.1f}")
-        self.logger.info(f"  {match_result.black_model}: {black_rating:.1f} -> {black_new:.1f}")
 
     def get_rating_history(self, model_id: str) -> List[Tuple[str, float]]:
         """Get rating history for a model."""

@@ -164,14 +164,11 @@ class NetworkWrapper:
             self.logger.error(f"Error saving model: {str(e)}")
 
     def load_model(self, path: str):
-        """Load model weights from file."""
         try:
-            self.network.load_state_dict(
-                torch.load(path, map_location=self.device)
-            )
-            self.logger.info(f"Model loaded from {path}")
+            state_dict = torch.load(path, map_location=self.device)
+            self.network.load_state_dict(state_dict, strict=False)
         except Exception as e:
-            self.logger.error(f"Error loading model: {str(e)}")
+            raise RuntimeError(f"Failed to load model: {e}")
 
     def export_to_coreml(self, path: str):
         """Export model to CoreML format."""
