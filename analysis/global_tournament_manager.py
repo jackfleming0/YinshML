@@ -216,17 +216,24 @@ class GlobalTournamentManager:
 
         return results
 
-    def update_elo(self, white_id: str, black_id: str, white_score: float, k_factor: float = 32.0):
+    def update_elo(self, white_id: str, black_id: str, white_score: float, k_factor: float = 32.0,
+                   total_games: int = 0):
         white_rating = self.ratings["ratings"].get(white_id, 1500)
         black_rating = self.ratings["ratings"].get(black_id, 1500)
 
-        # Scale K-factor by game count and margin
-        games_multiplier = min(1.0, total_games / 20)  # Stabilize with more games
-        margin_multiplier = abs(white_score - 0.5) * 2  # Higher K for decisive results
-        adjusted_k = k_factor * games_multiplier * margin_multiplier
-
+        # Calculate expected score
         expected_white = 1 / (1 + 10 ** ((black_rating - white_rating) / 400))
-        rating_change = adjusted_k * (white_score - expected_white)
+
+        # Calculate change (using actual game results)
+        white_actual = white_score / total_games if total_games > 0 else 0.5
+
+        # Adjust K factor based on number of games and decisiveness
+        games_factor = min(1.0, total_games / 20)
+        margin_factor = abs(white_actual - expected_white)
+        adjusted_k = k_factor * games_factor * margin_factor
+
+        # Calculate rating changes
+        rating_change = adjusted_k * (white_actual - expected_white)
 
         new_white = white_rating + rating_change
         new_black = black_rating - rating_change
@@ -294,7 +301,8 @@ class GlobalTournamentManager:
             white_new, black_new = self.update_elo(
                 model1.tournament_id,
                 model2.tournament_id,
-                white_score
+                white_score,
+                total_games=results['completed_games']  # Pass in completed games
             )
 
             # Record match in history
@@ -325,9 +333,14 @@ class GlobalTournamentManager:
             with open(self.history_file, 'w') as f:
                 json.dump(self.match_history, f, indent=2)
 
+            start_white = self.ratings["ratings"][model1.tournament_id]
+            start_black = self.ratings["ratings"][model2.tournament_id]
+
             print(f"Results: White wins: {results['white_wins']}, Black wins: {results['black_wins']}")
-            print(f"White ELO: {white_new:.1f} ({white_new - self.ratings['ratings'][model1.tournament_id]:+.1f})")
-            print(f"Black ELO: {black_new:.1f} ({black_new - self.ratings['ratings'][model2.tournament_id]:+.1f})")
+            # print(f"White ELO: {white_new:.1f} ({white_new - self.ratings['ratings'][model1.tournament_id]:+.1f})")
+            # print(f"Black ELO: {black_new:.1f} ({black_new - self.ratings['ratings'][model2.tournament_id]:+.1f})")
+            print(f"White ELO: {white_new:.1f} ({white_new - start_white:+.1f})")
+            print(f"Black ELO: {black_new:.1f} ({black_new - start_black:+.1f})")
 
         # Print summary of skipped matches
         if skipped_matches:
