@@ -163,10 +163,30 @@ class NetworkWrapper:
         except Exception as e:
             self.logger.error(f"Error saving model: {str(e)}")
 
+    # def load_model(self, path: str):
+    #     try:
+    #         state_dict = torch.load(path, map_location=self.device)
+    #         self.network.load_state_dict(state_dict, strict=False)
+    #     except Exception as e:
+    #         raise RuntimeError(f"Failed to load model: {e}")
+
     def load_model(self, path: str):
+        """Load model with architecture adaptation."""
         try:
+            # Load checkpoint
             state_dict = torch.load(path, map_location=self.device)
-            self.network.load_state_dict(state_dict, strict=False)
+
+            # Filter out incompatible layers, keeping only matching shapes
+            compatible_state_dict = {}
+            model_state = self.network.state_dict()
+
+            for key, param in state_dict.items():
+                if key in model_state and param.shape == model_state[key].shape:
+                    compatible_state_dict[key] = param
+
+            # Load compatible weights
+            self.network.load_state_dict(compatible_state_dict, strict=False)
+
         except Exception as e:
             raise RuntimeError(f"Failed to load model: {e}")
 

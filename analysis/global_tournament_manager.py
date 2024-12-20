@@ -113,6 +113,20 @@ class GlobalTournamentManager:
 
         return sorted(models, key=lambda m: (m.config_name, m.iteration))
 
+    def reset_ratings(self):
+        """Reset all ratings back to 1500 at start of tournament."""
+        self.ratings = {
+            "ratings": {},
+            "last_updated": datetime.now().isoformat(),
+            "total_games": 0
+        }
+        self.match_history = []
+
+        # Save clean state
+        self.save_ratings()
+        with open(self.history_file, 'w') as f:
+            json.dump(self.match_history, f, indent=2)
+
     def play_match(self, white_model: ModelInfo, black_model: ModelInfo,
                    num_games: int = 10) -> dict:
         """Play a match between two models."""
@@ -120,25 +134,9 @@ class GlobalTournamentManager:
         from yinsh_ml.game.game_state import GameState
         from yinsh_ml.game.constants import Player
 
-        # Load models with error handling
         try:
-            # Check compatibility first
-            if not self._check_network_compatibility(white_model, black_model):
-                print(f"Match skipped due to incompatible architectures")
-                return {
-                    'white_wins': 0,
-                    'black_wins': 0,
-                    'total_games': 0,
-                    'avg_game_length': 0,
-                    'game_lengths': [],
-                    'error': 'Incompatible architectures',
-                    'skipped': True
-                }
-
-            # Then load models if compatible
             white = NetworkWrapper(model_path=str(white_model.file_path))
             black = NetworkWrapper(model_path=str(black_model.file_path))
-
         except Exception as e:
             print(f"Model loading failed: {white_model.tournament_id} vs {black_model.tournament_id}")
             print(f"Error: {e}")
@@ -155,12 +153,54 @@ class GlobalTournamentManager:
         results = {
             'white_wins': 0,
             'black_wins': 0,
-            'completed_games': 0,  # Add this
+            'completed_games': 0,
             'total_games': num_games,
             'avg_game_length': 0,
             'game_lengths': [],
             'skipped': False
         }
+
+        # # Load models with error handling
+        # try:
+        #     # Check compatibility first
+        #     if not self._check_network_compatibility(white_model, black_model):
+        #         print(f"Match skipped due to incompatible architectures")
+        #         return {
+        #             'white_wins': 0,
+        #             'black_wins': 0,
+        #             'total_games': 0,
+        #             'avg_game_length': 0,
+        #             'game_lengths': [],
+        #             'error': 'Incompatible architectures',
+        #             'skipped': True
+        #         }
+        #
+        #     # Then load models if compatible
+        #     white = NetworkWrapper(model_path=str(white_model.file_path))
+        #     black = NetworkWrapper(model_path=str(black_model.file_path))
+        #
+        # except Exception as e:
+        #     print(f"Model loading failed: {white_model.tournament_id} vs {black_model.tournament_id}")
+        #     print(f"Error: {e}")
+        #     return {
+        #         'white_wins': 0,
+        #         'black_wins': 0,
+        #         'total_games': 0,
+        #         'avg_game_length': 0,
+        #         'game_lengths': [],
+        #         'error': str(e),
+        #         'skipped': True
+        #     }
+        #
+        # results = {
+        #     'white_wins': 0,
+        #     'black_wins': 0,
+        #     'completed_games': 0,  # Add this
+        #     'total_games': num_games,
+        #     'avg_game_length': 0,
+        #     'game_lengths': [],
+        #     'skipped': False
+        # }
 
         total_moves = 0
         for game_num in range(num_games):
@@ -269,10 +309,10 @@ class GlobalTournamentManager:
         except Exception as e:
             print(f"Error saving ratings: {e}")
 
-
     def run_tournament(self, sampled_models: List[ModelInfo], games_per_match: int = 10):
         """Run full tournament with sampled models."""
         print("\nStarting Tournament:")
+        self.reset_ratings()  # Reset at start
         pairings = self.generate_pairings(sampled_models)
         total_matches = len(pairings)
         skipped_matches = []
@@ -295,9 +335,13 @@ class GlobalTournamentManager:
                 print("No valid games played, skipping rating update")
                 continue
 
+            # Store starting ratings before any updates
+            start_white = self.ratings["ratings"].get(model1.tournament_id, 1500)
+            start_black = self.ratings["ratings"].get(model2.tournament_id, 1500)
+
             white_score = results['white_wins'] / total_games
 
-            # Update ELO ratings
+            # Update ELO ratings once
             white_new, black_new = self.update_elo(
                 model1.tournament_id,
                 model2.tournament_id,
@@ -305,19 +349,19 @@ class GlobalTournamentManager:
                 total_games=results['completed_games']  # Pass in completed games
             )
 
-            # Record match in history
+            # Record match in history using stored start ratings
             match_record = {
                 'timestamp': datetime.now().isoformat(),
                 'white': {
                     'id': model1.tournament_id,
                     'config': model1.config_name,
-                    'start_rating': self.ratings["ratings"][model1.tournament_id],
+                    'start_rating': start_white,
                     'end_rating': white_new
                 },
                 'black': {
                     'id': model2.tournament_id,
                     'config': model2.config_name,
-                    'start_rating': self.ratings["ratings"][model2.tournament_id],
+                    'start_rating': start_black,
                     'end_rating': black_new
                 },
                 'results': {
@@ -333,12 +377,7 @@ class GlobalTournamentManager:
             with open(self.history_file, 'w') as f:
                 json.dump(self.match_history, f, indent=2)
 
-            start_white = self.ratings["ratings"][model1.tournament_id]
-            start_black = self.ratings["ratings"][model2.tournament_id]
-
             print(f"Results: White wins: {results['white_wins']}, Black wins: {results['black_wins']}")
-            # print(f"White ELO: {white_new:.1f} ({white_new - self.ratings['ratings'][model1.tournament_id]:+.1f})")
-            # print(f"Black ELO: {black_new:.1f} ({black_new - self.ratings['ratings'][model2.tournament_id]:+.1f})")
             print(f"White ELO: {white_new:.1f} ({white_new - start_white:+.1f})")
             print(f"Black ELO: {black_new:.1f} ({black_new - start_black:+.1f})")
 
