@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from collections import defaultdict
 import argparse
+import time
 from yinsh_ml.network.wrapper import NetworkWrapper
 
 @dataclass
@@ -310,9 +311,9 @@ class GlobalTournamentManager:
             print(f"Error saving ratings: {e}")
 
     def run_tournament(self, sampled_models: List[ModelInfo], games_per_match: int = 10):
-        """Run full tournament with sampled models."""
+        """Run tournament with per-game ELO updates and timing."""
         print("\nStarting Tournament:")
-        self.reset_ratings()  # Reset at start
+        self.reset_ratings()
         pairings = self.generate_pairings(sampled_models)
         total_matches = len(pairings)
         skipped_matches = []
@@ -321,10 +322,9 @@ class GlobalTournamentManager:
             print(f"\nMatch {idx}/{total_matches}:")
             print(f"{model1.tournament_id} vs {model2.tournament_id}")
 
-            # Play match
+            series_start = time.time()
             results = self.play_match(model1, model2, games_per_match)
 
-            # Handle skipped matches
             if results.get('skipped', False):
                 skipped_matches.append((model1.tournament_id, model2.tournament_id))
                 print("Match skipped due to incompatibility")
@@ -335,34 +335,32 @@ class GlobalTournamentManager:
                 print("No valid games played, skipping rating update")
                 continue
 
-            # Store starting ratings before any updates
             start_white = self.ratings["ratings"].get(model1.tournament_id, 1500)
             start_black = self.ratings["ratings"].get(model2.tournament_id, 1500)
 
-            white_score = results['white_wins'] / total_games
+            # Update ELO for each game individually
+            for i in range(results['white_wins']):
+                self.update_elo(model1.tournament_id, model2.tournament_id, 1.0, total_games=1)
+            for i in range(results['black_wins']):
+                self.update_elo(model1.tournament_id, model2.tournament_id, 0.0, total_games=1)
 
-            # Update ELO ratings once
-            white_new, black_new = self.update_elo(
-                model1.tournament_id,
-                model2.tournament_id,
-                white_score,
-                total_games=results['completed_games']  # Pass in completed games
-            )
+            end_white = self.ratings["ratings"][model1.tournament_id]
+            end_black = self.ratings["ratings"][model2.tournament_id]
 
-            # Record match in history using stored start ratings
+            # Record match history
             match_record = {
                 'timestamp': datetime.now().isoformat(),
                 'white': {
                     'id': model1.tournament_id,
                     'config': model1.config_name,
                     'start_rating': start_white,
-                    'end_rating': white_new
+                    'end_rating': end_white
                 },
                 'black': {
                     'id': model2.tournament_id,
                     'config': model2.config_name,
                     'start_rating': start_black,
-                    'end_rating': black_new
+                    'end_rating': end_black
                 },
                 'results': {
                     'white_wins': results['white_wins'],
@@ -372,14 +370,20 @@ class GlobalTournamentManager:
             }
             self.match_history.append(match_record)
 
-            # Save after each match
+            # Save state
             self.save_ratings()
             with open(self.history_file, 'w') as f:
                 json.dump(self.match_history, f, indent=2)
 
+            # Calculate elapsed time
+            elapsed = time.time() - series_start
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+
             print(f"Results: White wins: {results['white_wins']}, Black wins: {results['black_wins']}")
-            print(f"White ELO: {white_new:.1f} ({white_new - start_white:+.1f})")
-            print(f"Black ELO: {black_new:.1f} ({black_new - start_black:+.1f})")
+            print(f"White ELO: {end_white:.1f} ({end_white - start_white:+.1f})")
+            print(f"Black ELO: {end_black:.1f} ({end_black - start_black:+.1f})")
+            print(f"Series took {minutes} minutes, {seconds:02d} seconds")
 
         # Print summary of skipped matches
         if skipped_matches:
