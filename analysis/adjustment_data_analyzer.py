@@ -11,13 +11,18 @@ import argparse
 
 class AdjustmentDataAnalyzer:
     def __init__(self, metrics_dir: Path, checkpoints_dir: Path):
-        self.metrics_dir = metrics_dir if isinstance(metrics_dir, Path) else Path(metrics_dir)
-        self.checkpoints_dir = checkpoints_dir if isinstance(checkpoints_dir, Path) else Path(checkpoints_dir)
+        # Get project root (parent of analysis directory)
+        project_root = Path(__file__).parent.parent
 
-        print(f"Metrics directory: {self.metrics_dir}")
-        print(f"Metrics directory exists: {self.metrics_dir.exists()}")
-        if self.metrics_dir.exists():
-            print("Contents:", list(self.metrics_dir.glob("*")))
+        # Build absolute paths
+        self.metrics_dir = project_root / metrics_dir
+        self.checkpoints_dir = project_root / checkpoints_dir
+
+        print(f"Project root: {project_root}")
+        print(f"Full metrics path: {self.metrics_dir}")
+
+        if not self.metrics_dir.exists():
+            raise ValueError(f"Metrics directory not found: {self.metrics_dir}")
 
     def analyze_value_head_performance(self) -> Dict:
         metrics = self._load_metrics()
@@ -29,21 +34,29 @@ class AdjustmentDataAnalyzer:
 
         for iteration_data in metrics:
             for game in iteration_data['metrics']['games']:
+                # Use phases directly from the data structure
                 for phase, values in game['phase_values'].items():
-                    # Track value prediction flips
+                    if not values:
+                        continue
+
                     flips = sum(1 for i in range(len(values) - 1)
                                 if np.sign(values[i]) != np.sign(values[i + 1]))
                     analysis['value_flips'][phase].append(flips)
 
-                    # Track accuracy (compare with game outcome)
                     final_value = values[-1]
                     correct_prediction = (final_value > 0) == (game['outcome'] > 0)
                     analysis['phase_accuracy'][phase].append(float(correct_prediction))
 
-                # Track confidence from temperature data
-                for move_stat in game['temperature_data']['move_stats']:
-                    phase = self._determine_phase(move_stat['move_number'])
-                    analysis['phase_confidence'][phase].append(move_stat['top_prob'])
+                    # Map confidence values to corresponding phase
+                    move_offset = 0 if phase == 'placement' else (
+                        10 if phase == 'main_game' else len(game['phase_values']['placement']) +
+                                                        len(game['phase_values']['main_game']))
+
+                    for i, value in enumerate(values):
+                        move_num = move_offset + i
+                        if move_num < len(game['temperature_data']['move_stats']):
+                            analysis['phase_confidence'][phase].append(
+                                game['temperature_data']['move_stats'][move_num]['top_prob'])
 
         return analysis
 
@@ -83,28 +96,22 @@ class AdjustmentDataAnalyzer:
         return fig
 
     def _load_metrics(self) -> List[Dict]:
+        """Load and validate metrics files."""
         metrics = []
-
-        # Handle nested metrics directory
-        full_metrics_path = self.metrics_dir / "metrics"
-        if full_metrics_path.exists():
-            search_path = full_metrics_path
-        else:
-            search_path = self.metrics_dir
-
-        print(f"Searching in: {search_path}")
-        print(f"Contents: {list(search_path.glob('*'))}")
-
-        for file in sorted(search_path.glob("iteration_*.json")):
+        for file in sorted(self.metrics_dir.glob("iteration_*.json")):
             try:
                 with open(file) as f:
-                    metrics.append(json.load(f))
+                    data = json.load(f)
+                    if 'metrics' in data and 'games' in data['metrics']:
+                        metrics.append(data)
             except Exception as e:
                 print(f"Error loading {file}: {e}")
 
-        return metrics
+        if not metrics:
+            print("No valid metrics files found")
+            return []
 
-        print(f"Loaded {len(metrics)} files")
+        print(f"Loaded {len(metrics)} metric files")
         return metrics
 
     def analyze_move_selection_patterns(self) -> Dict:
