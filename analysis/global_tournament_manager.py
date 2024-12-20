@@ -258,23 +258,19 @@ class GlobalTournamentManager:
         return results
 
     def update_elo(self, white_id: str, black_id: str, white_score: float, k_factor: float = 32.0,
-                   total_games: int = 0):
+                   total_games: int = 1):
+        """Update ELO ratings after a game/match."""
         white_rating = self.ratings["ratings"].get(white_id, 1500)
         black_rating = self.ratings["ratings"].get(black_id, 1500)
 
-        # Calculate expected score
         expected_white = 1 / (1 + 10 ** ((black_rating - white_rating) / 400))
 
-        # Calculate change (using actual game results)
-        white_actual = white_score / total_games if total_games > 0 else 0.5
+        # Standard K-factor of 32 for regular games
+        # Don't reduce K-factor as much for decisive results
+        margin_factor = 1 + abs(white_score - expected_white)  # Increase impact of surprising results
+        adjusted_k = k_factor * margin_factor
 
-        # Adjust K factor based on number of games and decisiveness
-        games_factor = min(1.0, total_games / 20)
-        margin_factor = abs(white_actual - expected_white)
-        adjusted_k = k_factor * games_factor * margin_factor
-
-        # Calculate rating changes
-        rating_change = adjusted_k * (white_actual - expected_white)
+        rating_change = adjusted_k * (white_score - expected_white)
 
         new_white = white_rating + rating_change
         new_black = black_rating - rating_change
