@@ -493,6 +493,35 @@ COMBINED_EXPERIMENTS = {
         temp_schedule="cosine"  # Smoother transition
     ),
 
+    "m3_final_revised2": CombinedConfig(
+
+        # one last run on the good computer to see how this bad boy does
+
+        # Training parameters
+        num_iterations=50,
+        games_per_iteration=120,
+        epochs_per_iteration=8,
+        batches_per_epoch=75,
+
+        # Learning rates
+        lr=0.0003,  # Modest increase for learning
+        weight_decay=5e-4,  # Increased regularization
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=2000,
+
+        # MCTS parameters
+        num_simulations=300,  # Moderate simulation depth
+        c_puct=2.0,  # Balanced exploration
+        dirichlet_alpha=0.4,
+        value_weight=0.7,  # Slight emphasis on value prediction
+
+        # Temperature parameters - accounting for move space complexity
+        initial_temp=3.0,  # Higher early exploration
+        final_temp=0.2,  # Strong final exploitation
+        temp_schedule="cosine"  # Smoother transition
+    ),
+
     "attention_config": CombinedConfig(
 
         # The attention_config builds on our learnings from value_head_config2 and addresses its limitations:
