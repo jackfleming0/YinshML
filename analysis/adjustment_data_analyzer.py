@@ -6,6 +6,8 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy.stats import pearsonr
+
 import argparse
 
 
@@ -29,7 +31,9 @@ class AdjustmentDataAnalyzer:
         analysis = {
             'phase_accuracy': defaultdict(list),
             'phase_confidence': defaultdict(list),
-            'value_flips': defaultdict(list)
+            'value_flips': defaultdict(list),
+            'confidence_accuracy_correlation': defaultdict(list),
+            'phase_performance': defaultdict(lambda: {'confidence': [], 'accuracy': [], 'calibration_error': []})
         }
 
         for iteration_data in metrics:
@@ -52,12 +56,29 @@ class AdjustmentDataAnalyzer:
                         10 if phase == 'main_game' else len(game['phase_values']['placement']) +
                                                         len(game['phase_values']['main_game']))
 
+                    confidence_values = []
                     for i, value in enumerate(values):
                         move_num = move_offset + i
                         if move_num < len(game['temperature_data']['move_stats']):
-                            analysis['phase_confidence'][phase].append(
+                            confidence_values.append(
                                 game['temperature_data']['move_stats'][move_num]['top_prob'])
 
+                    # Calculate and store confidence-accuracy correlation for each game/phase
+                    if len(confidence_values) >= 2:
+                        correlation, _ = pearsonr(confidence_values,
+                                                  [float(correct_prediction)] * len(confidence_values))
+                        analysis['confidence_accuracy_correlation'][phase].append(correlation)
+
+                    # Store accuracy and confidence values for calibration
+                    for i, value in enumerate(values):
+                        move_num = move_offset + i
+                        if move_num < len(game['temperature_data']['move_stats']):
+                            analysis['phase_performance'][phase]['confidence'].append(
+                                game['temperature_data']['move_stats'][move_num]['top_prob'])
+                            analysis['phase_performance'][phase]['accuracy'].append(float(correct_prediction))
+                            analysis['phase_performance'][phase]['calibration_error'].append(
+                                abs(float(correct_prediction) - game['temperature_data']['move_stats'][move_num][
+                                    'top_prob']))
         return analysis
 
     def plot_value_head_analysis(self, analysis: Dict):
@@ -65,28 +86,29 @@ class AdjustmentDataAnalyzer:
         fig, axes = plt.subplots(2, 2, figsize=(15, 15))
 
         # Plot 1: Confidence-Accuracy Correlation Over Time
-        for phase, correlations in analysis['confidence_accuracy_correlation'].items():
+        confidence_accuracy_correlation = analysis.get('confidence_accuracy_correlation', {})
+        for phase, correlations in confidence_accuracy_correlation.items():
             axes[0, 0].plot(correlations, label=phase)
         axes[0, 0].set_title('Confidence-Accuracy Correlation')
         axes[0, 0].set_ylabel('Correlation')
         axes[0, 0].legend()
 
         # Plot 2: Value Prediction Flips
-        for phase, flips in analysis['value_flips'].items():
+        for phase, flips in analysis.get('value_flips', {}).items():
             axes[0, 1].plot(flips, label=phase)
         axes[0, 1].set_title('Value Prediction Flips per Game')
         axes[0, 1].legend()
 
         # Plot 3: Calibration Error
-        for phase, data in analysis['phase_performance'].items():
-            axes[1, 0].plot(data['calibration_error'], label=phase)
+        for phase, data in analysis.get('phase_performance', {}).items():
+            axes[1, 0].plot(data.get('calibration_error', []), label=phase)
         axes[1, 0].set_title('Calibration Error by Phase')
         axes[1, 0].set_ylabel('|Accuracy - Confidence|')
         axes[1, 0].legend()
 
         # Plot 4: Accuracy vs Confidence Scatter
-        for phase, data in analysis['phase_performance'].items():
-            axes[1, 1].scatter(data['confidence'], data['accuracy'],
+        for phase, data in analysis.get('phase_performance', {}).items():
+            axes[1, 1].scatter(data.get('confidence', []), data.get('accuracy', []),
                                label=phase, alpha=0.5)
         axes[1, 1].plot([0, 1], [0, 1], 'k--', alpha=0.3)  # Perfect calibration line
         axes[1, 1].set_title('Accuracy vs Confidence')
@@ -119,7 +141,10 @@ class AdjustmentDataAnalyzer:
         analysis = {
             'move_temps': defaultdict(list),
             'move_entropies': defaultdict(list),
-            'move_times': defaultdict(list)
+            'move_times': defaultdict(list),
+            'branching_factors': defaultdict(list),
+            'move_selection': defaultdict(lambda: defaultdict(int)),
+            'timing': defaultdict(list)
         }
 
         for iteration_data in metrics:
@@ -131,6 +156,17 @@ class AdjustmentDataAnalyzer:
                     analysis['move_entropies'][phase].append(move_stat['entropy'])
                     analysis['move_times'][phase].append(move_stat['move_time'])
 
+                    # Check if valid_moves exists, default branching factor to 0 if not
+                    if 'valid_moves' in move_stat:
+                        analysis['branching_factors'][phase].append(len(move_stat['valid_moves']))
+                    else:
+                        analysis['branching_factors'][phase].append(0)
+
+                    analysis['timing'][phase].append(move_stat['move_time'])
+
+                    move_type = move_stat.get('move_type', 'Unknown')
+                    analysis['move_selection'][phase][move_type] += 1
+
         return analysis
 
     def _calculate_move_selection_summary(self, analysis: Dict) -> Dict:
@@ -139,14 +175,14 @@ class AdjustmentDataAnalyzer:
 
         for phase in analysis['branching_factors']:
             bf_data = analysis['branching_factors'][phase]
-            temp_data = analysis['move_temperatures'][phase]
+            temp_data = analysis['move_temps'][phase]
             time_data = analysis['timing'][phase]
 
             summary[phase] = {
-                'avg_branching_factor': np.mean(bf_data),
-                'max_branching_factor': np.max(bf_data),
-                'avg_temperature': np.mean(temp_data),
-                'avg_move_time': np.mean(time_data),
+                'avg_branching_factor': int(np.mean(bf_data)),
+                'max_branching_factor': int(np.max(bf_data)),
+                'avg_temperature': float(np.mean(temp_data)),
+                'avg_move_time': float(np.mean(time_data)),
                 'move_type_distribution': dict(analysis['move_selection'][phase])
             }
 
@@ -165,8 +201,8 @@ class AdjustmentDataAnalyzer:
         axes[0, 0].legend()
 
         # Plot 2: Temperature Evolution
-        for phase in analysis['move_temperatures']:
-            axes[0, 1].plot(analysis['move_temperatures'][phase],
+        for phase in analysis['move_temps']:
+            axes[0, 1].plot(analysis['move_temps'][phase],
                             label=phase, alpha=0.7)
         axes[0, 1].set_title('Temperature Evolution')
         axes[0, 1].set_xlabel('Move Number')
@@ -237,7 +273,8 @@ class AdjustmentDataAnalyzer:
         analysis = {
             'game_lengths': [],
             'win_conditions': {'markers': 0, 'rings': 0},
-            'color_balance': {'white_wins': 0, 'black_wins': 0}
+            'color_balance': {'white_wins': 0, 'black_wins': 0},
+            'ring_removal_timing': []
         }
 
         for iteration_data in metrics:
@@ -246,8 +283,13 @@ class AdjustmentDataAnalyzer:
                 analysis['game_lengths'].append(game['length'])
 
                 # Win condition (inferring from final phase values)
-                if game['phase_values'].get('ring_removal'):
+                if 'ring_removal' in game['phase_values']:
                     analysis['win_conditions']['rings'] += 1
+
+                    # Calculate timing of ring removals
+                    if game['phase_values'].get('ring_removal') is not None:
+                        analysis['ring_removal_timing'].append(
+                            len(game['phase_values']['placement']) + len(game['phase_values']['main_game']))
                 else:
                     analysis['win_conditions']['markers'] += 1
 
@@ -313,24 +355,42 @@ class AdjustmentDataAnalyzer:
         axes[0, 1].set_ylabel('Percentage of Games')
 
         # Plot 3: Color Balance Over Time
-        color_data = pd.DataFrame(analysis['color_balance'])
-        color_data['ratio'] = color_data['white_wins'] / (color_data['white_wins'] + color_data['black_wins'])
-        axes[1, 0].plot(color_data['ratio'])
-        axes[1, 0].axhline(0.5, color='r', linestyle='--', label='Perfect Balance')
-        axes[1, 0].set_title('Color Balance')
-        axes[1, 0].set_ylabel('White Win Rate')
-        axes[1, 0].legend()
+        color_balance = analysis['color_balance']
+        total_wins = color_balance['white_wins'] + color_balance['black_wins']
+
+        if total_wins > 0:
+            white_win_ratio = color_balance['white_wins'] / total_wins
+            axes[1, 0].axhline(white_win_ratio, color='b', label=f"White Win Ratio: {white_win_ratio:.2f}")
+            axes[1, 0].axhline(0.5, color='r', linestyle='--', label='Perfect Balance')
+            axes[1, 0].set_title('Color Balance')
+            axes[1, 0].set_ylabel('White Win Rate')
+            axes[1, 0].legend()
+        else:
+            axes[1, 0].set_title('Color Balance (No Wins Yet)')
 
         # Plot 4: Ring Removal Timing
-        sns.histplot(data=analysis['ring_removal_timing'], ax=axes[1, 1])
-        axes[1, 1].axvline(summary['ring_removal_timing']['mean'], color='r',
-                           linestyle='--', label='Mean Timing')
-        axes[1, 1].set_title('Ring Removal Timing Distribution')
-        axes[1, 1].set_xlabel('Move Number')
-        axes[1, 1].legend()
+        if 'ring_removal_timing' in analysis and summary.get('ring_removal_timing'):
+            sns.histplot(data=analysis['ring_removal_timing'], ax=axes[1, 1])
+            axes[1, 1].axvline(summary['ring_removal_timing']['mean'], color='r',
+                               linestyle='--', label='Mean Timing')
+            axes[1, 1].set_title('Ring Removal Timing Distribution')
+            axes[1, 1].set_xlabel('Move Number')
+            axes[1, 1].legend()
+        else:
+            axes[1, 1].set_title('Ring Removal Timing Distribution (No Data)')
 
         plt.tight_layout()
         return fig
+
+    def _determine_phase(self, move_number: int) -> str:
+        """Determine phase of the game based on move number."""
+        if move_number <= 10:
+            return 'placement'
+        elif move_number <= 100:  # assuming max of 90 main game moves
+            return 'main_game'
+        else:
+            return 'ring_removal'
+
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze YINSH training data for adjustments')
@@ -356,7 +416,8 @@ def main():
     value_fig.savefig(args.output_dir / 'value_head_analysis.png')
 
     print("\nAnalyzing Move Selection Patterns...")
-    move_analysis, move_summary = analyzer.analyze_move_selection_patterns()
+    move_analysis = analyzer.analyze_move_selection_patterns()
+    move_summary = analyzer._calculate_move_selection_summary(move_analysis)
     move_fig = analyzer.plot_move_selection_analysis(move_analysis, move_summary)
     move_fig.savefig(args.output_dir / 'move_selection_analysis.png')
 
@@ -389,6 +450,7 @@ def main():
             f.write(f"{i}. {rec}\n")
 
     print(f"\nAnalysis complete. Results saved to {args.output_dir}")
+
 
 if __name__ == "__main__":
     main()
