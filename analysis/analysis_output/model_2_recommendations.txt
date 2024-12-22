@@ -1,6 +1,0 @@
-=== Hyperparameter Adjustment Recommendations ===
-1. High average calibration error (0.59). Consider a calibration-specific loss or more rigorous training of the value head.
-2. Low average temperature in main game phase (0.21). Consider a slower temperature annealing schedule.
-3. Low win rate with markers. Consider adding a reward for creating lines of 3 or 4 markers to incentivize this win condition.
-4. Low average branching factor in placement phase (0.0). Investigate if the model is exploring enough valid moves. Consider increasing the temperature.
-5. Long average move time in main game phase (143.6s). Consider optimizing the move selection algorithm or adjusting search depth.

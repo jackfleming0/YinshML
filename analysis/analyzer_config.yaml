@@ -1,8 +1,11 @@
 ranking_criteria:
-  avg_calibration_error: ['lower', 0.4]
-  white_win_rate: ['higher', 0.3]
-  avg_value_flips: ['lower', 0.2]
-  avg_main_game_temperature: ['higher', 0.1]
+  avg_calibration_error: ['lower', 0.3]  # Lower is better (weight: 0.3)
+  avg_score: ['higher', 0.3]            # Higher is better (weight: 0.3)
+  white_win_rate: ['higher', 0.1]      # Higher is better (weight: 0.1)
+  avg_value_flips: ['lower', 0.1]      # Lower is better (weight: 0.1)
+  avg_main_game_temperature: ['higher', 0.05] # Higher is better (weight: 0.05)
+  avg_game_length: ['lower', 0.05] # Lower is better (weight: 0.05)
+  std_score: ['lower', 0.1] # Lower is better (weight: 0.1)
 
 comparison_metrics:
   - avg_calibration_error

@@ -1,3 +1,0 @@
-=== Model Rankings ===
-Rank 1: Model (Score: -0.42)
-Rank 2: Model (Score: -1.20)
