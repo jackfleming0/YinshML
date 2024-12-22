@@ -1,0 +1,12 @@
+ranking_criteria:
+  avg_calibration_error: ['lower', 0.4]
+  white_win_rate: ['higher', 0.3]
+  avg_value_flips: ['lower', 0.2]
+  avg_main_game_temperature: ['higher', 0.1]
+
+comparison_metrics:
+  - avg_calibration_error
+  - avg_value_flips
+  - white_win_rate
+  - avg_main_game_temperature
+  - avg_game_length
