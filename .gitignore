@@ -18,6 +18,8 @@
 !test_experiments.py
 !analysis/
 !analysis/**
+analysis/analysis_output
+
 
 # Python virtual environment
 .venv/
