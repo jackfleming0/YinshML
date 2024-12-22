@@ -1,0 +1,6 @@
+=== Hyperparameter Adjustment Recommendations ===
+1. High average calibration error (0.47). Consider a calibration-specific loss or more rigorous training of the value head.
+2. High average value flips (6.01). Consider increasing training iterations or adjusting the learning rate schedule.
+3. Low win rate with markers. Consider adding a reward for creating lines of 3 or 4 markers to incentivize this win condition.
+4. Low average branching factor in placement phase (0.0). Investigate if the model is exploring enough valid moves. Consider increasing the temperature.
+5. Long average move time in main game phase (303.3s). Consider optimizing the move selection algorithm or adjusting search depth.

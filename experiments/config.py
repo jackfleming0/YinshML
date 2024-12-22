@@ -495,7 +495,7 @@ COMBINED_EXPERIMENTS = {
 
     "m3_final_revised2": CombinedConfig(
 
-        # one last run on the good computer to see how this bad boy does
+        # second last run on the good computer to see how this bad boy does
 
         # Training parameters
         num_iterations=50,
