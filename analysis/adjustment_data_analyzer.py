@@ -89,9 +89,17 @@ class AdjustmentDataAnalyzer:
         axes[0, 0].set_ylabel('Correlation')
         axes[0, 0].legend()
 
+        global_min_flip = float('inf')
+        global_max_flip = float('-inf')
+        for phase, flips in analysis.get('value_flips', {}).items():
+            if flips:
+                global_min_flip = min(global_min_flip, min(flips))
+                global_max_flip = max(global_max_flip, max(flips))
+
         for phase, flips in analysis.get('value_flips', {}).items():
             if flips:
                 axes[0, 1].plot(flips, label=phase)
+                axes[0, 1].set_xlim([global_min_flip, global_max_flip])  # Set x-axis limits (ADD THIS LINE)
         axes[0, 1].set_title('Value Prediction Flips per Game')
         axes[0, 1].legend()
 
@@ -264,28 +272,34 @@ class AdjustmentDataAnalyzer:
 
         analysis = {
             'game_lengths': [],
-            'win_conditions': {'markers': 0, 'rings': 0},
+            'win_conditions': {'markers': 0, 'rings': 0},  # This is where I made the mistake
             'color_balance': {'white_wins': 0, 'black_wins': 0},
-            'ring_removal_timing': []
+            'ring_removal_timing': [],
+            'scores': []  # Track scores when rows of 5 are formed
         }
 
         for iteration_data in metrics:
             for game in iteration_data['metrics']['games']:
                 analysis['game_lengths'].append(game['length'])
 
+                # Win condition (rings removed)
                 if 'ring_removal' in game['phase_values']:
                     analysis['win_conditions']['rings'] += 1
 
+                    # Timing of first ring removal
                     if game['phase_values'].get('ring_removal') is not None:
                         analysis['ring_removal_timing'].append(
                             len(game['phase_values']['placement']) + len(game['phase_values']['main_game']))
-                else:
-                    analysis['win_conditions']['markers'] += 1
 
+                # Color balance (who removed the third ring)
                 if game['outcome'] == 1:
                     analysis['color_balance']['white_wins'] += 1
                 elif game['outcome'] == -1:
                     analysis['color_balance']['black_wins'] += 1
+
+                # Track scores
+                if 'score' in game:
+                    analysis['scores'].append(game['score'])
 
         return analysis, self._calculate_game_structure_summary(analysis)
 
@@ -305,13 +319,13 @@ class AdjustmentDataAnalyzer:
                     k: v / total_games for k, v in analysis['win_conditions'].items()
                 },
                 'color_balance': {
-                    'white_win_rate': analysis['color_balance']['white_wins'] / total_games if
-                    analysis['color_balance'][
+                    'white_win_rate': analysis['color_balance']['white_wins'] / total_games if analysis['color_balance'][
                         'white_wins'] else 0,
-                    'black_win_rate': analysis['color_balance']['black_wins'] / total_games if
-                    analysis['color_balance'][
+                    'black_win_rate': analysis['color_balance']['black_wins'] / total_games if analysis['color_balance'][
                         'black_wins'] else 0
-                }
+                },
+                'avg_score': float(np.mean(analysis['scores'])) if analysis['scores'] else 0,  # Add average score
+                'std_score': float(np.std(analysis['scores'])) if analysis['scores'] else 0  # Add score standard deviation
             }
 
             if analysis.get('ring_removal_timing'):
@@ -327,8 +341,9 @@ class AdjustmentDataAnalyzer:
 
     def plot_game_structure_analysis(self, analysis: Dict, summary: Dict):
         """Visualize game structure patterns."""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 15))
+        fig, axes = plt.subplots(3, 2, figsize=(15, 20))  # Adjusted for an additional row
 
+        # Plot 1: Game Length Distribution
         if analysis['game_lengths']:
             sns.histplot(data=analysis['game_lengths'], ax=axes[0, 0])
             axes[0, 0].axvline(summary['avg_game_length'], color='r', linestyle='--',
@@ -336,15 +351,26 @@ class AdjustmentDataAnalyzer:
             axes[0, 0].set_title('Game Length Distribution')
             axes[0, 0].legend()
 
+        # Plot 2: Win Conditions (Rings Removed)
         win_cond_data = pd.DataFrame([
-            {'condition': k, 'percentage': v * 100}
+            {'condition': k, 'percentage': v * 100}  # Only rings can be a win condition
             for k, v in summary['win_condition_distribution'].items()
         ])
         if not win_cond_data.empty:
             sns.barplot(data=win_cond_data, x='condition', y='percentage', ax=axes[0, 1])
             axes[0, 1].set_title('Win Condition Distribution')
             axes[0, 1].set_ylabel('Percentage of Games')
+            axes[0, 1].set_ylim([0, 100])  # Set y-axis limits from 0 to 100
 
+            # Add the percentage text above the bars
+            for p in axes[0, 1].patches:
+                axes[0, 1].annotate(format(p.get_height(), '.1f'),
+                                    (p.get_x() + p.get_width() / 2., p.get_height()),
+                                    ha='center', va='center',
+                                    xytext=(0, 9),
+                                    textcoords='offset points')
+
+        # Plot 3: Color Balance
         color_balance = analysis['color_balance']
         total_wins = color_balance['white_wins'] + color_balance['black_wins']
 
@@ -358,6 +384,7 @@ class AdjustmentDataAnalyzer:
         else:
             axes[1, 0].set_title('Color Balance (No Wins Yet)')
 
+        # Plot 4: Ring Removal Timing
         if 'ring_removal_timing' in analysis and summary.get('ring_removal_timing'):
             sns.histplot(data=analysis['ring_removal_timing'], ax=axes[1, 1])
             axes[1, 1].axvline(summary['ring_removal_timing']['mean'], color='r',
@@ -367,6 +394,18 @@ class AdjustmentDataAnalyzer:
             axes[1, 1].legend()
         else:
             axes[1, 1].set_title('Ring Removal Timing Distribution (No Data)')
+
+        # Plot 5: Score Distribution (NEW)
+        if analysis['scores']:
+            sns.histplot(data=analysis['scores'], ax=axes[2, 0])
+            axes[2, 0].axvline(summary['avg_score'], color='r', linestyle='--',
+                               label=f'Mean Score: {summary["avg_score"]:.1f}')
+            axes[2, 0].set_title('Score Distribution')
+            axes[2, 0].set_xlabel('Score')
+            axes[2, 0].legend()
+
+        # Remove the empty subplot (axes[2, 1])
+        fig.delaxes(axes[2][1])
 
         plt.tight_layout()
         return fig
@@ -392,8 +431,8 @@ class AdjustmentDataAnalyzer:
             'avg_game_length': game_summary.get('avg_game_length', 0),
             'std_game_length': game_summary.get('std_game_length', 0),
             'white_win_rate': game_summary.get('color_balance', {}).get('white_win_rate', 0),
-            'markers_win_rate': game_summary.get('win_condition_distribution', {}).get('markers', 0),
             'rings_win_rate': game_summary.get('win_condition_distribution', {}).get('rings', 0),
+            # Now only tracks "rings"
             'avg_confidence_accuracy_correlation': np.mean(
                 [np.nanmean(val) for val in value_summary.get('confidence_accuracy_correlation', {}).values() if
                  val]),
@@ -410,7 +449,9 @@ class AdjustmentDataAnalyzer:
             'avg_ring_removal_temperature': move_summary.get('ring_removal', {}).get('avg_temperature', 0),
             'avg_placement_move_time': move_summary.get('placement', {}).get('avg_move_time', 0),
             'avg_main_game_move_time': move_summary.get('main_game', {}).get('avg_move_time', 0),
-            'avg_ring_removal_move_time': move_summary.get('ring_removal', {}).get('avg_move_time', 0)
+            'avg_ring_removal_move_time': move_summary.get('ring_removal', {}).get('avg_move_time', 0),
+            'avg_score': game_summary.get('avg_score', 0),  # Add average score
+            'std_score': game_summary.get('std_score', 0)  # Add score standard deviation
         }
         return summary
 
@@ -458,12 +499,6 @@ class AdjustmentDataAnalyzer:
                 "Consider a slower temperature annealing schedule."
             )
 
-        if analysis_summary['markers_win_rate'] < 0.1:
-            recommendations.append(
-                "Low win rate with markers. Consider adding a reward for creating lines of 3 or 4 markers "
-                "to incentivize this win condition."
-            )
-
         if analysis_summary['avg_placement_branching_factor'] < 10:
             recommendations.append(
                 f"Low average branching factor in placement phase ({analysis_summary['avg_placement_branching_factor']:.1f}). "
@@ -490,6 +525,12 @@ class AdjustmentDataAnalyzer:
         if analysis_summary['avg_game_length'] < 60:
             recommendations.append(
                 f"Games are shorter than average ({analysis_summary['avg_game_length']:.1f} moves). This could indicate premature convergence or a lack of exploration. Consider increasing the initial temperature or training for more iterations."
+            )
+
+        if analysis_summary['avg_score'] < 1:  # Add a threshold that makes sense for your game
+            recommendations.append(
+                f"Low average score ({analysis_summary['avg_score']:.2f}). "
+                "Consider adding rewards for forming lines of 3 or 4 to encourage scoring opportunities."
             )
 
         return recommendations
