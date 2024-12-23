@@ -29,6 +29,11 @@ class GameExperience:
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else (
+                "mps" if torch.backends.mps.is_available() else "cpu"
+            )
+        )
 
     def add_game(self, states: List[np.ndarray],
                  move_probs: List[np.ndarray],
@@ -54,11 +59,12 @@ class GameExperience:
         """Sample a random batch of experiences."""
         indices = np.random.choice(len(self.states), batch_size)
 
-        states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])  # Ensure float32
-        probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])  # Ensure float32
-        values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
+        # Explicitly create tensors on the specified device
+        states = torch.stack([torch.from_numpy(self.states[i]).float().to(self.device) for i in indices])
+        probs = torch.stack([torch.from_numpy(self.move_probs[i]).float().to(self.device) for i in indices])
+        values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32, device=self.device).unsqueeze(1)
 
-        return states, probs, values.unsqueeze(1)
+        return states, probs, values
 
 
 class YinshTrainer:
@@ -428,6 +434,9 @@ class YinshTrainer:
         }
 
         for batch in range(batches_per_epoch):
+            # Get data (now should be on the correct device thanks to sample_batch)
+            states, target_probs, target_values = self.experience.sample_batch(batch_size)
+
             p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
 
             # Add explicit logging of loss values

@@ -2,7 +2,7 @@
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 from enum import Enum
 from .constants import (
     Player, Position, PieceType, RINGS_PER_PLAYER,
@@ -16,6 +16,10 @@ import logging
 
 # Setup logger
 logger = logging.getLogger(__name__)
+
+# Forward declare GameState if necessary
+if TYPE_CHECKING:
+    from .game_state import GameState
 
 class StateEncoder:
     """Handles encoding and decoding of YINSH game states for ML model."""
@@ -40,6 +44,9 @@ class StateEncoder:
         self.position_to_index = {}
         self.index_to_position = {}
         self._initialize_position_mappings()
+        self.logger = logging.getLogger("StateEncoder")
+        self.logger.info(f"StateEncoder initialized with {self.total_moves} total moves:")
+
 
         # Channel indices
         self.CHANNELS = {
@@ -51,6 +58,13 @@ class StateEncoder:
             'GAME_PHASE': 5  # Added channel for game phase
         }
 
+        self.logger.setLevel(logging.ERROR)
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else (
+                "mps" if torch.backends.mps.is_available() else "cpu"
+            )
+        )
+
     def _initialize_position_mappings(self):
         """Create bidirectional mappings between board positions and array indices."""
         idx = 0
@@ -61,9 +75,11 @@ class StateEncoder:
                 self.index_to_position[idx] = pos
                 idx += 1
 
-    def encode_state(self, game_state) -> np.ndarray:
+    def encode_state(self, game_state: 'GameState') -> np.ndarray:
         """Encode game state into ML input tensor."""
-        state = np.zeros((6, 11, 11), dtype=np.float32)
+        #state = np.zeros((6, 11, 11), dtype=np.float32)
+        state = torch.zeros((6, 11, 11), dtype=torch.float32, device=self.device) # NOW ON DEVICE
+
 
         # Get board state
         board_state = game_state.board.to_numpy_array()
