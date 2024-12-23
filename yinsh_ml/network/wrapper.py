@@ -29,27 +29,24 @@ class NetworkWrapper:
             model_path: Optional path to load a pre-trained model
             device: Device to use ('cuda', 'mps', or 'cpu')
         """
-        if device:
-            self.device = torch.device(device)
+        # device logic should match that in ExperimentRunner
+        if device == 'cuda' and torch.cuda.is_available():
+            self.device = torch.device('cuda')
+        elif device == 'mps' and torch.backends.mps.is_available():
+            self.device = torch.device('mps')
         else:
-            self.device = torch.device(
-                "cuda" if torch.cuda.is_available() else (
-                    "mps" if torch.backends.mps.is_available() else "cpu"
-                )
-            )
+            self.device = torch.device('cpu')
         self.network = YinshNetwork().to(self.device)
 
         # Setup logging
         self.logger = logging.getLogger("NetworkWrapper")
         self.logger.setLevel(logging.ERROR)
+        print(f"NetworkWrapper using device: {self.device}")  # Add this line
 
         if model_path and os.path.exists(model_path):
             self.load_model(model_path)
 
         self.network.eval()  # Set to evaluation mode by default
-
-        # Initialize StateEncoder
-        self.state_encoder = StateEncoder()
 
     def predict(self, state_tensor: torch.Tensor,
                 move_mask: Optional[torch.Tensor] = None,
@@ -65,9 +62,14 @@ class NetworkWrapper:
         Returns:
             Tuple of (move_probabilities, value)
         """
+        print(f"state_tensor device (in NetworkWrapper.predict, before .to(self.device)): {state_tensor.device}")
+        print(
+            f"model device (in NetworkWrapper.predict, before .to(self.device)): {next(self.network.parameters()).device}")
         self.network.eval()
         with torch.no_grad():
             # Get network predictions
+            state_tensor = state_tensor.to(self.device)  # move to device
+            print(f"state_tensor device (in NetworkWrapper.predict, after .to(self.device)): {state_tensor.device}")
             move_logits, value = self.network(state_tensor)
 
             # Ensure value predictions are in [-1, 1]

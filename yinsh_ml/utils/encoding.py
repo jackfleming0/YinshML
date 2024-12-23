@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Tuple, Dict, List
 import logging
+import torch
 
 from ..game.constants import (
     Position,
@@ -22,7 +23,7 @@ class StateEncoder:
     Handles encoding and decoding of YINSH game states and moves for the neural network.
     """
 
-    def __init__(self):
+    def __init__(self, device='cpu'):  # Add a device parameter with a default value
         # Initialize position mappings
         self.position_to_index = {}
         index = 0
@@ -67,6 +68,9 @@ class StateEncoder:
         self.logger.info(f"  Ring removal: {self.remove_ring_range}")
         self.logger.setLevel(logging.ERROR)
 
+        # Set the device for the StateEncoder
+        self.device = device
+        print(f"StateEncoder using device: {self.device}")  # Add this line
 
     def _initialize_position_to_index(self) -> Dict[str, int]:
         """Create a mapping from position strings to unique indices."""
@@ -210,7 +214,7 @@ class StateEncoder:
 
     def encode_state(self, game_state: GameState) -> np.ndarray:
         """Encode the game state into a numerical tensor."""
-        state = np.zeros((6, 11, 11), dtype=np.float32)
+        state = torch.zeros((6, 11, 11), dtype=torch.float32, device=self.device)
 
         try:
             # Channel 0-1: Rings
@@ -257,7 +261,7 @@ class StateEncoder:
             self.logger.error(f"Error encoding state: {str(e)}")
             raise
 
-        return state
+        return state.cpu().numpy() # confirmed on CPU
 
     def decode_move(self, move_probs: np.ndarray, valid_moves: List[Move]) -> Move:
         """

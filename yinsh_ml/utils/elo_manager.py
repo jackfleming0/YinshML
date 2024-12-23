@@ -9,7 +9,6 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 
-
 @dataclass
 class MatchResult:
     """Stores the result of a match between two models."""
@@ -36,7 +35,6 @@ class MatchResult:
     def black_score(self) -> float:
         """Calculate score for black."""
         return 1 - self.white_score()
-
 
 class EloTracker:
     """Manages ELO ratings for YINSH models."""
@@ -81,7 +79,6 @@ class EloTracker:
 
     def _save_data(self):
         """Save current ratings and match history."""
-        # Save ratings
         ratings_data = {
             'current_ratings': self.ratings,
             'rating_history': {k: [(t, r) for t, r in v]
@@ -104,8 +101,8 @@ class EloTracker:
     def _update_single_game(self, white_id: str, black_id: str, white_won: bool):
         """Update ratings for a single game."""
         # Get or initialize ratings
-        white_rating = self.ratings.get(white_id, self.initial_rating)
-        black_rating = self.ratings.get(black_id, self.initial_rating)
+        white_rating = self.get_rating(white_id)
+        black_rating = self.get_rating(black_id)
 
         # Calculate expected scores
         white_expected = self._expected_score(white_rating, black_rating)
@@ -135,45 +132,53 @@ class EloTracker:
         """Get current rating for a model, initializing if necessary."""
         if model_id not in self.ratings:
             self.ratings[model_id] = self.initial_rating
-            self._update_rating_history(model_id, self.initial_rating)
+            self._update_rating_history(model_id, self.initial_rating, datetime.now().isoformat())
         return self.ratings[model_id]
 
-    def update_ratings(self, match_result: MatchResult):
+    def update_ratings(self, model_a_id: str, model_b_id: str, white_result: float, black_result: float):
         """Update ratings based on match result, processing each game individually."""
-        white_id = match_result.white_model
-        black_id = match_result.black_model
+        # Calculate the number of wins for each model
+        white_wins = int(white_result)  # Assuming white_result is the number of wins for white
+        black_wins = int(black_result)  # Assuming black_result is the number of wins for black
+        draws = int((white_result - white_wins) * 2)
 
         # Process white wins
-        for _ in range(match_result.white_wins):
-            self._update_single_game(white_id, black_id, white_won=True)
+        for _ in range(white_wins):
+            self._update_single_game(model_a_id, model_b_id, white_won=True)
 
         # Process black wins
-        for _ in range(match_result.black_wins):
-            self._update_single_game(white_id, black_id, white_won=False)
+        for _ in range(black_wins):
+            self._update_single_game(model_a_id, model_b_id, white_won=False)
+
+        # Process draws
+        for _ in range(draws):
+            white_new, black_new = self._update_single_game(model_a_id, model_b_id, white_won=True)
+            self.ratings[model_a_id] = white_new - self.k_factor * 0.5  # Subtract half of k-factor for a draw
+            self.ratings[model_b_id] = black_new - self.k_factor * 0.5
 
         # Record final ratings in history
-        final_white = self.ratings[white_id]
-        final_black = self.ratings[black_id]
+        final_white = self.ratings[model_a_id]
+        final_black = self.ratings[model_b_id]
 
         timestamp = datetime.now().isoformat()
-        self._update_rating_history(white_id, final_white, timestamp)
-        self._update_rating_history(black_id, final_black, timestamp)
+        self._update_rating_history(model_a_id, final_white, timestamp)
+        self._update_rating_history(model_b_id, final_black, timestamp)
 
         # Add match to history with final ratings
         self.match_history.append(MatchResult(
-            white_model=white_id,
-            black_model=black_id,
-            white_wins=match_result.white_wins,
-            black_wins=match_result.black_wins,
+            white_model=model_a_id,
+            black_model=model_b_id,
+            white_wins=white_wins,
+            black_wins=black_wins,
             draws=0,  # Yinsh has no draws
             timestamp=timestamp,
-            avg_game_length=match_result.avg_game_length
+            avg_game_length=None
         ))
 
         # Log the overall rating changes
         self.logger.info(f"Updated ratings after match:")
-        self.logger.info(f"  {white_id}: {final_white:.1f}")
-        self.logger.info(f"  {black_id}: {final_black:.1f}")
+        self.logger.info(f"  {model_a_id}: {final_white:.1f}")
+        self.logger.info(f"  {model_b_id}: {final_black:.1f}")
 
         # Save updated data
         self._save_data()

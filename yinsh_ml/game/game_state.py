@@ -64,6 +64,7 @@ class StateEncoder:
                 "mps" if torch.backends.mps.is_available() else "cpu"
             )
         )
+        print(f"StateEncoder using device: {self.device}")
 
     def _initialize_position_mappings(self):
         """Create bidirectional mappings between board positions and array indices."""

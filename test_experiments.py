@@ -12,9 +12,9 @@ import multiprocessing
 
 warnings.filterwarnings('ignore', message='Torch version.*has not been tested with coremltools')
 
-def test_experiment_configs(quick_test: bool = True):
+def test_experiment_configs(quick_test: bool = True, device: str = 'cpu'):
     """Test experiment configurations systematically."""
-    runner = ExperimentRunner(device='cuda' if torch.cuda.is_available() else 'cpu')
+    runner = ExperimentRunner(device=device) # pass device to ExperimentRunner
 
     # Override ALL configs for quick tests
     if quick_test:
@@ -122,6 +122,8 @@ def test_experiment_configs(quick_test: bool = True):
     results = {}
     failed_configs = []
 
+    runner = None # added this line to ensure runner starts as none
+
     for exp_type, configs in experiment_types.items():
         print(f"\nTesting {exp_type} experiments:")
         results[exp_type] = {}
@@ -129,6 +131,7 @@ def test_experiment_configs(quick_test: bool = True):
         for config in configs:
             print(f"Running configuration: {config}")
             try:
+                runner = ExperimentRunner(device=args.device)
                 result = runner.run_experiment(exp_type, config)
                 _print_metrics(result)
                 results[exp_type][config] = result
@@ -375,12 +378,11 @@ def main():
                         choices=['learning_rate', 'mcts', 'temperature', 'combined'],
                         help='Test specific experiment type')
     parser.add_argument('--config', help='Test specific configuration')
-    # Add device argument with smart default
+    # Update default to cpu and change help description
     parser.add_argument('--device',
                         choices=['cuda', 'mps', 'cpu'],
-                        default='mps' if torch.backends.mps.is_available() else
-                        ('cuda' if torch.cuda.is_available() else 'cpu'),
-                        help='Device to run on (default: best available)')
+                        default='cpu',
+                        help='Device to run on (default: cpu, cuda if available)')
 
     parser.add_argument('--dashboard', action='store_true',
                         help='Start Streamlit dashboard after tests')
@@ -388,6 +390,12 @@ def main():
                         help='Only test combined configurations')
 
     args = parser.parse_args()
+
+    # Use specified device or default to best available if not specified
+    if not args.device:
+        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    else:
+        device = args.device
 
     if args.combined_only:
         print("Running combined configuration tests...")
@@ -397,7 +405,7 @@ def main():
         run_quick_test(args.type, args.config)
     elif args.type and args.config:
         print(f"Testing specific configuration: {args.type}/{args.config}")
-        runner = ExperimentRunner(device='cuda' if torch.cuda.is_available() else 'cpu')
+        runner = ExperimentRunner(device=device)  # Use the determined device
         result = runner.run_experiment(args.type, args.config)
         _print_metrics(result)
     else:
@@ -413,7 +421,6 @@ def main():
         print("\nStarting dashboard...")
         import streamlit
         streamlit.run("experiments/visualizer.py")
-
 
 if __name__ == "__main__":
     # multiprocessing.set_start_method('spawn')

@@ -17,6 +17,7 @@ from ..utils.metrics_logger import MetricsLogger, EpochMetrics
 from ..utils.enhanced_metrics import EnhancedMetricsCollector
 from ..network.wrapper import NetworkWrapper
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
+from ..utils.encoding import StateEncoder
 
 
 # Setup logger
@@ -59,10 +60,10 @@ class GameExperience:
         """Sample a random batch of experiences."""
         indices = np.random.choice(len(self.states), batch_size)
 
-        # Explicitly create tensors on the specified device
-        states = torch.stack([torch.from_numpy(self.states[i]).float().to(self.device) for i in indices])
-        probs = torch.stack([torch.from_numpy(self.move_probs[i]).float().to(self.device) for i in indices])
-        values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32, device=self.device).unsqueeze(1)
+        # Create tensors on the CPU explicitly
+        states = torch.stack([torch.from_numpy(self.states[i]).float().to('cpu') for i in indices])  # Force CPU
+        probs = torch.stack([torch.from_numpy(self.move_probs[i]).float().to('cpu') for i in indices])  # Force CPU
+        values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32, device='cpu').unsqueeze(1)  # Force CPU
 
         return states, probs, values
 
@@ -85,20 +86,20 @@ class YinshTrainer:
             metrics_logger: Optional MetricsLogger instance
 
         """
-        self.state_encoder = network.state_encoder
-
         # Device setup remains the same
-        if device:
-            self.device = torch.device(device)
+        if device == 'cuda' and torch.cuda.is_available():
+            self.device = torch.device('cuda')
+        elif device == 'mps' and torch.backends.mps.is_available():
+            self.device = torch.device('mps')
         else:
-            self.device = torch.device(
-                "cuda" if torch.cuda.is_available() else (
-                    "mps" if torch.backends.mps.is_available() else "cpu"
-                )
-            )
+            self.device = torch.device('cpu')
+
         self.network = network
         self.network.network = self.network.network.to(self.device)
         self.metrics_logger = metrics_logger  # Store the metrics_logger
+
+        # Initialize StateEncoder here
+        self.state_encoder = StateEncoder(device=self.device)
 
 
         # Separate out value head and policy parameters
@@ -184,6 +185,14 @@ class YinshTrainer:
 
         self.network.network.train()
         states, target_probs, target_values = self.experience.sample_batch(batch_size)
+
+        # Add these lines as a failsafe:
+        states = states.to(self.device)
+        target_probs = target_probs.to(self.device)
+        target_values = target_values.to(self.device)
+
+        # Add this line to check the device of states after sampling
+        print(f"Device of states after sample_batch: {states.device}")
 
         # Move to device
         states = states.to(self.device)
@@ -436,6 +445,9 @@ class YinshTrainer:
         for batch in range(batches_per_epoch):
             # Get data (now should be on the correct device thanks to sample_batch)
             states, target_probs, target_values = self.experience.sample_batch(batch_size)
+
+            # Print device of states
+            print(f"States device (in train_epoch): {states.device}")
 
             p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
 

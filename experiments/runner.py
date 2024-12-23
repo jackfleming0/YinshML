@@ -10,6 +10,7 @@ from yinsh_ml.game.moves import Move
 from yinsh_ml.game.game_state import GameState
 import numpy as np
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
+from yinsh_ml.utils.encoding import StateEncoder
 
 # Import YINSH specific modules
 from yinsh_ml.game.game_state import GameState, GamePhase
@@ -19,6 +20,8 @@ from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.training.self_play import SelfPlay
 from yinsh_ml.utils.tournament import ModelTournament
 from yinsh_ml.utils.metrics_logger import MetricsLogger
+from yinsh_ml.utils.elo_manager import EloTracker
+
 
 
 from experiments.config import (
@@ -32,8 +35,16 @@ from experiments.config import (
 
 
 class ExperimentRunner:
-    def __init__(self, device: str = 'cuda', debug: bool = False):
-        self.device = device
+    def __init__(self, device: str = 'cpu', debug: bool = False):  # Set default to 'cpu'
+        # Determine the device here
+        if device == 'cuda' and torch.cuda.is_available():
+            self.device = 'cuda'
+        elif device == 'mps' and torch.backends.mps.is_available():
+            self.device = 'mps'
+        else:
+            self.device = 'cpu'  # Default to CPU
+
+        print(f"ExperimentRunner using device: {self.device}")
         self.logger = logging.getLogger("ExperimentRunner")
 
         # Initialize metrics logger
@@ -92,18 +103,25 @@ class ExperimentRunner:
             debug=False
         )
 
-        # Initialize tournament manager with correct path
+        # Initialize tournament manager with correct path and elo tracker
+        experiment_dir = self.checkpoint_dir / experiment_type / config_name
+        experiment_dir.mkdir(parents=True, exist_ok=True)
         self.tournament_manager = ModelTournament(
-            training_dir=self.checkpoint_dir / experiment_type / config_name,
+            training_dir=experiment_dir,
             device=self.device,
             games_per_match=10,
             temperature=0.1
         )
 
-        # Create experiment-specific checkpoint directory
-        experiment_dir = self.checkpoint_dir / experiment_type / config_name
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-
+        # Initialize model and trainer
+        print("Initializing model and trainer...")
+        network = NetworkWrapper(device=self.device)
+        trainer = YinshTrainer(network,
+                               device=self.device,
+                               l2_reg=0.0,
+                               metrics_logger=self.metrics_logger
+                               )
+        state_encoder = trainer.state_encoder
 
         try:
             if experiment_type == "learning_rate":
@@ -504,9 +522,11 @@ class ExperimentRunner:
         network = NetworkWrapper(device=self.device)
         trainer = YinshTrainer(network,
                                device=self.device,
-                                l2_reg=0.0,
+                               l2_reg=0.0,
                                metrics_logger=self.metrics_logger
                                )
+        # added this line
+        state_encoder = trainer.state_encoder
 
         # Set learning rate configuration for both optimizers
         trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
@@ -565,22 +585,39 @@ class ExperimentRunner:
             # Evaluate against baseline
             print("Evaluating against baseline...")
             eval_start_time = time.time()
-            elo_change = self._evaluate_against_baseline(network, quick_eval=True)
+            elo_change = self._evaluate_against_baseline(network, state_encoder, quick_eval=True)
             print(f"Evaluation completed in {time.time() - eval_start_time:.2f} seconds")
 
             # Save checkpoint for this iteration
             self._save_checkpoint(network, "combined", config_name, iteration)
 
             # Run tournament evaluation if we have previous iterations
-            tournament_elo = 0.0  # Default if no tournament run
+            # tournament_elo = 0.0  # Default if no tournament run # REMOVE
             if iteration > 0:
                 print("Running tournament evaluation...")
-                self.tournament_manager.run_tournament(current_iteration=iteration)
-                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
-                tournament_elo = tournament_stats['current_rating']
+                self.tournament_manager.run_tournament(
+                    experiment_type="combined",
+                    config_name=config_name,
+                    current_iteration=iteration,
+                    state_encoder=state_encoder  # Pass state_encoder here
+                )
+                # Get ELO from EloTracker after the tournament (this requires modifying your EloTracker)
+                experiment_dir = self.checkpoint_dir / "combined" / config_name
+                elo_tracker = self.tournament_manager._get_elo_tracker(experiment_dir, iteration)
+                # tournament_stats = elo_tracker.get_ratings() # removed this line
+                # Get ELO rating for the current model
+                current_model_id = f"iteration_{iteration}"
+                tournament_elo = elo_tracker.get_rating(current_model_id)
+                # if f"iteration_{iteration}" in tournament_stats:
+                #     tournament_elo = tournament_stats[f"iteration_{iteration}"]
+                # else:
+                #     tournament_elo = 0.0  # Or some default value if not found
+                #     print(f"Could not retrieve ELO for iteration {iteration}")
+                # tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+                # tournament_elo = tournament_stats['current_rating']
                 print(f"Tournament ELO: {tournament_elo:+.1f}")
 
-            # Record metrics
+            # Record metrics            # Record metrics
             metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
             metrics["value_losses"].append(float(epoch_stats['value_loss']))
             metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
@@ -603,6 +640,7 @@ class ExperimentRunner:
         return metrics
 
     def _evaluate_against_baseline(self, network: NetworkWrapper,
+                                   state_encoder: StateEncoder,
                                    num_games: int = 20,
                                    quick_eval: bool = False) -> float:
         """Evaluate network against baseline model."""
@@ -617,7 +655,7 @@ class ExperimentRunner:
             white_model = network if test_is_white else self.baseline_model
             black_model = self.baseline_model if test_is_white else network
 
-            winner = self._play_evaluation_game(white_model, black_model)
+            winner = self._play_evaluation_game(white_model, black_model, state_encoder)
 
             if winner is not None:  # Should always be true for YINSH
                 if (test_is_white and winner == 1) or (not test_is_white and winner == -1):
@@ -830,8 +868,9 @@ class ExperimentRunner:
         return -400 * np.log10(1 / win_rate - 1)
 
     def _play_evaluation_game(self,
-                              white_model: NetworkWrapper,
-                              black_model: NetworkWrapper) -> Optional[int]:
+                                  white_model: NetworkWrapper,
+                                  black_model: NetworkWrapper,
+                                  state_encoder: StateEncoder) -> Optional[int]:
         """Play a single evaluation game between two models."""
         game_state = GameState()
         move_count = 0
@@ -848,8 +887,8 @@ class ExperimentRunner:
                     break
 
                 # Get model's move choice with lower temperature for evaluation
-                state_tensor = current_model.state_encoder.encode_state(game_state)
-                state_tensor = torch.FloatTensor(state_tensor).unsqueeze(0).to(self.device)
+                state_tensor = state_encoder.encode_state(game_state)
+                state_tensor = torch.FloatTensor(state_tensor).unsqueeze(0).to(current_model.device)
                 move_probs, _ = current_model.predict(state_tensor)
 
                 # Use lower temperature (0.1) for evaluation games
@@ -859,7 +898,7 @@ class ExperimentRunner:
                     temperature=0.1  # Lower temperature for more deterministic evaluation
                 )
 
-                # Make move
+                # Make the move
                 success = game_state.make_move(selected_move)
                 if not success:
                     self.logger.error(
@@ -885,7 +924,6 @@ class ExperimentRunner:
         except Exception as e:
             self.logger.error(f"Error in evaluation game: {e}")
             return None
-
 
 def main():
     """Main entry point for running experiments."""

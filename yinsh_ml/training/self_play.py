@@ -88,6 +88,7 @@ class MCTS:
         self.max_depth = max_depth
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS")
+        self.state_encoder = StateEncoder(device=network.device) # add device here
 
         # Temperature annealing parameters
         self.initial_temp = initial_temp
@@ -159,8 +160,9 @@ class MCTS:
         if not valid_moves:
             return move_probs
 
+        # Changed this line
         visit_counts = np.array([
-            root.children[move].visit_count
+            root.children.get(move, Node(None)).visit_count
             for move in valid_moves
         ], dtype=np.float32)
 
@@ -228,6 +230,7 @@ class MCTS:
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
         """Get policy and value from neural network."""
         state_tensor = self.state_encoder.encode_state(state)
+
         state_tensor = torch.FloatTensor(state_tensor).unsqueeze(0).to(
             self.network.device)  # Ensure tensor is on the correct device
 
@@ -382,7 +385,9 @@ class SelfPlay:
                         num_simulations,
                         self.initial_temp,
                         self.final_temp,
-                        self.annealing_steps
+                        self.annealing_steps,
+                        self.mcts.state_encoder,  # Pass state_encoder here
+                        self.network.device
                     )
                     for game_id in range(1, num_games + 1)
                 ]
@@ -576,7 +581,9 @@ def play_game_worker(
     num_simulations: int,
     initial_temp: float = 1.0,
     final_temp: float = 0.2,
-    annealing_steps: int = 30
+    annealing_steps: int = 30,
+    state_encoder = None,
+    device = None
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict]:
     """
     Worker function to play a single game with temperature metrics and robust logging.
@@ -598,11 +605,14 @@ def play_game_worker(
     """
     # Keep only essential setup logging
     logger.info(f"Worker {game_id} starting game...")
-    device = torch.device('cpu')
+    # device = torch.device('cpu')
+    print(f"Worker {game_id} using device: {state_encoder.device}")
 
     try:
         # Remove detailed initialization logs - only log if something fails
         network = NetworkWrapper(model_path=model_path, device=device)
+        print(f"NetworkWrapper device in worker {game_id}: {network.device}")  # Add this line
+
         mcts = MCTS(
             network,
             num_simulations=num_simulations,
@@ -611,7 +621,6 @@ def play_game_worker(
             annealing_steps=annealing_steps
         )
         state = GameState()
-        state_encoder = StateEncoder()
 
         states: List[np.ndarray] = []
         policies: List[np.ndarray] = []
