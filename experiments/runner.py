@@ -505,12 +505,13 @@ class ExperimentRunner:
         trainer = YinshTrainer(network,
                                device=self.device,
                                 l2_reg=0.0,
-                               metrics_logger=self.metrics_logger
-                               )
+                               metrics_logger=self.metrics_logger,
+                               value_head_lr_factor=config.value_head_lr_factor,  # Pass the factor
+                               value_loss_weights=config.value_loss_weights)  # Pass the weights
 
         # Set learning rate configuration for both optimizers
         trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
-        trainer.value_optimizer.param_groups[0]['lr'] = config.lr * 0.1  # Value head uses lower lr
+        trainer.value_optimizer.param_groups[0]['lr'] = config.lr * config.value_head_lr_factor  # Value head uses higher lr
 
         # Set weight decay for both optimizers
         trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay

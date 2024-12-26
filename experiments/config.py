@@ -1,7 +1,7 @@
 """Configuration for YINSH training experiments."""
 
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import logging
 from pathlib import Path
 
@@ -117,6 +117,10 @@ class CombinedConfig(BaseExperimentConfig):
     initial_temp: float = 1.0
     final_temp: float = 0.2
     temp_schedule: str = "linear"
+    temp_decay_half_life: float = 0.5 # Add this
+    temp_start_decay_at: float = 0.5 # Add this
+    value_head_lr_factor: float = 5.0  # Add this line
+    value_loss_weights: Tuple[float, float] = (0.5, 0.5) # Add this line - equal weights to start
 
     def __init__(self,
                  lr: float,
@@ -131,6 +135,10 @@ class CombinedConfig(BaseExperimentConfig):
                  lr_schedule: str = "constant",
                  temp_schedule: str = "linear",
                  warmup_steps: int = 0,
+                 temp_decay_half_life: float = 0.5,  # Add this
+                 temp_start_decay_at: float = 0.5,  # Add this
+                 value_head_lr_factor: float = 5.0,  # Add this line
+                 value_loss_weights: Tuple[float, float] = (0.5, 0.5),  # Add this line
                  **kwargs):
         super().__init__(**kwargs)
         self.lr = lr
@@ -145,6 +153,10 @@ class CombinedConfig(BaseExperimentConfig):
         self.initial_temp = initial_temp
         self.final_temp = final_temp
         self.temp_schedule = temp_schedule
+        self.temp_decay_half_life = temp_decay_half_life
+        self.temp_start_decay_at = temp_start_decay_at
+        self.value_head_lr_factor = value_head_lr_factor  # Add this line
+        self.value_loss_weights = value_loss_weights # Add this line
 
 # Experiment configurations
 LEARNING_RATE_EXPERIMENTS = {
@@ -520,6 +532,67 @@ COMBINED_EXPERIMENTS = {
         initial_temp=3.0,  # Higher early exploration
         final_temp=0.2,  # Strong final exploitation
         temp_schedule="cosine"  # Smoother transition
+    ),
+
+    "m3_final_revised_v3": CombinedConfig(
+
+        # second last run on the good computer to see how this bad boy does
+
+        # Training parameters
+        num_iterations=50,
+        games_per_iteration=500,
+        epochs_per_iteration=10,
+        batches_per_epoch=250,
+
+        # Learning rates
+        lr=0.0005,  # Slightly increased learning rate
+        weight_decay=1e-4,  # Reduced regularization to improve learning
+        batch_size=512,
+        lr_schedule="cosine",
+        warmup_steps=4000,
+
+        # MCTS parameters
+        num_simulations=400,  # Increased simulation depth
+        c_puct=4.0,  # Increased exploration
+        dirichlet_alpha=0.3,
+        value_weight=1.0,  # Balanced value prediction
+
+        # Temperature parameters - accounting for move space complexity
+        initial_temp=1.0,  # Lower initial exploration, more focused on learned policy
+        final_temp=0.1,  # Strong final exploitation, allowing model to play best moves
+        temp_schedule="cosine",  # Smooth transition
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
+    "separate_value_head": CombinedConfig(
+        # Training parameters (no changes)
+        num_iterations=50,
+        games_per_iteration=500,
+        epochs_per_iteration=10,
+        batches_per_epoch=250,
+
+        # Learning rates
+        lr=0.0005,  # Base learning rate (for policy head)
+        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        batch_size=512,
+        lr_schedule="cosine",
+        warmup_steps=4000,
+
+        # MCTS parameters
+        num_simulations=400,
+        c_puct=4.0,
+        dirichlet_alpha=0.3,
+        value_weight=1.5,  # Increased value weight
+        value_loss_weights=(0.5, 0.5),  # Add this line
+
+        # Temperature parameters
+        initial_temp=1.0,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
     ),
 
     "attention_config": CombinedConfig(
