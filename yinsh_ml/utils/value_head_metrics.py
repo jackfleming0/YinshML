@@ -20,22 +20,22 @@ class ValueHeadMetrics:
         self.critical_positions = []  # Store important position evaluations
 
     def record_evaluation(self, state: GameState, value_pred: float,
-                          policy_probs: np.ndarray, chosen_move: Move,
+                          policy_probs: np.ndarray, chosen_move: Optional[Move],
                           temperature: float, actual_outcome: Optional[float] = None):
         """Record comprehensive evaluation data."""
         phase = str(state.phase)
-        board_hash = self._hash_board_state(state)
+        board_str = str(state.board)  # Use str(state.board) directly
 
         # Track value prediction consistency
-        if board_hash in self.position_cache:
-            prev_value = self.position_cache[board_hash]['value']
+        if board_str in self.position_cache:
+            prev_value = self.position_cache[board_str]['value']
             self.phase_metrics[phase]['value_consistency'].append(
                 abs(prev_value - value_pred)
             )
 
-        self.position_cache[board_hash] = {
+        self.position_cache[board_str] = {
             'value': value_pred,
-            'move_count': len(state.move_history)
+            'move_count': len(state.move_history)  # Assuming you want to track this
         }
 
         # Track value influence on move selection
@@ -129,21 +129,98 @@ class ValueHeadMetrics:
         return report
 
     def plot_diagnostics(self, save_path: Optional[str] = None):
-        """Generate diagnostic plots."""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 15))
+        """
+        Generate diagnostic plots for value head evaluations.
 
-        # Value prediction distribution by phase
-        self._plot_value_distributions(axes[0, 0])
+        Args:
+            save_path: Optional path to save the plots
+        """
+        if not self.evaluations:
+            print("No evaluation data available to plot.")
+            return
 
-        # Value influence over game progression
-        self._plot_value_influence(axes[0, 1])
+        # Extract relevant data
+        phases = [eval['phase'] for eval in self.evaluations]
+        value_predictions = np.array([eval['value_prediction'] for eval in self.evaluations])
+        actual_outcomes = np.array([eval['actual_outcome'] for eval in self.evaluations])
 
-        # Consistency metrics
-        self._plot_consistency_metrics(axes[1, 0])
-
-        # Phase-specific metrics
-        self._plot_phase_metrics(axes[1, 1])
-
+        # Plot 1: Histogram of Value Predictions
+        plt.figure(figsize=(10, 5))
+        plt.hist(value_predictions, bins=20, alpha=0.7, label='Predictions')
+        plt.title('Distribution of Value Predictions')
+        plt.xlabel('Predicted Value')
+        plt.ylabel('Frequency')
         if save_path:
-            plt.savefig(save_path)
-        plt.close()
+            plt.savefig(f"{save_path}_value_predictions_hist.png")
+        plt.show()
+
+        # Plot 2: Scatter Plot of Predictions vs. Actual Outcomes
+        plt.figure(figsize=(10, 5))
+        plt.scatter(value_predictions, actual_outcomes, alpha=0.5)
+        plt.title('Value Predictions vs. Actual Outcomes')
+        plt.xlabel('Predicted Value')
+        plt.ylabel('Actual Outcome')
+        plt.plot([-1, 1], [-1, 1], color='red', linestyle='--')  # Diagonal line
+        if save_path:
+            plt.savefig(f"{save_path}_predictions_vs_outcomes.png")
+        plt.show()
+
+        # Plot 3: Value Prediction Distribution by Game Phase
+        unique_phases = sorted(set(phases))
+        plt.figure(figsize=(10, 5))
+        for phase in unique_phases:
+            phase_values = [v for p, v in zip(phases, value_predictions) if p == phase]
+            plt.hist(phase_values, bins=20, alpha=0.7, label=phase)
+        plt.title('Value Prediction Distribution by Game Phase')
+        plt.xlabel('Predicted Value')
+        plt.ylabel('Frequency')
+        plt.legend()
+        if save_path:
+            plt.savefig(f"{save_path}_value_predictions_by_phase.png")
+        plt.show()
+
+    def _calculate_average_value_prediction(self) -> float:
+        """Calculate the average value prediction."""
+        if not self.evaluations:
+            return 0.0
+        return float(np.mean([eval['value_prediction'] for eval in self.evaluations]))
+
+    def _calculate_std_value_prediction(self) -> float:
+        """Calculate the standard deviation of value predictions."""
+        if not self.evaluations:
+            return 0.0
+        return float(np.std([eval['value_prediction'] for eval in self.evaluations]))
+
+    def _calculate_prediction_confidence(self) -> float:
+        """Calculate the average confidence of value predictions."""
+        if not self.evaluations:
+            return 0.0
+        return float(np.mean([abs(eval['value_prediction']) for eval in self.evaluations]))
+
+    def _get_phase_distribution(self) -> Dict[str, int]:
+        """Get the distribution of game phases in evaluations."""
+        distribution = {}
+        for eval in self.evaluations:
+            phase = eval['phase']
+            distribution[phase] = distribution.get(phase, 0) + 1
+        return distribution
+
+    def _calculate_sign_match_percentage(self) -> float:
+        """Calculate the percentage of evaluations where prediction sign matches outcome sign."""
+        if not self.evaluations:
+            return 0.0
+        correct_sign_matches = sum(
+            1 for eval in self.evaluations
+            if np.sign(eval['value_prediction']) == np.sign(eval['actual_outcome'])
+        )
+        return (correct_sign_matches / len(self.evaluations)) * 100
+
+    def save(self, file_path: str):
+        """Save the evaluation data to a file."""
+        with open(file_path, 'w') as f:
+            json.dump(self.evaluations, f, indent=2)
+
+    def load(self, file_path: str):
+        """Load evaluation data from a file."""
+        with open(file_path, 'r') as f:
+            self.evaluations = json.load(f)
