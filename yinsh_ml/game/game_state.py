@@ -210,6 +210,15 @@ class GameState:
         """Get all valid moves for current game state."""
         return MoveGenerator.get_valid_moves(self.board, self)
 
+    def get_ring_valid_moves(self, position: Position) -> List[Move]:
+        """Get valid moves for a ring at the given position."""
+        valid_moves = self.get_valid_moves()  # Call the existing get_valid_moves
+        ring_moves = [
+            move for move in valid_moves
+            if move.type == MoveType.MOVE_RING and move.source == position
+        ]
+        return ring_moves
+
     def is_valid_move(self, move: Move) -> bool:
         """Check if a move is valid."""
         logger.debug(f"\nValidating move: {move}")

@@ -403,9 +403,9 @@ class SelfPlay:
                     # Process completed games
                     for future in done:
                         try:
-                            states, policies, outcome, temp_data = future.result()
+                            states, policies, outcome, temp_data, game_history = future.result()
                             games_completed += 1
-                            games.append((states, policies, outcome))
+                            games.append((states, policies, outcome, game_history))
                             elapsed = time.time() - start_time
                             rate = games_completed / elapsed
 
@@ -419,22 +419,9 @@ class SelfPlay:
                             )
                             final_confidence = abs(final_value.item())
 
-                            if self.metrics_logger:
-                                # Record metrics for each state in the game
-                                for i, state_tensor in enumerate(states):
-                                    state_phase = "placement" if i < 10 else "main_game" if i < len(
-                                        states) - 5 else "ring_removal"
-                                    _, value = self.network.predict(
-                                        torch.FloatTensor(state_tensor).unsqueeze(0).to(self.network.device)
-                                    )
-                                    self.metrics_logger.enhanced_metrics.add_state_metrics(
-                                        phase=state_phase,
-                                        board_state=str(self.state_encoder.decode_state(state_tensor).board),
-                                        value_pred=value.item(),
-                                        actual_outcome=outcome,  # Final game outcome
-                                        move_time=temp_data['move_stats'][i]['move_time'],
-                                        confidence=temp_data['move_stats'][i].get('top_prob', 0.0)
-                                    )
+                            # if self.metrics_logger:
+                            #     # Pass game history to metrics_logger for each game
+                            #     self.metrics_logger.record_game_history(game_history)
 
                             # Enhanced game metrics
                             game_metrics = GameMetrics(
@@ -577,7 +564,7 @@ def play_game_worker(
     initial_temp: float = 1.0,
     final_temp: float = 0.2,
     annealing_steps: int = 30
-) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict]:
+) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict, List[Dict]]:
     """
     Worker function to play a single game with temperature metrics and robust logging.
 
@@ -623,6 +610,8 @@ def play_game_worker(
             'move_stats': []
         }
 
+        game_history = []
+
         move_start = time.time()
 
         # Main game loop - remove all debug logs
@@ -653,6 +642,12 @@ def play_game_worker(
             selected_idx = np.random.choice(len(valid_moves), p=adj_probs)
             selected_move = valid_moves[selected_idx]
 
+            # Get the value prediction from the network
+            encoded_state = state_encoder.encode_state(state)
+            state_tensor = torch.FloatTensor(encoded_state).unsqueeze(0).to(network.device)
+            _, value_pred = network.predict(state_tensor)
+            value_pred = value_pred.item()  # Extract value as float
+
             # Replace frequent move-by-move logging with summary logging
             # Only log every 10th move or important moves like ring removals
             #if move_count % 10 == 0 or "removes" in str(selected_move):
@@ -673,9 +668,25 @@ def play_game_worker(
                 'move_time': move_time
             })
 
-            states.append(state_encoder.encode_state(state))
+            # Store state and policy before making move
+            encoded_state = state_encoder.encode_state(state)
+            states.append(encoded_state)
             policies.append(move_probs)
-            state.make_move(selected_move)
+
+            game_history.append({
+                'state': state.copy(),
+                'move': selected_move,
+                'move_probs': valid_probs,
+                'temperature': temp,
+                'value_pred': value_pred
+            })
+
+            # Make the move
+            success = state.make_move(selected_move)
+            if not success:
+                logger.error(f"Failed to make move: {selected_move}")
+                break
+
             move_count += 1
 
 
@@ -693,7 +704,7 @@ def play_game_worker(
             outcome = 0
             logger.warning(f"Worker {game_id}: Invalid game outcome")
 
-        return states, policies, outcome, temp_data
+        return states, policies, outcome, temp_data, game_history
 
     except Exception as e:
         logger.exception(f"Worker {game_id} error: {e}")
