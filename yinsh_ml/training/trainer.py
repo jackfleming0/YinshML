@@ -79,7 +79,8 @@ class YinshTrainer:
             device: Device to train on ('cuda', 'mps', or 'cpu')
             l2_reg: L2 regularization coefficient
             metrics_logger: Optional MetricsLogger instance
-
+            value_head_lr_factor: Factor to multiply base lr for value head
+            value_loss_weights: Weights for combining MSE and CE loss in value head
         """
         self.state_encoder = network.state_encoder
 
@@ -96,6 +97,11 @@ class YinshTrainer:
         self.network.network = self.network.network.to(self.device)
         self.metrics_logger = metrics_logger  # Store the metrics_logger
 
+        self.value_loss_weights = value_loss_weights  # Store the weights
+        self.value_head_lr_factor = value_head_lr_factor
+
+        print(f"Value Loss Weights Type: {type(self.value_loss_weights)}")
+        print(f"Value Loss Weights: {self.value_loss_weights}")
 
         # Separate out value head and policy parameters
         value_params = [p for n, p in self.network.network.named_parameters()
@@ -216,10 +222,10 @@ class YinshTrainer:
 
         # Calculate policy loss
         with torch.set_grad_enabled(True):
-            scaled_logits = pred_logits / self.temperature
+            scaled_logits = pred_logits / self.temperature  # Use self.temperature instead of local var
             log_probs = F.log_softmax(scaled_logits, dim=1)
             policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
-            policy_loss_val = float(policy_loss.item())
+            policy_loss_val = float(policy_loss.item())  # Store raw loss value
 
             # Add L2 regularization for policy if needed
             if self.l2_reg > 0:
@@ -257,9 +263,9 @@ class YinshTrainer:
             value_loss_ce = F.binary_cross_entropy(value_probs, target_outcomes.float())
 
             # Combine losses using weights from config
-            value_loss_weights = self.value_loss_weights
-            value_loss = value_loss_weights[0] * value_loss_mse + value_loss_weights[1] * value_loss_ce
-            value_loss_val = float(value_loss.item())
+            value_loss = self.value_loss_weights[0] * value_loss_mse + self.value_loss_weights[
+                1] * value_loss_ce  # Multiply the losses by the weights
+            value_loss_val = float(value_loss.item())  # Store raw loss value
 
             # Add L2 regularization for value head
             if self.l2_reg > 0:

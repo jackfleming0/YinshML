@@ -19,6 +19,7 @@ from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.training.self_play import SelfPlay
 from yinsh_ml.utils.tournament import ModelTournament
 from yinsh_ml.utils.metrics_logger import MetricsLogger
+from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 
 from experiments.config import (
@@ -41,6 +42,9 @@ class ExperimentRunner:
             save_dir=Path("results"),
             debug=debug
         )
+
+        # Initialize value head metrics
+        self.value_head_metrics = ValueHeadMetrics()
 
         # Set logging levels
         loggers = [
@@ -529,7 +533,6 @@ class ExperimentRunner:
             game_start_time = time.time()
             self_play = SelfPlay(
                 network=network,
-                # num_workers=4,
                 metrics_logger=self.metrics_logger,
                 num_simulations=config.num_simulations,
                 initial_temp=config.initial_temp,
@@ -544,7 +547,21 @@ class ExperimentRunner:
             # Add games to trainer's experience
             print("Adding games to trainer's experience...")
             exp_start_time = time.time()
-            for states, policies, outcome in games:
+            for states, policies, outcome, game_history in games:
+                # Pass game history to metrics_logger for each game
+                # self.metrics_logger.record_game_history(game_history)
+
+                # Pass individual game states to ValueHeadMetrics
+                for state_data in game_history:
+                    self.value_head_metrics.record_evaluation(
+                        state=state_data['state'],
+                        value_pred=state_data['value_pred'],  # Correctly passing value_pred
+                        policy_probs=state_data['move_probs'],
+                        chosen_move=state_data['move'],
+                        temperature=state_data['temperature'],
+                        actual_outcome=outcome
+                    )
+
                 trainer.add_game_experience(states, policies, outcome)
             print(f"Experience added in {time.time() - exp_start_time:.2f} seconds")
 

@@ -1,5 +1,3 @@
-# yinsh_ml/utils/metrics_logger.py
-
 import json
 import logging
 from pathlib import Path
@@ -11,8 +9,6 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 from .enhanced_metrics import EnhancedMetricsCollector
 
-
-
 @dataclass
 class GameMetrics:
     length: int
@@ -23,7 +19,6 @@ class GameMetrics:
     final_confidence: float
     temperature_data: Dict
 
-
 @dataclass
 class EpochMetrics:
     policy_loss: float
@@ -33,7 +28,6 @@ class EpochMetrics:
     learning_rates: Dict[str, float]
     gradient_norm: float
     loss_improvement: float  # Relative to previous epoch
-
 
 class MetricsLogger:
     def __init__(self, save_dir: Path, debug: bool = False):
@@ -80,6 +74,18 @@ class MetricsLogger:
                 }
             }
         }
+
+    # def record_game_history(self, game_history: List[Dict]):
+    #     """Record the history of a single game for later analysis."""
+    #     for entry in game_history:
+    #         self.enhanced_metrics.record_evaluation(
+    #             state=entry['state'],
+    #             value_pred=entry['value_pred'],
+    #             policy_probs=entry['move_probs'],
+    #             chosen_move=entry['move'],
+    #             temperature=entry['temperature'],
+    #             actual_outcome=entry['outcome']
+    #         )
 
     def start_iteration(self, iteration: int):
         """Start tracking a new iteration."""
@@ -249,27 +255,44 @@ class MetricsLogger:
 
         # Game length distribution
         lengths = [g['length'] for g in self.current_metrics['games']]
-        axes[0, 0].hist(lengths, bins=20)
+        axes[0, 0].hist(lengths, bins=20, alpha=0.7, label='Game Lengths')
         axes[0, 0].set_title('Game Length Distribution')
+        axes[0, 0].set_xlabel('Number of Moves')
+        axes[0, 0].set_ylabel('Frequency')
 
         # Value accuracy by phase
         phases = list(self.value_accuracy_history.keys())
         accuracies = [np.mean(self.value_accuracy_history[p]) for p in phases]
-        axes[0, 1].bar(phases, accuracies)
+        axes[0, 1].bar(phases, accuracies, alpha=0.7)
         axes[0, 1].set_title('Value Head Accuracy by Phase')
+        axes[0, 1].set_xlabel('Game Phase')
+        axes[0, 1].set_ylabel('Accuracy')
+        axes[0, 1].set_ylim([0, 1])  # Set y-axis limits to 0-1 for accuracy
 
         # Training curves
-        epochs = range(len(self.training_curves['policy_loss']))
-        axes[1, 0].plot(epochs, self.training_curves['policy_loss'], label='Policy Loss')
-        axes[1, 0].plot(epochs, self.training_curves['value_loss'], label='Value Loss')
-        axes[1, 0].set_title('Training Losses')
-        axes[1, 0].legend()
+        if self.training_curves['policy_loss']:
+            epochs = range(len(self.training_curves['policy_loss']))
+            axes[1, 0].plot(epochs, self.training_curves['policy_loss'], label='Policy Loss')
+            axes[1, 0].plot(epochs, self.training_curves['value_loss'], label='Value Loss')
+            axes[1, 0].set_title('Training Losses')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('Loss')
+            axes[1, 0].legend()
+        else:
+            axes[1, 0].text(0.5, 0.5, 'No Data', horizontalalignment='center', verticalalignment='center')
 
         # Gradient norms
-        axes[1, 1].plot(epochs, self.training_curves['gradient_norm'])
-        axes[1, 1].set_title('Gradient Norms')
+        if self.training_curves['gradient_norm']:
+            axes[1, 1].plot(epochs, self.training_curves['gradient_norm'])
+            axes[1, 1].set_title('Gradient Norms')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('Norm Value')
+        else:
+            axes[1, 1].text(0.5, 0.5, 'No Data', horizontalalignment='center', verticalalignment='center')
 
+        # Save and close figure
         plot_path = self.metrics_dir / f"iteration_{self.current_iteration}_plots.png"
-        self.logger.info(f"Saving plots to {plot_path}")  # Debug log
+        self.logger.info(f"Saving plots to {plot_path}")
+        plt.tight_layout()
         plt.savefig(plot_path)
         plt.close()
