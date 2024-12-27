@@ -121,6 +121,7 @@ class CombinedConfig(BaseExperimentConfig):
     temp_start_decay_at: float = 0.5 # Add this
     value_head_lr_factor: float = 5.0  # Add this line
     value_loss_weights: Tuple[float, float] = (0.5, 0.5) # Add this line - equal weights to start
+    max_depth: int = 20
 
     def __init__(self,
                  lr: float,
@@ -139,6 +140,7 @@ class CombinedConfig(BaseExperimentConfig):
                  temp_start_decay_at: float = 0.5,  # Add this
                  value_head_lr_factor: float = 5.0,  # Add this line
                  value_loss_weights: Tuple[float, float] = (0.5, 0.5),  # Add this line
+                 max_depth: int = 20,
                  **kwargs):
         super().__init__(**kwargs)
         self.lr = lr
@@ -157,6 +159,7 @@ class CombinedConfig(BaseExperimentConfig):
         self.temp_start_decay_at = temp_start_decay_at
         self.value_head_lr_factor = value_head_lr_factor  # Add this line
         self.value_loss_weights = value_loss_weights # Add this line
+        self.max_depth = max_depth
 
 # Experiment configurations
 LEARNING_RATE_EXPERIMENTS = {

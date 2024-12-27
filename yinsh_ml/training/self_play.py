@@ -151,6 +151,10 @@ class MCTS:
             # Backpropagation
             self._backpropagate(search_path, value)
 
+            # Collect MCTS metrics during search
+            self.metrics.add_search_depth(depth)
+            self.metrics.record_branching_factor(len(node.children))
+
         # Calculate visit count distribution
         temp = self.get_temperature(move_number)
         self.logger.debug(f"Using temperature {temp:.2f} at move {move_number}")
