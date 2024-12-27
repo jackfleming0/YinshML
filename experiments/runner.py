@@ -19,10 +19,12 @@ from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.training.self_play import SelfPlay
 from yinsh_ml.utils.tournament import ModelTournament
 from yinsh_ml.utils.metrics_logger import MetricsLogger
+from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 
 from experiments.config import (
     get_experiment_config,
+    RESULTS_DIR,
     RESULTS_SUBDIRS,
     LearningRateConfig,
     MCTSConfig,
@@ -42,6 +44,9 @@ class ExperimentRunner:
             debug=debug
         )
 
+        # Initialize value head metrics
+        self.value_head_metrics = ValueHeadMetrics()
+
         # Set logging levels
         loggers = [
             logging.getLogger("ExperimentRunner"),
@@ -57,9 +62,14 @@ class ExperimentRunner:
         # Add checkpoint directory
         self.checkpoint_dir = Path("checkpoints")
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir = RESULTS_DIR # Now it exists
+
 
         # Initialize baseline model
         self.baseline_model = self._init_baseline_model()
+
+        # Initialize self_play attribute here
+        self.self_play = None
 
 
     def _init_baseline_model(self) -> NetworkWrapper:
@@ -505,12 +515,13 @@ class ExperimentRunner:
         trainer = YinshTrainer(network,
                                device=self.device,
                                 l2_reg=0.0,
-                               metrics_logger=self.metrics_logger
-                               )
+                               metrics_logger=self.metrics_logger,
+                               value_head_lr_factor=config.value_head_lr_factor,  # Pass the factor
+                               value_loss_weights=config.value_loss_weights)  # Pass the weights
 
         # Set learning rate configuration for both optimizers
         trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
-        trainer.value_optimizer.param_groups[0]['lr'] = config.lr * 0.1  # Value head uses lower lr
+        trainer.value_optimizer.param_groups[0]['lr'] = config.lr * config.value_head_lr_factor  # Value head uses higher lr
 
         # Set weight decay for both optimizers
         trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay
@@ -518,6 +529,14 @@ class ExperimentRunner:
             'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
 
         for iteration in range(config.num_iterations):
+            # Create experiment-specific checkpoint directory
+            iteration_dir = self.checkpoint_dir / config_name / f"iteration_{iteration}"
+            iteration_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create experiment-specific metrics directory
+            metrics_dir = self.results_dir / config_name / f"iteration_{iteration}" / "metrics"
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+
             # Tell metrics logger we're starting a new iteration
             self.metrics_logger.start_iteration(iteration)
             iter_start_time = time.time()
@@ -526,24 +545,41 @@ class ExperimentRunner:
             # Generate self-play games with MCTS parameters
             print(f"Generating {config.games_per_iteration} self-play games...")
             game_start_time = time.time()
-            self_play = SelfPlay(
+            self.self_play = SelfPlay(
                 network=network,
-                # num_workers=4,
                 metrics_logger=self.metrics_logger,
                 num_simulations=config.num_simulations,
                 initial_temp=config.initial_temp,
                 final_temp=config.final_temp,
-                c_puct=config.c_puct
+                c_puct=config.c_puct,
+                max_depth=config.max_depth  # Pass max_depth to SelfPlay
             )
-            self_play.current_iteration = iteration
+            self.self_play.current_iteration = iteration
 
-            games = self_play.generate_games(num_games=config.games_per_iteration)
+            games = self.self_play.generate_games(num_games=config.games_per_iteration)
             print(f"Games generated in {time.time() - game_start_time:.2f} seconds")
+
+            # Save MCTS Metrics if they exist
+            if hasattr(self.self_play.mcts, 'metrics') and self.self_play.mcts.metrics:
+                mcts_metrics_path = metrics_dir / "mcts_metrics.json"  # Use metrics_dir
+                self.self_play.mcts.metrics.save(str(mcts_metrics_path))
+                self.logger.info(f"MCTS metrics saved to {mcts_metrics_path}")
 
             # Add games to trainer's experience
             print("Adding games to trainer's experience...")
             exp_start_time = time.time()
-            for states, policies, outcome in games:
+            for states, policies, outcome, game_history in games:
+                # Pass individual game states to ValueHeadMetrics
+                for state_data in game_history:
+                    self.value_head_metrics.record_evaluation(
+                        state=state_data['state'],
+                        value_pred=state_data['value_pred'],  # Correctly passing value_pred
+                        policy_probs=state_data['move_probs'],
+                        chosen_move=state_data['move'],
+                        temperature=state_data['temperature'],
+                        actual_outcome=outcome
+                    )
+
                 trainer.add_game_experience(states, policies, outcome)
             print(f"Experience added in {time.time() - exp_start_time:.2f} seconds")
 
@@ -589,6 +625,13 @@ class ExperimentRunner:
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
             metrics["timestamps"].append(time.time() - iter_start_time)
+
+            # Save Value Head Metrics and plots
+            value_metrics_path = metrics_dir / "value_metrics.json"  # Use metrics_dir
+            self.value_head_metrics.save(str(value_metrics_path))
+            self.logger.info(f"Value head metrics saved to {value_metrics_path}")
+            value_metrics_plots = metrics_dir / "value_head_diagnostics.png"  # Use metrics_dir
+            self.value_head_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
 
             # Add explicit save at end of iteration
             self.metrics_logger.summarize_iteration()  # Generate summary stats

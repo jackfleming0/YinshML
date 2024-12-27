@@ -68,7 +68,9 @@ class YinshTrainer:
                  network: NetworkWrapper,
                  device: Optional[str] = None,
                  l2_reg: float = 0.0,
-                 metrics_logger: Optional[MetricsLogger] = None):
+                 metrics_logger: Optional[MetricsLogger] = None,
+                 value_head_lr_factor: float = 5.0,
+                 value_loss_weights: Tuple[float, float] = (0.5, 0.5)):
         """
         Initialize the trainer.
 
@@ -77,7 +79,8 @@ class YinshTrainer:
             device: Device to train on ('cuda', 'mps', or 'cpu')
             l2_reg: L2 regularization coefficient
             metrics_logger: Optional MetricsLogger instance
-
+            value_head_lr_factor: Factor to multiply base lr for value head
+            value_loss_weights: Weights for combining MSE and CE loss in value head
         """
         self.state_encoder = network.state_encoder
 
@@ -94,6 +97,11 @@ class YinshTrainer:
         self.network.network = self.network.network.to(self.device)
         self.metrics_logger = metrics_logger  # Store the metrics_logger
 
+        self.value_loss_weights = value_loss_weights  # Store the weights
+        self.value_head_lr_factor = value_head_lr_factor
+
+        print(f"Value Loss Weights Type: {type(self.value_loss_weights)}")
+        print(f"Value Loss Weights: {self.value_loss_weights}")
 
         # Separate out value head and policy parameters
         value_params = [p for n, p in self.network.network.named_parameters()
@@ -195,15 +203,18 @@ class YinshTrainer:
         )
         self._log_value_head_metrics(value_metrics)
 
-        # After forward pass, record value head metrics
-        if hasattr(states, 'game_state'):  # If game state info is available
+        # After forward pass, record value head metrics for each state in the batch
+        for i in range(states.size(0)):
+            # Decode the state tensor to get the GameState object
+            game_state = self.state_encoder.decode_state(states[i].cpu().numpy())
+
             self.value_metrics.record_evaluation(
-                state=states.game_state,
-                value_pred=pred_values.detach().cpu().numpy(),
-                policy_probs=F.softmax(pred_logits, dim=-1).detach().cpu().numpy(),
-                chosen_move=None,  # We'll need to add this
-                temperature=temperature,
-                actual_outcome=target_values.detach().cpu().numpy()
+                state=game_state,  # Pass the GameState object
+                value_pred=pred_values[i].detach().cpu().numpy(),
+                policy_probs=F.softmax(pred_logits[i], dim=-1).detach().cpu().numpy(),
+                chosen_move=None,  # You can add logic to determine this if needed
+                temperature=self.temperature,
+                actual_outcome=target_values[i].detach().cpu().numpy()
             )
 
         # Policy optimization step
@@ -225,7 +236,7 @@ class YinshTrainer:
                 policy_loss = policy_loss + self.l2_reg * l2_loss
 
             # Backward pass for policy
-            policy_loss.backward()
+            policy_loss.backward(retain_graph=True)
 
             # Clip policy gradients
             policy_params = [p for n, p in self.network.network.named_parameters()
@@ -238,13 +249,22 @@ class YinshTrainer:
         # Value optimization step
         self.value_optimizer.zero_grad()
 
-        # Calculate value loss with stability term
+        # Calculate value loss with composite approach (MSE + CE)
         with torch.set_grad_enabled(True):
-            # Recompute forward pass for value head
+            # Recompute forward pass for value head (important for separate optimization)
             _, pred_values = self.network.network(states)
-            huber_loss = F.smooth_l1_loss(pred_values, target_values, beta=0.5)
-            stability_loss = torch.mean(torch.square(pred_values))
-            value_loss = huber_loss + 0.01 * stability_loss
+
+            # MSE loss
+            value_loss_mse = F.mse_loss(pred_values, target_values)
+
+            # Cross-entropy loss
+            target_outcomes = (target_values > 0).long()  # Convert to 0, 1 labels for win/loss
+            value_probs = torch.sigmoid(pred_values)  # Sigmoid for probabilities
+            value_loss_ce = F.binary_cross_entropy(value_probs, target_outcomes.float())
+
+            # Combine losses using weights from config
+            value_loss = self.value_loss_weights[0] * value_loss_mse + self.value_loss_weights[
+                1] * value_loss_ce  # Multiply the losses by the weights
             value_loss_val = float(value_loss.item())  # Store raw loss value
 
             # Add L2 regularization for value head

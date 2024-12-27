@@ -1,11 +1,10 @@
 """Core game logic for YINSH board."""
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, ForwardRef
 from dataclasses import dataclass, field
 from collections import defaultdict
 import numpy as np
 import logging
-
 
 from .constants import (
     Position,
@@ -196,6 +195,21 @@ class Board:
 
         logger.debug(f"Found valid moves: {valid_positions}")  # Debug
         return valid_positions
+
+    def get_rings_positions(self, player: Player) -> List[Position]:
+        """Get all positions of a player's rings."""
+        ring_type = PieceType.WHITE_RING if player == Player.WHITE else PieceType.BLACK_RING
+        return [pos for pos, piece in self.pieces.items() if piece == ring_type]
+
+    # Use a forward reference (string) for the Move type hint
+    # def get_ring_valid_moves(self, position: Position) -> List['Move']:
+    #     """Get valid moves for a ring at the given position."""
+    #     valid_moves = self.get_valid_moves()  # Assuming this method exists in GameState
+    #     ring_moves = [
+    #         move for move in valid_moves
+    #         if move.type == MoveType.MOVE_RING and move.source == position
+    #     ]
+    #     return ring_moves
 
     def get_markers_between(self, start: Position, end: Position) -> List[Position]:
         """Get all marker positions between start and end."""
