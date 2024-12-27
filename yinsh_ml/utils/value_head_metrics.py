@@ -1,10 +1,11 @@
 import numpy as np
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from collections import defaultdict
 import matplotlib.pyplot as plt
 from ..game.game_state import GameState, GamePhase
-from ..game.constants import Player
+from ..game.constants import Player, PieceType
 from ..game.moves import Move
+import json
 
 class ValueHeadMetrics:
     """Enhanced monitoring for value head analysis."""
@@ -15,21 +16,33 @@ class ValueHeadMetrics:
             'main_game': defaultdict(list),
             'ring_removal': defaultdict(list)
         }
-        self.position_cache = {}  # For tracking repeated positions
-        self.confidence_curves = []  # Track confidence over move number
-        self.critical_positions = []  # Store important position evaluations
+        self.position_cache = {}  # For tracking repeated positions and their value predictions
+        self.move_values = []  # Track value predictions over the course of each game
+
+    def _get_phase_name(self, phase: GamePhase) -> str:
+        """Helper function to get phase name."""
+        if phase == GamePhase.RING_PLACEMENT:
+            return 'placement'
+        elif phase == GamePhase.MAIN_GAME:
+            return 'main_game'
+        elif phase == GamePhase.ROW_COMPLETION:
+            return 'main_game'  # Assuming ROW_COMPLETION is similar to MAIN_GAME
+        elif phase == GamePhase.RING_REMOVAL:
+            return 'ring_removal'
+        else:
+            return 'unknown'
 
     def record_evaluation(self, state: GameState, value_pred: float,
-                          policy_probs: np.ndarray, chosen_move: Move,
+                          policy_probs: np.ndarray, chosen_move: Optional[Move],
                           temperature: float, actual_outcome: Optional[float] = None):
         """Record comprehensive evaluation data."""
-        phase = str(state.phase)
-        board_hash = self._hash_board_state(state)
+        phase_name = self._get_phase_name(state.phase)
+        board_hash = str(state.board)
 
         # Track value prediction consistency
         if board_hash in self.position_cache:
             prev_value = self.position_cache[board_hash]['value']
-            self.phase_metrics[phase]['value_consistency'].append(
+            self.phase_metrics[phase_name]['value_consistency'].append(
                 abs(prev_value - value_pred)
             )
 
@@ -38,83 +51,49 @@ class ValueHeadMetrics:
             'move_count': len(state.move_history)
         }
 
-        # Track value influence on move selection
-        top_policy_value = np.max(policy_probs)
-        value_influence = 1.0 - temperature  # Higher at lower temperatures
+        # Record value prediction and move number for evolution tracking
+        self.move_values.append((len(state.move_history), value_pred))
 
         metrics = {
             'value_pred': value_pred,
             'temperature': temperature,
-            'top_policy_prob': top_policy_value,
-            'value_influence': value_influence,
-            'move_count': len(state.move_history)
+            'top_policy_prob': np.max(policy_probs) if policy_probs is not None else 0,
+            'ring_mobility': self._calculate_ring_mobility(state)
         }
-
-        # Add phase-specific metrics
-        if phase == 'main_game':
-            metrics.update(self._analyze_main_game(state))
-        elif phase == 'ring_removal':
-            metrics.update(self._analyze_ring_removal(state))
 
         # Store metrics
         for key, value in metrics.items():
-            self.phase_metrics[phase][key].append(value)
+            self.phase_metrics[phase_name][key].append(value)
 
-        # Track critical positions
-        if self._is_critical_position(state, value_pred, actual_outcome):
-            self.critical_positions.append({
-                'board_state': str(state.board),
-                'value_pred': value_pred,
-                'actual_outcome': actual_outcome,
-                'phase': phase,
-                'move_count': len(state.move_history)
-            })
+    def _calculate_ring_mobility(self, state: GameState) -> float:
+        """Calculate average mobility of rings."""
+        total_mobility = 0
+        total_rings = 0
+        for player in Player:
+            # Use get_rings_positions instead of get_pieces_positions
+            rings = state.board.get_rings_positions(player)
+            total_rings += len(rings)
+            for ring_pos in rings:
+                total_mobility += len(state.get_ring_valid_moves(ring_pos))  # Use get_ring_valid_moves from GameState
+        return total_mobility / (total_rings or 1)
 
-    def _analyze_main_game(self, state: GameState) -> Dict:
-        """Analyze main game phase specifics."""
-        return {
-            'ring_mobility': self._calculate_ring_mobility(state),
-            'marker_chains': self._count_marker_chains(state),
-            'territory_control': self._analyze_territory(state)
-        }
+    def _analyze_value_evolution(self) -> List[Tuple[int, float]]:
+        """Return the evolution of value predictions over move numbers."""
+        return self.move_values
 
-    def _analyze_ring_removal(self, state: GameState) -> Dict:
-        """Analyze ring removal phase specifics."""
-        return {
-            'rings_remaining': {
-                'white': self._count_rings(state, Player.WHITE),
-                'black': self._count_rings(state, Player.BLACK)
-            },
-            'position_tension': self._calculate_position_tension(state)
-        }
-
-    def _is_critical_position(self, state: GameState,
-                              value_pred: float,
-                              actual_outcome: Optional[float]) -> bool:
-        """Identify critical positions for analysis."""
-        if actual_outcome is None:
-            return False
-
-        # Large prediction error
-        if abs(value_pred - actual_outcome) > 0.5:
-            return True
-
-        # Near end of game
-        if len(state.move_history) > 40:
-            return True
-
-        # During ring removal
-        if state.phase == GamePhase.RING_REMOVAL:
-            return True
-
-        return False
+    def _analyze_consistency(self) -> Dict[str, float]:
+        """Analyze consistency of value predictions for repeated positions."""
+        consistency_metrics = {}
+        for phase in self.phase_metrics:
+            if 'value_consistency' in self.phase_metrics[phase]:
+                consistency_metrics[phase] = np.mean(self.phase_metrics[phase]['value_consistency'])
+        return consistency_metrics
 
     def generate_report(self) -> Dict:
         """Generate comprehensive analysis report."""
         report = {
             'phase_summaries': {},
             'value_evolution': self._analyze_value_evolution(),
-            'critical_positions': self._analyze_critical_positions(),
             'consistency_metrics': self._analyze_consistency()
         }
 
@@ -122,28 +101,74 @@ class ValueHeadMetrics:
             report['phase_summaries'][phase] = {
                 'avg_value_pred': np.mean(metrics['value_pred']),
                 'value_std': np.std(metrics['value_pred']),
-                'avg_influence': np.mean(metrics['value_influence']),
+                'avg_ring_mobility': np.mean(metrics.get('ring_mobility', [0.0])),
                 'consistency': np.mean(metrics.get('value_consistency', [1.0]))
             }
 
         return report
 
     def plot_diagnostics(self, save_path: Optional[str] = None):
-        """Generate diagnostic plots."""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 15))
+        """
+        Generate diagnostic plots for value head evaluations.
 
-        # Value prediction distribution by phase
-        self._plot_value_distributions(axes[0, 0])
+        Args:
+            save_path: Optional path to save the plots
+        """
+        if not self.move_values:
+            print("No evaluation data available to plot.")
+            return
 
-        # Value influence over game progression
-        self._plot_value_influence(axes[0, 1])
+        # Extract relevant data for plotting
+        move_numbers, value_preds = zip(*self.move_values)
 
-        # Consistency metrics
-        self._plot_consistency_metrics(axes[1, 0])
-
-        # Phase-specific metrics
-        self._plot_phase_metrics(axes[1, 1])
-
+        # Plot 1: Histogram of Value Predictions
+        plt.figure(figsize=(10, 5))
+        plt.hist(value_preds, bins=20, alpha=0.7, label='Predictions')
+        plt.title('Distribution of Value Predictions')
+        plt.xlabel('Predicted Value')
+        plt.ylabel('Frequency')
         if save_path:
-            plt.savefig(save_path)
-        plt.close()
+            plt.savefig(f"{save_path}_value_predictions_hist.png")
+        plt.close()  # Close the figure after saving
+
+        # Plot 2: Value Prediction Evolution
+        plt.figure(figsize=(10, 5))
+        plt.plot(move_numbers, value_preds)
+        plt.title('Value Prediction Evolution Over Game')
+        plt.xlabel('Move Number')
+        plt.ylabel('Predicted Value')
+        plt.ylim(-1, 1)  # Assuming value predictions are in the range [-1, 1]
+        if save_path:
+            plt.savefig(f"{save_path}_value_evolution.png")
+        plt.close()  # Close the figure after saving
+
+    def save(self, file_path: str):
+        """Save the evaluation data to a file."""
+
+        def convert_to_serializable(obj):
+            if isinstance(obj, np.float32):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, dict):
+                return {k: convert_to_serializable(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [convert_to_serializable(item) for item in obj]
+            return obj
+
+        data_to_save = {
+            'phase_metrics': self.phase_metrics,
+            'position_cache': self.position_cache,
+            'move_values': self.move_values,
+        }
+        with open(file_path, 'w') as f:
+            json.dump(data_to_save, f, indent=2, default=convert_to_serializable)
+
+    def load(self, file_path: str):
+        """Load evaluation data from a file."""
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            self.phase_metrics = data['phase_metrics']
+            self.position_cache = data['position_cache']
+            self.move_values = data['move_values']
+            self.critical_positions = data['critical_positions']

@@ -3,14 +3,19 @@
 import json
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional
-import logging
-
+from typing import Dict, Optional, List, Tuple
+from collections import defaultdict
+import matplotlib.pyplot as plt
+from yinsh_ml.game.game_state import GameState, GamePhase
+from yinsh_ml.game.constants import (Player, PieceType)
+from yinsh_ml.game.moves import Move
 
 class MCTSMetrics:
     def __init__(self):
         self.iteration_data = {}  # Keyed by iteration number
         self.current_iteration = 0  # Need to set this when starting new iterations
+        self.search_depths = []  # new
+        self.branching_factors = []  # new
 
     def record_position(self, iteration: int, position_data: dict):
         """Record interesting position data during MCTS."""
@@ -32,6 +37,14 @@ class MCTSMetrics:
             'value_ucb_disagreement': position_data.get('value_ucb_disagreement', False),
             'game_phase': position_data.get('game_phase', 'unknown')
         })
+
+    def add_search_depth(self, depth: int): # new
+        """Record the depth of a search."""
+        self.search_depths.append(depth)
+
+    def record_branching_factor(self, branching_factor: int): # new
+        """Record the branching factor at a node."""
+        self.branching_factors.append(branching_factor)
 
     def analyze_iteration(self, iteration: int) -> dict:
         """Analyze metrics for a specific iteration."""
