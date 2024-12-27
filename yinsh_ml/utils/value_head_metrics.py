@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from ..game.game_state import GameState, GamePhase
 from ..game.constants import Player, PieceType
 from ..game.moves import Move
+import json
 
 class ValueHeadMetrics:
     """Enhanced monitoring for value head analysis."""
@@ -120,27 +121,48 @@ class ValueHeadMetrics:
         # Extract relevant data for plotting
         move_numbers, value_preds = zip(*self.move_values)
 
-        # Plot: Value Prediction Evolution
+        # Plot 1: Histogram of Value Predictions
+        plt.figure(figsize=(10, 5))
+        plt.hist(value_preds, bins=20, alpha=0.7, label='Predictions')
+        plt.title('Distribution of Value Predictions')
+        plt.xlabel('Predicted Value')
+        plt.ylabel('Frequency')
+        if save_path:
+            plt.savefig(f"{save_path}_value_predictions_hist.png")
+        plt.close()  # Close the figure after saving
+
+        # Plot 2: Value Prediction Evolution
         plt.figure(figsize=(10, 5))
         plt.plot(move_numbers, value_preds)
         plt.title('Value Prediction Evolution Over Game')
         plt.xlabel('Move Number')
-        plt.ylabel('Value Prediction')
+        plt.ylabel('Predicted Value')
         plt.ylim(-1, 1)  # Assuming value predictions are in the range [-1, 1]
         if save_path:
             plt.savefig(f"{save_path}_value_evolution.png")
-        plt.show()
+        plt.close()  # Close the figure after saving
 
     def save(self, file_path: str):
         """Save the evaluation data to a file."""
+
+        def convert_to_serializable(obj):
+            if isinstance(obj, np.float32):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, dict):
+                return {k: convert_to_serializable(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [convert_to_serializable(item) for item in obj]
+            return obj
+
         data_to_save = {
             'phase_metrics': self.phase_metrics,
             'position_cache': self.position_cache,
             'move_values': self.move_values,
-            'critical_positions': self.critical_positions
         }
         with open(file_path, 'w') as f:
-            json.dump(data_to_save, f, indent=2)
+            json.dump(data_to_save, f, indent=2, default=convert_to_serializable)
 
     def load(self, file_path: str):
         """Load evaluation data from a file."""
