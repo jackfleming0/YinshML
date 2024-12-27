@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from typing import List, Tuple, Optional, Dict
 from collections import defaultdict
-import random
 import logging
 from concurrent.futures import ProcessPoolExecutor
 import time
@@ -14,14 +13,14 @@ from pathlib import Path
 import concurrent.futures
 import psutil
 
-from experiments.mcts_metrics import MCTSMetrics
+from yinsh_ml.utils.mcts_metrics import MCTSMetrics
 from ..utils.TemperatureMetrics import TemperatureMetrics
 from ..utils.metrics_logger import MetricsLogger, GameMetrics
 from ..utils.encoding import StateEncoder
-from ..game.game_state import GamePhase, GameState
-from ..game.constants import Player, Position
+from ..game.game_state import GameState
+from ..game.constants import Player
 from ..network.wrapper import NetworkWrapper
-from ..game.moves import Move, MoveType
+from ..game.moves import Move
 
 # Configure the logger at the module level
 logger = logging.getLogger(__name__)
@@ -82,7 +81,9 @@ class MCTS:
                  final_temp: float = 0.2,
                  annealing_steps: int = 30,
                  c_puct: float = 1.0,
-                 max_depth: int = 20):
+                 max_depth: int = 20,
+                 mcts_metrics: Optional[MCTSMetrics] = None
+                 ):
         self.network = network
         self.num_simulations = num_simulations
         self.max_depth = max_depth
@@ -94,7 +95,8 @@ class MCTS:
         self.final_temp = final_temp
         self.annealing_steps = annealing_steps
 
-        self.metrics = MCTSMetrics()
+        # Use the passed MCTSMetrics object or create a new one
+        self.metrics = mcts_metrics if mcts_metrics is not None else MCTSMetrics()
         self.current_iteration = 0
 
         # MCTS exploration parameter
@@ -278,7 +280,7 @@ class SelfPlay:
     def __init__(self, network: NetworkWrapper, metrics_logger: MetricsLogger, num_simulations: int = 100,
                  initial_temp: float = 1.0, final_temp: float = 0.2,
                  annealing_steps: int = 30, c_puct: float = 1.0,
-                 max_depth: int = 20):
+                 max_depth: int = 20, mcts_metrics: Optional[MCTSMetrics] = None):
         self.network = network
         self.num_simulations = num_simulations
         self.metrics_logger = metrics_logger
@@ -307,7 +309,8 @@ class SelfPlay:
             final_temp=final_temp,
             annealing_steps=annealing_steps,
             c_puct=c_puct,         # Add new parameter
-            max_depth=max_depth    # Add new parameter
+            max_depth=max_depth,    # Add new parameter
+            mcts_metrics=mcts_metrics  # Pass MCTSMetrics to MCTS
         )
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("SelfPlay")
@@ -386,7 +389,8 @@ class SelfPlay:
                         num_simulations,
                         self.initial_temp,
                         self.final_temp,
-                        self.annealing_steps
+                        self.annealing_steps,
+                        self.mcts.metrics  # Pass mcts_metrics
                     )
                     for game_id in range(1, num_games + 1)
                 ]
@@ -567,7 +571,8 @@ def play_game_worker(
     num_simulations: int,
     initial_temp: float = 1.0,
     final_temp: float = 0.2,
-    annealing_steps: int = 30
+    annealing_steps: int = 30,
+    mcts_metrics: Optional[MCTSMetrics] = None  # New argument
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict, List[Dict]]:
     """
     Worker function to play a single game with temperature metrics and robust logging.
@@ -599,7 +604,8 @@ def play_game_worker(
             num_simulations=num_simulations,
             initial_temp=initial_temp,
             final_temp=final_temp,
-            annealing_steps=annealing_steps
+            annealing_steps=annealing_steps,
+            mcts_metrics=mcts_metrics  # Pass mcts_metrics to MCTS
         )
         state = GameState()
         state_encoder = StateEncoder()

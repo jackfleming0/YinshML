@@ -4,12 +4,12 @@ import json
 import time
 from pathlib import Path
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import torch
+
+from yinsh_ml.utils.mcts_metrics import MCTSMetrics
 from yinsh_ml.game.moves import Move
-from yinsh_ml.game.game_state import GameState
 import numpy as np
-from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 # Import YINSH specific modules
 from yinsh_ml.game.game_state import GameState, GamePhase
@@ -542,6 +542,8 @@ class ExperimentRunner:
             iter_start_time = time.time()
             print(f"\nIteration {iteration + 1}/{config.num_iterations}")
 
+            mcts_metrics = MCTSMetrics()
+
             # Generate self-play games with MCTS parameters
             print(f"Generating {config.games_per_iteration} self-play games...")
             game_start_time = time.time()
@@ -552,7 +554,7 @@ class ExperimentRunner:
                 initial_temp=config.initial_temp,
                 final_temp=config.final_temp,
                 c_puct=config.c_puct,
-                max_depth=config.max_depth  # Pass max_depth to SelfPlay
+                mcts_metrics=mcts_metrics
             )
             self.self_play.current_iteration = iteration
 
