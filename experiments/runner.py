@@ -523,6 +523,10 @@ class ExperimentRunner:
             'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
 
         for iteration in range(config.num_iterations):
+            # Create experiment-specific checkpoint directory
+            iteration_dir = self.checkpoint_dir / config_name / f"iteration_{iteration}"
+            iteration_dir.mkdir(parents=True, exist_ok=True)
+
             # Tell metrics logger we're starting a new iteration
             self.metrics_logger.start_iteration(iteration)
             iter_start_time = time.time()
@@ -544,13 +548,16 @@ class ExperimentRunner:
             games = self_play.generate_games(num_games=config.games_per_iteration)
             print(f"Games generated in {time.time() - game_start_time:.2f} seconds")
 
+            # Save MCTS Metrics if they exist
+            if hasattr(self_play.mcts, 'metrics') and self_play.mcts.metrics:
+                mcts_metrics_path = iteration_dir / "mcts_metrics.json"
+                self_play.mcts.metrics.save(str(mcts_metrics_path))
+                self.logger.info(f"MCTS metrics saved to {mcts_metrics_path}")
+
             # Add games to trainer's experience
             print("Adding games to trainer's experience...")
             exp_start_time = time.time()
             for states, policies, outcome, game_history in games:
-                # Pass game history to metrics_logger for each game
-                # self.metrics_logger.record_game_history(game_history)
-
                 # Pass individual game states to ValueHeadMetrics
                 for state_data in game_history:
                     self.value_head_metrics.record_evaluation(
@@ -607,6 +614,13 @@ class ExperimentRunner:
             metrics["elo_changes"].append(float(elo_change))
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
             metrics["timestamps"].append(time.time() - iter_start_time)
+
+            # Save Value Head Metrics and plots
+            value_metrics_path = iteration_dir / "value_metrics.json"
+            self.value_head_metrics.save(str(value_metrics_path))
+            self.logger.info(f"Value head metrics saved to {value_metrics_path}")
+            value_metrics_plots = iteration_dir / "value_head_diagnostics.png"
+            self.value_head_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
 
             # Add explicit save at end of iteration
             self.metrics_logger.summarize_iteration()  # Generate summary stats
