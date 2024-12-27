@@ -24,6 +24,7 @@ from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 from experiments.config import (
     get_experiment_config,
+    RESULTS_DIR,
     RESULTS_SUBDIRS,
     LearningRateConfig,
     MCTSConfig,
@@ -61,9 +62,14 @@ class ExperimentRunner:
         # Add checkpoint directory
         self.checkpoint_dir = Path("checkpoints")
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir = RESULTS_DIR # Now it exists
+
 
         # Initialize baseline model
         self.baseline_model = self._init_baseline_model()
+
+        # Initialize self_play attribute here
+        self.self_play = None
 
 
     def _init_baseline_model(self) -> NetworkWrapper:
@@ -527,6 +533,10 @@ class ExperimentRunner:
             iteration_dir = self.checkpoint_dir / config_name / f"iteration_{iteration}"
             iteration_dir.mkdir(parents=True, exist_ok=True)
 
+            # Create experiment-specific metrics directory
+            metrics_dir = self.results_dir / config_name / f"iteration_{iteration}" / "metrics"
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+
             # Tell metrics logger we're starting a new iteration
             self.metrics_logger.start_iteration(iteration)
             iter_start_time = time.time()
@@ -535,23 +545,24 @@ class ExperimentRunner:
             # Generate self-play games with MCTS parameters
             print(f"Generating {config.games_per_iteration} self-play games...")
             game_start_time = time.time()
-            self_play = SelfPlay(
+            self.self_play = SelfPlay(
                 network=network,
                 metrics_logger=self.metrics_logger,
                 num_simulations=config.num_simulations,
                 initial_temp=config.initial_temp,
                 final_temp=config.final_temp,
-                c_puct=config.c_puct
+                c_puct=config.c_puct,
+                max_depth=config.max_depth  # Pass max_depth to SelfPlay
             )
-            self_play.current_iteration = iteration
+            self.self_play.current_iteration = iteration
 
-            games = self_play.generate_games(num_games=config.games_per_iteration)
+            games = self.self_play.generate_games(num_games=config.games_per_iteration)
             print(f"Games generated in {time.time() - game_start_time:.2f} seconds")
 
             # Save MCTS Metrics if they exist
-            if hasattr(self_play.mcts, 'metrics') and self_play.mcts.metrics:
-                mcts_metrics_path = iteration_dir / "mcts_metrics.json"
-                self_play.mcts.metrics.save(str(mcts_metrics_path))
+            if hasattr(self.self_play.mcts, 'metrics') and self.self_play.mcts.metrics:
+                mcts_metrics_path = metrics_dir / "mcts_metrics.json"  # Use metrics_dir
+                self.self_play.mcts.metrics.save(str(mcts_metrics_path))
                 self.logger.info(f"MCTS metrics saved to {mcts_metrics_path}")
 
             # Add games to trainer's experience
@@ -616,10 +627,10 @@ class ExperimentRunner:
             metrics["timestamps"].append(time.time() - iter_start_time)
 
             # Save Value Head Metrics and plots
-            value_metrics_path = iteration_dir / "value_metrics.json"
+            value_metrics_path = metrics_dir / "value_metrics.json"  # Use metrics_dir
             self.value_head_metrics.save(str(value_metrics_path))
             self.logger.info(f"Value head metrics saved to {value_metrics_path}")
-            value_metrics_plots = iteration_dir / "value_head_diagnostics.png"
+            value_metrics_plots = metrics_dir / "value_head_diagnostics.png"  # Use metrics_dir
             self.value_head_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
 
             # Add explicit save at end of iteration
