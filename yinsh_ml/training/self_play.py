@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from typing import List, Tuple, Optional, Dict
 from collections import defaultdict
-import random
 import logging
 from concurrent.futures import ProcessPoolExecutor
 import time
@@ -14,14 +13,14 @@ from pathlib import Path
 import concurrent.futures
 import psutil
 
-from experiments.mcts_metrics import MCTSMetrics
+from yinsh_ml.utils.mcts_metrics import MCTSMetrics
 from ..utils.TemperatureMetrics import TemperatureMetrics
 from ..utils.metrics_logger import MetricsLogger, GameMetrics
 from ..utils.encoding import StateEncoder
-from ..game.game_state import GamePhase, GameState
-from ..game.constants import Player, Position
+from ..game.game_state import GameState
+from ..game.constants import Player
 from ..network.wrapper import NetworkWrapper
-from ..game.moves import Move, MoveType
+from ..game.moves import Move
 
 # Configure the logger at the module level
 logger = logging.getLogger(__name__)
@@ -82,7 +81,9 @@ class MCTS:
                  final_temp: float = 0.2,
                  annealing_steps: int = 30,
                  c_puct: float = 1.0,
-                 max_depth: int = 20):
+                 max_depth: int = 20,
+                 mcts_metrics: Optional[MCTSMetrics] = None
+                 ):
         self.network = network
         self.num_simulations = num_simulations
         self.max_depth = max_depth
@@ -94,7 +95,8 @@ class MCTS:
         self.final_temp = final_temp
         self.annealing_steps = annealing_steps
 
-        self.metrics = MCTSMetrics()
+        # Use the passed MCTSMetrics object or create a new one
+        self.metrics = mcts_metrics if mcts_metrics is not None else MCTSMetrics()
         self.current_iteration = 0
 
         # MCTS exploration parameter
@@ -125,6 +127,7 @@ class MCTS:
             # Selection
             while node.is_expanded and node.children:
                 action = self._select_action(node)
+                print(f"Selected action: {action}")  # Debug print
                 current_state.make_move(action)
                 node = node.children[action]
                 search_path.append(node)
@@ -132,8 +135,11 @@ class MCTS:
 
             # Expansion and evaluation
             value = self._get_value(current_state)
+            print(f"Value from _get_value: {value}")  # Debug print
             if value is None:
                 policy, value = self._evaluate_state(current_state)
+                print(f"Policy from network: {policy}")  # Debug print
+                print(f"Value from network: {value}")  # Debug print
                 valid_moves = current_state.get_valid_moves()
 
                 if valid_moves:
@@ -147,12 +153,17 @@ class MCTS:
                             prior_prob=self._get_move_prob(policy, move),
                             c_puct=self.c_puct  # Pass the c_puct value
                         )
+                else:
+                    print("No valid moves to expand!")
 
             # Backpropagation
             self._backpropagate(search_path, value)
+            print(f"Value after backpropagation: {value}")
 
             # Collect MCTS metrics during search
+            print(f"Adding search depth: {depth}")  # Debug print
             self.metrics.add_search_depth(depth)
+            print(f"Recording branching factor: {len(node.children)}")  # Debug print
             self.metrics.record_branching_factor(len(node.children))
 
         # Calculate visit count distribution
@@ -202,19 +213,31 @@ class MCTS:
             for move in valid_moves
         ])
 
+        # Add more detailed debug prints
+        print(f"  Node: {node}, Parent Visit Count: {node.parent.visit_count if node.parent else 0}")
+        for move, child_node in node.children.items():
+            print(f"    Move: {move}, Prior Prob: {child_node.prior_prob:.4f}, "
+                  f"Value Sum: {child_node.value_sum}, Visit Count: {child_node.visit_count}, "
+                  f"UCB: {child_node.get_ucb_score(node.parent.visit_count if node.parent else 0):.4f}")
+
         # Record interesting positions
         if len(values) > 0:  # Make sure we have moves to analyze
+            print(f"values: {values}")
             value_range = np.max(values) - np.min(values)
+            print(f"value_range: {value_range}")
             best_by_value = valid_moves[np.argmax(values)]
+            print(f"best_by_value: {best_by_value}")
             best_by_ucb = valid_moves[np.argmax(ucb_scores)]
+            print(f"best_by_ucb: {best_by_ucb}")
             max_visits = np.max(visit_counts)
+            print(f"max_visits: {max_visits}")
 
             # Only record if position is interesting
-            if (values.max() > 0 and  # Skip all-zero states
-                    ((value_range > 1.0 and max_visits > 20) or
-                     (best_by_value != best_by_ucb and
-                      visit_counts[np.argmax(ucb_scores)] > 20 and
-                      value_range > 0.5))):
+            if (value_range > 0.1 or
+                    (best_by_value != best_by_ucb and
+                     visit_counts[np.argmax(ucb_scores)] >= 1 and
+                     value_range > 0.05)):
+                print("RECORDING POSITION")
                 self.metrics.record_position(self.current_iteration, {
                     'value_range': value_range,
                     'max_visits': max_visits,
@@ -278,7 +301,7 @@ class SelfPlay:
     def __init__(self, network: NetworkWrapper, metrics_logger: MetricsLogger, num_simulations: int = 100,
                  initial_temp: float = 1.0, final_temp: float = 0.2,
                  annealing_steps: int = 30, c_puct: float = 1.0,
-                 max_depth: int = 20):
+                 max_depth: int = 20, mcts_metrics: Optional[MCTSMetrics] = None):
         self.network = network
         self.num_simulations = num_simulations
         self.metrics_logger = metrics_logger
@@ -307,7 +330,8 @@ class SelfPlay:
             final_temp=final_temp,
             annealing_steps=annealing_steps,
             c_puct=c_puct,         # Add new parameter
-            max_depth=max_depth    # Add new parameter
+            max_depth=max_depth,    # Add new parameter
+            mcts_metrics=mcts_metrics  # Pass MCTSMetrics to MCTS
         )
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("SelfPlay")
@@ -386,7 +410,8 @@ class SelfPlay:
                         num_simulations,
                         self.initial_temp,
                         self.final_temp,
-                        self.annealing_steps
+                        self.annealing_steps,
+                        self.mcts.metrics  # Pass mcts_metrics
                     )
                     for game_id in range(1, num_games + 1)
                 ]
@@ -567,7 +592,8 @@ def play_game_worker(
     num_simulations: int,
     initial_temp: float = 1.0,
     final_temp: float = 0.2,
-    annealing_steps: int = 30
+    annealing_steps: int = 30,
+    mcts_metrics: Optional[MCTSMetrics] = None  # New argument
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict, List[Dict]]:
     """
     Worker function to play a single game with temperature metrics and robust logging.
@@ -599,7 +625,8 @@ def play_game_worker(
             num_simulations=num_simulations,
             initial_temp=initial_temp,
             final_temp=final_temp,
-            annealing_steps=annealing_steps
+            annealing_steps=annealing_steps,
+            mcts_metrics=mcts_metrics  # Pass mcts_metrics to MCTS
         )
         state = GameState()
         state_encoder = StateEncoder()

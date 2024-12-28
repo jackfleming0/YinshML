@@ -19,6 +19,9 @@ class MCTSMetrics:
 
     def record_position(self, iteration: int, position_data: dict):
         """Record interesting position data during MCTS."""
+        print(f"record_position called with iteration: {iteration}")  # Debug print
+        print(f"position_data: {position_data}")  # Debug print
+
         if iteration not in self.iteration_data:
             self.iteration_data[iteration] = []
 
@@ -40,10 +43,13 @@ class MCTSMetrics:
 
     def add_search_depth(self, depth: int): # new
         """Record the depth of a search."""
+        print(f"Adding search depth: {depth}")  # Debug print
         self.search_depths.append(depth)
+
 
     def record_branching_factor(self, branching_factor: int): # new
         """Record the branching factor at a node."""
+        print(f"Recording branching factor: {branching_factor}")  # Debug print
         self.branching_factors.append(branching_factor)
 
     def analyze_iteration(self, iteration: int) -> dict:

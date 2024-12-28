@@ -58,7 +58,8 @@ class ValueHeadMetrics:
             'value_pred': value_pred,
             'temperature': temperature,
             'top_policy_prob': np.max(policy_probs) if policy_probs is not None else 0,
-            'ring_mobility': self._calculate_ring_mobility(state)
+            'ring_mobility': self._calculate_ring_mobility(state),
+            'move_count': len(state.move_history)
         }
 
         # Store metrics

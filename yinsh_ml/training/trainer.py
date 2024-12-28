@@ -222,6 +222,7 @@ class YinshTrainer:
 
         # Calculate policy loss
         with torch.set_grad_enabled(True):
+
             scaled_logits = pred_logits / self.temperature  # Use self.temperature instead of local var
             log_probs = F.log_softmax(scaled_logits, dim=1)
             policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
@@ -254,6 +255,9 @@ class YinshTrainer:
             # Recompute forward pass for value head (important for separate optimization)
             _, pred_values = self.network.network(states)
 
+            # Print some value predictions for debugging
+            print(f"Sample Value Predictions (Pre-Tanh): {pred_values.detach().cpu().numpy()[:5].flatten()}")
+
             # MSE loss
             value_loss_mse = F.mse_loss(pred_values, target_values)
 
@@ -285,6 +289,13 @@ class YinshTrainer:
 
             self.value_optimizer.step()
             self.value_scheduler.step()
+
+        # Add debugging prints for gradients
+        if self.current_iteration % 10 == 0:  # Print every 10 iterations
+            print("Value Head Gradients:")
+            for name, param in self.network.network.named_parameters():
+                if 'value_head' in name and param.grad is not None:
+                    print(f"  {name}: {param.grad.data.norm(2).item():.6f}")
 
         if hasattr(self, 'logger'):
             self.logger.debug(
