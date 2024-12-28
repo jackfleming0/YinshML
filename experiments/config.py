@@ -601,9 +601,9 @@ COMBINED_EXPERIMENTS = {
     "separate_value_head_smoke": CombinedConfig(
         # Training parameters (no changes)
         num_iterations=3,
-        games_per_iteration=4,
-        epochs_per_iteration=5,
-        batches_per_epoch=256,
+        games_per_iteration=2,
+        epochs_per_iteration=2,
+        batches_per_epoch=2,
 
         # Learning rates
         lr=0.0005,  # Base learning rate (for policy head)
@@ -614,7 +614,7 @@ COMBINED_EXPERIMENTS = {
         warmup_steps=4000,
 
         # MCTS parameters
-        num_simulations=2,
+        num_simulations=15,
         c_puct=4.0,
         dirichlet_alpha=0.3,
         value_weight=1.5,  # Increased value weight
