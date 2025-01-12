@@ -213,41 +213,33 @@ class MCTS:
             for move in valid_moves
         ])
 
-        # Add more detailed debug prints
-        #print(f"  Node: {node}, Parent Visit Count: {node.parent.visit_count if node.parent else 0}")
-        # for move, child_node in node.children.items():
-        #    print(f"    Move: {move}, Prior Prob: {child_node.prior_prob:.4f}, "
-        #          f"Value Sum: {child_node.value_sum}, Visit Count: {child_node.visit_count}, "
-        #          f"UCB: {child_node.get_ucb_score(node.parent.visit_count if node.parent else 0):.4f}")
 
-        # # Record interesting positions
-        # # if len(values) > 0:  # Make sure we have moves to analyze
-        # #    print(f"values: {values}")
-        #     value_range = np.max(values) - np.min(values)
-        # #    print(f"value_range: {value_range}")
-        #     best_by_value = valid_moves[np.argmax(values)]
-        # #    print(f"best_by_value: {best_by_value}")
-        #     best_by_ucb = valid_moves[np.argmax(ucb_scores)]
-        # #    print(f"best_by_ucb: {best_by_ucb}")
-        #     max_visits = np.max(visit_counts)
-        # #    print(f"max_visits: {max_visits}")
+        # Record interesting positions
+        if len(values) > 0:  # Make sure we have moves to analyze
+            print(f"values: {values}")
+            value_range = np.max(values) - np.min(values)
+            print(f"value_range: {value_range}")
+            best_by_value = valid_moves[np.argmax(values)]
+            print(f"best_by_value: {best_by_value}")
+            best_by_ucb = valid_moves[np.argmax(ucb_scores)]
+            print(f"best_by_ucb: {best_by_ucb}")
+            max_visits = np.max(visit_counts)
+            print(f"max_visits: {max_visits}")
 
-            # # Only record if position is interesting
-            # if (value_range > 0.1 or
-            #         (best_by_value != best_by_ucb and
-            #          visit_counts[np.argmax(ucb_scores)] >= 1 and
-            #          value_range > 0.05)):
-            #     print("RECORDING POSITION")
-            #     self.metrics.record_position(self.current_iteration, {
-            #         'value_range': value_range,
-            #         'max_visits': max_visits,
-            #         'moves': [
-            #             (str(valid_moves[i]), values[i], visit_counts[i], ucb_scores[i])
-            #             for i in np.argsort(values)[-3:]  # Top 3 moves
-            #         ],
-            #         'value_ucb_disagreement': best_by_value != best_by_ucb,
-            #         'game_phase': str(node.state.phase)
-            #     })
+            # Loosen conditions for recording positions during debugging
+            if (value_range > 0.01 or  # Reduced threshold
+                    best_by_value != best_by_ucb):  # Any disagreement is interesting
+                print("RECORDING POSITION")
+                self.metrics.record_position(self.current_iteration, {
+                    'value_range': value_range,
+                    'max_visits': max_visits,
+                    'moves': [
+                        (str(valid_moves[i]), values[i], visit_counts[i], ucb_scores[i])
+                        for i in np.argsort(values)[-3:]  # Top 3 moves
+                    ],
+                    'value_ucb_disagreement': best_by_value != best_by_ucb,
+                    'game_phase': str(node.state.phase)
+                })
 
         best_move = valid_moves[np.argmax(ucb_scores)]
         return best_move
