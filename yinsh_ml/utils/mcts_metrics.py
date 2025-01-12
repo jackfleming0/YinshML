@@ -43,13 +43,13 @@ class MCTSMetrics:
 
     def add_search_depth(self, depth: int): # new
         """Record the depth of a search."""
-        print(f"Adding search depth: {depth}")  # Debug print
+        # print(f"Adding search depth: {depth}")  # Debug print
         self.search_depths.append(depth)
 
 
     def record_branching_factor(self, branching_factor: int): # new
         """Record the branching factor at a node."""
-        print(f"Recording branching factor: {branching_factor}")  # Debug print
+        # print(f"Recording branching factor: {branching_factor}")  # Debug print
         self.branching_factors.append(branching_factor)
 
     def analyze_iteration(self, iteration: int) -> dict:

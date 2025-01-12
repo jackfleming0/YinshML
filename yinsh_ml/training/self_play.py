@@ -127,7 +127,7 @@ class MCTS:
             # Selection
             while node.is_expanded and node.children:
                 action = self._select_action(node)
-                print(f"Selected action: {action}")  # Debug print
+                # print(f"Selected action: {action}")  # Debug print
                 current_state.make_move(action)
                 node = node.children[action]
                 search_path.append(node)
@@ -135,11 +135,11 @@ class MCTS:
 
             # Expansion and evaluation
             value = self._get_value(current_state)
-            print(f"Value from _get_value: {value}")  # Debug print
+            # print(f"Value from _get_value: {value}")  # Debug print
             if value is None:
                 policy, value = self._evaluate_state(current_state)
-                print(f"Policy from network: {policy}")  # Debug print
-                print(f"Value from network: {value}")  # Debug print
+                # print(f"Policy from network: {policy}")  # Debug print
+                # print(f"Value from network: {value}")  # Debug print
                 valid_moves = current_state.get_valid_moves()
 
                 if valid_moves:
@@ -158,17 +158,17 @@ class MCTS:
 
             # Backpropagation
             self._backpropagate(search_path, value)
-            print(f"Value after backpropagation: {value}")
+            # print(f"Value after backpropagation: {value}")
 
             # Collect MCTS metrics during search
-            print(f"Adding search depth: {depth}")  # Debug print
+            # print(f"Adding search depth: {depth}")  # Debug print
             self.metrics.add_search_depth(depth)
-            print(f"Recording branching factor: {len(node.children)}")  # Debug print
+            # print(f"Recording branching factor: {len(node.children)}")  # Debug print
             self.metrics.record_branching_factor(len(node.children))
 
         # Calculate visit count distribution
         temp = self.get_temperature(move_number)
-        self.logger.debug(f"Using temperature {temp:.2f} at move {move_number}")
+        # self.logger.debug(f"Using temperature {temp:.2f} at move {move_number}")
 
         valid_moves = state.get_valid_moves()
         if not valid_moves:
@@ -213,12 +213,6 @@ class MCTS:
             for move in valid_moves
         ])
 
-        # Add more detailed debug prints
-        print(f"  Node: {node}, Parent Visit Count: {node.parent.visit_count if node.parent else 0}")
-        for move, child_node in node.children.items():
-            print(f"    Move: {move}, Prior Prob: {child_node.prior_prob:.4f}, "
-                  f"Value Sum: {child_node.value_sum}, Visit Count: {child_node.visit_count}, "
-                  f"UCB: {child_node.get_ucb_score(node.parent.visit_count if node.parent else 0):.4f}")
 
         # Record interesting positions
         if len(values) > 0:  # Make sure we have moves to analyze
@@ -232,11 +226,9 @@ class MCTS:
             max_visits = np.max(visit_counts)
             print(f"max_visits: {max_visits}")
 
-            # Only record if position is interesting
-            if (value_range > 0.1 or
-                    (best_by_value != best_by_ucb and
-                     visit_counts[np.argmax(ucb_scores)] >= 1 and
-                     value_range > 0.05)):
+            # Loosen conditions for recording positions during debugging
+            if (value_range > 0.01 or  # Reduced threshold
+                    best_by_value != best_by_ucb):  # Any disagreement is interesting
                 print("RECORDING POSITION")
                 self.metrics.record_position(self.current_iteration, {
                     'value_range': value_range,

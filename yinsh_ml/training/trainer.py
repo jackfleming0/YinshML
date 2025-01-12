@@ -119,7 +119,7 @@ class YinshTrainer:
         # Use SGD with momentum for value head to support cyclical learning rates
         self.value_optimizer = optim.SGD(
             value_params,
-            lr=0.0001,  # Lower learning rate for value head
+            lr=0.0001 * value_head_lr_factor,  # Apply higher learning rate here
             momentum=0.9,
             weight_decay=1e-3  # Stronger regularization
         )
