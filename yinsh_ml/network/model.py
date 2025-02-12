@@ -3,9 +3,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Tuple, List
 from ..utils.encoding import StateEncoder
-
+from ..game.moves import Move
 
 class ResBlock(nn.Module):
     """Residual block with batch normalization."""
@@ -115,27 +115,13 @@ class YinshNetwork(nn.Module):
 
         self.value_head_activations = {}
 
-        # Value head with attention
-        self.value_attention = SpatialAttention(num_channels)
+        # Simplified Value head without spatial attention:
+        # Flatten the shared trunk features, then Linear(num_channels*11*11, 128) -> ReLU -> Linear(128, 1) -> Tanh
         self.value_head = nn.Sequential(
-            # Initial feature extraction
-            nn.Conv2d(num_channels, 32, 1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
             nn.Flatten(),
-
-            # Reduced width architecture
-            nn.Linear(32 * 11 * 11, 128),
-            nn.BatchNorm1d(128),
+            nn.Linear(num_channels * 11 * 11, 128),
             nn.ReLU(),
-            nn.Dropout(0.2),
-
-            nn.Linear(128, 32),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-
-            nn.Linear(32, 1),
+            nn.Linear(128, 1),
             nn.Tanh()
         )
 
@@ -222,10 +208,8 @@ class YinshNetwork(nn.Module):
         # Policy head
         policy = self.policy_head(x)
 
-        # Value head with attention
-        value_attn = self.value_attention(x)
-        value_features = x * value_attn
-        value = self.value_head(value_features)
+        # Simplified value head: directly use the shared trunk features
+        value = self.value_head(x)
 
         return policy, value
 
@@ -252,3 +236,68 @@ class YinshNetwork(nn.Module):
             policy = F.softmax(policy, dim=1)
 
             return policy, value
+
+    def select_move(self, move_probs: torch.Tensor, valid_moves: List[Move],
+                    temperature: float = 1.0) -> Move:
+        """
+        Select a move using the policy probabilities with better numerical stability.
+
+        Args:
+            move_probs: Probability distribution over all moves
+            valid_moves: List of valid moves
+            temperature: Temperature for probability scaling
+
+        Returns:
+            Selected move
+        """
+        # Ensure move_probs is 1D
+        if len(move_probs.shape) > 1:
+            move_probs = move_probs.squeeze()
+
+        # Create tensor of valid move probabilities
+        valid_probs = torch.zeros(len(valid_moves), device=self.device)
+        valid_moves_indices = []
+
+        for i, move in enumerate(valid_moves):
+            try:
+                idx = self.state_encoder.move_to_index(move)
+                valid_moves_indices.append(idx)
+                if idx < len(move_probs):  # Bounds check
+                    valid_probs[i] = move_probs[idx].item()
+            except Exception as e:
+                self.logger.warning(f"Error processing move {move}: {e}")
+                continue
+
+        # Better handling of edge cases
+        if len(valid_moves_indices) == 0:
+            self.logger.warning("No valid moves could be processed")
+            return random.choice(valid_moves)
+
+        if valid_probs.max() < 1e-8 or torch.isnan(valid_probs.sum()):
+            self.logger.warning("Very low or invalid probabilities detected")
+            return random.choice(valid_moves)
+
+        # Apply temperature and normalization with better numerical stability
+        if temperature > 0:
+            # Use log space for numerical stability
+            log_probs = torch.log(valid_probs + 1e-10)
+            scaled_log_probs = log_probs / temperature
+            valid_probs = F.softmax(scaled_log_probs, dim=0)
+        else:
+            # Temperature 0 means greedy selection
+            max_idx = torch.argmax(valid_probs).item()
+            return valid_moves[max_idx]
+
+        try:
+            # Ensure probs sum to 1
+            valid_probs = valid_probs / valid_probs.sum()
+
+            # Move to CPU for multinomial sampling
+            valid_probs = valid_probs.cpu()
+            selected_idx = torch.multinomial(valid_probs, 1).item()
+            return valid_moves[selected_idx]
+        except Exception as e:
+            self.logger.error(f"Error in move selection: {e}")
+            self.logger.debug(f"Probabilities: {valid_probs}")
+            # Fallback to random selection
+            return random.choice(valid_moves)
