@@ -699,7 +699,6 @@ COMBINED_EXPERIMENTS = {
         # Temperature parameters
         initial_temp=1.5,           # High but not as extreme as value_head_config2
         final_temp=0.1,             # Keep strong final exploitation
-        temp_schedule="exponential"  # Keep smooth transition
     ),
 
     "smoke": CombinedConfig(

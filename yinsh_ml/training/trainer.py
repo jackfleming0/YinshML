@@ -13,6 +13,7 @@ import time
 from collections import deque, defaultdict
 import random
 
+
 from ..utils.metrics_logger import MetricsLogger, EpochMetrics
 from ..utils.enhanced_metrics import EnhancedMetricsCollector
 from ..network.wrapper import NetworkWrapper
@@ -23,32 +24,57 @@ from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 logger = logging.getLogger(__name__)
 
 class GameExperience:
-    """Stores game states and outcomes for training."""
+    """Stores game states and outcomes for training, with persistence support."""
 
     def __init__(self, max_size: int = 100000):
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
 
-    def add_game(self, states: List[np.ndarray],
-                 move_probs: List[np.ndarray],
-                 winner: int):
+    def add_game(self, states: list, move_probs: list, winner: int):
         """
         Add a completed game to the experience buffer.
 
         Args:
-            states: List of game states
-            move_probs: List of move probability distributions
-            winner: 1 for white win, -1 for black win, 0 for draw
+            states: List of game states.
+            move_probs: List of move probability distributions.
+            winner: 1 for white win, -1 for black win, 0 for draw.
         """
         game_length = len(states)
         for idx, (state, probs) in enumerate(zip(states, move_probs)):
-            # Calculate discounted value based on winner and move number
+            # Discount the value based on move number.
             value = winner * (0.99 ** (game_length - idx))
-
             self.states.append(state)
             self.move_probs.append(probs)
             self.values.append(value)
+
+    def save_buffer(self, path: str):
+        """Save the replay buffer to disk using pickle."""
+        import pickle
+        with open(path, 'wb') as f:
+            pickle.dump({
+                'states': list(self.states),
+                'move_probs': list(self.move_probs),
+                'values': list(self.values)
+            }, f)
+        print(f"[Replay Buffer] Saved to {path}. Current size: {self.size()}")
+
+    def load_buffer(self, path: str):
+        """Load the replay buffer from disk using pickle."""
+        import pickle
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            self.states = deque(data.get('states', []), maxlen=self.states.maxlen)
+            self.move_probs = deque(data.get('move_probs', []), maxlen=self.move_probs.maxlen)
+            self.values = deque(data.get('values', []), maxlen=self.values.maxlen)
+            print(f"[Replay Buffer] Loaded from {path}. Current size: {self.size()}")
+        except Exception as e:
+            print(f"[Replay Buffer] Failed to load from {path}: {e}")
+
+    def size(self) -> int:
+        """Return the current size of the replay buffer."""
+        return len(self.states)
 
     def sample_batch(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample a random batch of experiences."""
@@ -70,7 +96,8 @@ class YinshTrainer:
                  l2_reg: float = 0.0,
                  metrics_logger: Optional[MetricsLogger] = None,
                  value_head_lr_factor: float = 5.0,
-                 value_loss_weights: Tuple[float, float] = (0.5, 0.5)):
+                 value_loss_weights: Tuple[float, float] = (0.5, 0.5),
+                 replay_buffer_path: [str] = None,):
         """
         Initialize the trainer.
 
@@ -125,6 +152,12 @@ class YinshTrainer:
         )
 
         self.experience = GameExperience()
+        if replay_buffer_path is not None:
+            from os import path as osp
+            if osp.exists(replay_buffer_path):
+                self.experience.load_buffer(replay_buffer_path)
+            else:
+                print(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
 
         # Scheduler for policy head
         self.policy_scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -576,13 +609,11 @@ class YinshTrainer:
                             policies: List[np.ndarray],
                             outcome: int):
         """Add game experience with pure win/loss values."""
-        # Simple addition of experiences with pure outcome values
-        #print(f"Received outcome value: {outcome}")  # Debug
         for state, policy in zip(states, policies):
-            # No discounting or noise - pure win/loss signal
             self.experience.states.append(state)
             self.experience.move_probs.append(policy)
             self.experience.values.append(outcome)  # Pure -1 or 1
+        print(f"[Replay Buffer] Added game experience. Current buffer size: {self.experience.size()}")
 
     def evaluate_position(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Evaluate a single position."""
