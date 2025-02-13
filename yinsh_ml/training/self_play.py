@@ -214,32 +214,32 @@ class MCTS:
         ])
 
 
-        # Record interesting positions
-        if len(values) > 0:  # Make sure we have moves to analyze
-            print(f"values: {values}")
-            value_range = np.max(values) - np.min(values)
-            print(f"value_range: {value_range}")
-            best_by_value = valid_moves[np.argmax(values)]
-            print(f"best_by_value: {best_by_value}")
-            best_by_ucb = valid_moves[np.argmax(ucb_scores)]
-            print(f"best_by_ucb: {best_by_ucb}")
-            max_visits = np.max(visit_counts)
-            print(f"max_visits: {max_visits}")
-
-            # Loosen conditions for recording positions during debugging
-            if (value_range > 0.01 or  # Reduced threshold
-                    best_by_value != best_by_ucb):  # Any disagreement is interesting
-                print("RECORDING POSITION")
-                self.metrics.record_position(self.current_iteration, {
-                    'value_range': value_range,
-                    'max_visits': max_visits,
-                    'moves': [
-                        (str(valid_moves[i]), values[i], visit_counts[i], ucb_scores[i])
-                        for i in np.argsort(values)[-3:]  # Top 3 moves
-                    ],
-                    'value_ucb_disagreement': best_by_value != best_by_ucb,
-                    'game_phase': str(node.state.phase)
-                })
+        # # Record interesting positions
+        # if len(values) > 0:  # Make sure we have moves to analyze
+        #     # print(f"values: {values}")
+        #     value_range = np.max(values) - np.min(values)
+        #     # print(f"value_range: {value_range}")
+        #     best_by_value = valid_moves[np.argmax(values)]
+        #     # print(f"best_by_value: {best_by_value}")
+        #     best_by_ucb = valid_moves[np.argmax(ucb_scores)]
+        #     # print(f"best_by_ucb: {best_by_ucb}")
+        #     max_visits = np.max(visit_counts)
+        #     # print(f"max_visits: {max_visits}")
+        #
+        #     # Loosen conditions for recording positions during debugging
+        #     if (value_range > 0.20): #or  # Reduced threshold
+        #             # best_by_value != best_by_ucb):  # Any disagreement is interesting
+        #         print("RECORDING POSITION - Value > .20")
+        #         self.metrics.record_position(self.current_iteration, {
+        #             'value_range': value_range,
+        #             'max_visits': max_visits,
+        #             'moves': [
+        #                 (str(valid_moves[i]), values[i], visit_counts[i], ucb_scores[i])
+        #                 for i in np.argsort(values)[-3:]  # Top 3 moves
+        #             ],
+        #             'value_ucb_disagreement': best_by_value != best_by_ucb,
+        #             'game_phase': str(node.state.phase)
+        #         })
 
         best_move = valid_moves[np.argmax(ucb_scores)]
         return best_move
