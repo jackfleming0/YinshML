@@ -81,6 +81,8 @@ class MCTS:
                  final_temp: float = 0.2,
                  annealing_steps: int = 30,
                  c_puct: float = 1.0,
+                 dirichlet_alpha: float = 0.3,
+                 initial_value_weight: float = 0.5,
                  max_depth: int = 20,
                  mcts_metrics: Optional[MCTSMetrics] = None
                  ):
@@ -101,7 +103,13 @@ class MCTS:
 
         # MCTS exploration parameter
         self.c_puct = c_puct
+        self.dirichlet_alpha = dirichlet_alpha  # Dirichlet noise parameter
 
+        # Value weight scaling for Q-values in UCB
+        self.value_weight = initial_value_weight
+
+        print(
+            f"[MCTS] Initialized with c_puct={self.c_puct}, dirichlet_alpha={self.dirichlet_alpha}, value_weight={self.value_weight}")
 
     def get_temperature(self, move_number: int) -> float:
         """Calculate temperature based on move number."""
@@ -145,14 +153,22 @@ class MCTS:
                 if valid_moves:
                     node.is_expanded = True
                     policy = self._mask_invalid_moves(policy, valid_moves)
-
                     for move in valid_moves:
                         node.children[move] = Node(
                             current_state.copy(),
                             parent=node,
                             prior_prob=self._get_move_prob(policy, move),
-                            c_puct=self.c_puct  # Pass the c_puct value
+                            c_puct=self.c_puct  # Use dynamic c_puct
                         )
+                    # Apply Dirichlet noise at the root if not already applied
+                    if node.parent is None and not hasattr(node, "dirichlet_applied"):
+                        epsilon_mix = 0.25  # Mixing fraction for Dirichlet noise
+                        noise = np.random.dirichlet([self.dirichlet_alpha] * len(valid_moves))
+                        for i, move in enumerate(valid_moves):
+                            original = node.children[move].prior_prob
+                            node.children[move].prior_prob = (1 - epsilon_mix) * original + epsilon_mix * noise[i]
+                        node.dirichlet_applied = True
+                        print(f"[MCTS] Applied Dirichlet noise at root with alpha {self.dirichlet_alpha}")
                 else:
                     print("No valid moves to expand!")
 
@@ -198,50 +214,45 @@ class MCTS:
         return move_probs
 
     def _select_action(self, node: Node) -> Move:
-        """Select action according to UCB formula."""
+        """Select action according to UCB formula with weighted Q-values."""
         valid_moves = list(node.children.keys())
-        visit_counts = np.array([node.children[move].visit_count for move in valid_moves])
         total_visits = node.visit_count
-
-        # Get values and UCB scores separately first
-        values = np.array([node.children[move].value() for move in valid_moves])
-
-        # Add small epsilon to all UCB scores to break ties randomly
         epsilon = 1e-8
-        ucb_scores = np.array([
-            node.children[move].get_ucb_score(total_visits) + np.random.uniform(0, epsilon)
-            for move in valid_moves
-        ])
+        ucb_scores = []
+        for move in valid_moves:
+            child = node.children[move]
+            # Scale the Q-value using the configured value_weight
+            scaled_q = self.value_weight * child.value()
+            # Compute exploration term as usual
+            u_value = child.c_puct * child.prior_prob * np.sqrt(total_visits) / (1 + child.visit_count)
+            score = scaled_q + u_value + np.random.uniform(0, epsilon)
+            ucb_scores.append(score)
+        ucb_scores = np.array(ucb_scores)
 
-
-        # # Record interesting positions
-        # if len(values) > 0:  # Make sure we have moves to analyze
-        #     # print(f"values: {values}")
+        # Optional logging for debugging and health metrics
+        # if len(ucb_scores) > 0:
+        #     values = np.array([child.value() for child in node.children.values()])
         #     value_range = np.max(values) - np.min(values)
-        #     # print(f"value_range: {value_range}")
         #     best_by_value = valid_moves[np.argmax(values)]
-        #     # print(f"best_by_value: {best_by_value}")
         #     best_by_ucb = valid_moves[np.argmax(ucb_scores)]
-        #     # print(f"best_by_ucb: {best_by_ucb}")
+        #     visit_counts = np.array([node.children[move].visit_count for move in valid_moves])
         #     max_visits = np.max(visit_counts)
-        #     # print(f"max_visits: {max_visits}")
-        #
-        #     # Loosen conditions for recording positions during debugging
-        #     if (value_range > 0.20): #or  # Reduced threshold
-        #             # best_by_value != best_by_ucb):  # Any disagreement is interesting
-        #         print("RECORDING POSITION - Value > .20")
+        #     if value_range > 0.01 or best_by_value != best_by_ucb:
+        #         print(f"[MCTS] _select_action: value_range={value_range:.4f}, max_visits={max_visits}")
+        #         print(f"[MCTS] _select_action: best_by_value={best_by_value}, best_by_ucb={best_by_ucb}")
         #         self.metrics.record_position(self.current_iteration, {
         #             'value_range': value_range,
         #             'max_visits': max_visits,
         #             'moves': [
         #                 (str(valid_moves[i]), values[i], visit_counts[i], ucb_scores[i])
-        #                 for i in np.argsort(values)[-3:]  # Top 3 moves
+        #                 for i in np.argsort(values)[-3:]
         #             ],
         #             'value_ucb_disagreement': best_by_value != best_by_ucb,
         #             'game_phase': str(node.state.phase)
         #         })
 
         best_move = valid_moves[np.argmax(ucb_scores)]
+        print(f"[MCTS] _select_action: Selected move {best_move} with UCB score {np.max(ucb_scores):.4f}")
         return best_move
 
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
