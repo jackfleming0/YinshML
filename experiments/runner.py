@@ -506,6 +506,10 @@ class ExperimentRunner:
             "policy_entropy": []
         }
 
+        experiment_dir = self.checkpoint_dir / "combined_experiments" / config_name
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        replay_buffer_file = experiment_dir / "replay_buffer.pkl"
+
         print(f"Starting combined experiment with config: {config}")
         total_start_time = time.time()
 
@@ -517,7 +521,8 @@ class ExperimentRunner:
                                l2_reg=0.0,
                                metrics_logger=self.metrics_logger,
                                value_head_lr_factor=config.value_head_lr_factor,  # Pass the factor
-                               value_loss_weights=config.value_loss_weights)  # Pass the weights
+                               value_loss_weights=config.value_loss_weights, # Pass the weights
+                               replay_buffer_path=str(replay_buffer_file))
 
         # Set learning rate configuration for both optimizers
         trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
@@ -617,6 +622,9 @@ class ExperimentRunner:
 
             # Save checkpoint for this iteration
             self._save_checkpoint(network, "combined", config_name, iteration)
+
+            #add to buffer
+            trainer.experience.save_buffer(str(replay_buffer_file))
 
             # Run tournament evaluation if we have previous iterations
             tournament_elo = 0.0  # Default if no tournament run
