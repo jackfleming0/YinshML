@@ -30,6 +30,8 @@ class GameExperience:
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
+        self.phases = deque(maxlen=max_size)
+
 
     def add_game(self, states: list, move_probs: list, winner: int):
         """
@@ -76,15 +78,38 @@ class GameExperience:
         """Return the current size of the replay buffer."""
         return len(self.states)
 
-    def sample_batch(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Sample a random batch of experiences."""
-        indices = np.random.choice(len(self.states), batch_size)
 
-        states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])  # Ensure float32
-        probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])  # Ensure float32
+    def sample_batch(self, batch_size: int, ring_placement_weight: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Sample a random batch of experiences, weighting ring-placement states extra if desired.
+
+        Args:
+            batch_size: Number of samples to draw.
+            ring_placement_weight: Extra weight for ring-placement states.
+                                     Default is 1.0 (no extra weighting).
+
+        Returns:
+            Tuple of (states, move_probs, values) as tensors.
+        """
+        n = len(self.states)
+        if n == 0:
+            raise ValueError("Replay buffer is empty!")
+        # Initialize equal probabilities.
+        p = np.ones(n)
+        # If ring_placement_weight > 1, multiply the weight for ring-placement states.
+        if ring_placement_weight > 1.0:
+            for i, phase in enumerate(self.phases):
+                # Detect ring-placement states (e.g., if phase equals "RING_PLACEMENT")
+                if phase == "RING_PLACEMENT":
+                    p[i] *= ring_placement_weight
+        # Normalize the probability array so that it sums to 1.
+        p = p / p.sum()
+        indices = np.random.choice(n, batch_size, replace=False, p=p)
+        states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])
+        probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])
         values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
-
         return states, probs, values.unsqueeze(1)
+
 
 
 class YinshTrainer:
@@ -605,16 +630,40 @@ class YinshTrainer:
         self.logger.info(f"Checkpoint loaded from {path}")
         return checkpoint['epoch']
 
-    def add_game_experience(self, states: List[np.ndarray],
-                            policies: List[np.ndarray],
-                            outcome: int):
-        """Add game experience with pure win/loss values."""
-        for state, policy in zip(states, policies):
+    def add_game_experience(self, states: list, policies: list, outcome: int):
+        """
+        Add game experience with pure win/loss values, including phase information.
+
+        For each state, we decode the phase from channel 5 of the state tensor.
+        (Assumption: channel index 5 represents game phase, where a low average value indicates
+        RING_PLACEMENT, mid-range indicates MAIN_GAME, and high values indicate RING_REMOVAL.)
+        """
+
+        def decode_phase(state: np.ndarray) -> str:
+            # Extract the phase channel (channel index 5)
+            phase_channel = state[5]
+            avg = np.mean(phase_channel)
+            if avg < 0.33:
+                return "RING_PLACEMENT"
+            elif avg < 0.66:
+                return "MAIN_GAME"
+            else:
+                return "RING_REMOVAL"
+
+        # Create a list to hold the phase for each state.
+        phases = []
+        for state in states:
+            phase = decode_phase(state)
+            phases.append(phase)
+
+        # Add the experience and phase information to the replay buffer.
+        for state, policy, phase in zip(states, policies, phases):
             self.experience.states.append(state)
             self.experience.move_probs.append(policy)
             self.experience.values.append(outcome)  # Pure -1 or 1
-        print(f"[Replay Buffer] Added game experience. Current buffer size: {self.experience.size()}")
+            self.experience.phases.append(phase)
 
+        print(f"[Replay Buffer] Added game experience. Current buffer size: {self.experience.size()}")
     def evaluate_position(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Evaluate a single position."""
         self.network.network.eval()

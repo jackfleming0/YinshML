@@ -168,7 +168,7 @@ class MCTS:
                             original = node.children[move].prior_prob
                             node.children[move].prior_prob = (1 - epsilon_mix) * original + epsilon_mix * noise[i]
                         node.dirichlet_applied = True
-                        print(f"[MCTS] Applied Dirichlet noise at root with alpha {self.dirichlet_alpha}")
+                        # print(f"[MCTS] Applied Dirichlet noise at root with alpha {self.dirichlet_alpha}")
                 else:
                     print("No valid moves to expand!")
 
@@ -252,7 +252,7 @@ class MCTS:
         #         })
 
         best_move = valid_moves[np.argmax(ucb_scores)]
-        print(f"[MCTS] _select_action: Selected move {best_move} with UCB score {np.max(ucb_scores):.4f}")
+        # print(f"[MCTS] _select_action: Selected move {best_move} with UCB score {np.max(ucb_scores):.4f}")
         return best_move
 
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
