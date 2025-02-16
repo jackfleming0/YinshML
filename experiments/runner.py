@@ -596,7 +596,11 @@ class ExperimentRunner:
                         actual_outcome=outcome
                     )
 
+                    print(f"[DEBUG] About to add game experience. "
+                          f"len(states)={len(states)}, len(policies)={len(policies)}")
+
                 trainer.add_game_experience(states, policies, outcome)
+
             print(f"Experience added in {time.time() - exp_start_time:.2f} seconds")
 
             # Train on games
@@ -604,9 +608,11 @@ class ExperimentRunner:
             train_start_time = time.time()
             for _ in range(config.epochs_per_iteration):
                 actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+                ring_weight = 1.0 + iteration * 0.2  # or some schedule. this makes ring placement more important as iterations go up.
                 epoch_stats = trainer.train_epoch(
                     batch_size=config.batch_size,
-                    batches_per_epoch=actual_batches
+                    batches_per_epoch=actual_batches,
+                    ring_placement_weight=ring_weight
                 )
             print(f"Training completed in {time.time() - train_start_time:.2f} seconds")
 

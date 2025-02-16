@@ -598,6 +598,66 @@ COMBINED_EXPERIMENTS = {
         temp_start_decay_at=0.25
     ),
 
+    "feb15_testing": CombinedConfig(
+        # Training parameters (no changes)
+        num_iterations=50,
+        games_per_iteration=100,
+        epochs_per_iteration=5,
+        batches_per_epoch=150,
+
+        # Learning rates
+        lr=0.0005,  # Base learning rate (for policy head)
+        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        batch_size=512,
+        lr_schedule="cosine",
+        warmup_steps=4000,
+
+        # MCTS parameters
+        num_simulations=100,
+        c_puct=3.0,
+        dirichlet_alpha=0.3,
+        value_weight=1.5,  # Increased value weight
+        value_loss_weights=(0.5, 0.5),  # Add this line
+
+        # Temperature parameters
+        initial_temp=1.0,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
+    "feb16_testing": CombinedConfig(
+        # Training parameters (no changes)
+        num_iterations=50,
+        games_per_iteration=100,
+        epochs_per_iteration=5,
+        batches_per_epoch=150,
+
+        # Learning rates
+        lr=0.0005,  # Base learning rate (for policy head)
+        value_head_lr_factor=3.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        batch_size=512,
+        lr_schedule="cosine",
+        warmup_steps=4000,
+
+        # MCTS parameters
+        num_simulations=200,
+        c_puct=2.0,
+        dirichlet_alpha=0.15,
+        value_weight=1.5,  # Increased value weight
+        value_loss_weights=(0.5, 0.5),  # Add this line
+
+        # Temperature parameters
+        initial_temp=1.0,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
     "separate_value_head_2": CombinedConfig(
         # Training parameters (no changes)
         num_iterations=50,
@@ -639,7 +699,7 @@ COMBINED_EXPERIMENTS = {
         lr=0.0005,  # Base learning rate (for policy head)
         value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
         weight_decay=1e-4,
-        batch_size=512,
+        batch_size=128,
         lr_schedule="cosine",
         warmup_steps=4000,
 

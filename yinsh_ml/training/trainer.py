@@ -33,22 +33,23 @@ class GameExperience:
         self.phases = deque(maxlen=max_size)
 
 
-    def add_game(self, states: list, move_probs: list, winner: int):
-        """
-        Add a completed game to the experience buffer.
-
-        Args:
-            states: List of game states.
-            move_probs: List of move probability distributions.
-            winner: 1 for white win, -1 for black win, 0 for draw.
-        """
-        game_length = len(states)
-        for idx, (state, probs) in enumerate(zip(states, move_probs)):
-            # Discount the value based on move number.
-            value = winner * (0.99 ** (game_length - idx))
-            self.states.append(state)
-            self.move_probs.append(probs)
-            self.values.append(value)
+    # def add_game(self, states: list, move_probs: list, winner: int):
+    #     """
+    #     Add a completed game to the experience buffer.
+    #
+    #     Args:
+    #         states: List of game states.
+    #         move_probs: List of move probability distributions.
+    #         winner: 1 for white win, -1 for black win, 0 for draw.
+    #     """
+    #     game_length = len(states)
+    #     for idx, (state, probs) in enumerate(zip(states, move_probs)):
+    #         # Discount the value based on move number.
+    #         value = winner * (0.99 ** (game_length - idx))
+    #         self.states.append(state)
+    #         self.move_probs.append(probs)
+    #         self.values.append(value)
+    #         self.phases.append(phase)
 
     def save_buffer(self, path: str):
         """Save the replay buffer to disk using pickle."""
@@ -104,10 +105,20 @@ class GameExperience:
                     p[i] *= ring_placement_weight
         # Normalize the probability array so that it sums to 1.
         p = p / p.sum()
+
+        # Sample without replacement
         indices = np.random.choice(n, batch_size, replace=False, p=p)
+
+        # Build return tensors
         states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])
         probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])
         values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
+
+        # NEW: Log how many ring-placement states ended up in this batch
+        ring_placement_count = sum(1 for i in indices if self.phases[i] == "RING_PLACEMENT")
+        print(f"[DEBUG] Sampled Batch: {ring_placement_count} ring-placement states "
+              f"out of {batch_size} total. (Weight={ring_placement_weight})")
+
         return states, probs, values.unsqueeze(1)
 
 
@@ -237,14 +248,16 @@ class YinshTrainer:
         uniform = torch.ones_like(targets) / n_classes
         return (1 - epsilon) * targets + epsilon * uniform
 
-    def train_step(self, batch_size: int) -> Tuple[float, float, float, Dict]:
+    def train_step(self, batch_size: int, ring_placement_weight: float = 1.0) -> Tuple[float, float, float, Dict]:
         """Training step with separate policy and value optimization."""
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0, 0.0, {'top_1_accuracy': 0.0, 'top_3_accuracy': 0.0, 'top_5_accuracy': 0.0}
 
         self.network.network.train()
-        states, target_probs, target_values = self.experience.sample_batch(batch_size)
-
+        states, target_probs, target_values = self.experience.sample_batch(
+            batch_size,
+            ring_placement_weight=ring_placement_weight
+        )
         # Move to device
         states = states.to(self.device)
         target_probs = target_probs.to(self.device)
@@ -493,7 +506,9 @@ class YinshTrainer:
                     print(f"    Std: {layer_metrics['std']:.3f}")
                     print(f"    Zeros: {layer_metrics['zeros_pct']:.1f}%")
 
-    def train_epoch(self, batch_size: int, batches_per_epoch: int) -> Dict:
+    def train_epoch(self, batch_size: int,
+                    batches_per_epoch: int,
+                    ring_placement_weight: float = 1.0) -> Dict:
         """Train for one epoch and return comprehensive stats."""
         stats_accum = {
             'policy_loss': 0,
@@ -517,7 +532,10 @@ class YinshTrainer:
         }
 
         for batch in range(batches_per_epoch):
-            p_loss, v_loss, v_acc, move_accs = self.train_step(batch_size)
+            p_loss, v_loss, v_acc, move_accs = self.train_step(
+                batch_size,
+                ring_placement_weight=ring_placement_weight
+            )
 
             # Add explicit logging of loss values
             self.logger.debug(f"Batch {batch} losses - Policy: {p_loss:.4f}, Value: {v_loss:.4f}")
@@ -656,6 +674,9 @@ class YinshTrainer:
             phase = decode_phase(state)
             phases.append(phase)
 
+        assert len(states) == len(policies), "Mismatch: states vs. policies!"
+        assert len(states) == len(phases), "Mismatch: states vs. phases!"
+
         # Add the experience and phase information to the replay buffer.
         for state, policy, phase in zip(states, policies, phases):
             self.experience.states.append(state)
@@ -664,6 +685,11 @@ class YinshTrainer:
             self.experience.phases.append(phase)
 
         print(f"[Replay Buffer] Added game experience. Current buffer size: {self.experience.size()}")
+
+        # Safety check
+        assert len(self.experience.states) == len(self.experience.phases), \
+            "Mismatch in states vs. phases after adding experience!"
+
     def evaluate_position(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Evaluate a single position."""
         self.network.network.eval()
