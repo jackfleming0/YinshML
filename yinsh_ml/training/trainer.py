@@ -32,24 +32,60 @@ class GameExperience:
         self.values = deque(maxlen=max_size)
         self.phases = deque(maxlen=max_size)
 
+    def add_game_experience(self,
+                            states: list,
+                            policies: list,
+                            final_white_score: int,
+                            final_black_score: int,
+                            discount_factor: float = 1.0):
+        """
+        Add a completed game to the replay buffer using a continuous
+        margin-based value in [-1, +1] normalized by max score = 3.
 
-    # def add_game(self, states: list, move_probs: list, winner: int):
-    #     """
-    #     Add a completed game to the experience buffer.
-    #
-    #     Args:
-    #         states: List of game states.
-    #         move_probs: List of move probability distributions.
-    #         winner: 1 for white win, -1 for black win, 0 for draw.
-    #     """
-    #     game_length = len(states)
-    #     for idx, (state, probs) in enumerate(zip(states, move_probs)):
-    #         # Discount the value based on move number.
-    #         value = winner * (0.99 ** (game_length - idx))
-    #         self.states.append(state)
-    #         self.move_probs.append(probs)
-    #         self.values.append(value)
-    #         self.phases.append(phase)
+        Args:
+            states:             List of game states (numpy arrays).
+            policies:           List of move probability distributions.
+            final_white_score:  White's final score (0 to 3).
+            final_black_score:  Black's final score (0 to 3).
+            discount_factor:    Optional discount factor, e.g. 0.99, applied per move
+                                (from the end of the game backward). Default = 1.0 (no discount).
+        """
+        # Safety check
+        assert len(states) == len(policies), "Mismatch: states vs. policies!"
+
+        # Helper to decode phases from channel 5, if needed
+        def decode_phase(state: np.ndarray) -> str:
+            # If your channel-5 logic is different, adjust accordingly
+            phase_channel = state[5]  # 5th channel for 'GAME_PHASE'
+            avg = np.mean(phase_channel)
+            if avg < 0.33:
+                return "RING_PLACEMENT"
+            elif avg < 0.66:
+                return "MAIN_GAME"
+            else:
+                return "RING_REMOVAL"
+
+        # Compute the normalized margin in [-1, +1]
+        score_diff = final_white_score - final_black_score  # e.g. +2 if 3–1
+        normalized_margin = score_diff / 3.0                # e.g. +0.666..., range is [-1, +1]
+
+        # Precompute phases
+        phases = [decode_phase(s) for s in states]
+        game_length = len(states)
+
+        # Iterate over each move/state in the completed game
+        for idx, (state, policy, phase) in enumerate(zip(states, policies, phases)):
+            # If you want to discount earlier moves more heavily, you can do:
+            # (game_length - 1 - idx) as the exponent for discount_factor
+            discounted_value = normalized_margin * (discount_factor ** (game_length - 1 - idx))
+
+            self.states.append(state)
+            self.move_probs.append(policy)
+            self.values.append(discounted_value)
+            self.phases.append(phase)
+
+        print(f"[Replay Buffer] Added game with final scores W={final_white_score}, B={final_black_score}, "
+              f"margin={normalized_margin:.3f}. Replay size={self.size()}")
 
     def save_buffer(self, path: str):
         """Save the replay buffer to disk using pickle."""
@@ -58,7 +94,8 @@ class GameExperience:
             pickle.dump({
                 'states': list(self.states),
                 'move_probs': list(self.move_probs),
-                'values': list(self.values)
+                'values': list(self.values),
+                'phases': list(self.phases)  # Save phases along with other data
             }, f)
         print(f"[Replay Buffer] Saved to {path}. Current size: {self.size()}")
 
@@ -71,6 +108,13 @@ class GameExperience:
             self.states = deque(data.get('states', []), maxlen=self.states.maxlen)
             self.move_probs = deque(data.get('move_probs', []), maxlen=self.move_probs.maxlen)
             self.values = deque(data.get('values', []), maxlen=self.values.maxlen)
+            # If phases are not present, default to "MAIN_GAME" for each state.
+            loaded_phases = data.get('phases', None)
+            if loaded_phases is None or len(loaded_phases) != len(self.states):
+                default_phase = "MAIN_GAME"
+                self.phases = deque([default_phase] * len(self.states), maxlen=self.states.maxlen)
+            else:
+                self.phases = deque(loaded_phases, maxlen=self.states.maxlen)
             print(f"[Replay Buffer] Loaded from {path}. Current size: {self.size()}")
         except Exception as e:
             print(f"[Replay Buffer] Failed to load from {path}: {e}")
@@ -79,31 +123,32 @@ class GameExperience:
         """Return the current size of the replay buffer."""
         return len(self.states)
 
-
     def sample_batch(self, batch_size: int, ring_placement_weight: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample a random batch of experiences, weighting ring-placement states extra if desired.
 
         Args:
             batch_size: Number of samples to draw.
-            ring_placement_weight: Extra weight for ring-placement states.
-                                     Default is 1.0 (no extra weighting).
+            ring_placement_weight: Extra weight for ring-placement states (e.g. 2.0).
+                                   Default is 1.0 (no extra weighting).
 
         Returns:
-            Tuple of (states, move_probs, values) as tensors.
+            (states, move_probs, values) as tensors.
         """
         n = len(self.states)
         if n == 0:
             raise ValueError("Replay buffer is empty!")
-        # Initialize equal probabilities.
-        p = np.ones(n)
-        # If ring_placement_weight > 1, multiply the weight for ring-placement states.
+
+        # Initialize equal probabilities
+        p = np.ones(n, dtype=np.float64)
+
+        # Apply ring-placement weighting
         if ring_placement_weight > 1.0:
             for i, phase in enumerate(self.phases):
-                # Detect ring-placement states (e.g., if phase equals "RING_PLACEMENT")
                 if phase == "RING_PLACEMENT":
                     p[i] *= ring_placement_weight
-        # Normalize the probability array so that it sums to 1.
+
+        # Normalize the probability array
         p = p / p.sum()
 
         # Sample without replacement
@@ -114,13 +159,12 @@ class GameExperience:
         probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])
         values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
 
-        # NEW: Log how many ring-placement states ended up in this batch
+        # Log how many ring-placement states ended up in this batch
         ring_placement_count = sum(1 for i in indices if self.phases[i] == "RING_PLACEMENT")
         print(f"[DEBUG] Sampled Batch: {ring_placement_count} ring-placement states "
-              f"out of {batch_size} total. (Weight={ring_placement_weight})")
+              f"out of {batch_size}. (Weight={ring_placement_weight})")
 
         return states, probs, values.unsqueeze(1)
-
 
 
 class YinshTrainer:
@@ -133,7 +177,7 @@ class YinshTrainer:
                  metrics_logger: Optional[MetricsLogger] = None,
                  value_head_lr_factor: float = 5.0,
                  value_loss_weights: Tuple[float, float] = (0.5, 0.5),
-                 replay_buffer_path: [str] = None,):
+                 replay_buffer_path: Optional[str] = None,):
         """
         Initialize the trainer.
 
@@ -147,7 +191,7 @@ class YinshTrainer:
         """
         self.state_encoder = network.state_encoder
 
-        # Device setup remains the same
+        # Device setup
         if device:
             self.device = torch.device(device)
         else:
@@ -158,33 +202,28 @@ class YinshTrainer:
             )
         self.network = network
         self.network.network = self.network.network.to(self.device)
-        self.metrics_logger = metrics_logger  # Store the metrics_logger
+        self.metrics_logger = metrics_logger
 
-        self.value_loss_weights = value_loss_weights  # Store the weights
+        self.value_loss_weights = value_loss_weights
         self.value_head_lr_factor = value_head_lr_factor
 
-        print(f"Value Loss Weights Type: {type(self.value_loss_weights)}")
-        print(f"Value Loss Weights: {self.value_loss_weights}")
-
-        # Separate out value head and policy parameters
+        # Separate out parameters for policy vs. value heads
         value_params = [p for n, p in self.network.network.named_parameters()
                         if 'value_head' in n]
         policy_params = [p for n, p in self.network.network.named_parameters()
                          if 'value_head' not in n]
 
-        # Separate optimizers for policy and value
         self.policy_optimizer = optim.Adam(
             policy_params,
             lr=0.001,
             weight_decay=1e-4
         )
 
-        # Use SGD with momentum for value head to support cyclical learning rates
         self.value_optimizer = optim.SGD(
             value_params,
-            lr=0.0001 * value_head_lr_factor,  # Apply higher learning rate here
+            lr=0.0001 * value_head_lr_factor,
             momentum=0.9,
-            weight_decay=1e-3  # Stronger regularization
+            weight_decay=1e-3
         )
 
         self.experience = GameExperience()
@@ -195,53 +234,41 @@ class YinshTrainer:
             else:
                 print(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
 
-        # Scheduler for policy head
+        # Schedulers
         self.policy_scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.policy_optimizer,
-            T_max=1000,  # Will adjust based on iterations * epochs
+            T_max=1000,
             eta_min=1e-5
         )
-
-        # Cyclical learning rate for value head
         self.value_scheduler = optim.lr_scheduler.CyclicLR(
             self.value_optimizer,
             base_lr=1e-5,
             max_lr=1e-4,
             step_size_up=500,
             mode='triangular2',
-            cycle_momentum=True  # Enable momentum cycling
+            cycle_momentum=True
         )
 
         self.l2_reg = l2_reg
-
-        # Setup logging
         self.logger = logging.getLogger("YinshTrainer")
         self.logger.setLevel(logging.INFO)
 
-        # Add iteration counter
         self.current_iteration = 0
-
-        # Enhanced metrics tracking
         self.policy_losses = []
         self.value_losses = []
         self.total_losses = []
-        self.learning_rates = {'policy': [], 'value': []}  # Track both learning rates
+        self.learning_rates = {'policy': [], 'value': []}
         self.value_accuracies = []
         self.move_accuracies = []
-
-        self.temperature = 1.0  # Add base temperature
-
-        # Track value head specific metrics
-        self.value_metrics = {
-            'pre_tanh_stats': [],  # Track pre-tanh activation statistics
-            'layer_stats': [],  # Track per-layer statistics
-            'prediction_stats': [],  # Track prediction statistics
-            'sign_match': []  # Track sign matching accuracy
-        }
+        self.temperature = 1.0
         self.value_metrics = ValueHeadMetrics()
 
         self.metrics_logger = metrics_logger
 
+    #
+    # NOTE: Removed the old add_game_experience(...) from YinshTrainer
+    #       Now you should call `self.experience.add_game_experience(...)` directly.
+    #
 
     def _smooth_policy_targets(self, targets: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
         n_classes = targets.shape[1]
@@ -254,11 +281,13 @@ class YinshTrainer:
             return 0.0, 0.0, 0.0, {'top_1_accuracy': 0.0, 'top_3_accuracy': 0.0, 'top_5_accuracy': 0.0}
 
         self.network.network.train()
+
+        # Pull a batch from replay
         states, target_probs, target_values = self.experience.sample_batch(
             batch_size,
             ring_placement_weight=ring_placement_weight
         )
-        # Move to device
+
         states = states.to(self.device)
         target_probs = target_probs.to(self.device)
         target_values = target_values.to(self.device)
@@ -266,7 +295,7 @@ class YinshTrainer:
         # Forward pass
         pred_logits, pred_values = self.network.network(states)
 
-        # Monitor value head metrics
+        # Monitor / log value head metrics
         value_metrics = self._monitor_value_head(
             pred_values,
             target_values,
@@ -274,32 +303,26 @@ class YinshTrainer:
         )
         self._log_value_head_metrics(value_metrics)
 
-        # After forward pass, record value head metrics for each state in the batch
+        # Additional logging per-sample if needed
         for i in range(states.size(0)):
-            # Decode the state tensor to get the GameState object
             game_state = self.state_encoder.decode_state(states[i].cpu().numpy())
-
             self.value_metrics.record_evaluation(
-                state=game_state,  # Pass the GameState object
+                state=game_state,
                 value_pred=pred_values[i].detach().cpu().numpy(),
                 policy_probs=F.softmax(pred_logits[i], dim=-1).detach().cpu().numpy(),
-                chosen_move=None,  # You can add logic to determine this if needed
+                chosen_move=None,
                 temperature=self.temperature,
                 actual_outcome=target_values[i].detach().cpu().numpy()
             )
 
-        # Policy optimization step
+        # --- Policy Optimization ---
         self.policy_optimizer.zero_grad()
-
-        # Calculate policy loss
         with torch.set_grad_enabled(True):
-
-            scaled_logits = pred_logits / self.temperature  # Use self.temperature instead of local var
+            scaled_logits = pred_logits / self.temperature
             log_probs = F.log_softmax(scaled_logits, dim=1)
             policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
-            policy_loss_val = float(policy_loss.item())  # Store raw loss value
 
-            # Add L2 regularization for policy if needed
+            # L2 regularization for policy
             if self.l2_reg > 0:
                 l2_loss = 0
                 for name, param in self.network.network.named_parameters():
@@ -307,10 +330,10 @@ class YinshTrainer:
                         l2_loss += torch.norm(param)
                 policy_loss = policy_loss + self.l2_reg * l2_loss
 
-            # Backward pass for policy
+            policy_loss_val = float(policy_loss.item())  # for logging
             policy_loss.backward(retain_graph=True)
 
-            # Clip policy gradients
+            # Clip gradients
             policy_params = [p for n, p in self.network.network.named_parameters()
                              if 'value_head' not in n]
             torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
@@ -318,31 +341,24 @@ class YinshTrainer:
             self.policy_optimizer.step()
             self.policy_scheduler.step()
 
-        # Value optimization step
+        # --- Value Optimization ---
         self.value_optimizer.zero_grad()
-
-        # Calculate value loss with composite approach (MSE + CE)
         with torch.set_grad_enabled(True):
-            # Recompute forward pass for value head (important for separate optimization)
+            # Recompute (because we did backward above)
             _, pred_values = self.network.network(states)
 
-            # Print some value predictions for debugging
-            print(f"Sample Value Predictions (Pre-Tanh): {pred_values.detach().cpu().numpy()[:5].flatten()}")
-
-            # MSE loss
+            # MSE component
             value_loss_mse = F.mse_loss(pred_values, target_values)
 
-            # Cross-entropy loss
-            target_outcomes = (target_values > 0).long()  # Convert to 0, 1 labels for win/loss
-            value_probs = torch.sigmoid(pred_values)  # Sigmoid for probabilities
+            # Optionally keep BCE for sign classification
+            target_outcomes = (target_values > 0).long()
+            value_probs = torch.sigmoid(pred_values)  # interpret as "win" probability
             value_loss_ce = F.binary_cross_entropy(value_probs, target_outcomes.float())
 
-            # Combine losses using weights from config
-            value_loss = self.value_loss_weights[0] * value_loss_mse + self.value_loss_weights[
-                1] * value_loss_ce  # Multiply the losses by the weights
-            value_loss_val = float(value_loss.item())  # Store raw loss value
+            # Weighted combination
+            value_loss = (self.value_loss_weights[0] * value_loss_mse +
+                          self.value_loss_weights[1] * value_loss_ce)
 
-            # Add L2 regularization for value head
             if self.l2_reg > 0:
                 l2_loss = 0
                 for name, param in self.network.network.named_parameters():
@@ -350,10 +366,10 @@ class YinshTrainer:
                         l2_loss += torch.norm(param)
                 value_loss = value_loss + (self.l2_reg * 2) * l2_loss
 
-            # Backward pass for value
+            value_loss_val = float(value_loss.item())
             value_loss.backward()
 
-            # Clip value gradients
+            # Clip value head gradients
             value_params = [p for n, p in self.network.network.named_parameters()
                             if 'value_head' in n]
             torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
@@ -361,30 +377,19 @@ class YinshTrainer:
             self.value_optimizer.step()
             self.value_scheduler.step()
 
-        # Add debugging prints for gradients
-        if self.current_iteration % 10 == 0:  # Print every 10 iterations
+        # Debugging prints
+        if self.current_iteration % 10 == 0:
             print("Value Head Gradients:")
             for name, param in self.network.network.named_parameters():
                 if 'value_head' in name and param.grad is not None:
                     print(f"  {name}: {param.grad.data.norm(2).item():.6f}")
 
-        if hasattr(self, 'logger'):
-            self.logger.debug(
-                f"Step {self.current_iteration} - "
-                f"Policy Loss: {policy_loss_val:.4f}, "
-                f"Value Loss: {value_loss_val:.4f}, "
-                f"Policy LR: {self.policy_optimizer.param_groups[0]['lr']:.2e}, "
-                f"Value LR: {self.value_optimizer.param_groups[0]['lr']:.2e}"
-            )
-
-        # Calculate metrics
+        # Metrics / logging
         with torch.no_grad():
-            # Value accuracy
             pred_outcomes = (pred_values > 0).float()
             true_outcomes = (target_values > 0).float()
             value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
 
-            # Move accuracies
             pred_moves = torch.argmax(pred_logits, dim=1)
             true_moves = torch.argmax(target_probs, dim=1)
             top1_acc = (pred_moves == true_moves).float().mean().item()
@@ -401,37 +406,22 @@ class YinshTrainer:
                 'top_5_accuracy': top5_acc
             }
 
-            # Update learning rate tracking
+            # Track LR
             self.learning_rates['policy'].append(self.policy_optimizer.param_groups[0]['lr'])
             self.learning_rates['value'].append(self.value_optimizer.param_groups[0]['lr'])
 
         self.current_iteration += 1
 
-        return (
-            policy_loss.item(),
-            value_loss.item(),
-            value_accuracy,
-            move_accuracies
-        )
+        return (policy_loss_val, value_loss_val, value_accuracy, move_accuracies)
 
     def _monitor_value_head(self, pred_values: torch.Tensor,
                             target_values: torch.Tensor,
                             log_activations: bool = False) -> Dict:
-        """Monitor value head performance and distributions.
-
-        Args:
-            pred_values: Predicted values from the network
-            target_values: Target values
-            log_activations: Whether to log full activation distributions
-
-        Returns:
-            Dict of monitoring metrics
-        """
+        """Monitor value head performance and distributions."""
         with torch.no_grad():
             metrics = {}
+            pre_tanh = pred_values
 
-            # 1. Pre-tanh activation monitoring
-            pre_tanh = pred_values  # These are now pre-tanh values
             metrics['pre_tanh'] = {
                 'mean': float(pre_tanh.mean()),
                 'std': float(pre_tanh.std()),
@@ -440,7 +430,6 @@ class YinshTrainer:
                 'saturated_pct': float((torch.abs(pre_tanh) > 0.99).float().mean() * 100)
             }
 
-            # 2. Layer-wise activation tracking
             if log_activations:
                 activations = self.network.network.value_head_activations
                 for name, activation in activations.items():
@@ -450,7 +439,6 @@ class YinshTrainer:
                         'zeros_pct': float((activation == 0).float().mean() * 100)
                     }
 
-            # 3. Value prediction analysis
             value_confidence = torch.abs(pred_values)
             high_confidence = (value_confidence > 0.8).float().mean()
             metrics['predictions'] = {
@@ -460,14 +448,12 @@ class YinshTrainer:
                 'std': float(pred_values.std())
             }
 
-            # 4. Target analysis
             metrics['targets'] = {
                 'mean': float(target_values.mean()),
                 'std': float(target_values.std()),
                 'positive_pct': float((target_values > 0).float().mean() * 100)
             }
 
-            # 5. Prediction-target alignment
             pred_signs = torch.sign(pred_values)
             target_signs = torch.sign(target_values)
             metrics['alignment'] = {
@@ -479,9 +465,7 @@ class YinshTrainer:
             return metrics
 
     def _log_value_head_metrics(self, metrics: Dict):
-        """Log value head metrics in a readable format."""
         print("\nValue Head Analysis:")
-
         print("Pre-tanh Activations:")
         print(f"  Range: [{metrics['pre_tanh']['min']:.3f}, {metrics['pre_tanh']['max']:.3f}]")
         print(f"  Distribution: {metrics['pre_tanh']['mean']:.3f} ± {metrics['pre_tanh']['std']:.3f}")
@@ -506,9 +490,7 @@ class YinshTrainer:
                     print(f"    Std: {layer_metrics['std']:.3f}")
                     print(f"    Zeros: {layer_metrics['zeros_pct']:.1f}%")
 
-    def train_epoch(self, batch_size: int,
-                    batches_per_epoch: int,
-                    ring_placement_weight: float = 1.0) -> Dict:
+    def train_epoch(self, batch_size: int, batches_per_epoch: int, ring_placement_weight: float = 1.0) -> Dict:
         """Train for one epoch and return comprehensive stats."""
         stats_accum = {
             'policy_loss': 0,
@@ -516,13 +498,11 @@ class YinshTrainer:
             'value_accuracy': 0,
             'policy_entropy': 0,
             'move_accuracies': defaultdict(float),
-            'gradient_norm': 0,  # Initialize gradient tracking
-            'loss_improvement': 0  # Initialize loss improvement tracking
+            'gradient_norm': 0,
+            'loss_improvement': 0
         }
 
-        prev_total_loss = float('inf')  # For tracking loss improvement
-
-        # Track learning rates for each batch
+        prev_total_loss = float('inf')
         current_policy_lr = float(self.policy_optimizer.param_groups[0]['lr'])
         current_value_lr = float(self.value_optimizer.param_groups[0]['lr'])
 
@@ -537,34 +517,12 @@ class YinshTrainer:
                 ring_placement_weight=ring_placement_weight
             )
 
-            # Add explicit logging of loss values
             self.logger.debug(f"Batch {batch} losses - Policy: {p_loss:.4f}, Value: {v_loss:.4f}")
 
-            # Convert loss values explicitly to float
             stats_accum['policy_loss'] += float(p_loss)
             stats_accum['value_loss'] += float(v_loss)
+            stats_accum['value_accuracy'] += float(v_acc)
 
-            if self.metrics_logger is not None:
-                states, target_probs, target_values = self.experience.sample_batch(batch_size)
-                start_time = time.time()
-                policy_logits, value_preds = self.network.network(states)
-                batch_time = time.time() - start_time
-
-                for i in range(len(states)):
-                    game_state = self.state_encoder.decode_state(states[i].cpu().numpy())
-                    self.metrics_logger.enhanced_metrics.add_state_metrics(
-                        phase=str(game_state.phase),
-                        board_state=str(game_state.board),
-                        value_pred=value_preds[i].item(),
-                        actual_outcome=target_values[i].item(),
-                        move_time=batch_time / batch_size,
-                        confidence=torch.max(F.softmax(policy_logits[i], dim=0)).item()
-                    )
-
-            # Accumulate stats
-            stats_accum['policy_loss'] += p_loss
-            stats_accum['value_loss'] += v_loss
-            stats_accum['value_accuracy'] += v_acc
             for k, v in move_accs.items():
                 stats_accum['move_accuracies'][k] += v
 
@@ -578,23 +536,21 @@ class YinshTrainer:
             if hasattr(self, 'last_policy_entropy'):
                 stats_accum['policy_entropy'] += self.last_policy_entropy
 
-        # Calculate averages
+        # Average stats
         for key in ['policy_loss', 'value_loss', 'value_accuracy', 'policy_entropy', 'gradient_norm']:
             stats_accum[key] /= batches_per_epoch
 
         for k in stats_accum['move_accuracies']:
             stats_accum['move_accuracies'][k] /= batches_per_epoch
 
-        # Calculate loss improvement with protection against zero division
         current_total_loss = stats_accum['policy_loss'] + stats_accum['value_loss']
         if prev_total_loss != float('inf') and prev_total_loss != 0:
             stats_accum['loss_improvement'] = (prev_total_loss - current_total_loss) / (prev_total_loss + 1e-8)
         else:
             stats_accum['loss_improvement'] = 0.0
 
-        # Create metrics object
         metrics = EpochMetrics(
-            policy_loss=max(stats_accum['policy_loss'], 1e-8),  # Prevent exact zeros
+            policy_loss=max(stats_accum['policy_loss'], 1e-8),
             value_loss=max(stats_accum['value_loss'], 1e-8),
             value_accuracy=stats_accum['value_accuracy'],
             move_accuracies=dict(stats_accum['move_accuracies']),
@@ -606,11 +562,9 @@ class YinshTrainer:
             loss_improvement=stats_accum['loss_improvement']
         )
 
-        # Store metrics
         if self.metrics_logger is not None:
             self.metrics_logger.log_training(metrics)
 
-        # Single clear log message
         self.logger.info(
             f"\n{'=' * 20} Epoch Summary {'=' * 20}\n"
             f"Policy: loss={metrics.policy_loss:.4f}, lr={metrics.learning_rates['policy']:.2e}\n"
@@ -629,7 +583,7 @@ class YinshTrainer:
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.network.network.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
+            'optimizer_state_dict': self.policy_optimizer.state_dict(),  # or separate if needed
             'policy_losses': self.policy_losses,
             'value_losses': self.value_losses,
             'total_losses': self.total_losses
@@ -641,54 +595,13 @@ class YinshTrainer:
         """Load a training checkpoint. Returns the epoch number."""
         checkpoint = torch.load(path, map_location=self.device)
         self.network.network.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.policy_losses = checkpoint['policy_losses']
-        self.value_losses = checkpoint['value_losses']
-        self.total_losses = checkpoint['total_losses']
+        self.policy_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # If you have separate value_optimizer, load that too
+        self.policy_losses = checkpoint.get('policy_losses', [])
+        self.value_losses = checkpoint.get('value_losses', [])
+        self.total_losses = checkpoint.get('total_losses', [])
         self.logger.info(f"Checkpoint loaded from {path}")
         return checkpoint['epoch']
-
-    def add_game_experience(self, states: list, policies: list, outcome: int):
-        """
-        Add game experience with pure win/loss values, including phase information.
-
-        For each state, we decode the phase from channel 5 of the state tensor.
-        (Assumption: channel index 5 represents game phase, where a low average value indicates
-        RING_PLACEMENT, mid-range indicates MAIN_GAME, and high values indicate RING_REMOVAL.)
-        """
-
-        def decode_phase(state: np.ndarray) -> str:
-            # Extract the phase channel (channel index 5)
-            phase_channel = state[5]
-            avg = np.mean(phase_channel)
-            if avg < 0.33:
-                return "RING_PLACEMENT"
-            elif avg < 0.66:
-                return "MAIN_GAME"
-            else:
-                return "RING_REMOVAL"
-
-        # Create a list to hold the phase for each state.
-        phases = []
-        for state in states:
-            phase = decode_phase(state)
-            phases.append(phase)
-
-        assert len(states) == len(policies), "Mismatch: states vs. policies!"
-        assert len(states) == len(phases), "Mismatch: states vs. phases!"
-
-        # Add the experience and phase information to the replay buffer.
-        for state, policy, phase in zip(states, policies, phases):
-            self.experience.states.append(state)
-            self.experience.move_probs.append(policy)
-            self.experience.values.append(outcome)  # Pure -1 or 1
-            self.experience.phases.append(phase)
-
-        print(f"[Replay Buffer] Added game experience. Current buffer size: {self.experience.size()}")
-
-        # Safety check
-        assert len(self.experience.states) == len(self.experience.phases), \
-            "Mismatch in states vs. phases after adding experience!"
 
     def evaluate_position(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Evaluate a single position."""
@@ -701,28 +614,49 @@ class YinshTrainer:
                 value.item()
             )
 
-    def _calculate_accuracies(self, pred_values: torch.Tensor, target_values: torch.Tensor,
-                              pred_logits: torch.Tensor, target_probs: torch.Tensor) -> Dict:
-
+    def add_game_experience(self, states: list, policies: list, outcome, discount_factor: float = 1.0):
         """
-        Calculate value and move prediction accuracies.
+        Delegating method for backward compatibility.
+
+        Converts the outcome (either an int or a tuple) into final scores and
+        then delegates to GameExperience.add_game_experience.
 
         Args:
-            pred_values: Predicted values [-1, 1]
-            target_values: True values [-1, 1]
-            pred_logits: Raw move prediction logits
-            target_probs: True move probabilities
+            states:   List of game state numpy arrays.
+            policies: List of move probability distributions.
+            outcome:  Either an integer (1 for white win, -1 for black win, 0 for draw)
+                      or a tuple (final_white_score, final_black_score).
+            discount_factor: Discount factor applied per move (default 1.0, meaning no discount).
+        """
+        if isinstance(outcome, int):
+            # Convert binary outcome to final scores:
+            if outcome == 1:
+                final_white_score, final_black_score = 3, 0
+            elif outcome == -1:
+                final_white_score, final_black_score = 0, 3
+            else:
+                final_white_score, final_black_score = 0, 0
+        elif isinstance(outcome, (list, tuple)) and len(outcome) == 2:
+            final_white_score, final_black_score = outcome
+        else:
+            raise ValueError(
+                "Unexpected outcome format. Must be an int or a tuple (final_white_score, final_black_score)")
 
-        Returns:
-            Tuple of (value_accuracy, move_accuracy)
+        self.experience.add_game_experience(states, policies, final_white_score, final_black_score, discount_factor)
+
+    def _calculate_accuracies(self,
+                              pred_values: torch.Tensor,
+                              target_values: torch.Tensor,
+                              pred_logits: torch.Tensor,
+                              target_probs: torch.Tensor) -> Dict:
+        """
+        Calculate value and move prediction accuracies.
         """
         with torch.no_grad():
-            # Value accuracy
             pred_outcomes = (pred_values > 0).float()
             true_outcomes = (target_values > 0).float()
             value_accuracy = float((pred_outcomes == true_outcomes).float().mean().item())
 
-            # Move accuracy
             pred_moves = torch.argmax(pred_logits, dim=1)
             true_moves = torch.argmax(target_probs, dim=1)
             move_accuracy = float((pred_moves == true_moves).float().mean().item())
@@ -730,7 +664,6 @@ class YinshTrainer:
             k = 5
             _, pred_top_k = torch.topk(pred_logits, k, dim=1)
             _, true_top_k = torch.topk(target_probs, k, dim=1)
-
             top_k_accuracy = float(torch.any(
                 pred_top_k == true_moves.unsqueeze(1),
                 dim=1
