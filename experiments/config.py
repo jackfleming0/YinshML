@@ -690,7 +690,38 @@ COMBINED_EXPERIMENTS = {
         temp_start_decay_at=0.25
     ),
 
-    "separate_value_head_2": CombinedConfig(
+    "feb20_testing": CombinedConfig(
+        # ring_weight = 1.0 + iteration * 0.0125  # or some schedule. this makes ring placement more important as iterations go up.
+        # Training parameters
+        num_iterations= 25, #dropped iterations
+        games_per_iteration=150, #but bumped up games
+        epochs_per_iteration=3, #less epochs
+        batches_per_epoch=300, #but more batches
+
+        # Learning rates
+        lr=0.0007,  # Base learning rate (for policy head)
+        value_head_lr_factor=4.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        batch_size=512,
+        lr_schedule="cosine",
+        warmup_steps=3000, #maybe in the middle?
+
+        # MCTS parameters
+        num_simulations=300, # a little more exploration
+        c_puct=2.0,
+        dirichlet_alpha=0.2, #slight bump to flatten move distribution, hopefully
+        value_weight=1.9,  # Increased value weight more
+        value_loss_weights=(0.6, 0.4),  # also put this a bit more towards MSE
+
+        # Temperature parameters
+        initial_temp=1.0,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
+"separate_value_head_2": CombinedConfig(
         # Training parameters (no changes)
         num_iterations=50,
         games_per_iteration=500,
