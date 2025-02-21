@@ -695,7 +695,7 @@ COMBINED_EXPERIMENTS = {
         # Training parameters
         num_iterations= 25, #dropped iterations
         games_per_iteration=150, #but bumped up games
-        epochs_per_iteration=3, #less epochs
+        epochs_per_iteration=3, #fewer epochs
         batches_per_epoch=300, #but more batches
 
         # Learning rates
