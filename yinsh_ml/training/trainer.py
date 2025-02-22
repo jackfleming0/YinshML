@@ -123,7 +123,7 @@ class GameExperience:
         """Return the current size of the replay buffer."""
         return len(self.states)
 
-    def sample_batch(self, batch_size: int, ring_placement_weight: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample_batch(self, batch_size: int, ring_placement_weight: float = 0.25) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample a random batch of experiences, weighting ring-placement states extra if desired.
 

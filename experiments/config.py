@@ -692,11 +692,12 @@ COMBINED_EXPERIMENTS = {
 
     "feb20_testing": CombinedConfig(
         # ring_weight = 1.0 + iteration * 0.0125  # or some schedule. this makes ring placement more important as iterations go up.
+        # I changed the ring_placement_weight in trainer.py to be 0.25 instead of 1.0. I think this'll focus more on main game in early phases.
         # Training parameters
         num_iterations= 25, #dropped iterations
         games_per_iteration=150, #but bumped up games
-        epochs_per_iteration=3, #fewer epochs
-        batches_per_epoch=300, #but more batches
+        epochs_per_iteration=4, #fewer epochs
+        batches_per_epoch=150,
 
         # Learning rates
         lr=0.0007,  # Base learning rate (for policy head)
@@ -707,9 +708,9 @@ COMBINED_EXPERIMENTS = {
         warmup_steps=3000, #maybe in the middle?
 
         # MCTS parameters
-        num_simulations=300, # a little more exploration
+        num_simulations=250,
         c_puct=2.0,
-        dirichlet_alpha=0.2, #slight bump to flatten move distribution, hopefully
+        dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
         value_weight=1.9,  # Increased value weight more
         value_loss_weights=(0.6, 0.4),  # also put this a bit more towards MSE
 
