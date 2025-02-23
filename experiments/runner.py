@@ -55,7 +55,7 @@ class ExperimentRunner:
             logging.getLogger("ModelTournament")
         ]
 
-        level = logging.DEBUG if debug else logging.INFO
+        level = logging.DEBUG if debug else logging.DEBUG
         for logger in loggers:
             logger.setLevel(level)
 
@@ -521,7 +521,7 @@ class ExperimentRunner:
                                l2_reg=0.0,
                                metrics_logger=self.metrics_logger,
                                value_head_lr_factor=config.value_head_lr_factor,  # Pass the factor
-                               value_loss_weights=config.value_loss_weights, # Pass the weights
+                               value_loss_weights=config.value_loss_weights,  # Pass the weights
                                replay_buffer_path=str(replay_buffer_file))
 
         # Set learning rate configuration for both optimizers
@@ -582,24 +582,31 @@ class ExperimentRunner:
             print("Adding games to trainer's experience...")
             exp_start_time = time.time()
             for states, policies, outcome, game_history in games:
-                # Pass game history to metrics_logger for each game
-                # self.metrics_logger.record_game_history(game_history)
+                # Debug: print lengths of states and game_history
+                print(
+                    f"[DEBUG] Adding game experience: len(states)={len(states)}, len(game_history)={len(game_history)}")
 
-                # Pass individual game states to ValueHeadMetrics
-                for state_data in game_history:
-                    self.value_head_metrics.record_evaluation(
-                        state=state_data['state'],
-                        value_pred=state_data['value_pred'],  # Correctly passing value_pred
-                        policy_probs=state_data['move_probs'],
-                        chosen_move=state_data['move'],
-                        temperature=state_data['temperature'],
-                        actual_outcome=outcome
-                    )
+                # Check if game_history is available and has a 'state' field in its last entry
+                if game_history and isinstance(game_history, list) and len(game_history) > 0 and 'state' in \
+                        game_history[-1]:
+                    candidate = game_history[-1]['state']
+                    # If candidate is already a GameState, use it directly; otherwise, decode it.
+                    if isinstance(candidate, GameState):
+                        final_state = candidate
+                        print(
+                            f"[DEBUG] Using GameState from game_history: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
+                    else:
+                        final_state = trainer.state_encoder.decode_state(candidate)
+                        print(
+                            f"[DEBUG] Decoded terminal state from game_history: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
+                else:
+                    final_state = self.get_terminal_state(states, trainer.state_encoder)
+                    print(
+                        f"[DEBUG] Using scanned terminal state: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
 
-                    print(f"[DEBUG] About to add game experience. "
-                          f"len(states)={len(states)}, len(policies)={len(policies)}")
-
-                trainer.add_game_experience(states, policies, outcome)
+                final_white_score = final_state.white_score
+                final_black_score = final_state.black_score
+                trainer.add_game_experience(states, policies, (final_white_score, final_black_score))
 
             print(f"Experience added in {time.time() - exp_start_time:.2f} seconds")
 
@@ -608,7 +615,7 @@ class ExperimentRunner:
             train_start_time = time.time()
             for _ in range(config.epochs_per_iteration):
                 actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
-                ring_weight = 1.0 + iteration * 0.0125  # or some schedule. this makes ring placement more important as iterations go up.
+                ring_weight = 1.0 + iteration * 0.0125  # Schedule: ring placement weight increases as iterations progress.
                 epoch_stats = trainer.train_epoch(
                     batch_size=config.batch_size,
                     batches_per_epoch=actual_batches,
@@ -629,10 +636,10 @@ class ExperimentRunner:
             # Save checkpoint for this iteration
             self._save_checkpoint(network, "combined", config_name, iteration)
 
-            #add to buffer
+            # Save replay buffer to disk
             trainer.experience.save_buffer(str(replay_buffer_file))
 
-            # Run tournament evaluation if we have previous iterations
+            # Run tournament evaluation if applicable
             tournament_elo = 0.0  # Default if no tournament run
             if iteration > 0:
                 print("Running tournament evaluation...")
@@ -651,10 +658,10 @@ class ExperimentRunner:
             metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
             metrics["timestamps"].append(time.time() - iter_start_time)
 
-            # Add explicit save at end of iteration
-            self.metrics_logger.summarize_iteration()  # Generate summary stats
-            self.metrics_logger.plot_current_metrics()  # Generate plots
-            self.metrics_logger.save_iteration()  # Save to disk
+            # Save and plot metrics for this iteration
+            self.metrics_logger.summarize_iteration()
+            self.metrics_logger.plot_current_metrics()
+            self.metrics_logger.save_iteration()
 
             print(f"Iteration completed in {time.time() - iter_start_time:.2f} seconds")
             print(f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, ELO Change: {elo_change:+.1f}")
@@ -687,6 +694,16 @@ class ExperimentRunner:
         # Simple win rate calculation - no draws possible
         win_rate = wins / total_games
         return self._win_rate_to_elo(win_rate)
+
+    def get_terminal_state(self, states, state_encoder):
+        """Return the first terminal state found when scanning states in reverse.
+           If none are terminal, return the last state.
+        """
+        for s in reversed(states):
+            decoded = state_encoder.decode_state(s)
+            if decoded.is_terminal():
+                return decoded
+        return state_encoder.decode_state(states[-1])
 
     def _save_results(self, experiment_type: str, config_name: str,
                       config: object, metrics: Dict) -> None:

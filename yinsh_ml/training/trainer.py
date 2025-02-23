@@ -251,7 +251,7 @@ class YinshTrainer:
 
         self.l2_reg = l2_reg
         self.logger = logging.getLogger("YinshTrainer")
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
 
         self.current_iteration = 0
         self.policy_losses = []
@@ -264,11 +264,6 @@ class YinshTrainer:
         self.value_metrics = ValueHeadMetrics()
 
         self.metrics_logger = metrics_logger
-
-    #
-    # NOTE: Removed the old add_game_experience(...) from YinshTrainer
-    #       Now you should call `self.experience.add_game_experience(...)` directly.
-    #
 
     def _smooth_policy_targets(self, targets: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
         n_classes = targets.shape[1]
@@ -618,8 +613,9 @@ class YinshTrainer:
         """
         Delegating method for backward compatibility.
 
-        Converts the outcome (either an int or a tuple) into final scores and
-        then delegates to GameExperience.add_game_experience.
+        **IMPORTANT:** Outcome must be provided as a tuple of final scores,
+        e.g. (final_white_score, final_black_score) such as (3,1) or (3,2),
+        so that the normalized margin is computed correctly.
 
         Args:
             states:   List of game state numpy arrays.
@@ -628,21 +624,17 @@ class YinshTrainer:
                       or a tuple (final_white_score, final_black_score).
             discount_factor: Discount factor applied per move (default 1.0, meaning no discount).
         """
-        if isinstance(outcome, int):
-            # Convert binary outcome to final scores:
-            if outcome == 1:
-                final_white_score, final_black_score = 3, 0
-            elif outcome == -1:
-                final_white_score, final_black_score = 0, 3
-            else:
-                final_white_score, final_black_score = 0, 0
-        elif isinstance(outcome, (list, tuple)) and len(outcome) == 2:
-            final_white_score, final_black_score = outcome
-        else:
-            raise ValueError(
-                "Unexpected outcome format. Must be an int or a tuple (final_white_score, final_black_score)")
+        if not (isinstance(outcome, (list, tuple)) and len(outcome) == 2):
+            raise ValueError("Outcome must be a tuple of final scores, e.g. (3,1) or (3,2)")
 
-        self.experience.add_game_experience(states, policies, final_white_score, final_black_score, discount_factor)
+        final_white_score, final_black_score = outcome
+        self.experience.add_game_experience(
+            states,
+            policies,
+            final_white_score,
+            final_black_score,
+            discount_factor
+        )
 
     def _calculate_accuracies(self,
                               pred_values: torch.Tensor,

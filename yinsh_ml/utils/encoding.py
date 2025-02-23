@@ -14,7 +14,7 @@ from ..game.game_state import GameState, GamePhase
 
 logger = logging.getLogger(__name__)
 
-logging.getLogger('StateEncoder').setLevel(logging.ERROR)
+logging.getLogger('StateEncoder').setLevel(logging.DEBUG)
 
 
 class StateEncoder:
@@ -59,13 +59,13 @@ class StateEncoder:
         self.remove_ring_range = (self.remove_ring_base, self.total_moves)
 
         self.logger = logging.getLogger("StateEncoder")
-        self.logger.info(f"StateEncoder initialized with {self.total_moves} total moves:")
-        self.logger.info(f"  Valid positions: {self.num_positions}")
-        self.logger.info(f"  Ring placement: {self.ring_place_range}")
-        self.logger.info(f"  Ring movement: {self.move_ring_range} (space: {self.move_ring_space})")
-        self.logger.info(f"  Marker removal: {self.remove_markers_range} (space: {self.remove_markers_space})")
-        self.logger.info(f"  Ring removal: {self.remove_ring_range}")
-        self.logger.setLevel(logging.ERROR)
+        # self.logger.info(f"StateEncoder initialized with {self.total_moves} total moves:")
+        # self.logger.info(f"  Valid positions: {self.num_positions}")
+        # self.logger.info(f"  Ring placement: {self.ring_place_range}")
+        # self.logger.info(f"  Ring movement: {self.move_ring_range} (space: {self.move_ring_space})")
+        # self.logger.info(f"  Marker removal: {self.remove_markers_range} (space: {self.remove_markers_space})")
+        # self.logger.info(f"  Ring removal: {self.remove_ring_range}")
+        self.logger.setLevel(logging.DEBUG)
 
 
     def _initialize_position_to_index(self) -> Dict[str, int]:
@@ -467,8 +467,7 @@ class StateEncoder:
         else:
             game_state.current_player = Player.BLACK
 
-        logger.debug(f"Decoded state - Phase: {game_state.phase}, "
-                     f"White rings: {game_state.rings_placed[Player.WHITE]}, "
-                     f"Black rings: {game_state.rings_placed[Player.BLACK]}")
-
+        logger.debug(f"Decoded state - Phase: {game_state.phase.name}, "
+                     f"White rings: {white_rings}, Black rings: {black_rings}, "
+                     f"White score: {game_state.white_score}, Black score: {game_state.black_score}")
         return game_state

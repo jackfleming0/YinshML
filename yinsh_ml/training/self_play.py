@@ -28,7 +28,7 @@ logger.setLevel(logging.DEBUG)  # Set the desired logging level
 
 # Create handlers (console and file handlers can be added as needed)
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)  # Set the console handler level
+console_handler.setLevel(logging.DEBUG)  # Set the console handler level
 
 # Optionally, add a file handler
 # file_handler = logging.FileHandler('play_game_worker.log')
@@ -521,60 +521,74 @@ class SelfPlay:
         states = []
         policies = []
         move_count = 0
+        game_history = []
 
         self.logger.info(f"\nStarting game {game_id}")
 
         while not state.is_terminal() and move_count < 5000:
             valid_moves = state.get_valid_moves()
             if not valid_moves:
+                self.logger.warning(f"Game {game_id} move {move_count}: No valid moves available.")
                 break
 
-            # Get current temperature
             temp = self.mcts.get_temperature(move_count)
-
-            # Run MCTS with current temperature
             move_probs = self.mcts.search(state, move_count)
 
-            # Get probabilities for valid moves
             valid_indices = [self.state_encoder.move_to_index(move) for move in valid_moves]
             valid_probs = move_probs[valid_indices]
-
             if valid_probs.sum() == 0:
-                self.logger.error("All valid moves have zero probability!")
+                self.logger.error(f"Game {game_id} move {move_count}: All valid moves have zero probability!")
                 break
-
-            # Normalize probabilities
             valid_probs = valid_probs / valid_probs.sum()
 
-            # Select move
             selected_idx = np.random.choice(len(valid_moves), p=valid_probs)
             selected_move = valid_moves[selected_idx]
 
-            # Track temperature metrics
-            self.temp_metrics.add_move_data(
-                move_number=move_count,
-                temperature=temp,
-                move_probs=valid_probs,
-                selected_move_idx=selected_idx
-            )
-
-            # Store state and policy before making move
-            encoded_state = self.state_encoder.encode_state(state)
-            states.append(encoded_state)
-            policies.append(move_probs)
-
-            # Make the move
+            # Make the move first.
             success = state.make_move(selected_move)
             if not success:
-                self.logger.error(f"Failed to make move: {selected_move}")
+                self.logger.error(f"Game {game_id} move {move_count}: Failed to make move: {selected_move}")
                 break
 
             move_count += 1
 
-        # Determine outcome
+            # Record the post-move state (which reflects any updates from the move)
+            encoded_state = self.state_encoder.encode_state(state)
+            states.append(encoded_state)
+            game_history.append({
+                'state': state.copy(),
+                'move': selected_move,
+                'move_probs': valid_probs,
+                'temperature': temp,
+                'value_pred': None  # Optionally fill in if needed
+            })
+
+            # Check immediately if the move resulted in a terminal state.
+            if state.is_terminal():
+                self.logger.debug(f"Game {game_id}: Terminal state reached after {move_count} moves.")
+                break
+
+        # After exiting the loop, ensure the final state is recorded.
+        if state.is_terminal():
+            # Check if the last recorded state in game_history is terminal.
+            if not game_history or not game_history[-1]['state'].is_terminal():
+                self.logger.debug(f"Game {game_id}: Appending final terminal state to history.")
+                final_encoded_state = self.state_encoder.encode_state(state)
+                states.append(final_encoded_state)
+                game_history.append({
+                    'state': state.copy(),
+                    'move': None,
+                    'move_probs': None,
+                    'temperature': None,
+                    'value_pred': None
+                })
+
+        self.logger.debug(f"Game {game_id}: Final state - Phase: {state.phase}, "
+                          f"White score: {state.white_score}, Black score: {state.black_score}, "
+                          f"Terminal: {state.is_terminal()}")
+
         winner = state.get_winner()
         outcome = 1 if winner == Player.WHITE else (-1 if winner == Player.BLACK else 0)
-
         return states, policies, outcome
 
     def export_games(self, games: List[Tuple[List[np.ndarray], List[np.ndarray], int]],
@@ -596,32 +610,22 @@ def play_game_worker(
     initial_temp: float = 1.0,
     final_temp: float = 0.2,
     annealing_steps: int = 30,
-    mcts_metrics: Optional[MCTSMetrics] = None  # New argument
+    mcts_metrics: Optional[MCTSMetrics] = None
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict, List[Dict]]:
     """
     Worker function to play a single game with temperature metrics and robust logging.
-
-    Args:
-        model_path (str): Path to the model file.
-        game_id (int): Unique identifier for the game.
-        num_simulations (int): Number of MCTS simulations to run.
-        initial_temp (float, optional): Initial temperature for move selection. Defaults to 1.0.
-        final_temp (float, optional): Final temperature after annealing. Defaults to 0.2.
-        annealing_steps (int, optional): Number of steps over which to anneal the temperature. Defaults to 30.
-
     Returns:
-        Tuple[List[np.ndarray], List[np.ndarray], int, Dict]: A tuple containing:
-            - List of encoded game states.
-            - List of policy vectors.
-            - Game outcome.
-            - Temperature metrics and move statistics.
+        Tuple containing:
+         - List of encoded game states.
+         - List of policy vectors.
+         - Game outcome.
+         - Temperature metrics dictionary.
+         - Game history (list of dicts, each with a 'state' key that is a GameState).
     """
-    # Keep only essential setup logging
     logger.info(f"Worker {game_id} starting game...")
     device = torch.device('cpu')
 
     try:
-        # Remove detailed initialization logs - only log if something fails
         network = NetworkWrapper(model_path=model_path, device=device)
         mcts = MCTS(
             network,
@@ -629,7 +633,7 @@ def play_game_worker(
             initial_temp=initial_temp,
             final_temp=final_temp,
             annealing_steps=annealing_steps,
-            mcts_metrics=mcts_metrics  # Pass mcts_metrics to MCTS
+            mcts_metrics=mcts_metrics
         )
         state = GameState()
         state_encoder = StateEncoder()
@@ -637,18 +641,15 @@ def play_game_worker(
         states: List[np.ndarray] = []
         policies: List[np.ndarray] = []
         move_count = 0
-
         temp_data: Dict[str, List] = {
             'temperatures': [],
             'entropies': [],
             'move_stats': []
         }
-
-        game_history = []
+        game_history: List[Dict] = []
 
         move_start = time.time()
 
-        # Main game loop - remove all debug logs
         while not state.is_terminal() and move_count < 5000:
             valid_moves = state.get_valid_moves()
             if not valid_moves:
@@ -659,37 +660,34 @@ def play_game_worker(
             move_probs = mcts.search(state, move_count)
             valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
             valid_probs = move_probs[valid_indices]
-
             if valid_probs.sum() == 0:
-                logger.warning(f"Worker {game_id} move {move_count}: Zero probability for all moves.")
+                logger.warning(f"Worker {game_id} move {move_count}: All valid moves have zero probability.")
                 break
-
             valid_probs = valid_probs / valid_probs.sum()
 
-            # Temperature application without logging
-            if temp > 0:
-                adj_probs = np.power(valid_probs, 1 / temp)
-                adj_probs = adj_probs / adj_probs.sum()
-            else:
-                adj_probs = valid_probs
-
-            selected_idx = np.random.choice(len(valid_moves), p=adj_probs)
+            selected_idx = np.random.choice(len(valid_moves), p=valid_probs)
             selected_move = valid_moves[selected_idx]
 
-            # Get the value prediction from the network
+            # Make the move before recording the state.
+            success = state.make_move(selected_move)
+            if not success:
+                logger.error(f"Worker {game_id} move {move_count}: Failed to make move: {selected_move}")
+                break
+
+            move_count += 1
+
+            # Record the post-move state and details.
             encoded_state = state_encoder.encode_state(state)
-            state_tensor = torch.FloatTensor(encoded_state).unsqueeze(0).to(network.device)
-            _, value_pred = network.predict(state_tensor)
-            value_pred = value_pred.item()  # Extract value as float
+            states.append(encoded_state)
+            game_history.append({
+                'state': state.copy(),  # Copy the GameState object
+                'move': selected_move,
+                'move_probs': valid_probs,
+                'temperature': temp,
+                'value_pred': None  # Optionally record network value if desired
+            })
 
-            # Replace frequent move-by-move logging with summary logging
-            # Only log every 10th move or important moves like ring removals
-            #if move_count % 10 == 0 or "removes" in str(selected_move):
-            #    logger.info(f"Worker {game_id} move {move_count}: {selected_move}")
-
-            move_time = time.time() - move_start
-
-            # Record metrics without logging
+            # Record temperature metrics
             entropy = -np.sum(valid_probs * np.log(valid_probs + 1e-10))
             temp_data['temperatures'].append((move_count, temp))
             temp_data['entropies'].append((move_count, entropy))
@@ -699,45 +697,68 @@ def play_game_worker(
                 'entropy': entropy,
                 'top_prob': float(np.max(valid_probs)),
                 'selected_prob': float(valid_probs[selected_idx]),
-                'move_time': move_time
+                'move_time': time.time() - move_start
             })
 
-            # Store state and policy before making move
-            encoded_state = state_encoder.encode_state(state)
-            states.append(encoded_state)
-            policies.append(move_probs)
-
-            game_history.append({
-                'state': state.copy(),
-                'move': selected_move,
-                'move_probs': valid_probs,
-                'temperature': temp,
-                'value_pred': value_pred
-            })
-
-            # Make the move
-            success = state.make_move(selected_move)
-            if not success:
-                logger.error(f"Failed to make move: {selected_move}")
+            # If the move resulted in a terminal state, break immediately.
+            if state.is_terminal():
+                logger.debug(f"Worker {game_id}: Terminal state reached after {move_count} moves.")
                 break
 
-            move_count += 1
+        # After exiting the loop, force a final update of the game phase.
+        state._update_game_phase()
+        if state.is_terminal():
+            # If the final state hasn't been recorded in the history, append it.
+            if not game_history or not game_history[-1]['state'].is_terminal():
+                logger.debug(f"Worker {game_id}: Appending final terminal state to game history.")
+                final_encoded_state = state_encoder.encode_state(state)
+                states.append(final_encoded_state)
+                # Append a dummy policy so that len(states)==len(policies)
+                if len(policies) < len(states):
+                    if policies:
+                        dummy_policy = np.zeros_like(policies[-1])
+                    else:
+                        dummy_policy = np.zeros(state_encoder.total_moves, dtype=np.float32)
+                    policies.append(dummy_policy)
+                game_history.append({
+                    'state': state.copy(),
+                    'move': None,
+                    'move_probs': None,
+                    'temperature': None,
+                    'value_pred': None
+                })
+        # Ensure that the lengths of states and policies are equal.
+        while len(policies) < len(states):
+            logger.debug(
+                f"Worker {game_id}: Appending extra dummy policy to match states (states: {len(states)}, policies: {len(policies)})")
+            if policies:
+                dummy_policy = np.zeros_like(policies[-1])
+            else:
+                dummy_policy = np.zeros(state_encoder.total_moves, dtype=np.float32)
+            policies.append(dummy_policy)
+            game_history.append({
+                'state': state.copy(),
+                'move': None,
+                'move_probs': None,
+                'temperature': None,
+                'value_pred': None
+            })
 
-
-
-        # Keep game outcome logging
+        logger.debug(f"Worker {game_id}: Final state - Phase: {state.phase}, "
+                     f"White score: {state.white_score}, Black score: {state.black_score}, "
+                     f"Terminal: {state.is_terminal()}")
         logger.info(f"Worker {game_id} completed: {move_count} moves")
         winner = state.get_winner()
         if winner == Player.WHITE:
-            outcome = 1
             logger.info(f"Worker {game_id}: White wins")
         elif winner == Player.BLACK:
-            outcome = -1
             logger.info(f"Worker {game_id}: Black wins")
         else:
-            outcome = 0
             logger.warning(f"Worker {game_id}: Invalid game outcome")
+        outcome = 1 if winner == Player.WHITE else (-1 if winner == Player.BLACK else 0)
 
+        logger.debug(
+            f"Worker {game_id}: Returning {len(states)} states and {len(game_history)} history entries. Also, policies length = {len(policies)}.")
         return states, policies, outcome, temp_data, game_history
 
     except Exception as e:
