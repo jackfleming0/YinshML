@@ -16,7 +16,7 @@ import torch.nn.functional as F
 # Define output type for traced model
 ModelOutput = namedtuple('ModelOutput', ['policy', 'value'])
 
-logging.getLogger('NetworkWrapper').setLevel(logging.ERROR)
+logging.getLogger('NetworkWrapper').setLevel(logging.DEBUG)
 
 class NetworkWrapper:
     """Wrapper class for the YINSH neural network model."""

@@ -72,9 +72,7 @@ class MoveGenerator:
                     logger.debug(f"Invalid position")
 
         logger.debug(f"\nRing placement generation complete:")
-        logger.debug(f"Valid positions: {valid_count}")
-        logger.debug(f"Empty positions: {empty_count}")
-        logger.debug(f"Total moves: {len(moves)}")
+
         return moves
 
     @staticmethod

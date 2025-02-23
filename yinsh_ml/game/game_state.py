@@ -16,6 +16,7 @@ import logging
 
 # Setup logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 class StateEncoder:
     """Handles encoding and decoding of YINSH game states for ML model."""
@@ -138,18 +139,18 @@ class GameState:
 
     def make_move(self, move: Move) -> bool:
         """Execute a move and update game state."""
-        logger.debug(f"\nAttempting to validate move: {move}")
+        # logger.debug(f"\nAttempting to validate move: {move}")
 
         # First validate the move
-        logger.debug(f"\nBeginning move validation...")  # Debug
+       #  logger.debug(f"\nBeginning move validation...")  # Debug
         if not self.is_valid_move(move):
             logger.debug("Move validation failed")
             return False
-        logger.debug("Move validation passed!")  # Debug
+        # logger.debug("Move validation passed!")  # Debug
 
         success = False
         before_phase = self.phase  # Store phase before move
-        logger.debug(f"\nProcessing move execution...")  # Debug
+        #logger.debug(f"\nProcessing move execution...")  # Debug
 
         if move.type == MoveType.PLACE_RING:
             logger.debug("Processing ring placement")
@@ -196,14 +197,14 @@ class GameState:
             # and only if we're not entering/in a row completion sequence
             if (move.type in {MoveType.PLACE_RING}
                     or (move.type == MoveType.MOVE_RING and self.phase == GamePhase.MAIN_GAME)):
-                logger.debug(f"Switching player from {self.current_player} to {self.current_player.opponent}")
+#                logger.debug(f"Switching player from {self.current_player} to {self.current_player.opponent}")
                 self._switch_player()
 
         return success
 
     def _switch_player(self):
         """Switch the current player."""
-        logger.debug(f"Switching player from {self.current_player} to {self.current_player.opponent}")  # Debug
+        # logger.debug(f"Switching player from {self.current_player} to {self.current_player.opponent}")  # Debug
         self.current_player = self.current_player.opponent
 
     def get_valid_moves(self) -> List['Move']:
@@ -221,12 +222,12 @@ class GameState:
 
     def is_valid_move(self, move: Move) -> bool:
         """Check if a move is valid."""
-        logger.debug(f"\nValidating move: {move}")
-        logger.debug(f"Current phase: {self.phase}")
-        logger.debug(f"Current player: {self.current_player}")
-        logger.debug(f"Move player: {move.player}")
-        logger.debug(f"Move type: {move.type}")  # Debug
-        logger.debug(f"Move source: {move.source}")  # Debug
+        #logger.debug(f"\nValidating move: {move}")
+    #    logger.debug(f"Current phase: {self.phase}")
+        #logger.debug(f"Current player: {self.current_player}")
+        #logger.debug(f"Move player: {move.player}")
+        #logger.debug(f"Move type: {move.type}")  # Debug
+        #logger.debug(f"Move source: {move.source}")  # Debug
 
         # Basic validation
         if move.player != self.current_player:
@@ -234,13 +235,13 @@ class GameState:
             return False
 
         if move.type == MoveType.PLACE_RING:
-            logger.debug("\nValidating PLACE_RING move:")  # Debug
-            logger.debug(f"1. Phase check: current={self.phase}, expected={GamePhase.RING_PLACEMENT}")  # Debug
+            #logger.debug("\nValidating PLACE_RING move:")  # Debug
+            #logger.debug(f"1. Phase check: current={self.phase}, expected={GamePhase.RING_PLACEMENT}")  # Debug
             if self.phase != GamePhase.RING_PLACEMENT:
                 logger.debug("Not in ring placement phase")
                 return False
 
-            logger.debug(f"2. Source position check: {move.source}")  # Debug
+            #ogger.debug(f"2. Source position check: {move.source}")  # Debug
             if not move.source:
                 logger.debug("No source position provided")
                 return False
@@ -248,19 +249,19 @@ class GameState:
                 logger.debug("Invalid source position")
                 return False
 
-            logger.debug(f"3. Empty position check")  # Debug
+            #logger.debug(f"3. Empty position check")  # Debug
             current_piece = self.board.get_piece(move.source)
-            logger.debug(f"Current piece at position: {current_piece}")  # Debug
+            #logger.debug(f"Current piece at position: {current_piece}")  # Debug
             if current_piece is not None:
                 logger.debug("Position already occupied")
                 return False
 
-            logger.debug(f"4. Ring count check: {self.rings_placed[move.player]}/{RINGS_PER_PLAYER}")  # Debug
+            #logger.debug(f"4. Ring count check: {self.rings_placed[move.player]}/{RINGS_PER_PLAYER}")  # Debug
             if self.rings_placed[move.player] >= RINGS_PER_PLAYER:
                 logger.debug("All rings already placed")
                 return False
 
-            logger.debug("All validation checks passed!")  # Debug
+            # logger.debug("All validation checks passed!")  # Debug
             return True
 
         elif move.type == MoveType.MOVE_RING:
@@ -319,10 +320,10 @@ class GameState:
 
     def _handle_ring_placement(self, move: Move) -> bool:
         """Handle ring placement during setup phase."""
-        logger.debug(f"\nHandling ring placement: {move}")  # Debug
+        # logger.debug(f"\nHandling ring placement: {move}")  # Debug
         ring_type = PieceType.WHITE_RING if move.player == Player.WHITE else PieceType.BLACK_RING
-        logger.debug(f"Ring type to place: {ring_type}")  # Debug
-        logger.debug(f"Current board state before placement:")  # Debug
+        # logger.debug(f"Ring type to place: {ring_type}")  # Debug
+        # logger.debug(f"Current board state before placement:")  # Debug
         logger.debug(self.board)
 
         if not move.source or not is_valid_position(move.source):
@@ -339,22 +340,22 @@ class GameState:
 
         # Place the ring
         place_success = self.board.place_piece(move.source, ring_type)
-        logger.debug(f"Place piece result: {place_success}")  # Debug
+        # logger.debug(f"Place piece result: {place_success}")  # Debug
         if not place_success:
             logger.debug("Failed to place ring")  # Debug
             return False
 
         # Update ring count
         self.rings_placed[move.player] += 1
-        logger.debug(f"Successfully placed {ring_type} at {move.source}")  # Debug
-        logger.debug(f"Updated rings placed: {self.rings_placed}")  # Debug
+        #logger.debug(f"Successfully placed {ring_type} at {move.source}")  # Debug
+        #logger.debug(f"Updated rings placed: {self.rings_placed}")  # Debug
 
         # Check if we need to transition to main game
         if all(count == RINGS_PER_PLAYER for count in self.rings_placed.values()):
             logger.debug("Transitioning to main game")  # Debug
             self.phase = GamePhase.MAIN_GAME
 
-        logger.debug(f"Final board state after placement:")  # Debug
+        # logger.debug(f"Final board state after placement:")  # Debug
         logger.debug(self.board)
         return True
 
@@ -404,16 +405,16 @@ class GameState:
 
     def _handle_marker_removal(self, move: Move) -> bool:
         """Handle marker removal after completing a row."""
-        logger.debug("\nHandling marker removal:")
-        logger.debug(f"Current player: {move.player}")
-        logger.debug(f"Current phase: {self.phase}")
+        #logger.debug("\nHandling marker removal:")
+        #logger.debug(f"Current player: {move.player}")
+        # logger.debug(f"Current phase: {self.phase}")
 
         if len(move.markers) != 5:
             logger.debug(f"Wrong number of markers: {len(move.markers)}")
             return False
 
         # Remove the markers
-        logger.debug("Removing markers:")
+        #logger.debug("Removing markers:")
         for pos in move.markers:
             old_piece = self.board.get_piece(pos)
             if old_piece is None:
@@ -424,7 +425,7 @@ class GameState:
                 return False
 
             self.board.remove_piece(pos)
-            logger.debug(f"Removed {old_piece} from {pos}")
+            #logger.debug(f"Removed {old_piece} from {pos}")
 
         return True
 
@@ -438,8 +439,8 @@ class GameState:
                      else PieceType.BLACK_RING)
 
         current_piece = self.board.get_piece(move.source)
-        logger.debug(f"Expected ring type: {ring_type}")
-        logger.debug(f"Found piece: {current_piece}")
+        #logger.debug(f"Expected ring type: {ring_type}")
+        #logger.debug(f"Found piece: {current_piece}")
 
         if current_piece != ring_type:
             logger.debug("Invalid ring type for removal")
@@ -450,32 +451,36 @@ class GameState:
 
         if move.player == Player.WHITE:
             self.white_score += 1
-            logger.debug(f"White score increased to {self.white_score}")
+            #logger.debug(f"White score increased to {self.white_score}")
         else:
             self.black_score += 1
-            logger.debug(f"Black score increased to {self.black_score}")
+            #logger.debug(f"Black score increased to {self.black_score}")
 
         return True
 
     def _update_game_phase(self):
         """Update game phase based on current state."""
-        logger.debug("\nUpdating game phase...")
+    #    logger.debug("\nUpdating game phase...")
 
         # Check for game end condition
         if self.white_score >= 3 or self.black_score >= 3:
             self.phase = GamePhase.GAME_OVER
+            logger.debug(f"GAME OVER detected: White score = {self.white_score}, Black score = {self.black_score}")
+
             return
 
         # Handle ring placement phase
         if self.phase == GamePhase.RING_PLACEMENT:
             if all(self.rings_placed[p] == RINGS_PER_PLAYER for p in Player):
                 self.phase = GamePhase.MAIN_GAME
+                logger.debug("Transitioning from RING_PLACEMENT to MAIN_GAME")
+
             return
 
         # Find completed rows
         white_rows = self.board.find_marker_rows(PieceType.WHITE_MARKER)
         black_rows = self.board.find_marker_rows(PieceType.BLACK_MARKER)
-        logger.debug(f"Found {len(white_rows)} white rows and {len(black_rows)} black rows")
+        #logger.debug(f"Found {len(white_rows)} white rows and {len(black_rows)} black rows")
 
         completed_rows = white_rows + black_rows
         if completed_rows:
