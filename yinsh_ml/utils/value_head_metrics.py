@@ -29,14 +29,57 @@ class ValueHeadMetrics:
             return 'main_game'  # Assuming ROW_COMPLETION is similar to MAIN_GAME
         elif phase == GamePhase.RING_REMOVAL:
             return 'ring_removal'
+        elif phase == GamePhase.game_over:
+            return 'game_over'
         else:
             return 'unknown'
+
+    # def record_evaluation(self, state: GameState, value_pred: float,
+    #                       policy_probs: np.ndarray, chosen_move: Optional[Move],
+    #                       temperature: float, actual_outcome: Optional[float] = None):
+    #     """Record comprehensive evaluation data."""
+    #     phase_name = self._get_phase_name(state.phase)
+    #     board_hash = str(state.board)
+    #
+    #     # Track value prediction consistency
+    #     if board_hash in self.position_cache:
+    #         prev_value = self.position_cache[board_hash]['value']
+    #         self.phase_metrics[phase_name]['value_consistency'].append(
+    #             abs(prev_value - value_pred)
+    #         )
+    #
+    #     self.position_cache[board_hash] = {
+    #         'value': value_pred,
+    #         'move_count': len(state.move_history)
+    #     }
+    #
+    #     # Record value prediction and move number for evolution tracking
+    #     self.move_values.append((len(state.move_history), value_pred))
+    #
+    #     metrics = {
+    #         'value_pred': value_pred,
+    #         'temperature': temperature,
+    #         'top_policy_prob': np.max(policy_probs) if policy_probs is not None else 0,
+    #         'ring_mobility': self._calculate_ring_mobility(state),
+    #         'move_count': len(state.move_history)
+    #     }
+    #
+    #     # Store metrics
+    #     for key, value in metrics.items():
+    #         self.phase_metrics[phase_name][key].append(value)
 
     def record_evaluation(self, state: GameState, value_pred: float,
                           policy_probs: np.ndarray, chosen_move: Optional[Move],
                           temperature: float, actual_outcome: Optional[float] = None):
         """Record comprehensive evaluation data."""
+        # Get the phase name using your helper; if it returns an unknown value,
+        # default to 'game_over'
         phase_name = self._get_phase_name(state.phase)
+        if phase_name not in self.phase_metrics:
+            # Log a warning and default the phase name
+            print(f"Warning: phase '{phase_name}' not found in phase_metrics. Defaulting to 'game_over'.")
+            phase_name = "game_over"
+
         board_hash = str(state.board)
 
         # Track value prediction consistency
