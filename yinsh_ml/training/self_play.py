@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import concurrent.futures
 import psutil
+import platform
 
 from yinsh_ml.utils.mcts_metrics import MCTSMetrics
 from ..utils.TemperatureMetrics import TemperatureMetrics
@@ -309,15 +310,19 @@ class SelfPlay:
         self.num_simulations = num_simulations
         self.metrics_logger = metrics_logger
 
-
-        # Calculate optimal workers
-        cpu_count = psutil.cpu_count(logical=True)
-        if cpu_count >= 32:
-            self.num_workers = min(24, cpu_count - 4)
-        elif cpu_count >= 16:
-            self.num_workers = min(12, cpu_count - 2)
+        # M2-specific optimal worker count
+        if platform.processor() == 'arm':  # Check for Apple Silicon
+            # Optimal for M2: use 6 workers (leave 2 cores for system)
+            self.num_workers = 6
         else:
-            self.num_workers = max(4, psutil.cpu_count(logical=False) - 1)
+            # Original logic for other CPUs
+            cpu_count = psutil.cpu_count(logical=True)
+            if cpu_count >= 32:
+                self.num_workers = min(24, cpu_count - 4)
+            elif cpu_count >= 16:
+                self.num_workers = min(12, cpu_count - 2)
+            else:
+                self.num_workers = max(4, psutil.cpu_count(logical=False) - 1)
 
         self.current_iteration = 0
 
@@ -380,6 +385,7 @@ class SelfPlay:
         print(f"\nStarting generation of {num_games} games using {self.num_workers} workers")
         games = []
         num_simulations = self.num_simulations
+
         network_params = self.network.network.state_dict()
 
         # Reset temperature metrics for new batch

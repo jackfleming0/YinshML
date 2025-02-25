@@ -367,6 +367,10 @@ def check_hardware():
 def main():
     check_hardware()
 
+    # Force MPS backend for M2 Mac
+    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    print(f"Using device: {device}")
+
     failures = []
     parser = argparse.ArgumentParser(description='Test YINSH experiment configurations')
     parser.add_argument('--quick', action='store_true',
@@ -376,10 +380,14 @@ def main():
                         help='Test specific experiment type')
     parser.add_argument('--config', help='Test specific configuration')
     # Add device argument with smart default
+    # parser.add_argument('--device',
+    #                     choices=['cuda', 'mps', 'cpu'],
+    #                     default='mps' if torch.backends.mps.is_available() else
+    #                     ('cuda' if torch.cuda.is_available() else 'cpu'),
+    #                     help='Device to run on (default: best available)')
     parser.add_argument('--device',
                         choices=['cuda', 'mps', 'cpu'],
-                        default='mps' if torch.backends.mps.is_available() else
-                        ('cuda' if torch.cuda.is_available() else 'cpu'),
+                        default=device,
                         help='Device to run on (default: best available)')
 
     parser.add_argument('--dashboard', action='store_true',

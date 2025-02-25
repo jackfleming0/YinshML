@@ -707,12 +707,12 @@ COMBINED_EXPERIMENTS = {
         lr=0.0007,  # Base learning rate (for policy head)
         value_head_lr_factor=4.0,  # Value head learning rate will be lr * value_head_lr_factor
         weight_decay=1e-4,
-        batch_size=512,
+        batch_size=256,
         lr_schedule="cosine",
         warmup_steps=3000, #maybe in the middle?
 
         # MCTS parameters
-        num_simulations=250,
+        num_simulations=125,
 #        num_simulations=20,
         c_puct=2.0,
         dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
