@@ -24,7 +24,8 @@ class EnhancedMetricsCollector:
         self.phase_metrics = {
             'placement': PhaseMetrics(),
             'main_game': PhaseMetrics(),
-            'ring_removal': PhaseMetrics()
+            'ring_removal': PhaseMetrics(),
+            'game_over': PhaseMetrics()
         }
         self.critical_positions = defaultdict(list)
         self.current_summary = {}
