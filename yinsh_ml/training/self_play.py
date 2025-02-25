@@ -555,6 +555,9 @@ class SelfPlay:
             # Record the post-move state (which reflects any updates from the move)
             encoded_state = self.state_encoder.encode_state(state)
             states.append(encoded_state)
+
+            # The move_probs or valid_probs from MCTS search
+            policies.append(move_probs)  # Make sure move_probs has shape [total_moves]
             game_history.append({
                 'state': state.copy(),
                 'move': selected_move,
@@ -574,7 +577,13 @@ class SelfPlay:
             if not game_history or not game_history[-1]['state'].is_terminal():
                 self.logger.debug(f"Game {game_id}: Appending final terminal state to history.")
                 final_encoded_state = self.state_encoder.encode_state(state)
+
                 states.append(final_encoded_state)
+
+                # Append a dummy policy to keep lengths in sync
+                dummy_policy = np.zeros_like(move_probs)
+                policies.append(dummy_policy)
+
                 game_history.append({
                     'state': state.copy(),
                     'move': None,
@@ -650,14 +659,18 @@ def play_game_worker(
 
         move_start = time.time()
 
+        # Main loop
         while not state.is_terminal() and move_count < 5000:
             valid_moves = state.get_valid_moves()
             if not valid_moves:
                 logger.warning(f"Worker {game_id} move {move_count}: No valid moves available.")
                 break
 
+            # 1) Get temperature and MCTS policy
             temp = mcts.get_temperature(move_count)
-            move_probs = mcts.search(state, move_count)
+            move_probs = mcts.search(state, move_count)  # shape [action_size] (e.g., 7395)
+
+            # 2) Filter for valid_moves
             valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
             valid_probs = move_probs[valid_indices]
             if valid_probs.sum() == 0:
@@ -665,10 +678,11 @@ def play_game_worker(
                 break
             valid_probs = valid_probs / valid_probs.sum()
 
+            # 3) Select move from the valid set
             selected_idx = np.random.choice(len(valid_moves), p=valid_probs)
             selected_move = valid_moves[selected_idx]
 
-            # Make the move before recording the state.
+            # 4) Make the move
             success = state.make_move(selected_move)
             if not success:
                 logger.error(f"Worker {game_id} move {move_count}: Failed to make move: {selected_move}")
@@ -676,18 +690,21 @@ def play_game_worker(
 
             move_count += 1
 
-            # Record the post-move state and details.
+            # 5) Encode the post-move state and record policy
             encoded_state = state_encoder.encode_state(state)
             states.append(encoded_state)
+            policies.append(move_probs)  # <-- IMPORTANT: store the *full* policy vector
+
+            # Record extras in game_history
             game_history.append({
                 'state': state.copy(),  # Copy the GameState object
                 'move': selected_move,
-                'move_probs': valid_probs,
+                'move_probs': valid_probs,  # Probability distribution over valid moves only
                 'temperature': temp,
-                'value_pred': None  # Optionally record network value if desired
+                'value_pred': None  # optionally fill in if desired
             })
 
-            # Record temperature metrics
+            # 6) Collect temperature/entropy info
             entropy = -np.sum(valid_probs * np.log(valid_probs + 1e-10))
             temp_data['temperatures'].append((move_count, temp))
             temp_data['entropies'].append((move_count, entropy))
@@ -697,44 +714,22 @@ def play_game_worker(
                 'entropy': entropy,
                 'top_prob': float(np.max(valid_probs)),
                 'selected_prob': float(valid_probs[selected_idx]),
-                'move_time': time.time() - move_start
+                'move_time': time.time()
             })
 
-            # If the move resulted in a terminal state, break immediately.
+            # If that move led to a terminal state, break
             if state.is_terminal():
                 logger.debug(f"Worker {game_id}: Terminal state reached after {move_count} moves.")
                 break
 
-        # After exiting the loop, force a final update of the game phase.
+        # Final check (optional, in case we want to store one more “terminal state”).
         state._update_game_phase()
         if state.is_terminal():
-            # If the final state hasn't been recorded in the history, append it.
-            if not game_history or not game_history[-1]['state'].is_terminal():
-                logger.debug(f"Worker {game_id}: Appending final terminal state to game history.")
-                final_encoded_state = state_encoder.encode_state(state)
-                states.append(final_encoded_state)
-                # Append a dummy policy so that len(states)==len(policies)
-                if len(policies) < len(states):
-                    if policies:
-                        dummy_policy = np.zeros_like(policies[-1])
-                    else:
-                        dummy_policy = np.zeros(state_encoder.total_moves, dtype=np.float32)
-                    policies.append(dummy_policy)
-                game_history.append({
-                    'state': state.copy(),
-                    'move': None,
-                    'move_probs': None,
-                    'temperature': None,
-                    'value_pred': None
-                })
-        # Ensure that the lengths of states and policies are equal.
-        while len(policies) < len(states):
-            logger.debug(
-                f"Worker {game_id}: Appending extra dummy policy to match states (states: {len(states)}, policies: {len(policies)})")
-            if policies:
-                dummy_policy = np.zeros_like(policies[-1])
-            else:
-                dummy_policy = np.zeros(state_encoder.total_moves, dtype=np.float32)
+            # Append *one* terminal state plus a dummy policy to keep lengths aligned.
+            final_encoded_state = state_encoder.encode_state(state)
+            states.append(final_encoded_state)
+            # Use a zero vector of same shape as move_probs
+            dummy_policy = np.zeros_like(move_probs, dtype=np.float32)
             policies.append(dummy_policy)
             game_history.append({
                 'state': state.copy(),
@@ -744,21 +739,27 @@ def play_game_worker(
                 'value_pred': None
             })
 
-        logger.debug(f"Worker {game_id}: Final state - Phase: {state.phase}, "
-                     f"White score: {state.white_score}, Black score: {state.black_score}, "
-                     f"Terminal: {state.is_terminal()}")
-        logger.info(f"Worker {game_id} completed: {move_count} moves")
+        # Debug:
+        logger.debug(
+            f"Worker {game_id}: Final #states={len(states)}, #policies={len(policies)}"
+        )
+        logger.debug(
+            f"Worker {game_id}: Final state - Phase={state.phase}, "
+            f"Score: W={state.white_score}, B={state.black_score}, Terminal={state.is_terminal()}"
+        )
+
+        # Determine outcome
         winner = state.get_winner()
         if winner == Player.WHITE:
+            outcome = 1
             logger.info(f"Worker {game_id}: White wins")
         elif winner == Player.BLACK:
+            outcome = -1
             logger.info(f"Worker {game_id}: Black wins")
         else:
-            logger.warning(f"Worker {game_id}: Invalid game outcome")
-        outcome = 1 if winner == Player.WHITE else (-1 if winner == Player.BLACK else 0)
+            outcome = 0
+            logger.info(f"Worker {game_id}: Draw or no valid outcome")
 
-        logger.debug(
-            f"Worker {game_id}: Returning {len(states)} states and {len(game_history)} history entries. Also, policies length = {len(policies)}.")
         return states, policies, outcome, temp_data, game_history
 
     except Exception as e:

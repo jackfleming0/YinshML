@@ -14,7 +14,8 @@ class ValueHeadMetrics:
         self.phase_metrics = {
             'placement': defaultdict(list),
             'main_game': defaultdict(list),
-            'ring_removal': defaultdict(list)
+            'ring_removal': defaultdict(list),
+            'game_over': defaultdict(list)
         }
         self.position_cache = {}  # For tracking repeated positions and their value predictions
         self.move_values = []  # Track value predictions over the course of each game
@@ -29,7 +30,7 @@ class ValueHeadMetrics:
             return 'main_game'  # Assuming ROW_COMPLETION is similar to MAIN_GAME
         elif phase == GamePhase.RING_REMOVAL:
             return 'ring_removal'
-        elif phase == GamePhase.game_over:
+        elif phase == GamePhase.GAME_OVER:
             return 'game_over'
         else:
             return 'unknown'

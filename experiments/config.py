@@ -696,8 +696,12 @@ COMBINED_EXPERIMENTS = {
         # Training parameters
         num_iterations= 25, #dropped iterations
         games_per_iteration=150, #but bumped up games
+#        games_per_iteration=2, #but bumped up games
         epochs_per_iteration=4, #fewer epochs
-        batches_per_epoch=150,
+#        epochs_per_iteration=1,  # fewer epochs
+
+#        batches_per_epoch=150,
+#        batches_per_epoch=3,
 
         # Learning rates
         lr=0.0007,  # Base learning rate (for policy head)
@@ -709,6 +713,7 @@ COMBINED_EXPERIMENTS = {
 
         # MCTS parameters
         num_simulations=250,
+#        num_simulations=20,
         c_puct=2.0,
         dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
         value_weight=1.9,  # Increased value weight more
