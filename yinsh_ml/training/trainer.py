@@ -283,9 +283,20 @@ class YinshTrainer:
             ring_placement_weight=ring_placement_weight
         )
 
+        # Debug print every 20 iterations
+        if self.current_iteration % 20 == 0:
+            device_before = states.device
+            print(f"Training tensors device before transfer: {device_before}")
+
         states = states.to(self.device)
         target_probs = target_probs.to(self.device)
         target_values = target_values.to(self.device)
+
+        # Debug print every 20 iterations
+        if self.current_iteration % 20 == 0:
+            device_after = states.device
+            print(f"Training tensors device after transfer: {device_after}")
+            print(f"Network device: {next(self.network.network.parameters()).device}")
 
         # Forward pass
         pred_logits, pred_values = self.network.network(states)
