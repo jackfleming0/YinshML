@@ -265,6 +265,22 @@ class YinshTrainer:
 
         self.metrics_logger = metrics_logger
 
+    def _get_phase_weight(self, phase: str, iteration: int) -> float:
+        """Get sampling weight for specific game phase.
+
+        Args:
+            phase: Game phase name
+            iteration: Current training iteration
+
+        Returns:
+            Weight multiplier for this phase
+        """
+        if phase == "RING_REMOVAL":
+            return 2.0  # Double weight for struggling phase
+        elif phase == "RING_PLACEMENT":
+            return 1.0 + iteration * 0.0125  # Keep existing schedule
+        return 1.0  # Default weight for main game
+
     def _smooth_policy_targets(self, targets: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
         n_classes = targets.shape[1]
         uniform = torch.ones_like(targets) / n_classes

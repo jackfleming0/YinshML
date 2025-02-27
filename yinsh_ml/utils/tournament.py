@@ -19,7 +19,7 @@ class ModelTournament:
     def __init__(self,
                  training_dir: Path,
                  device: str = 'cpu',
-                 games_per_match: int = 10,
+                 games_per_match: int = 50,
                  temperature: float = 0.1):
         """
         Initialize tournament manager.
