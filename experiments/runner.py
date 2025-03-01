@@ -106,8 +106,8 @@ class ExperimentRunner:
         self.tournament_manager = ModelTournament(
             training_dir=self.checkpoint_dir / experiment_type / config_name,
             device=self.device,
-            games_per_match=10,
-            temperature=0.1
+            games_per_match=50,
+            temperature=0.2
         )
 
         # Create experiment-specific checkpoint directory
