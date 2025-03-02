@@ -41,7 +41,7 @@ class MatchResult:
 class EloTracker:
     """Manages ELO ratings for YINSH models."""
 
-    def __init__(self, save_dir: Path, k_factor: float = 32, initial_rating: float = 1500):
+    def __init__(self, save_dir: Path, k_factor: float = 20, initial_rating: float = 1500):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True, parents=True)
         self.k_factor = k_factor

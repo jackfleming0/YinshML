@@ -58,7 +58,6 @@ class GlobalTournamentManager:
         return []
 
     def scan_models(self, checkpoints_root: Path) -> List[ModelInfo]:
-        """Scan directories for model checkpoints."""
         models = []
         print(f"\nScanning for models in: {checkpoints_root}")
 
@@ -66,7 +65,7 @@ class GlobalTournamentManager:
             print(f"Error: Checkpoints directory not found!")
             return models
 
-        # First check for "combined" subdirectory
+        # Check if there's a 'combined' folder
         combined_dir = checkpoints_root / "combined"
         if combined_dir.exists():
             print(f"Found 'combined' directory, scanning configurations:")
@@ -74,22 +73,16 @@ class GlobalTournamentManager:
         else:
             root_to_scan = checkpoints_root
 
-        # List all configuration directories
+        # Look for configuration directories
         config_dirs = [d for d in root_to_scan.iterdir() if d.is_dir()]
-        print(f"Found {len(config_dirs)} configuration directories:")
-        for d in config_dirs:
-            print(f"  - {d.name}")
-
-        for config_dir in config_dirs:
-            print(f"\nScanning config: {config_dir.name}")
-            config_name = config_dir.name
-
-            # Look for checkpoint files
-            checkpoint_files = list(config_dir.glob("checkpoint_iteration_*.pt"))
-            if checkpoint_files:
-                print(f"  Found {len(checkpoint_files)} checkpoint files:")
+        if config_dirs:
+            print(f"Found {len(config_dirs)} configuration directories:")
+            for d in config_dirs:
+                print(f"  - {d.name}")
+            for config_dir in config_dirs:
+                config_name = config_dir.name
+                checkpoint_files = list(config_dir.glob("checkpoint_iteration_*.pt"))
                 for cf in sorted(checkpoint_files):
-                    print(f"    - {cf.name}")
                     try:
                         iteration = int(cf.stem.split('_')[-1])
                         tournament_id = f"{config_name}_iter_{iteration}"
@@ -100,18 +93,33 @@ class GlobalTournamentManager:
                             tournament_id=tournament_id
                         ))
                     except ValueError as e:
-                        print(f"      Error parsing iteration: {e}")
-            else:
-                print("  No checkpoint files found directly in directory")
+                        print(f"Error parsing iteration from {cf.name}: {e}")
+        else:
+            # No configuration directories found: scan for .pt files directly
+            print("No configuration directories found. Scanning for checkpoint files directly...")
+            checkpoint_files = list(root_to_scan.glob("checkpoint_iteration_*.pt"))
+            print(f"Found {len(checkpoint_files)} checkpoint files.")
+            for cf in sorted(checkpoint_files):
+                try:
+                    iteration = int(cf.stem.split('_')[-1])
+                    tournament_id = f"feb26_testing_iter_{iteration}"
+                    models.append(ModelInfo(
+                        config_name="feb26_testing",
+                        iteration=iteration,
+                        file_path=cf,
+                        tournament_id=tournament_id
+                    ))
+                except ValueError as e:
+                    print(f"Error parsing iteration from {cf.name}: {e}")
 
         print(f"\nTotal models found: {len(models)}")
         if models:
+            configs = sorted({m.config_name for m in models})
             print("\nConfigurations found:")
-            for config in sorted({m.config_name for m in models}):
+            for config in configs:
                 config_models = [m for m in models if m.config_name == config]
-                print(f"  {config}: {len(config_models)} models")
-                print(f"    Iterations: {', '.join(str(m.iteration) for m in sorted(config_models, key=lambda x: x.iteration))}")
-
+                iterations = ', '.join(str(m.iteration) for m in sorted(config_models, key=lambda m: m.iteration))
+                print(f"  {config}: {len(config_models)} models (iterations: {iterations})")
         return sorted(models, key=lambda m: (m.config_name, m.iteration))
 
     def reset_ratings(self):
@@ -542,12 +550,11 @@ class GlobalTournamentManager:
         return sorted(sampled, key=lambda m: (m.config_name, m.iteration))
 
     def generate_pairings(self, models: List[ModelInfo]) -> List[Tuple[ModelInfo, ModelInfo]]:
-        """Generate tournament pairings between different configurations."""
+        """Generate tournament pairings among all models."""
         pairings = []
         for i, model1 in enumerate(models):
-            for model2 in models[i+1:]:
-                if model1.config_name != model2.config_name:
-                    pairings.append((model1, model2))
+            for model2 in models[i + 1:]:
+                pairings.append((model1, model2))
         return pairings
 
 
@@ -561,6 +568,8 @@ def main():
                         help='Target games per configuration')
     parser.add_argument('--dry-run', action='store_true',
                         help='Only show what would be done, without playing matches')
+    parser.add_argument('--checkpoint-folder', type=str, default="combined/feb26_testing",
+                        help="Relative path under 'checkpoints' to use for the tournament")
     args = parser.parse_args()
 
     # Get project root (parent of analysis directory)
@@ -568,7 +577,7 @@ def main():
 
     # Set up paths relative to project root
     tournament_dir = project_root / "tournaments" / "global"
-    checkpoints_root = project_root / "checkpoints"
+    checkpoints_root = project_root / "checkpoints" / args.checkpoint_folder
 
     print(f"Project root: {project_root}")
     print(f"Looking for checkpoints in: {checkpoints_root}")
