@@ -55,15 +55,19 @@ class GameExperience:
 
         # Helper to decode phases from channel 5, if needed
         def decode_phase(state: np.ndarray) -> str:
-            # If your channel-5 logic is different, adjust accordingly
             phase_channel = state[5]  # 5th channel for 'GAME_PHASE'
-            avg = np.mean(phase_channel)
-            if avg < 0.33:
-                return "RING_PLACEMENT"
-            elif avg < 0.66:
-                return "MAIN_GAME"
+            # Use absolute value to ignore current player sign.
+            avg = np.mean(np.abs(phase_channel))
+            # Adjust thresholds to match your observed distribution.
+            if avg < 0.2:
+                phase = "RING_PLACEMENT"
+            elif avg < 0.6:
+                phase = "MAIN_GAME"
             else:
-                return "RING_REMOVAL"
+                phase = "RING_REMOVAL"
+            print(f"[DEBUG] decode_phase: avg={avg:.3f}")
+            print(f"[DEBUG] Classified phase: {phase}")
+            return phase
 
         # Compute the normalized margin in [-1, +1]
         score_diff = final_white_score - final_black_score  # e.g. +2 if 3–1
@@ -123,15 +127,19 @@ class GameExperience:
         """Return the current size of the replay buffer."""
         return len(self.states)
 
-    def sample_batch(self, batch_size: int, ring_placement_weight: float = 0.25) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample_batch(
+            self,
+            batch_size: int,
+            phase_weights: Optional[Dict[str, float]] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Sample a random batch of experiences, weighting ring-placement states extra if desired.
+        Sample a random batch of experiences, weighting certain phases more/less.
 
         Args:
             batch_size: Number of samples to draw.
-            ring_placement_weight: Extra weight for ring-placement states (e.g. 2.0).
-                                   Default is 1.0 (no extra weighting).
-
+            phase_weights: Dictionary of phase -> weight multipliers.
+                           Example: {"RING_PLACEMENT": 0.5, "MAIN_GAME": 2.0, "RING_REMOVAL": 0.5}
+                           If None, defaults to 1.0 for everything.
         Returns:
             (states, move_probs, values) as tensors.
         """
@@ -139,30 +147,36 @@ class GameExperience:
         if n == 0:
             raise ValueError("Replay buffer is empty!")
 
-        # Initialize equal probabilities
+        # Default weights if none are provided
+        if phase_weights is None:
+            phase_weights = {
+                "RING_PLACEMENT": 1.0,
+                "MAIN_GAME": 1.0,
+                "RING_REMOVAL": 1.0
+            }
+
+        # Initialize equal probabilities for each sample
         p = np.ones(n, dtype=np.float64)
 
-        # Apply ring-placement weighting
-        if ring_placement_weight > 1.0:
-            for i, phase in enumerate(self.phases):
-                if phase == "RING_PLACEMENT":
-                    p[i] *= ring_placement_weight
+        # Apply phase-based weighting
+        for i, phase in enumerate(self.phases):
+            p[i] *= phase_weights.get(phase, 1.0)
 
-        # Normalize the probability array
+        # Normalize to make a proper probability distribution
         p = p / p.sum()
 
         # Sample without replacement
         indices = np.random.choice(n, batch_size, replace=False, p=p)
 
-        # Build return tensors
         states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])
         probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])
         values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
 
-        # Log how many ring-placement states ended up in this batch
-        ring_placement_count = sum(1 for i in indices if self.phases[i] == "RING_PLACEMENT")
-        print(f"[DEBUG] Sampled Batch: {ring_placement_count} ring-placement states "
-              f"out of {batch_size}. (Weight={ring_placement_weight})")
+        # Optional debug: Log how many states of each phase are in this batch
+        phase_counts = {"RING_PLACEMENT": 0, "MAIN_GAME": 0, "RING_REMOVAL": 0}
+        for idx in indices:
+            phase_counts[self.phases[idx]] += 1
+        print(f"[DEBUG] Sampled Batch Phase Counts: {phase_counts}")
 
         return states, probs, values.unsqueeze(1)
 
@@ -286,7 +300,9 @@ class YinshTrainer:
         uniform = torch.ones_like(targets) / n_classes
         return (1 - epsilon) * targets + epsilon * uniform
 
-    def train_step(self, batch_size: int, ring_placement_weight: float = 1.0) -> Tuple[float, float, float, Dict]:
+    def train_step(self,
+                   batch_size: int,
+                   phase_weights: Optional[Dict[str, float]] = None) -> Tuple[float, float, float, Dict]:
         """Training step with separate policy and value optimization."""
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0, 0.0, {'top_1_accuracy': 0.0, 'top_3_accuracy': 0.0, 'top_5_accuracy': 0.0}
@@ -296,7 +312,7 @@ class YinshTrainer:
         # Pull a batch from replay
         states, target_probs, target_values = self.experience.sample_batch(
             batch_size,
-            ring_placement_weight=ring_placement_weight
+            phase_weights=phase_weights  # <--- pass in your dictionary
         )
 
         # Debug print every 20 iterations
@@ -534,9 +550,14 @@ class YinshTrainer:
         }
 
         for batch in range(batches_per_epoch):
+            phase_weights = {
+                "RING_PLACEMENT": 0.5,  # half emphasis
+                "MAIN_GAME": 2.0,  # double emphasis
+                "RING_REMOVAL": 0.5  # half emphasis
+            }
             p_loss, v_loss, v_acc, move_accs = self.train_step(
                 batch_size,
-                ring_placement_weight=ring_placement_weight
+                phase_weights=phase_weights
             )
 
             self.logger.debug(f"Batch {batch} losses - Policy: {p_loss:.4f}, Value: {v_loss:.4f}")
