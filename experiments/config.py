@@ -801,7 +801,7 @@ COMBINED_EXPERIMENTS = {
         temp_start_decay_at=0.25
     ),
 
-    "mar7_testing": CombinedConfig(
+    "mar7_test": CombinedConfig(
         # phase weights are now defined in trainer.py via phase_weight dict
         # Training parameters
         num_iterations= 25, #dropped iterations
@@ -818,11 +818,11 @@ COMBINED_EXPERIMENTS = {
         value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
         weight_decay=1e-4,
         batch_size=384,
-        lr_schedule="cosine",
+        lr_schedule="cyclical",
         warmup_steps=2500, #maybe in the middle?
 
         # MCTS parameters
-        num_simulations=200,
+        num_simulations=50,
 #        num_simulations=20,
         c_puct=2.0,
         dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
