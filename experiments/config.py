@@ -805,7 +805,7 @@ COMBINED_EXPERIMENTS = {
         # phase weights are now defined in trainer.py via phase_weight dict
         # Training parameters
         num_iterations= 40, #dropped iterations
-        games_per_iteration=200, #but bumped up games
+        games_per_iteration=205, #but bumped up games
 #        games_per_iteration=2, #but bumped up games
         epochs_per_iteration=8, #fewer epochs
 #        epochs_per_iteration=1,  # fewer epochs
