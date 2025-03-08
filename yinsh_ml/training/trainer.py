@@ -249,11 +249,21 @@ class YinshTrainer:
                 print(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
 
         # Schedulers
-        self.policy_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        # self.policy_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        #     self.policy_optimizer,
+        #     T_max=1000,
+        #     eta_min=1e-5
+        # )
+
+        self.policy_scheduler = torch.optim.lr_scheduler.CyclicLR(
             self.policy_optimizer,
-            T_max=1000,
-            eta_min=1e-5
+            base_lr=1e-5,
+            max_lr=1e-4,
+            step_size_up=500,
+            mode='triangular2',
+            cycle_momentum=False  # if using Adam, usually no momentum cycling is needed
         )
+
         self.value_scheduler = optim.lr_scheduler.CyclicLR(
             self.value_optimizer,
             base_lr=1e-5,
