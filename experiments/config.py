@@ -801,6 +801,41 @@ COMBINED_EXPERIMENTS = {
         temp_start_decay_at=0.25
     ),
 
+    "mar7_testing": CombinedConfig(
+        # phase weights are now defined in trainer.py via phase_weight dict
+        # Training parameters
+        num_iterations= 25, #dropped iterations
+        games_per_iteration=200, #but bumped up games
+#        games_per_iteration=2, #but bumped up games
+        epochs_per_iteration=8, #fewer epochs
+#        epochs_per_iteration=1,  # fewer epochs
+
+#        batches_per_epoch=150,
+#        batches_per_epoch=3,
+
+        # Learning rates
+        lr=0.0007,  # Base learning rate (for policy head)
+        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        batch_size=384,
+        lr_schedule="cosine",
+        warmup_steps=2500, #maybe in the middle?
+
+        # MCTS parameters
+        num_simulations=200,
+#        num_simulations=20,
+        c_puct=2.0,
+        dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
+        value_weight=1.9,  # Increased value weight more
+        value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
+
+        # Temperature parameters
+        initial_temp=1.5,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
 
 "separate_value_head_2": CombinedConfig(
         # Training parameters (no changes)
