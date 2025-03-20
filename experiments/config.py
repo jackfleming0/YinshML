@@ -806,12 +806,9 @@ COMBINED_EXPERIMENTS = {
         # Training parameters
         num_iterations= 40, #dropped iterations
         games_per_iteration=205, #but bumped up games
-#        games_per_iteration=2, #but bumped up games
         epochs_per_iteration=8, #fewer epochs
-#        epochs_per_iteration=1,  # fewer epochs
 
-#        batches_per_epoch=150,
-#        batches_per_epoch=3,
+        batches_per_epoch=50,
 
         # Learning rates
         lr=0.0007,  # Base learning rate (for policy head)
@@ -823,9 +820,41 @@ COMBINED_EXPERIMENTS = {
 
         # MCTS parameters
         num_simulations=50,
-#        num_simulations=20,
         c_puct=2.0,
         dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
+        value_weight=1.9,  # Increased value weight more
+        value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
+
+        # Temperature parameters
+        initial_temp=1.5,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
+    "mar_19_test": CombinedConfig(
+        #I know it's basically the same as march 7 but I changed the model configuration
+        # phase weights are now defined in trainer.py via phase_weight dict
+        # Training parameters
+        num_iterations=20,  # dropped iterations further to get this tested fast
+        games_per_iteration=205,  # but bumped up games
+        epochs_per_iteration=8,  # fewer epochs
+
+        batches_per_epoch=50,
+
+        # Learning rates
+        lr=0.0007,  # Base learning rate (for policy head)
+        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        batch_size=384,
+        lr_schedule="cyclical",
+        warmup_steps=2500,  # maybe in the middle?
+
+        # MCTS parameters
+        num_simulations=50,
+        c_puct=2.0,
+        dirichlet_alpha=0.17,  # slight bump to flatten move distribution, hopefully
         value_weight=1.9,  # Increased value weight more
         value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
 
@@ -883,7 +912,7 @@ COMBINED_EXPERIMENTS = {
         warmup_steps=4000,
 
         # MCTS parameters
-        num_simulations=15,
+        num_simulations=2,
         c_puct=4.0,
         dirichlet_alpha=0.3,
         value_weight=1.5,  # Increased value weight

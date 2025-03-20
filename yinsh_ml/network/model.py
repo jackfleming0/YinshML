@@ -79,7 +79,7 @@ class YinshNetwork(nn.Module):
     - Value head (position evaluation)
     """
 
-    def __init__(self, num_channels: int = 128, num_blocks: int = 8):  # Reduced blocks for attention
+    def __init__(self, num_channels: int = 256, num_blocks: int = 12):  # mar_19 raised from 128/8
         super().__init__()
 
         # Fixed output size
@@ -102,14 +102,14 @@ class YinshNetwork(nn.Module):
 
         # Policy head (outputs move probabilities)
         self.policy_head = nn.Sequential(
-            nn.Conv2d(num_channels, 32, 1),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(num_channels, 64, 1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(32 * 11 * 11, 512),
+            nn.Linear(64 * 11 * 11, 1024),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, self.total_moves)
+            nn.Linear(1024, self.total_moves)
             # No activation here - we want raw logits
         )
 
@@ -119,9 +119,9 @@ class YinshNetwork(nn.Module):
         # Flatten the shared trunk features, then Linear(num_channels*11*11, 128) -> ReLU -> Linear(128, 1) -> Tanh
         self.value_head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(num_channels * 11 * 11, 128),
+            nn.Linear(num_channels * 11 * 11, 256),
             nn.ReLU(),
-            nn.Linear(128, 1),
+            nn.Linear(256, 1),
             nn.Tanh()
         )
 
