@@ -37,7 +37,7 @@ class NetworkWrapper:
                     "mps" if torch.backends.mps.is_available() else "cpu"
                 )
             )
-        self.network = YinshNetwork().to(self.device)
+        self.network = YinshNetwork(num_channels=256, num_blocks=12).to(self.device)
 
         # Setup logging
         self.logger = logging.getLogger("NetworkWrapper")

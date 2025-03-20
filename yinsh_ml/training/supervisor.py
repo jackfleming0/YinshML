@@ -176,7 +176,7 @@ class TrainingSupervisor:
 
         # 2. Tournament evaluation against previous iterations
         self.logger.info(f"\nRunning tournament evaluation...")
-        self.tournament_manager.run_tournament(current_iteration)
+        self.tournament_manager.run_full_round_robin_tournament(current_iteration)
         tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{current_iteration}")
 
         self.logger.info(f"Tournament Results:")
@@ -362,7 +362,7 @@ class TrainingSupervisor:
             )
 
         # Run tournament against previous iterations
-        self.tournament_manager.run_tournament(iteration)
+        self.tournament_manager.run_full_round_robin_tournament(iteration)
 
         # Get tournament results
         tournament_summary = self.tournament_manager.get_latest_tournament_summary()

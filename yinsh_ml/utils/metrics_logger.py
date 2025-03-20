@@ -272,14 +272,29 @@ class MetricsLogger:
         # Training curves
         if self.training_curves['policy_loss']:
             epochs = range(len(self.training_curves['policy_loss']))
-            axes[1, 0].plot(epochs, self.training_curves['policy_loss'], label='Policy Loss')
-            axes[1, 0].plot(epochs, self.training_curves['value_loss'], label='Value Loss')
-            axes[1, 0].set_title('Training Losses')
-            axes[1, 0].set_xlabel('Epoch')
-            axes[1, 0].set_ylabel('Loss')
-            axes[1, 0].legend()
+
+            # Primary axis for Policy Loss
+            ax1 = axes[1, 0]
+            ax1.set_title('Training Losses')
+            ax1.set_xlabel('Epoch')
+            ax1.set_ylabel('Policy Loss', color='blue')
+            p1 = ax1.plot(epochs, self.training_curves['policy_loss'], label='Policy Loss', color='blue')
+
+            # Create twin axis for Value Loss
+            ax2 = ax1.twinx()
+            ax2.set_ylabel('Value Loss', color='orange')
+            p2 = ax2.plot(epochs, self.training_curves['value_loss'], label='Value Loss', color='orange')
+
+            # Combine legends
+            lines = p1 + p2
+            labels = [l.get_label() for l in lines]
+            ax1.legend(lines, labels, loc=0)
         else:
-            axes[1, 0].text(0.5, 0.5, 'No Data', horizontalalignment='center', verticalalignment='center')
+            axes[1, 0].text(
+                0.5, 0.5, 'No Data',
+                horizontalalignment='center',
+                verticalalignment='center'
+            )
 
         # Gradient norms
         if self.training_curves['gradient_norm']:

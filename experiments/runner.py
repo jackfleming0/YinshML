@@ -106,7 +106,7 @@ class ExperimentRunner:
         self.tournament_manager = ModelTournament(
             training_dir=self.checkpoint_dir / experiment_type / config_name,
             device=self.device,
-            games_per_match=50,
+            games_per_match=15,
             temperature=0.2
         )
 
@@ -255,7 +255,7 @@ class ExperimentRunner:
             tournament_elo = 0.0  # Default if no tournament run
             if iteration > 0:
                 print("Running tournament evaluation...")
-                self.tournament_manager.run_tournament(
+                self.tournament_manager.run_full_round_robin_tournament(
                     experiment_type="learning_rate",
                     config_name=config_name,
                     current_iteration=iteration
@@ -359,7 +359,7 @@ class ExperimentRunner:
             tournament_elo = 0.0  # Default if no tournament run
             if iteration > 0:
                 print("Running tournament evaluation...")
-                self.tournament_manager.run_tournament(
+                self.tournament_manager.run_full_round_robin_tournament(
                     experiment_type="mcts",
                     config_name=config_name,
                     current_iteration=iteration
@@ -458,7 +458,7 @@ class ExperimentRunner:
             tournament_elo = 0.0  # Default if no tournament run
             if iteration > 0:
                 print("Running tournament evaluation...")
-                self.tournament_manager.run_tournament(
+                self.tournament_manager.run_full_round_robin_tournament(
                     experiment_type="temperature",
                     config_name=config_name,
                     current_iteration=iteration
@@ -614,7 +614,7 @@ class ExperimentRunner:
             print(f"Training for {config.epochs_per_iteration} epochs...")
             train_start_time = time.time()
             for _ in range(config.epochs_per_iteration):
-                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+                actual_batches = config.batches_per_epoch
                 ring_weight = 1.0 + iteration * 0.0125  # Schedule: ring placement weight increases as iterations progress.
                 epoch_stats = trainer.train_epoch(
                     batch_size=config.batch_size,
@@ -643,7 +643,7 @@ class ExperimentRunner:
             tournament_elo = 0.0  # Default if no tournament run
             if iteration > 0:
                 print("Running tournament evaluation...")
-                self.tournament_manager.run_tournament(current_iteration=iteration)
+                self.tournament_manager.run_full_round_robin_tournament(current_iteration=iteration)
                 tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
                 tournament_elo = tournament_stats['current_rating']
                 print(f"Tournament ELO: {tournament_elo:+.1f}")
