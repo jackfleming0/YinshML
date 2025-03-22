@@ -835,6 +835,7 @@ COMBINED_EXPERIMENTS = {
 
     "mar_19_test": CombinedConfig(
         #I know it's basically the same as march 7 but I changed the model configuration
+        #result: basically the same as the 7th.
         # phase weights are now defined in trainer.py via phase_weight dict
         # Training parameters
         num_iterations=20,  # dropped iterations further to get this tested fast
@@ -853,6 +854,39 @@ COMBINED_EXPERIMENTS = {
 
         # MCTS parameters
         num_simulations=50,
+        c_puct=2.0,
+        dirichlet_alpha=0.17,  # slight bump to flatten move distribution, hopefully
+        value_weight=1.9,  # Increased value weight more
+        value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
+
+        # Temperature parameters
+        initial_temp=1.5,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
+    "mar_22_test": CombinedConfig(
+        # hypothesis: take the 19th config and bump up simulations.
+        # phase weights are now defined in trainer.py via phase_weight dict
+        # Training parameters
+        num_iterations=20,  # dropped iterations further to get this tested fast
+        games_per_iteration=205,  # but bumped up games
+        epochs_per_iteration=8,  # fewer epochs
+
+        batches_per_epoch=50,
+
+        # Learning rates
+        lr=0.0007,  # Base learning rate (for policy head)
+        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        batch_size=384,
+        lr_schedule="cyclical",
+        warmup_steps=2500,  # maybe in the middle?
+
+        # MCTS parameters
+        num_simulations=200,
         c_puct=2.0,
         dirichlet_alpha=0.17,  # slight bump to flatten move distribution, hopefully
         value_weight=1.9,  # Increased value weight more
