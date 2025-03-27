@@ -754,15 +754,25 @@ def play_game_worker(
             f"Score: W={state.white_score}, B={state.black_score}, Terminal={state.is_terminal()}"
         )
 
-        # Determine outcome
+
+        # Determine outcome with more nuanced scoring based on score difference
         winner = state.get_winner()
         if winner == Player.WHITE:
-            outcome = 1
-            logger.info(f"Worker {game_id}: White wins")
+            # Get score difference as a normalized value between 0 and 1
+            score_diff = min(3, state.white_score - state.black_score) / 3.0  # Max score diff of 3
+            # Map to [0.5, 1.0] range for white wins, stronger win = higher value
+            outcome = 0.5 + 0.5 * score_diff
+            logger.info(
+                f"Worker {game_id}: White wins with score W:{state.white_score}-B:{state.black_score}, outcome={outcome:.3f}")
         elif winner == Player.BLACK:
-            outcome = -1
-            logger.info(f"Worker {game_id}: Black wins")
+            # Get score difference as a normalized value between 0 and 1
+            score_diff = min(3, state.black_score - state.white_score) / 3.0
+            # Map to [0.0, 0.5] range for black wins, stronger win = lower value
+            outcome = 0.5 - 0.5 * score_diff
+            logger.info(
+                f"Worker {game_id}: Black wins with score W:{state.white_score}-B:{state.black_score}, outcome={outcome:.3f}")
         else:
+            # This shouldn't happen in YINSH, but handle it just in case
             outcome = 0
             logger.info(f"Worker {game_id}: Draw or no valid outcome")
 

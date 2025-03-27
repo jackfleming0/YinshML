@@ -113,17 +113,46 @@ class YinshNetwork(nn.Module):
             # No activation here - we want raw logits
         )
 
-        self.value_head_activations = {}
+        # Replace the current value_head definition with this enhanced version
+        self.value_head_activations = {}  # Keep this line
 
-        # Simplified Value head without spatial attention:
-        # Flatten the shared trunk features, then Linear(num_channels*11*11, 128) -> ReLU -> Linear(128, 1) -> Tanh
+        # Enhanced value head architecture with more capacity and regularization
         self.value_head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(num_channels * 11 * 11, 256),
+            nn.Conv2d(num_channels, 64, 3, padding=1),  # Spatial features
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Linear(256, 1),
+            nn.Conv2d(64, 64, 3, padding=1),  # Additional conv layer
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 11 * 11, 512),  # Significantly larger linear layer
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.4),  # Strong dropout
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),  # Layer norm for stability
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
             nn.Tanh()
         )
+
+        # Add this right after defining the value_head
+        # Initialize the value head with better weights
+        for m in self.value_head.modules():
+            if isinstance(m, nn.Linear):
+                if m.out_features == 1:  # Final layer
+                    nn.init.uniform_(m.weight, -0.03, 0.03)
+                    nn.init.constant_(m.bias, 0)
+                else:  # Hidden layers
+                    nn.init.orthogonal_(m.weight, gain=1.0)
+                    nn.init.constant_(m.bias, 0.01)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
         # Register hooks for activation tracking
         for name, module in self.value_head.named_modules():
@@ -134,16 +163,23 @@ class YinshNetwork(nn.Module):
         self._initialize_weights()
         self._initialize_value_head()
 
+    # Add this to model.py just after the value_head definition
+
     def _initialize_value_head(self):
-        """Careful initialization of value head weights."""
+        """Improved initialization for value head."""
         for m in self.value_head.modules():
             if isinstance(m, nn.Linear):
-                # Smaller initialization scale for final layer
+                # Smaller initialization for final layer
                 if m.out_features == 1:
-                    nn.init.uniform_(m.weight, -0.01, 0.01)
+                    nn.init.uniform_(m.weight, -0.03, 0.03)
                     nn.init.constant_(m.bias, 0)
                 else:
-                    nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                    gain = nn.init.calculate_gain('relu')
+                    nn.init.orthogonal_(m.weight, gain)
+                    nn.init.constant_(m.bias, 0.01)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
                 nn.init.constant_(m.weight, 1)
