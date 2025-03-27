@@ -900,7 +900,35 @@ COMBINED_EXPERIMENTS = {
         temp_start_decay_at=0.25
     ),
 
-"separate_value_head_2": CombinedConfig(
+    "improved_value_head_mar26": CombinedConfig(
+        # Training parameters
+        num_iterations=20,
+        games_per_iteration=300,  # Increase games per iteration
+        epochs_per_iteration=5,
+        batches_per_epoch=50,
+
+        # Learning rates
+        lr=0.0005,
+        value_head_lr_factor=8.0,  # Significantly increase value head learning rate
+        weight_decay=5e-4,  # Increase weight decay for better regularization
+        batch_size=384,
+        lr_schedule="cosine",
+        warmup_steps=1500,
+
+        # MCTS parameters
+        num_simulations=150,
+        c_puct=3.0,  # Increase exploration
+        dirichlet_alpha=0.2,  # Slightly increase noise
+        value_weight=0.8,  # Reduce value influence until it's better trained
+        value_loss_weights=(0.7, 0.3),  # More emphasis on MSE
+
+        # Temperature parameters
+        initial_temp=1.8,
+        final_temp=0.1,
+        temp_schedule="cosine"
+    ),
+
+    "separate_value_head_2": CombinedConfig(
         # Training parameters (no changes)
         num_iterations=50,
         games_per_iteration=500,

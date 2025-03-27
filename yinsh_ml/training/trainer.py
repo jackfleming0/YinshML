@@ -559,6 +559,15 @@ class YinshTrainer:
             'value': current_value_lr
         }
 
+        # Track best value accuracy for early stopping
+        self.best_value_accuracy = getattr(self, 'best_value_accuracy', 0.0)
+        self.value_accuracy_patience = getattr(self, 'value_accuracy_patience', 0)
+        self.current_iteration = getattr(self, 'current_iteration', 0) + 1
+
+        # Keep track of value head metrics for this epoch
+        value_confidences = []
+        value_sign_matches = []
+
         for batch in range(batches_per_epoch):
             phase_weights = {
                 "RING_PLACEMENT": 0.5,  # half emphasis
@@ -569,6 +578,10 @@ class YinshTrainer:
                 batch_size,
                 phase_weights=phase_weights
             )
+
+            # Track value head metrics
+            value_confidences.append(self._get_current_value_confidence())
+            value_sign_matches.append(v_acc)
 
             self.logger.debug(f"Batch {batch} losses - Policy: {p_loss:.4f}, Value: {v_loss:.4f}")
 
@@ -596,6 +609,27 @@ class YinshTrainer:
         for k in stats_accum['move_accuracies']:
             stats_accum['move_accuracies'][k] /= batches_per_epoch
 
+        # Add average value confidence
+        stats_accum['value_confidence'] = np.mean(value_confidences) if value_confidences else 0.0
+
+        # Track value head improvement
+        current_value_accuracy = stats_accum['value_accuracy']
+        if current_value_accuracy > self.best_value_accuracy:
+            self.best_value_accuracy = current_value_accuracy
+            self.value_accuracy_patience = 0
+            self.logger.info(f"New best value accuracy: {current_value_accuracy:.2%}")
+        else:
+            self.value_accuracy_patience += 1
+            # If accuracy hasn't improved for several epochs, adjust learning rate
+            if self.value_accuracy_patience >= 3:
+                new_lr = self.value_optimizer.param_groups[0]['lr'] * 0.7
+                self.logger.warning(f"Value accuracy not improving for {self.value_accuracy_patience} epochs. "
+                                    f"Reducing value LR: {current_value_lr:.2e} -> {new_lr:.2e}")
+                for param_group in self.value_optimizer.param_groups:
+                    param_group['lr'] = new_lr
+                # Reset patience
+                self.value_accuracy_patience = 0
+
         current_total_loss = stats_accum['policy_loss'] + stats_accum['value_loss']
         if prev_total_loss != float('inf') and prev_total_loss != 0:
             stats_accum['loss_improvement'] = (prev_total_loss - current_total_loss) / (prev_total_loss + 1e-8)
@@ -622,6 +656,7 @@ class YinshTrainer:
             f"\n{'=' * 20} Epoch Summary {'=' * 20}\n"
             f"Policy: loss={metrics.policy_loss:.4f}, lr={metrics.learning_rates['policy']:.2e}\n"
             f"Value:  loss={metrics.value_loss:.4f}, acc={metrics.value_accuracy:.2%}, "
+            f"conf={stats_accum['value_confidence']:.3f}, "  # Added confidence reporting
             f"lr={metrics.learning_rates['value']:.2e}\n"
             f"Moves:  acc={metrics.move_accuracies['top_1_accuracy']:.2%}, "
             f"top3={metrics.move_accuracies['top_3_accuracy']:.2%}\n"
@@ -630,6 +665,16 @@ class YinshTrainer:
         )
 
         return vars(metrics)
+
+    # Add this helper method to the YinshTrainer class
+    def _get_current_value_confidence(self) -> float:
+        """Helper method to get the current average value head confidence."""
+        if not hasattr(self, 'value_head_activations') or not self.value_head_activations:
+            return 0.0
+
+        # Get the absolute value of predictions (confidence)
+        pred_values = self.value_head_activations.get('predictions', {}).get('mean_confidence', 0.0)
+        return float(pred_values)
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save a training checkpoint."""
