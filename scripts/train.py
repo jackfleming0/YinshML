@@ -19,7 +19,7 @@ from yinsh_ml.training.trainer import YinshTrainer
 from yinsh_ml.training.supervisor import TrainingSupervisor
 from yinsh_ml.utils.visualization import TrainingVisualizer
 
-logging.getLogger('coremltools').setLevel(logging.DEBUG)
+logging.getLogger('coremltools').setLevel(logging.INFO)
 
 
 def setup_logging(log_dir: str, mode: str, debug: bool = False):
@@ -32,7 +32,7 @@ def setup_logging(log_dir: str, mode: str, debug: bool = False):
     log_file = log_dir / f'training_{mode}_{timestamp}.log'
 
     logging.basicConfig(
-        level=logging.DEBUG if debug else logging.DEBUG,
+        level=logging.DEBUG if debug else logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(log_file),
