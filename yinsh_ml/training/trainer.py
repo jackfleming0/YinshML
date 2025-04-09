@@ -275,7 +275,7 @@ class YinshTrainer:
 
         self.l2_reg = l2_reg
         self.logger = logging.getLogger("YinshTrainer")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.INFO)
 
         self.current_iteration = 0
         self.policy_losses = []

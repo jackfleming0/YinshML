@@ -928,6 +928,64 @@ COMBINED_EXPERIMENTS = {
         temp_schedule="cosine"
     ),
 
+    "improved_value_head_apr1": CombinedConfig(
+        # Training parameters
+        num_iterations=20,
+        games_per_iteration=300,  # Increase games per iteration
+        epochs_per_iteration=5,
+        batches_per_epoch=50,
+
+        # Learning rates
+        lr=0.0005,
+        value_head_lr_factor=18.0,  # mega Significantly increase value head learning rate
+        weight_decay=5e-4,  # Increase weight decay for better regularization
+        batch_size=384,
+        lr_schedule="cosine",
+        warmup_steps=1500,
+
+        # MCTS parameters
+        num_simulations=150,
+        c_puct=3.0,  # Increase exploration
+        dirichlet_alpha=0.2,  # Slightly increase noise
+        value_weight=0.8,  # Reduce value influence until it's better trained
+        value_loss_weights=(0.7, 0.3),  # More emphasis on MSE
+
+        # Temperature parameters
+        initial_temp=1.8,
+        final_temp=0.1,
+        temp_schedule="cosine"
+    ),
+
+    "more_games_apr7": CombinedConfig(
+        #so far approx 21 hrs per iteration
+        #compare with apr1
+        # Training parameters
+        num_iterations=10,
+        games_per_iteration=1500,  # Massively increase games per iteration
+        epochs_per_iteration=5,
+        batches_per_epoch=50,
+
+        # Learning rates
+        lr=0.0005,
+        value_head_lr_factor=18.0,  # mega Significantly increase value head learning rate
+        weight_decay=5e-4,  # Increase weight decay for better regularization
+        batch_size=384,
+        lr_schedule="cosine",
+        warmup_steps=1500,
+
+        # MCTS parameters
+        num_simulations=50, #drop simulations significantly (5 rings, 10 moves per)
+        c_puct=3.0,  # Increase exploration
+        dirichlet_alpha=0.2,  # Slightly increase noise
+        value_weight=0.8,  # Reduce value influence until it's better trained
+        value_loss_weights=(0.7, 0.3),  # More emphasis on MSE
+
+        # Temperature parameters
+        initial_temp=1.8,
+        final_temp=0.1,
+        temp_schedule="cosine"
+    ),
+
     "separate_value_head_2": CombinedConfig(
         # Training parameters (no changes)
         num_iterations=50,

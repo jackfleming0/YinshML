@@ -55,7 +55,7 @@ class ExperimentRunner:
             logging.getLogger("ModelTournament")
         ]
 
-        level = logging.DEBUG if debug else logging.DEBUG
+        level = logging.DEBUG if debug else logging.INFO
         for logger in loggers:
             logger.setLevel(level)
 
