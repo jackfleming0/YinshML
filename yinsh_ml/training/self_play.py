@@ -74,9 +74,11 @@ class Node:
         return q_value + u_value
 
 class MCTS:
-    """Monte Carlo Tree Search implementation."""
+    """Monte‑Carlo Tree‑Search with temperature annealing and ply‑adaptive rollouts."""
 
-    def __init__(self, network: NetworkWrapper,
+    def __init__(self,
+                 network: NetworkWrapper,
+                 # ── existing args ────────────────────────────────────────────────
                  num_simulations: int = 100,
                  initial_temp: float = 1.0,
                  final_temp: float = 0.2,
@@ -85,53 +87,87 @@ class MCTS:
                  dirichlet_alpha: float = 0.3,
                  initial_value_weight: float = 0.5,
                  max_depth: int = 20,
-                 mcts_metrics: Optional[MCTSMetrics] = None
-                 ):
-        self.network = network
-        self.num_simulations = num_simulations
-        self.max_depth = max_depth
-        self.state_encoder = StateEncoder()
-        self.logger = logging.getLogger("MCTS")
+                 mcts_metrics: Optional[MCTSMetrics] = None,
+                 # ── new args (all optional) ──────────────────────────────────────
+                 late_simulations: Optional[int] = None,
+                 simulation_switch_ply: int = 20,
+                 temp_clamp_fraction: float = 0.60):
+        """
+        Args
+        ----
+        late_simulations:
+            Rollout budget **after** `simulation_switch_ply`.
+            If None we fall back to `num_simulations`.
+        simulation_switch_ply:
+            Ply at which to start using `late_simulations`.
+        temp_clamp_fraction:
+            What fraction (0‒1) of `annealing_steps` should be used for
+            annealing. After that, temperature is clamped to `final_temp`.
+        """
+        # ── keep existing init exactly as before ───────────────────────────────
+        self.network           = network
+        self.num_simulations   = num_simulations
+        self.max_depth         = max_depth
+        self.state_encoder     = StateEncoder()
+        self.logger            = logging.getLogger("MCTS")
 
-        # Temperature annealing parameters
-        self.initial_temp = initial_temp
-        self.final_temp = final_temp
-        self.annealing_steps = annealing_steps
+        # temperature schedule
+        self.initial_temp      = initial_temp
+        self.final_temp        = final_temp
+        self.annealing_steps   = annealing_steps
+        self.temp_clamp_frac   = temp_clamp_fraction    # ← NEW
 
-        # Use the passed MCTSMetrics object or create a new one
-        self.metrics = mcts_metrics if mcts_metrics is not None else MCTSMetrics()
+        # metrics / exploration
+        self.metrics           = mcts_metrics if mcts_metrics is not None else MCTSMetrics()
         self.current_iteration = 0
+        self.c_puct            = c_puct
+        self.dirichlet_alpha   = dirichlet_alpha
+        self.value_weight      = initial_value_weight
 
-        # MCTS exploration parameter
-        self.c_puct = c_puct
-        self.dirichlet_alpha = dirichlet_alpha  # Dirichlet noise parameter
+        # rollout‑budget schedule
+        self.early_simulations = num_simulations
+        self.late_simulations  = late_simulations if late_simulations is not None else num_simulations
+        self.switch_ply        = simulation_switch_ply
 
-        # Value weight scaling for Q-values in UCB
-        self.value_weight = initial_value_weight
+        self.logger.debug(f"[MCTS] early={self.early_simulations}, "
+                          f"late={self.late_simulations} from ply {self.switch_ply}, "
+                          f"T_init={initial_temp}, T_final={final_temp}, "
+                          f"anneal={annealing_steps}, clamp_frac={self.temp_clamp_frac}")
+
 
         print(
             f"[MCTS] Initialized with c_puct={self.c_puct}, dirichlet_alpha={self.dirichlet_alpha}, value_weight={self.value_weight}")
 
     def get_temperature(self, move_number: int) -> float:
-        """Calculate temperature based on move number."""
-        if move_number >= self.annealing_steps:
+        """
+        Linear annealing **until** `self.temp_clamp_frac * self.annealing_steps`,
+        then hold at `final_temp`.
+        """
+        clamp_moves = int(self.annealing_steps * self.temp_clamp_frac)
+
+        if move_number >= clamp_moves:
             return self.final_temp
 
-        # Linear annealing
-        progress = move_number / self.annealing_steps
+        progress = move_number / clamp_moves            # 0 → 1
         return self.initial_temp - (self.initial_temp - self.final_temp) * progress
 
     def search(self, state: GameState, move_number: int) -> np.ndarray:
-        """Perform MCTS search with temperature-adjusted move probabilities."""
-        root = Node(state)
+        """
+        Run MCTS with a rollout budget that *drops* after `self.switch_ply`.
+        """
+        # ---------- choose rollout budget on this ply -------------------------
+        budget = self.early_simulations if move_number < self.switch_ply \
+                 else self.late_simulations
+
+        root = Node(state)                              # (unchanged)
         move_probs = np.zeros(self.state_encoder.total_moves, dtype=np.float32)
 
-        # Run simulations
-        for _ in range(self.num_simulations):
+        # ----------------------- simulations ---------------------------------
+        for _ in range(budget):
             node = root
             search_path = [node]
             current_state = state.copy()
-            depth = 0  # Track depth
+            depth = 0
 
             # Selection
             while node.is_expanded and node.children:
@@ -302,10 +338,21 @@ class MCTS:
 class SelfPlay:
     """Handles self-play game generation with temperature annealing."""
 
-    def __init__(self, network: NetworkWrapper, metrics_logger: MetricsLogger, num_simulations: int = 100,
+    def __init__(self,
+                 network: NetworkWrapper,
+                 metrics_logger: MetricsLogger | None = None,
+                 num_workers: int | None = None,  # ← NEW
+                 num_simulations: int = 100,
+                 late_simulations: Optional[int] = None,
+                 simulation_switch_ply: int = 20,
+                 temp_clamp_fraction: float = 0.60,
                  initial_temp: float = 1.0, final_temp: float = 0.2,
                  annealing_steps: int = 30, c_puct: float = 1.0,
-                 max_depth: int = 20, mcts_metrics: Optional[MCTSMetrics] = None):
+                 max_depth: int = 20,
+                 dirichlet_alpha: float = 0.3,
+                 mcts_metrics: Optional[MCTSMetrics] = None,
+                 **mcts_extras):
+
         self.network = network
         self.num_simulations = num_simulations
         self.metrics_logger = metrics_logger
@@ -333,14 +380,19 @@ class SelfPlay:
 
         self.mcts = MCTS(
             network,
-            num_simulations=num_simulations,
-            initial_temp=initial_temp,
-            final_temp=final_temp,
-            annealing_steps=annealing_steps,
-            c_puct=c_puct,         # Add new parameter
-            max_depth=max_depth,    # Add new parameter
-            mcts_metrics=mcts_metrics  # Pass MCTSMetrics to MCTS
+            num_simulations       = num_simulations,
+            late_simulations      = late_simulations,
+            simulation_switch_ply = simulation_switch_ply,
+            temp_clamp_fraction   = temp_clamp_fraction,
+            initial_temp          = initial_temp,
+            final_temp            = final_temp,
+            annealing_steps       = annealing_steps,
+            c_puct                = c_puct,
+            dirichlet_alpha       = dirichlet_alpha,
+            max_depth             = max_depth,
+            mcts_metrics          = mcts_metrics
         )
+
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("SelfPlay")
         self.temp_metrics = TemperatureMetrics()
@@ -416,7 +468,16 @@ class SelfPlay:
                         play_game_worker,
                         model_path,
                         game_id,
-                        num_simulations,
+                        self.mcts.early_simulations,  # Use early_simulations as the base num_simulations passed
+                        # --- Add the parameters to pass ---
+                        self.mcts.c_puct,
+                        self.mcts.dirichlet_alpha,
+                        self.mcts.value_weight,
+                        self.mcts.late_simulations,
+                        self.mcts.switch_ply,
+                        self.mcts.temp_clamp_frac,
+                        self.mcts.max_depth,  # Pass max_depth if needed
+                        # --- End Add ---
                         self.initial_temp,
                         self.final_temp,
                         self.annealing_steps,
@@ -462,16 +523,17 @@ class SelfPlay:
                             #     self.metrics_logger.record_game_history(game_history)
 
                             # Enhanced game metrics
-                            game_metrics = GameMetrics(
-                                length=len(states),
-                                outcome=outcome,
-                                duration=elapsed,
-                                avg_move_time=elapsed / len(states),
-                                phase_values=phase_values,
-                                final_confidence=final_confidence,
-                                temperature_data=temp_data
-                            )
-                            self.metrics_logger.log_game(game_metrics)
+                            if self.metrics_logger is not None:  # ← guard
+                                game_metrics = GameMetrics(
+                                    length=len(states),
+                                    outcome=outcome,
+                                    duration=elapsed,
+                                    avg_move_time=elapsed / len(states),
+                                    phase_values=phase_values,
+                                    final_confidence=final_confidence,
+                                    temperature_data=temp_data
+                                )
+                                self.metrics_logger.log_game(game_metrics)
 
                             # Simplified logging
                             self.logger.info(
@@ -622,11 +684,21 @@ def play_game_worker(
     model_path: str,
     game_id: int,
     num_simulations: int,
+    # --- Add these ---
+    c_puct: float,
+    dirichlet_alpha: float,
+    value_weight: float,
+    late_simulations: Optional[int],
+    simulation_switch_ply: int,
+    temp_clamp_fraction: float,
+    max_depth: int, # If you want to pass max_depth too
+    # --- End Add ---
     initial_temp: float = 1.0,
     final_temp: float = 0.2,
     annealing_steps: int = 30,
     mcts_metrics: Optional[MCTSMetrics] = None
 ) -> Tuple[List[np.ndarray], List[np.ndarray], int, Dict, List[Dict]]:
+    # ... rest of the function signature
     """
     Worker function to play a single game with temperature metrics and robust logging.
     Returns:
@@ -645,10 +717,20 @@ def play_game_worker(
         mcts = MCTS(
             network,
             num_simulations=num_simulations,
+            # --- Pass the new args ---
+            c_puct=c_puct,
+            dirichlet_alpha=dirichlet_alpha,
+            initial_value_weight=value_weight,  # MCTS uses initial_value_weight
+            late_simulations=late_simulations,
+            simulation_switch_ply=simulation_switch_ply,
+            temp_clamp_fraction=temp_clamp_fraction,
+            max_depth=max_depth,
+            # --- End Pass ---
             initial_temp=initial_temp,
             final_temp=final_temp,
             annealing_steps=annealing_steps,
             mcts_metrics=mcts_metrics
+            # Add any other **mcts_extras if needed
         )
         state = GameState()
         state_encoder = StateEncoder()

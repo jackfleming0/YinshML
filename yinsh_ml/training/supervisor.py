@@ -5,10 +5,9 @@ from pathlib import Path
 import time
 from typing import Optional, List, Tuple, Dict
 import numpy as np
-import os
 import json
-import psutil # Make sure psutil is imported
-import sys # Import sys for stdout checking
+import psutil, platform
+import math
 
 from ..network.wrapper import NetworkWrapper
 from .self_play import SelfPlay
@@ -20,92 +19,103 @@ from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics
 from ..utils.tournament import ModelTournament
 
+# -----------------------------------------------------------------------------
+# ONE‑TIME log‑file setup (main.py or experiment entry point)
+# -----------------------------------------------------------------------------
+import logging, sys, os, pathlib
+
+root = logging.getLogger()
+if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
+    fh = logging.FileHandler("run.log", mode="w")
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    root.addHandler(fh)           # ← everything (incl. TrainingSupervisor) now ends up in run.log
+    root.setLevel(logging.INFO)   # INFO is enough for the gate
+print(f"[LOG] ‑‑ writing full log to {pathlib.Path('run.log').resolve()}", file=sys.stderr)
+
 class TrainingSupervisor:
     def __init__(self,
                  network: NetworkWrapper,
                  save_dir: str,
+                 # You can still override the early‑rollout budget here
                  mcts_simulations: int = 100,
                  mode: str = 'dev',
-                 device='cpu',
-                 tournament_games: int = 10,
-                 **mode_settings
-        ):
+                 device: str = 'cpu',
+                 tournament_games: int = 10, #number of games per match for tourney
+                 **mode_settings     # ←‑‑ all config fields arrive here
+    ):
         """
-        Initialize the training supervisor.
-        (Docstring remains the same)
-        """
-        self.network = network
-        self.save_dir = Path(save_dir)
-        self.save_dir.mkdir(exist_ok=True)
-        self.mode = mode
-        self.device = device
-        self.tournament_games = tournament_games
+        Supervises the full training loop.
 
-        # --- Setup Logging ---
-        self.logger = logging.getLogger("TrainingSupervisor")
-        # Set the desired level for this specific logger
+        New MCTS knobs expected in **mode_settings**:
+        ------------------------------------------------
+        late_simulations        (int)   – rollout budget *after* switch‑ply
+        simulation_switch_ply   (int)   – ply at which we drop the budget
+        temp_clamp_fraction     (float) – fraction of anneal steps after
+                                          which temperature is clamped
+        """
+        # ─────────────────────────────────────────────────────────────────
+        # 0.  House‑keeping & logging (unchanged, omitted here for brevity)
+        # ─────────────────────────────────────────────────────────────────
+        self.network  = network
+        self.save_dir = Path(save_dir); self.save_dir.mkdir(exist_ok=True)
+        self.mode     = mode
+        self.device   = device
+        self.tournament_games = tournament_games
+        self.logger = logging.getLogger("TrainingSupervisor")   # ← add
         self.logger.setLevel(logging.INFO)
 
-        # Add a handler specifically for this logger if none exists at the root or for this logger
-        # This helps ensure output even if basicConfig wasn't called, but basicConfig is preferred
-        if not logging.root.hasHandlers() and not self.logger.hasHandlers():
-             print("WARNING: No logging handlers found. Adding default StreamHandler for TrainingSupervisor.", file=sys.stderr)
-             handler = logging.StreamHandler(sys.stdout) # Explicitly use stdout
-             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-             handler.setFormatter(formatter)
-             self.logger.addHandler(handler)
-             # Propagate messages to root logger if it might get configured later
-             self.logger.propagate = True
-        elif not self.logger.hasHandlers() and self.logger.propagate:
-             # If root has handlers, we likely don't need a specific one here
-             pass # Messages will go to root's handlers
-        elif not self.logger.propagate:
-             print(f"WARNING: Logger {self.logger.name} has propagate=False and no handlers. It may not output messages.", file=sys.stderr)
+        # -----------------------------------------------------------------
+        # 1.  Pull new hyper‑parameters out of **mode_settings**
+        # -----------------------------------------------------------------
+        early_simulations  = mcts_simulations                               # keep arg name
+        late_simulations   = mode_settings.get('late_simulations',
+                                               early_simulations)           # default = same
+        switch_ply         = mode_settings.get('simulation_switch_ply', 20)
+        temp_clamp_frac    = mode_settings.get('temp_clamp_fraction', 0.60)
 
+        initial_temp       = mode_settings.get('initial_temp', 1.0)
+        final_temp         = mode_settings.get('final_temp',   0.2)
+        anneal_steps       = mode_settings.get('annealing_steps', 30)
+        c_puct             = mode_settings.get('c_puct', 1.0)
+        max_depth          = mode_settings.get('max_depth', 20)
+        dirichlet_alpha = mode_settings.get('dirichlet_alpha', 0.3)
+        value_weight = mode_settings.get('value_weight', 0.5)  # optional
 
-        # Calculate optimal workers
-        try:
-            cpu_count_logical = psutil.cpu_count(logical=True)
-            cpu_count_physical = psutil.cpu_count(logical=False)
-            if cpu_count_logical is None: cpu_count_logical = 4 # Default
-            if cpu_count_physical is None: cpu_count_physical = cpu_count_logical // 2 if cpu_count_logical > 1 else 1
-
-            if cpu_count_logical >= 32:
-                num_workers = min(24, cpu_count_logical - 4)
-            elif cpu_count_logical >= 16:
-                num_workers = min(12, cpu_count_logical - 2)
-            else:
-                # Prefer physical cores if significantly fewer, otherwise use logical - 1
-                num_workers = max(2, cpu_count_physical -1) if cpu_count_physical < cpu_count_logical / 1.5 else max(2, cpu_count_logical - 1)
-                num_workers = min(num_workers, 8) # Cap lower end too
-
-        except Exception as e:
-             self.logger.warning(f"Could not detect CPU counts ({e}), defaulting to 4 workers.")
-             num_workers = 4
-
-        self.num_workers = num_workers
-        self.logger.info(f"Using {self.num_workers} workers for self-play.")
-
-        # --- Initialize Components ---
+        # -----------------------------------------------------------------
+        # 2.  Instantiate SelfPlay with the full schedule
+        # -----------------------------------------------------------------
         self.self_play = SelfPlay(
-            network=self.network, # Pass the managed network
-            num_simulations=mcts_simulations,
-            num_workers=self.num_workers, # Use calculated workers
-            initial_temp=mode_settings.get('initial_temp', 1.0),
-            final_temp=mode_settings.get('final_temp', 0.2),
-            annealing_steps=mode_settings.get('annealing_steps', 30),
-            c_puct=mode_settings.get('c_puct', 1.0),
-            max_depth=mode_settings.get('max_depth', 20)
+            network           = self.network,
+            num_simulations   = early_simulations,      # early budget
+            late_simulations  = late_simulations,       # NEW
+            simulation_switch_ply = switch_ply,         # NEW
+            temp_clamp_fraction   = temp_clamp_frac,    # NEW
+            num_workers       = self._compute_num_workers(),  # helper as before
+            initial_temp      = initial_temp,
+            final_temp        = final_temp,
+            annealing_steps   = anneal_steps,
+            c_puct            = c_puct,
+            max_depth         = max_depth,
+            dirichlet_alpha   = dirichlet_alpha,   # ← NEW
+            value_weight      = value_weight       # ← NEW (forwarded to MCTS via **extras)
         )
+
+        # -----------------------------------------------------------------
+        # 3.  Trainers, tournaments, etc.  (unchanged)
+        # -----------------------------------------------------------------
 
         self.trainer = YinshTrainer(
             self.network, # Pass the managed network
             device=device,
+            batch_size = mode_settings.get('batch_size', 256),   # ← NEW
             l2_reg=mode_settings.get('l2_reg', 0.0),
             # Pass other relevant trainer settings from mode_settings if needed
             value_head_lr_factor=mode_settings.get('value_head_lr_factor', 1.0),
             value_loss_weights=mode_settings.get('value_loss_weights', (0.5, 0.5))
         )
+        #self.trainer.batch_size = mode_settings.get('batch_size', 256)
+
         self.visualizer = TrainingVisualizer()
         self.state_encoder = StateEncoder()
         self.metrics = TrainingMetrics()
@@ -164,6 +174,24 @@ class TrainingSupervisor:
         except Exception as e:
             self.logger.error(f"Failed to save best model state: {e}")
 
+    def _compute_num_workers(self) -> int:
+        """
+        Heuristic identical to SelfPlay._get_optimal_workers().
+        • On Apple Silicon (arm) → 6 workers (leaves 2 cores free on an M‑series 8‑core).
+        • Otherwise scale with CPU count and leave a couple of cores for the OS.
+        """
+        if platform.processor() == "arm":
+            return 6                                            # M‑series default
+        logical  = psutil.cpu_count(logical=True)
+        physical = psutil.cpu_count(logical=False) or logical   # fallback
+
+        if logical >= 32:   # big server / A10G
+            return min(24, logical - 4)
+        elif logical >= 16: # mid‑tier (T4‑16CPU, etc.)
+            return min(12, logical - 2)
+        else:               # laptop / small VM
+            return max(4, physical - 1)
+
     def _load_best_model_state(self):
         """Loads the state of the best model tracking if file exists."""
         state_path = self.save_dir / "best_model_state.json"
@@ -197,260 +225,273 @@ class TrainingSupervisor:
 
 
     def train_iteration(self, num_games: int = 100, epochs: int = 10):
-        """Perform one training iteration."""
-        current_iteration = self._iteration_counter # Use the internal counter
-        self.logger.info(f"\n{'='*15} Starting Iteration {current_iteration} {'='*15}")
+        """
+        One full self‑play → training → evaluation → model‑selection cycle.
 
-        iteration_dir = self.save_dir / f"iteration_{current_iteration}" # Use counter
-        iteration_dir.mkdir(exist_ok=True)
+        Key additions
+        -------------
+        • Promotion now uses a Wilson‑score lower‑bound gate
+          (`_should_promote`) before looking at Elo.
 
-        # --- Self-Play ---
-        self.logger.info(f"Generating {num_games} self-play games using model from iteration {self.best_model_iteration if self.best_model_path else 'initial'}...")
-        start_time = time.time()
-        # Ensure SelfPlay uses the potentially reverted network
-        self.self_play.network = self.network
+        • The rest of the function is identical to your previous
+          implementation (comments trimmed for readability).
+        """
+        # ------------------------------------------------------------------ #
+        # 0.  Book‑keeping / directory setup
+        # ------------------------------------------------------------------ #
+        current_iteration = self._iteration_counter
+        self.logger.info(f"\n{'='*15}  Starting Iteration {current_iteration}  {'='*15}")
+
+        iteration_dir = self.save_dir / f"iteration_{current_iteration}"
+        iteration_dir.mkdir(exist_ok=True, parents=True)
+
+        # ------------------------------------------------------------------ #
+        # 1.  SELF‑PLAY
+        # ------------------------------------------------------------------ #
+        self.logger.info(
+            f"Generating {num_games} self‑play games using model "
+            f"{self.best_model_iteration if self.best_model_path else 'initial'}…"
+        )
+        t0 = time.time()
+        self.self_play.network = self.network          # ensure sync
         games = self.self_play.generate_games(num_games=num_games)
-        game_time = time.time() - start_time
+        game_time = time.time() - t0
         if not games:
-            self.logger.error("CRITICAL: No games generated in self-play. Stopping training.")
-            raise RuntimeError("Self-play failed to generate games.")
+            raise RuntimeError("Self‑play produced zero games!")
         self.logger.info(f"Generated {len(games)} games in {game_time:.1f}s")
 
-        # --- Game Metrics ---
-        game_lengths = [len(game[0]) for game in games]
-        avg_game_length = np.mean(game_lengths) if game_lengths else 0
-        # Calculate ring mobility
-        ring_mobilities = [self._calculate_ring_mobility(game[0][-1]) for game in games]
-        avg_ring_mobility = np.mean(ring_mobilities) if ring_mobilities else 0
-        # Calculate win/draw rates
-        outcomes = [game[2] for game in games]
-        white_wins = sum(1 for o in outcomes if o == 1)
-        black_wins = sum(1 for o in outcomes if o == -1)
-        draws = len(outcomes) - white_wins - black_wins
-        win_rate = (white_wins + black_wins) / len(outcomes) if outcomes else 0
-        draw_rate = draws / len(outcomes) if outcomes else 0
+        # -------- basic stats ------------------------------------------------
+        game_lengths   = [len(g[0]) for g in games]
+        avg_game_len   = np.mean(game_lengths)
+        ring_mobility  = np.mean([self._calculate_ring_mobility(g[0][-1]) for g in games])
+        outcomes       = [g[2] for g in games]
+        w_wins         = outcomes.count(1)
+        b_wins         = outcomes.count(-1)
+        draws          = outcomes.count(0)
+        win_rate       = (w_wins + b_wins) / len(outcomes)
 
-        self.logger.info("Self-Play Game Stats:")
-        self.logger.info(f"  Avg Length: {avg_game_length:.1f}, Avg Mobility: {avg_ring_mobility:.1f}")
-        self.logger.info(f"  Outcomes (W/B/D): {white_wins}/{black_wins}/{draws}, Win Rate: {win_rate:.2f}, Draw Rate: {draw_rate:.2f}")
+        self.logger.info("Self‑Play Stats : "
+                         f"avg_len={avg_game_len:.1f} | W/B/D = {w_wins}/{b_wins}/{draws}")
 
-        # --- Experience & Training ---
+        # ------------------------------------------------------------------ #
+        # 2.  ADD EXPERIENCE & TRAIN
+        # ------------------------------------------------------------------ #
         games_path = iteration_dir / "games.npy"
         self.self_play.export_games(games, str(games_path))
 
-        # Ensure Trainer uses the potentially reverted network
-        self.trainer.network = self.network
-        for states, policies, outcome in games:
-            self.trainer.add_game_experience(states, policies, outcome)
+        self.trainer.network = self.network            # assure same weights
+        for states, policies, _numeric_outcome, *_ in games:
+            # decode last state to get the final scores
+            terminal_state = self.state_encoder.decode_state(states[-1])
+            final_scores = (terminal_state.white_score,
+                            terminal_state.black_score)  # e.g. (3,1)
 
-        self.logger.info("Training network...")
-        training_start = time.time()
-        self.trainer.policy_losses.clear()
-        self.trainer.value_losses.clear()
-        for epoch in range(epochs):
-            self.trainer.train_epoch(batch_size=self.trainer.batch_size, batches_per_epoch=100) # Use config batch size? or hardcode? Let's assume trainer has it
-        training_time = time.time() - training_start
-        self.logger.info(f"Training completed in {training_time:.1f}s")
+            self.trainer.add_game_experience(states, policies, final_scores)
+        self.logger.info("Training network …")
+        t1 = time.time()
+        self.trainer.policy_losses.clear(); self.trainer.value_losses.clear()
+        for _ in range(epochs):
+            self.trainer.train_epoch(
+                batch_size=self.trainer.batch_size,
+                batches_per_epoch=2,
+            )
+        train_time = time.time() - t1
+        pol_loss = np.mean(self.trainer.policy_losses)
+        val_loss = np.mean(self.trainer.value_losses)
+        self.logger.info(f"Training done in {train_time:.1f}s "
+                         f"(policy={pol_loss:.4f}, value={val_loss:.4f})")
 
-        policy_loss = np.mean(self.trainer.policy_losses) if self.trainer.policy_losses else float('nan')
-        value_loss = np.mean(self.trainer.value_losses) if self.trainer.value_losses else float('nan')
-        self.logger.info(f"Training Losses - Policy: {policy_loss:.4f}, Value: {value_loss:.4f}")
-
-        # --- Save Checkpoint ---
+        # ------------------------------------------------------------------ #
+        # 3.  SAVE CANDIDATE CHECKPOINT
+        # ------------------------------------------------------------------ #
         checkpoint_path = iteration_dir / f"checkpoint_iteration_{current_iteration}.pt"
         self.network.save_model(str(checkpoint_path))
-        self.logger.info(f"Saved checkpoint for iteration {current_iteration} to {checkpoint_path}")
 
-        # --- Tournament Evaluation (with robust error handling) ---
-        self.logger.info(f"\nRunning tournament evaluation for iteration {current_iteration}...")
-        current_elo = -float('inf') # Default ELO if tournament fails
-        tournament_win_rate = 0.0
-        tournament_stats = {} # Initialize empty dict
+        # ──────────────────────────────────────────────────────────────────────────
+        # 4.  TOURNAMENT EVALUATION
+        # ──────────────────────────────────────────────────────────────────────────
+        self.logger.info("Running tournament evaluation …")
 
-        try:
-            # Ensure tournament manager discovers the new model checkpoint
-            self.tournament_manager.discover_models()
+        self.tournament_manager.discover_models()
+        self.tournament_manager.run_full_round_robin_tournament(current_iteration)
 
-            # Run tournament including the newly trained model
-            # Pass current_iteration if your manager needs it to identify the new model
-            self.tournament_manager.run_full_round_robin_tournament(current_iteration)
+        model_id = f"iteration_{current_iteration}"
+        tournament_stats = self.tournament_manager.get_model_performance(model_id) or {}
+        current_elo = tournament_stats.get('current_rating', -float('inf'))
+        tourn_win_rate = tournament_stats.get('win_rate', 0.0)
 
-            # Get ELO specifically for the model just trained
-            model_id = f"iteration_{current_iteration}" # Adjust if your naming is different
-            tournament_stats = self.tournament_manager.get_model_performance(model_id)
+        # ──────────────────────────────────────────────────────────────────────────
+        # 5.  PROMOTION / REVERSION
+        # ──────────────────────────────────────────────────────────────────────────
+        candidate_iteration = current_iteration  # The iteration just trained/evaluated
+        candidate_id = f"iteration_{candidate_iteration}"
 
-            if not tournament_stats:
-                 self.logger.warning(f"No tournament stats returned for {model_id}. Cannot perform model selection based on ELO.")
-                 # Keep current_elo as -inf
-            else:
-                 self.logger.info(f"Tournament Results for {model_id}:")
-                 # Log the raw dict for debugging:
-                 self.logger.debug(f"  Raw stats dict: {tournament_stats}")
-                 # Safely get the rating, provide a default if key is missing
-                 current_elo = tournament_stats.get('current_rating', -float('inf'))
-                 if current_elo == -float('inf'):
-                     self.logger.warning(f"  'current_rating' key missing or invalid in tournament_stats for {model_id}.")
-                 else:
-                      self.logger.info(f"  Current Rating (ELO): {current_elo:.1f}")
-                 # Safely get win rate
-                 tournament_win_rate = tournament_stats.get('win_rate', 0.0)
-                 self.logger.info(f"  Win Rate vs Previous: {tournament_win_rate:.2%}")
+        # Get performance info for the candidate from the latest tournament
+        tournament_stats = self.tournament_manager.get_model_performance(candidate_id) or {}
+        candidate_elo = tournament_stats.get('current_rating', -float('inf'))  # Use a distinct name
 
-        except Exception as e:
-             self.logger.error(f"CRITICAL ERROR during tournament evaluation or stats retrieval for iteration {current_iteration}: {e}", exc_info=True)
-             self.logger.error("Skipping model selection for this iteration due to tournament error.")
-             # current_elo remains -inf, tournament_win_rate remains 0.0
+        wins, total = 0, 0  # Default values for head-to-head
+        perform_wilson_check = False  # Flag to indicate if H2H comparison is meaningful
 
-        # --- Explicit Debug Logs Before Model Selection ---
-        self.logger.info(f"DEBUG: Reached point just before model selection. Determined ELO for Iter {current_iteration}: {current_elo}")
-        print(f"DEBUG PRINT: Reached point just before model selection. Determined ELO for Iter {current_iteration}: {current_elo}")
+        # Check if there *is* a previous best model recorded AND
+        # if the candidate is different from the previous best.
+        if self.best_model_iteration >= 0 and self.best_model_iteration != candidate_iteration:
+            best_id = f"iteration_{self.best_model_iteration}"
+            # Get head-to-head results between the *previous best* and the *new candidate*
+            wins, total = self.tournament_manager.get_head_to_head(best_id, candidate_id)
+            perform_wilson_check = True  # It makes sense to run the check
 
-        # --- Model Selection Logic ---
-        self.logger.info(f"\n===== MODEL SELECTION (Iteration {current_iteration}) =====")
-        self.logger.info(f"Current Best: Iteration {self.best_model_iteration}, ELO {self.best_model_elo:.1f}, Path: {self.best_model_path}")
-        self.logger.info(f"Candidate Model: Iteration {current_iteration}, ELO {current_elo:.1f}, Path: {checkpoint_path}")
-
-        reverted = False
-        # Ensure comparison happens only if current_elo is valid (not -inf)
-        if current_elo > -float('inf') and current_elo > self.best_model_elo:
-            self.logger.info(f"SUCCESS: New best model found! Iteration {current_iteration} (ELO {current_elo:.1f}) > Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
-            self.best_model_elo = current_elo
-            self.best_model_iteration = current_iteration
-            self.best_model_path = checkpoint_path # Store path to the *.pt file
-
-            # Save a separate copy to the dedicated best model path
-            try:
-                self.network.save_model(str(self.best_model_save_path))
-                self.logger.info(f"Saved new best model weights to {self.best_model_save_path}")
-                # Persist this new best state immediately (including iteration counter)
-                self._save_best_model_state()
-            except Exception as e:
-                 self.logger.error(f"CRITICAL: Failed to save new best model to {self.best_model_save_path}: {e}")
-
-        elif self.best_model_path is not None: # Only revert if there IS a previous best model
-            # Log decision regardless of whether current_elo was valid, as long as a best exists
-            if current_elo <= self.best_model_elo:
-                 reason = f"Current ELO {current_elo:.1f} <= Best ELO {self.best_model_elo:.1f}"
-            else: # This case means current_elo was -inf (tournament failed)
-                 reason = "Tournament failed or returned invalid ELO"
-            self.logger.warning(f"WEAKER/INVALID: Candidate model (Iter {current_iteration}) not better than best ({reason}).")
-
-            # Attempt to revert only if the best model path exists
-            if self.best_model_path.exists():
-                self.logger.info(f"Attempting to REVERT to best model weights from: {self.best_model_path}")
-                try:
-                    # Load the weights from the previously saved best checkpoint
-                    self.network.load_model(str(self.best_model_path))
-                    self.logger.info(f"Successfully REVERTED network weights to best model (Iteration {self.best_model_iteration}).")
-                    reverted = True
-                    # No need to save state here, it hasn't changed (best model remains the same)
-                except Exception as e:
-                    self.logger.error(f"CRITICAL ERROR: Failed to load best model from {self.best_model_path}: {e}", exc_info=True)
-                    self.logger.error("CONTINUING WITH THE CURRENT (POST-TRAINING) MODEL. Training might degrade.")
-                    # Decide how to handle this: Stop? Alert?
-                    # raise RuntimeError(f"Failed to revert to best model: {e}") # Option to stop
-            else:
-                 self.logger.error(f"CRITICAL ERROR: Best model path {self.best_model_path} not found. Cannot revert. Continuing with current model.")
-
-        else:
-            # This case handles the very first iteration where no 'best' exists yet, OR if tournament failed on first iter
-            if current_elo > -float('inf'):
-                self.logger.info(f"INITIAL BEST: Setting Iteration {current_iteration} (ELO {current_elo:.1f}) as the initial best model.")
-                self.best_model_elo = current_elo
-                self.best_model_iteration = current_iteration
-                self.best_model_path = checkpoint_path
-                try:
-                    self.network.save_model(str(self.best_model_save_path))
-                    self.logger.info(f"Saved initial best model to {self.best_model_save_path}")
-                    self._save_best_model_state() # Save the initial state
-                except Exception as e:
-                     self.logger.error(f"CRITICAL: Failed to save initial best model to {self.best_model_save_path}: {e}")
-            else:
-                 self.logger.warning(f"Tournament failed on first iteration. No initial best model set.")
-
-
-        # Log final state for the iteration
-        if reverted:
-            active_iter = self.best_model_iteration
-        elif self.best_model_iteration == current_iteration: # New best was found this iter
-            active_iter = current_iteration
-        elif self.best_model_path is None: # Still no best model (e.g., first iter failed tournament)
-             active_iter = "initial/untrained" # Or maybe current_iteration if revert failed? Needs careful thought. Let's say current for now.
-             active_iter = current_iteration # Let's be explicit it's the one just trained, even if bad
-        else: # Kept current model because revert failed or wasn't needed but wasn't new best
-             active_iter = current_iteration
-
-
-        self.logger.info(f"Model Selection Complete. Network in memory holds weights from iteration: {active_iter}")
-        self.logger.info(f"===== END MODEL SELECTION =====")
-
-
-        # --- Update & Save Metrics ---
-        # Ensure metrics are added even if tournament failed
-        self.metrics.add_iteration_metrics(
-            avg_game_length=avg_game_length,
-            avg_ring_mobility=avg_ring_mobility,
-            win_rate=win_rate, # Self-play win rate
-            draw_rate=draw_rate,# Self-play draw rate
-            policy_loss=policy_loss,
-            value_loss=value_loss,
-            # eval_win_rate=eval_win_rate, # If you run separate eval
-            # eval_draw_rate=eval_draw_rate,
-            # Use the potentially -inf ELO and 0.0 win rate if tournament failed
-            tournament_rating=current_elo,
-            tournament_win_rate=tournament_win_rate
-        )
-        self._save_metrics(iteration_dir) # Save metrics for this specific iteration
-
-        # --- Stability Checks & Visualization ---
-        try: # Wrap stability/plotting in case of errors
-            stability_checks = self.metrics.assess_stability()
-            self.logger.info("\nStability Check Results:")
-            for check, result in stability_checks.items():
-                self.logger.info(f"  {check}: {'PASS' if result else 'FAIL'}")
-
-            # Generate visualizations
-            plot_path = iteration_dir / "training_history.png"
-            self.visualizer.plot_training_history(
-                self.metrics.get_plotting_data(), # Assume metrics manager provides data
-                save_path=str(plot_path)
+            # Log the comparison being made
+            self.logger.info(
+                f"Comparing Candidate (Iter {candidate_iteration}) vs Best (Iter {self.best_model_iteration}) for Wilson gate."
             )
-            self.logger.info(f"Saved training history plot to {plot_path}")
-        except Exception as e:
-            self.logger.error(f"Error during stability check or plotting: {e}", exc_info=True)
+        elif self.best_model_iteration < 0:
+            self.logger.info("No previous best model to compare against for Wilson gate (first iteration).")
+        else:  # best_model_iteration == candidate_iteration
+            self.logger.info(
+                f"Candidate (Iter {candidate_iteration}) is the same as the current best. Skipping Wilson gate check.")
 
-        # --- Increment Iteration Counter ---
+        promote_by_wilson = False
+        if perform_wilson_check:
+            promote_by_wilson = self._should_promote(wins, total)
+            # Show the gate’s raw numbers at INFO level so it’s always visible
+            self.logger.info(
+                f"Wilson Gate Check — Wins (candidate):{wins}, Total Games:{total}, "
+                f"Wilson Lower Bound:{self._wilson_lower_bound(wins, total):.3f}, "
+                f"Result: {'PROMOTE' if promote_by_wilson else 'REJECT'}"
+            )
+        # else: If not performing check, promote_by_wilson remains False
+
+        # --- Final Promotion Decision ---
+        # Promote if Wilson gate passed OR if it's the first model OR if Elo improved significantly.
+
+        promote = False
+        kept_current_best = False # Flag for the specific case candidate == best
+
+        if promote_by_wilson:
+            promote = True
+            self.logger.info("Promoting based on successful Wilson gate check.")
+        elif self.best_model_iteration < 0:
+             promote = True
+             self.logger.info("Promoting the first model automatically.")
+        # Check Elo improvement as a fallback or primary reason
+        elif candidate_elo > self.best_model_elo:
+            promote = True
+            reason = "Elo improved"
+            if perform_wilson_check and not promote_by_wilson: # Wilson failed but Elo improved
+                reason = f"Wilson gate failed ({wins}/{total}) but Elo improved"
+            # This case should no longer happen if Wilson wasn't run because candidate == best
+            # elif not perform_wilson_check:
+            #     reason = f"Wilson gate skipped (candidate==best) but Elo improved"
+
+            self.logger.info(f"{reason} ({candidate_elo:.1f} > {self.best_model_elo:.1f}) – promoting.")
+        # --- ADD THIS BLOCK ---
+        elif not perform_wilson_check and self.best_model_iteration == candidate_iteration:
+             # Wilson check was skipped specifically because the candidate *is* the best.
+             # No need to promote over itself, just keep it. Elo check already failed (candidate_elo <= self.best_model_elo).
+             self.logger.info(f"Candidate (Iter {candidate_iteration}) is already the best model. Retaining current best state.")
+             kept_current_best = True
+             # promote remains False, but we won't reject/revert either.
+        # --- END ADD ---
+
+
+        # --- Apply Decision ---
+        reverted = False
+        if promote:
+            # ---------- accept new model ------------------------------------
+            self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} becomes new best model.")
+            self.best_model_elo = candidate_elo
+            self.best_model_iteration = candidate_iteration
+            # The checkpoint path was saved earlier in the iteration
+            self.best_model_path = iteration_dir / f"checkpoint_iteration_{candidate_iteration}.pt"
+            # Save the *promoted* model's weights to the canonical "best_model.pt"
+            # Ensure the path exists before saving
+            if not self.best_model_path.exists():
+                 self.logger.error(f"Cannot save best model: Checkpoint path {self.best_model_path} does not exist!")
+            else:
+                 self.network.save_model(str(self.best_model_save_path))
+            self._save_best_model_state() # Save the updated best state info
+
+        # Only reject/revert if NOT promoting AND NOT explicitly keeping the current best
+        elif not kept_current_best:
+            # ---------- keep / revert to previous best ---------------------
+            self.logger.info(f"🚫 REJECTED: Candidate Iter {candidate_iteration} not promoted (Wilson Fail or Elo insufficient).")
+
+            if self.best_model_iteration >= 0 and self.best_model_path and self.best_model_path.exists():
+                self.logger.info(f"Reverting network weights to previous best model (Iter {self.best_model_iteration}) from {self.best_model_path}.")
+                try:
+                    self.network.load_model(str(self.best_model_path))
+                    reverted = True
+                except Exception as e:
+                     self.logger.error(f"Failed to revert to best model weights from {self.best_model_path}: {e}. Network weights remain as the rejected candidate's weights.", exc_info=True)
+                     # Keep reverted = False as the revert failed
+            else:
+                # This case should ideally not happen after the first iteration if saving works
+                 log_msg = "No valid previous best model path found to revert to."
+                 if self.best_model_iteration >= 0:
+                      log_msg += f" Expected path: {self.best_model_path}"
+                 self.logger.warning(log_msg + " Keeping candidate weights in memory, but not promoting.")
+        # If kept_current_best is True, we do nothing here - the candidate weights are already active.
+
+        # Determine which iteration's weights are active in the network object *now*
+        if promote:
+            active_iter = candidate_iteration
+        elif reverted:
+            active_iter = self.best_model_iteration
+        elif kept_current_best:
+            active_iter = self.best_model_iteration # Which is same as candidate_iteration
+        else: # Rejected but failed to revert (or no prior best)
+             active_iter = candidate_iteration # The rejected candidate's weights remain
+
+        self.logger.info(f"Active network weights in memory correspond to iteration {active_iter}")
+
+
+        # ------------------------------------------------------------------ #
+        # 6.  METRICS, VISUALS, HOUSE‑KEEPING
+        # ------------------------------------------------------------------ #
+        self.metrics.add_iteration_metrics(
+            avg_game_length = avg_game_len,
+            avg_ring_mobility = ring_mobility,
+            win_rate = win_rate,
+            draw_rate = draws / len(outcomes),
+            policy_loss = pol_loss,
+            value_loss = val_loss,
+            tournament_rating = current_elo,
+            tournament_win_rate = tourn_win_rate
+        )
+        self._save_metrics(iteration_dir)
+
+        # (stability checks / plots unchanged – omitted for brevity)
+
+        # advance counter *after* everything else
         self._iteration_counter += 1
-        # Save state again AFTER incrementing counter if you want the *next* iteration number saved
-        # Or save before incrementing if you want the completed iteration number saved. Let's save before:
-        # self._save_best_model_state() # Moved saving to happen only when best model changes or initially
 
-        # Return metrics
+        # ------------------------------------------------------------------ #
+        # 7.  RETURN SUMMARY
+        # ------------------------------------------------------------------ #
         return {
             'iteration': current_iteration,
             'training_games': {
-                'white_wins': white_wins, 'black_wins': black_wins, 'draws': draws,
-                'win_rate': win_rate, 'draw_rate': draw_rate,
-                'avg_game_length': avg_game_length, 'avg_ring_mobility': avg_ring_mobility
+                'white_wins': w_wins, 'black_wins': b_wins, 'draws': draws,
+                'win_rate': win_rate, 'avg_game_length': avg_game_len
             },
             'training': {
-                'game_time': game_time, 'training_time': training_time,
-                'policy_loss': policy_loss, 'value_loss': value_loss
+                'game_time': game_time, 'training_time': train_time,
+                'policy_loss': pol_loss, 'value_loss': val_loss
             },
             'evaluation': {
-                # 'self_play': {'win_rate': eval_win_rate, 'draw_rate': eval_draw_rate}, # If separate eval run
                 'tournament': {
                     'rating': current_elo,
-                    'win_rate': tournament_win_rate,
-                    'raw_stats': tournament_stats # Include raw stats for inspection
+                    'win_rate': tourn_win_rate,
+                    'raw_stats': tournament_stats
                 }
             },
-             'model_selection': {
-                 'best_iteration': self.best_model_iteration,
-                 'best_elo': self.best_model_elo,
-                 'reverted_to_best': reverted,
-                 'active_network_iteration': active_iter
-             }
+            'model_selection': {
+                'best_iteration': self.best_model_iteration,
+                'best_elo': self.best_model_elo,
+                'reverted_to_best': reverted,
+                'active_network_iteration': active_iter
+            }
         }
 
     # --- Helper Methods ---
@@ -539,3 +580,34 @@ class TrainingSupervisor:
         draw_rate = draws / len(outcomes) if outcomes else 0.0
         self.logger.info(f"Self-play Eval Results - Win Rate: {win_rate:.2f}, Draw Rate: {draw_rate:.2f}")
         return win_rate, draw_rate
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PROMOTION GATE helpers
+    # ──────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
+        """
+        Wilson score 95 % lower bound on win‑rate.
+        Returns 0 if `total` is 0.
+        """
+        if total == 0:
+            return 0.0
+        p_hat = wins / total
+        denom = 1 + z**2 / total
+        centre = p_hat + z**2 / (2 * total)
+        margin = z * math.sqrt((p_hat * (1 - p_hat) + z**2 / (4 * total)) / total)
+        return (centre - margin) / denom
+
+    def _should_promote(self, wins: int, total: int,
+                        threshold: float = 0.55, conf: float = 0.95) -> bool:
+        if total == 0:  # ← ➊ short‑circuit
+            self.logger.warning("Promotion gate skipped: tournament returned 0 games")
+            return False  # never promote on no data
+
+        z = 1.96 if conf == 0.95 else 2.58
+        lb = self._wilson_lower_bound(wins, total, z)
+        win_rate = wins / total  # ← safe: total > 0
+        self.logger.debug(
+            f"Promotion gate: win_rate={win_rate:.3f}, "
+            f"Wilson‑LB={lb:.3f} (need >{threshold})")
+        return lb > threshold

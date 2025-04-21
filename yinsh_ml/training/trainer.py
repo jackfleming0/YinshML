@@ -65,8 +65,8 @@ class GameExperience:
                 phase = "MAIN_GAME"
             else:
                 phase = "RING_REMOVAL"
-            print(f"[DEBUG] decode_phase: avg={avg:.3f}")
-            print(f"[DEBUG] Classified phase: {phase}")
+#            print(f"[DEBUG] decode_phase: avg={avg:.3f}")
+#            print(f"[DEBUG] Classified phase: {phase}")
             return phase
 
         # Compute the normalized margin in [-1, +1]
@@ -187,6 +187,7 @@ class YinshTrainer:
     def __init__(self,
                  network: NetworkWrapper,
                  device: Optional[str] = None,
+                 batch_size: int = 256,
                  l2_reg: float = 0.0,
                  metrics_logger: Optional[MetricsLogger] = None,
                  value_head_lr_factor: float = 5.0,
@@ -199,11 +200,13 @@ class YinshTrainer:
             network: NetworkWrapper instance
             device: Device to train on ('cuda', 'mps', or 'cpu')
             l2_reg: L2 regularization coefficient
+            batch_size: Batch size for training, passed from config via trainingsupervisor
             metrics_logger: Optional MetricsLogger instance
             value_head_lr_factor: Factor to multiply base lr for value head
             value_loss_weights: Weights for combining MSE and CE loss in value head
         """
         self.state_encoder = network.state_encoder
+        self.batch_size = batch_size
 
         # Device setup
         if device:

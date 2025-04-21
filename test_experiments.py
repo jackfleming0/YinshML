@@ -139,23 +139,36 @@ def test_experiment_configs(quick_test: bool = True):
     return results, failed_configs
 
 
-def _print_metrics(result: dict):
-    """Print experiment metrics in a consistent format."""
-    print(f"Policy Loss: {result['policy_losses'][-1]:.4f}")
-    print(f"Value Loss: {result['value_losses'][-1]:.4f}")
-    print(f"ELO Change: {result['elo_changes'][-1]:.1f}")
+def _print_metrics(result: dict) -> None:
+    """Pretty‑print the latest metrics, falling back gracefully if any are missing."""
 
-    # New metrics
-    if 'value_accuracies' in result:
-        print(f"Value Accuracy: {result['value_accuracies'][-1]:.2%}")
-    if 'move_accuracies' in result:
-        print(f"Move Top-1 Accuracy: {result['move_accuracies'][-1].get('top_1_accuracy', 0):.2%}")
-        print(f"Move Top-3 Accuracy: {result['move_accuracies'][-1].get('top_3_accuracy', 0):.2%}")
-    if 'policy_entropy' in result:
-        print(f"Policy Entropy: {result['policy_entropy'][-1]:.3f}")
+    def latest(series_name: str, default: str = "–") -> str:
+        """Return the last element of a list in `result`, formatted as a string."""
+        series = result.get(series_name, [])
+        return f"{series[-1]:.4f}" if series else default
 
-    if 'move_entropies' in result:
-        print(f"Move Entropy: {result['move_entropies'][-1]:.3f}")
+    print(f"Policy Loss       : {latest('policy_losses')}")
+    print(f"Value  Loss       : {latest('value_losses')}")
+    print(f"ELO Change        : {latest('elo_changes', default='–')[:-2]}")  # strip trailing zeros
+
+    # Optional series ----------------------------------------------------------
+    if "value_accuracies" in result:
+        acc = result["value_accuracies"][-1] if result["value_accuracies"] else None
+        print(f"Value Accuracy    : {acc:.2%}" if acc is not None else "Value Accuracy    : –")
+
+    if "move_accuracies" in result and result["move_accuracies"]:
+        mv = result["move_accuracies"][-1]
+        print(f"Move Top‑1 Acc    : {mv.get('top_1_accuracy', 0):.2%}")
+        print(f"Move Top‑3 Acc    : {mv.get('top_3_accuracy', 0):.2%}")
+
+    if "policy_entropy" in result:
+        pe = result["policy_entropy"][-1] if result["policy_entropy"] else None
+        print(f"Policy Entropy    : {pe:.3f}" if pe is not None else "Policy Entropy    : –")
+
+    if "move_entropies" in result:
+        me = result["move_entropies"][-1] if result["move_entropies"] else None
+        print(f"Move Entropy      : {me:.3f}" if me is not None else "Move Entropy      : –")
+
     print("-" * 40)
 
 

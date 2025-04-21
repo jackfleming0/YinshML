@@ -16,6 +16,15 @@ import math
 
 q = math.log(10) / 400  # constant used in Glicko formulas
 
+def _canon(model_id: str) -> str:
+    """
+    Canonicalise a model identifier so everybody uses the same key:
+
+    • strips directory components
+    • strips the `.pt` extension
+    • keeps the “iteration_X” stem
+    """
+    return Path(model_id).stem            # "…/checkpoint_iteration_3.pt" → "checkpoint_iteration_3"
 
 class GlickoPlayer:
     def __init__(self, rating=1500.0, rd=350.0):
@@ -156,7 +165,7 @@ class ModelTournament:
     def __init__(self,
                  training_dir: Path,
                  device: str = 'cpu',
-                 games_per_match: int = 15,
+                 games_per_match: int = 50,
                  temperature: float = 0.1):
         """
         Initialize tournament manager.
@@ -171,6 +180,9 @@ class ModelTournament:
         self.device = device
         self.games_per_match = games_per_match
         self.temperature = temperature
+        self.latest_summary_stats: Dict[str, Dict] = {}   # NEW
+        self._pair_results: Dict[Tuple[str, str], Dict[str, int]] = {}
+
 
         # Initialize ELO tracker
         #self.elo_tracker = EloTracker(self.training_dir)
@@ -278,8 +290,69 @@ class ModelTournament:
             avg_game_length=total_moves / self.games_per_match if self.games_per_match > 0 else 0
         )
 
+        pair = tuple(sorted((white_id, black_id)))
+        if pair not in self._pair_results:
+            # wins, draws are always *from the perspective of the first element in `pair`*
+            self._pair_results[pair] = {'wins_a': 0, 'wins_b': 0, 'draws': 0}
+
+        if pair[0] == white_id:
+            self._pair_results[pair]['wins_a'] += match_result.white_wins
+            self._pair_results[pair]['wins_b'] += match_result.black_wins
+        else:
+            self._pair_results[pair]['wins_a'] += match_result.black_wins
+            self._pair_results[pair]['wins_b'] += match_result.white_wins
+
+        self._pair_results[pair]['draws'] += match_result.draws
+
         self.logger.debug(f"Match complete: White: {white_wins}, Black: {black_wins}, Draws: {draws}")
         return match_result
+
+    def get_head_to_head(self, model_a: str, model_b: str) -> Tuple[int, int]:
+        """
+        Return (wins_by_A, total_games_between_A_and_B).
+        model_a and model_b are expected in the format "iteration_X".
+        The internal storage uses keys like "checkpoint_iteration_X".
+        If the pair never met, return (0, 0) so the supervisor can decide what to do.
+        """
+        # Construct the keys used internally for storage
+        # Example: model_a="iteration_1" -> key_a="checkpoint_iteration_1"
+        try:
+            # Extract the iteration number from the input IDs
+            iter_a = model_a.split('_')[-1]
+            iter_b = model_b.split('_')[-1]
+            # Construct the keys as they are stored in _pair_results
+            key_a = f"checkpoint_iteration_{iter_a}"
+            key_b = f"checkpoint_iteration_{iter_b}"
+        except IndexError:
+            # Handle cases where the input ID format is unexpected
+            self.logger.error(f"Could not parse iteration numbers from model IDs: {model_a}, {model_b}")
+            return 0, 0  # Cannot proceed if IDs are malformed
+
+        # Use the constructed internal keys for lookup
+        pair = tuple(sorted((key_a, key_b)))
+
+        rec = self._pair_results.get(pair)
+        if rec is None:
+            # Log which pair was missed for debugging
+            self.logger.warning(
+                f"Head-to-head data not found for lookup pair: {pair}. Available stored pairs: {list(self._pair_results.keys())}")
+            return 0, 0
+
+        # Determine wins based on which key is first in the sorted tuple 'pair'
+        # Remember: rec['wins_a'] are wins for pair[0], rec['wins_b'] are wins for pair[1]
+        if pair[0] == key_a:
+            # model_a corresponds to the first element in the pair tuple
+            wins_a = rec['wins_a']
+        else:  # pair[0] must be key_b, so model_a corresponds to the second element
+            wins_a = rec['wins_b']
+
+        total = rec['wins_a'] + rec['wins_b'] + rec['draws']
+
+        # Optional: Add a debug log to confirm successful retrieval
+        self.logger.debug(
+            f"Head-to-head lookup for ({model_a}, {model_b}): Found pair {pair}, wins_a={wins_a}, total={total}")
+
+        return wins_a, total
 
     def run_full_round_robin_tournament(self, current_iteration: int):
         """
@@ -298,18 +371,29 @@ class ModelTournament:
         # Gather all model checkpoints up to current_iteration
         model_paths = []
         for i in range(current_iteration + 1):
-            ckpt = self.training_dir / f"checkpoint_iteration_{i}.pt"
+            # OLD PATH: Looks directly in self.training_dir
+            # ckpt = self.training_dir / f"checkpoint_iteration_{i}.pt"
+
+            # NEW PATH: Looks inside the iteration subdirectory
+            ckpt = self.training_dir / f"iteration_{i}" / f"checkpoint_iteration_{i}.pt"
+
             if ckpt.exists():
                 model_paths.append((i, ckpt))
+            else:
+                # Add a debug log to see which paths are being checked and missed
+                self.logger.debug(f"Checkpoint not found at expected path: {ckpt}")
 
         if len(model_paths) < 2:
-            self.logger.info("Skipping tournament - need at least 2 models.")
+            self.logger.warning(f"Skipping tournament - found only {len(model_paths)} models (need >= 2). Checked paths like: {self.training_dir / 'iteration_X' / 'checkpoint_iteration_X.pt'}")
+            # Log the paths it did find, if any
+            if model_paths:
+                 self.logger.warning(f"Found model paths: {[str(p[1]) for p in model_paths]}")
             return
 
         # Load all models into memory
         models = {}
         for iter_num, path in model_paths:
-            model_id = f"iteration_{iter_num}"
+            model_id = _canon(path)  # instead of f"iteration_{iter_num}"
             models[model_id] = self._load_model(path)
 
         # Reset Glicko ratings for all models by initializing a new tracker
@@ -368,6 +452,7 @@ class ModelTournament:
         for model_id in summary_stats.keys():
             summary_stats[model_id]['glicko_rating'] = self.glicko_tracker.get_rating(model_id)
             summary_stats[model_id]['rd'] = self.glicko_tracker.get_rd(model_id)
+        self.latest_summary_stats = summary_stats.copy()   # NEW
 
         # Save tournament results
         self.tournament_history[tournament_id] = {
@@ -528,20 +613,53 @@ class ModelTournament:
     #     self.logger.info("=" * 50)
 
     def get_model_performance(self, model_id: str) -> Dict:
-        """Get performance statistics for a specific model from the EloTracker's match history."""
-        matches = self.glicko_tracker.get_match_history(model_id)
-        total_games = sum(m.total_games() for m in matches)
-        wins = sum(
-            (m.white_wins if m.white_model == model_id else m.black_wins)
-            for m in matches
-        )
-        draws = sum(m.draws for m in matches)
+        """
+        Return wins / draws / losses and current rating for `model_id`
+        using the summary produced in the most recent tournament.
+        Fallback to the old (match‑history) method if we don't have stats yet.
+        """
+        if model_id in self.latest_summary_stats:
+            st = self.latest_summary_stats[model_id]
+            total_games = st['games']
+            wins        = st['wins']
+            draws       = st['draws']
+            losses      = st['losses']
+            rating      = self.glicko_tracker.get_rating(model_id)
+            return {
+                'total_games': total_games,
+                'wins':        wins,
+                'draws':       draws,
+                'losses':      losses,
+                'win_rate':    wins / total_games if total_games else 0.0,
+                'current_rating': rating
+            }
 
+        # ---------- fallback (old behaviour) ---------------------------------
+        matches = self.glicko_tracker.get_match_history(model_id)
+        total_games = sum(m['total_games'] for m in matches)
+        wins  = sum(m['white_wins'] if m['white_model']==model_id else m['black_wins']
+                    for m in matches)
+        draws = sum(m['draws'] for m in matches)
+        losses = total_games - wins - draws
         return {
             'total_games': total_games,
-            'wins': wins,
-            'draws': draws,
-            'losses': total_games - wins - draws,
-            'win_rate': wins / total_games if total_games > 0 else 0,
+            'wins':        wins,
+            'draws':       draws,
+            'losses':      losses,
+            'win_rate':    wins / total_games if total_games else 0.0,
             'current_rating': self.glicko_tracker.get_rating(model_id)
         }
+
+    def discover_models(self) -> None:
+        """
+        Populate an internal list of (iteration, checkpoint_path).
+        Called by TrainingSupervisor before each tournament.
+        """
+        self._model_paths = []          # clear cache
+        for ckpt in sorted(self.training_dir.glob("checkpoint_iteration_*.pt")):
+            # Extract iteration number
+            try:
+                iter_num = int(ckpt.stem.split("_")[-1])
+                self._model_paths.append((iter_num, ckpt))
+            except ValueError:
+                continue    # skip odd files
