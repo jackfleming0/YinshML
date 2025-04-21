@@ -100,34 +100,44 @@ class TemperatureConfig(BaseExperimentConfig):
 @dataclass
 class CombinedConfig(BaseExperimentConfig):
     """Configuration for combined experiments."""
-    # Learning rate params
+
+    # ───────── existing fields ────────────────────────────────────────────
     lr: float
     weight_decay: float
     batch_size: int
     lr_schedule: str = "constant"
     warmup_steps: int = 0
 
-    # MCTS params
+    # MCTS search quality
     num_simulations: int = 100
+    late_simulations: int = 100          # ← NEW  (after switch‑ply)
+    simulation_switch_ply: int = 20      # ← NEW
     c_puct: float = 1.0
     dirichlet_alpha: float = 0.3
     value_weight: float = 1.0
 
-    # Temperature params
+    # Temperature schedule
     initial_temp: float = 1.0
     final_temp: float = 0.2
     temp_schedule: str = "linear"
-    temp_decay_half_life: float = 0.5 # Add this
-    temp_start_decay_at: float = 0.5 # Add this
-    value_head_lr_factor: float = 5.0  # Add this line
-    value_loss_weights: Tuple[float, float] = (0.5, 0.5) # Add this line - equal weights to start
+    temp_clamp_fraction: float = 0.60    # ← NEW  (clamp after 60 % of anneal steps)
+    temp_decay_half_life: float = 0.5
+    temp_start_decay_at: float = 0.5
+
+    # Value‑head
+    value_head_lr_factor: float = 5.0
+    value_loss_weights: Tuple[float, float] = (0.5, 0.5)
+
     max_depth: int = 20
 
     def __init__(self,
                  lr: float,
                  weight_decay: float,
                  batch_size: int,
+                 # --------- existing kwargs ---------------------------------
                  num_simulations: int = 100,
+                 late_simulations: int = 100,           # NEW
+                 simulation_switch_ply: int = 20,       # NEW
                  c_puct: float = 1.0,
                  dirichlet_alpha: float = 0.3,
                  value_weight: float = 1.0,
@@ -136,29 +146,44 @@ class CombinedConfig(BaseExperimentConfig):
                  lr_schedule: str = "constant",
                  temp_schedule: str = "linear",
                  warmup_steps: int = 0,
-                 temp_decay_half_life: float = 0.5,  # Add this
-                 temp_start_decay_at: float = 0.5,  # Add this
-                 value_head_lr_factor: float = 5.0,  # Add this line
-                 value_loss_weights: Tuple[float, float] = (0.5, 0.5),  # Add this line
+                 temp_clamp_fraction: float = 0.60,     # NEW
+                 temp_decay_half_life: float = 0.5,
+                 temp_start_decay_at: float = 0.5,
+                 value_head_lr_factor: float = 5.0,
+                 value_loss_weights: Tuple[float, float] = (0.5, 0.5),
                  max_depth: int = 20,
                  **kwargs):
+        # Let BaseExperimentConfig initialise common metadata
         super().__init__(**kwargs)
+
+        # ---------- store fields -------------------------------------------
         self.lr = lr
         self.weight_decay = weight_decay
         self.batch_size = batch_size
-        self.lr_schedule = lr_schedule
-        self.warmup_steps = warmup_steps
+
+        # MCTS rollout scheduling
         self.num_simulations = num_simulations
+        self.late_simulations = late_simulations
+        self.simulation_switch_ply = simulation_switch_ply
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.value_weight = value_weight
+
+        # Temperature
         self.initial_temp = initial_temp
         self.final_temp = final_temp
         self.temp_schedule = temp_schedule
+        self.temp_clamp_fraction = temp_clamp_fraction
         self.temp_decay_half_life = temp_decay_half_life
         self.temp_start_decay_at = temp_start_decay_at
-        self.value_head_lr_factor = value_head_lr_factor  # Add this line
-        self.value_loss_weights = value_loss_weights # Add this line
+
+        # Optimisation
+        self.lr_schedule = lr_schedule
+        self.warmup_steps = warmup_steps
+        self.value_head_lr_factor = value_head_lr_factor
+        self.value_loss_weights = value_loss_weights
+
+        # Misc
         self.max_depth = max_depth
 
 # Experiment configurations
@@ -1016,9 +1041,40 @@ COMBINED_EXPERIMENTS = {
         temp_start_decay_at=0.25
     ),
 
+    "041725_balanced": CombinedConfig(
+        #------Self Play------
+        num_iterations=15,
+        games_per_iteration=800,
+        num_simulations=120,
+        late_simulations=60,
+        c_puct=2.5,
+        dirichlet_alpha=0.17,
+
+        #-----Training Loop------
+        epochs_per_iteration=8,
+        batches_per_epoch=60,
+        batch_size=512,
+
+        #----Optimizer------
+        lr=6e-4,
+        value_head_lr_factor=6.0,  # Value head learning rate will be lr * value_head_lr_factor
+        weight_decay=1e-4,
+        lr_schedule="cosine",
+        warmup_steps=2000,
+
+        #------Loss Weights-----
+        value_weight=1.0,
+        value_loss_weights=(0.5, 0.5),  # Add this line
+
+        #-----Temperature parameters------
+        initial_temp=1.6,
+        final_temp=0.15,
+        temp_schedule="cosine"
+    ),
+
     "separate_value_head_smoke": CombinedConfig(
         # Training parameters (no changes)
-        num_iterations=3,
+        num_iterations=5,
         games_per_iteration=2,
         epochs_per_iteration=2,
         batches_per_epoch=2,

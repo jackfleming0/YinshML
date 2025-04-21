@@ -6,6 +6,8 @@ from pathlib import Path
 import logging
 from typing import Dict, List, Optional
 import torch
+from collections import defaultdict
+
 
 from yinsh_ml.utils.mcts_metrics import MCTSMetrics
 from yinsh_ml.game.moves import Move
@@ -20,6 +22,7 @@ from yinsh_ml.training.self_play import SelfPlay
 from yinsh_ml.utils.tournament import ModelTournament
 from yinsh_ml.utils.metrics_logger import MetricsLogger
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
+from yinsh_ml.training.supervisor import TrainingSupervisor
 
 
 from experiments.config import (
@@ -31,6 +34,43 @@ from experiments.config import (
     TemperatureConfig,
     CombinedConfig
 )
+
+from dataclasses import asdict
+
+def _supervisor_kwargs_from_config(cfg: object) -> dict:
+    """
+    Convert any experiment‑config dataclass into kwargs for TrainingSupervisor.
+    Works with CombinedConfig, LearningRateConfig, MCTSConfig, …
+    """
+
+    # Grab every field as a plain dict
+    d = asdict(cfg)          # requires your config classes to be @dataclass;
+                             # if they aren’t, just use cfg.__dict__
+
+    # Field‑name translation (config → supervisor / trainer)
+    rename = {
+        "num_simulations"  : "mcts_simulations",
+        "lr"               : "base_lr",                  # we’ll pass this through mode_settings
+        "value_weight"     : "value_weight",            # stays the same
+        "warmup_steps"     : "warmup_steps",
+    }
+
+    for old, new in rename.items():
+        if old in d:
+            d[new] = d.pop(old)
+
+    # The supervisor already forwards **mode_settings to SelfPlay & Trainer,
+    # so anything extra (dirichlet_alpha, late_simulations, lr_schedule …)
+    # can simply remain in the dict.
+    #
+    # We *do* need to ensure the three canonical loop controls are present:
+    d.setdefault("num_iterations",        10)
+    d.setdefault("games_per_iteration",   100)
+    d.setdefault("epochs_per_iteration",  5)
+    #also batch size
+    d.setdefault("batch_size", 256)  # ensure the key is present
+
+    return d
 
 
 class ExperimentRunner:
@@ -106,7 +146,7 @@ class ExperimentRunner:
         self.tournament_manager = ModelTournament(
             training_dir=self.checkpoint_dir / experiment_type / config_name,
             device=self.device,
-            games_per_match=15,
+            games_per_match=50,
             temperature=0.2
         )
 
@@ -172,502 +212,576 @@ class ExperimentRunner:
             return network
         return None
 
-    def _run_learning_rate_experiment(self, config: LearningRateConfig, config_name: str) -> Dict:
-        """Run learning rate experiment."""
-        metrics = {
-            "policy_losses": [],
-            "value_losses": [],
-            "elo_changes": [],
-            "tournament_elo": [],
-            "game_lengths": [],
-            "timestamps": [],
-            "value_accuracies": [],
-            "move_accuracies": [],
-            "policy_entropy": []
-        }
+    # def _run_learning_rate_experiment(self, config: LearningRateConfig, config_name: str) -> Dict:
+    #     """Run learning rate experiment."""
+    #     metrics = {
+    #         "policy_losses": [],
+    #         "value_losses": [],
+    #         "elo_changes": [],
+    #         "tournament_elo": [],
+    #         "game_lengths": [],
+    #         "timestamps": [],
+    #         "value_accuracies": [],
+    #         "move_accuracies": [],
+    #         "policy_entropy": []
+    #     }
+    #
+    #     print(f"\nStarting learning rate experiment with config: {config}")
+    #
+    #     # Initialize model and trainer
+    #     print("Initializing model and trainer...")
+    #
+    #     network = NetworkWrapper(device=self.device)
+    #     trainer = YinshTrainer(network, device=self.device)
+    #
+    #     # Set learning rate configuration
+    #     trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
+    #     trainer.value_optimizer.param_groups[0]['lr'] = config.lr * 0.1  # Value head uses lower lr
+    #
+    #     # Set weight decay
+    #     trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay
+    #     trainer.value_optimizer.param_groups[0][
+    #         'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
+    #
+    #     for iteration in range(config.num_iterations):
+    #         # Tell metrics logger we're starting a new iteration
+    #         self.metrics_logger.start_iteration(iteration)
+    #         start_time = time.time()
+    #         print(f"\nIteration {iteration + 1}/{config.num_iterations}")
+    #
+    #         # Generate self-play games
+    #         print(f"Generating {config.games_per_iteration} self-play games...")
+    #
+    #         self._current_selfplay = SelfPlay(
+    #             network=network,
+    #         #    num_workers=self._get_optimal_workers(), # 4 on local, will use more cores on cloud compute
+    #             num_simulations=100
+    #         )
+    #         self._current_selfplay.current_iteration = iteration
+    #
+    #         games = self._current_selfplay.generate_games(num_games=config.games_per_iteration)
+    #
+    #         # Rest of the method remains the same...
+    #         # Add games to trainer's experience
+    #         print("Adding games to trainer's experience...")
+    #
+    #         for states, policies, outcome in games:
+    #             trainer.add_game_experience(states, policies, outcome)
+    #
+    #         # Train on games
+    #         print(f"Training for {config.epochs_per_iteration} epochs...")
+    #
+    #         for _ in range(config.epochs_per_iteration):
+    #             actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+    #             epoch_stats = trainer.train_epoch(
+    #                 batch_size=config.batch_size,
+    #                 batches_per_epoch=actual_batches
+    #             )
+    #
+    #         print("Training completed")
+    #
+    #         # Get the losses from trainer's stored metrics
+    #         policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
+    #         value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
+    #
+    #         # Evaluate against baseline
+    #         print("Evaluating against baseline...")
+    #         elo_change = self._evaluate_against_baseline(network, quick_eval=True)
+    #
+    #         # Save checkpoint for this iteration
+    #         self._save_checkpoint(network, "learning_rate", config_name, iteration)
+    #
+    #         # Run tournament evaluation if we have previous iterations
+    #         tournament_elo = 0.0  # Default if no tournament run
+    #         if iteration > 0:
+    #             print("Running tournament evaluation...")
+    #             self.tournament_manager.run_full_round_robin_tournament(
+    #                 experiment_type="learning_rate",
+    #                 config_name=config_name,
+    #                 current_iteration=iteration
+    #             )
+    #             tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+    #             tournament_elo = tournament_stats['current_rating']
+    #             print(f"Tournament ELO: {tournament_elo:+.1f}")
+    #
+    #
+    #         # Record metrics
+    #         metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+    #         metrics["value_losses"].append(float(epoch_stats['value_loss']))
+    #         metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+    #         metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+    #         metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
+    #         metrics["elo_changes"].append(float(elo_change))
+    #         metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
+    #         metrics["timestamps"].append(time.time() - start_time)
+    #
+    #         # Log progress
+    #         self.logger.info(
+    #             f"Iteration {iteration + 1}/{config.num_iterations}: "
+    #             f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, "
+    #             f"ELO Change: {elo_change:+.1f}"
+    #         )
+    #
+    #     # After training completes
+    #     # Save value head metrics
+    #     value_metrics_path = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_value_metrics.json"
+    #     value_metrics_plots = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_value_diagnostics.png"
+    #
+    #     trainer.value_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
+    #
+    #     with open(value_metrics_path, 'w') as f:
+    #         json.dump(trainer.value_metrics.generate_report(), f, indent=2)
+    #
+    #     self.logger.info(f"Value head metrics saved to {value_metrics_path}")
+    #     self.logger.info(f"Value head diagnostics plotted to {value_metrics_plots}")
+    #
+    #
+    #     return metrics
+    #
+    # def _run_mcts_experiment(self, config: MCTSConfig, config_name: str) -> Dict:
+    #     """Run MCTS simulation experiment."""
+    #     metrics = {
+    #         "policy_losses": [],
+    #         "value_losses": [],
+    #         "elo_changes": [],
+    #         "tournament_elo": [],
+    #         "game_lengths": [],
+    #         "timestamps": [],
+    #         "value_accuracies": [],
+    #         "move_accuracies": [],
+    #         "policy_entropy": []
+    #     }
+    #     # Initialize model and trainer
+    #     network = NetworkWrapper(device=self.device)
+    #     trainer = YinshTrainer(network, device=self.device)
+    #
+    #     for iteration in range(config.num_iterations):
+    #         # Tell metrics logger we're starting a new iteration
+    #         self.metrics_logger.start_iteration(iteration)
+    #         start_time = time.time()
+    #
+    #         # Generate games with specified MCTS depth
+    #         self_play = SelfPlay(
+    #             network=network,
+    #         #     num_workers=4,
+    #             num_simulations=config.num_simulations,
+    #             initial_temp=1.0,  # Use your default values
+    #             final_temp=0.2,
+    #             annealing_steps=30
+    #         )
+    #         self_play.current_iteration = iteration
+    #
+    #         games = self_play.generate_games(num_games=config.games_per_iteration)
+    #
+    #         # Add games to trainer's experience
+    #         for states, policies, outcome in games:
+    #             trainer.add_game_experience(states, policies, outcome)
+    #
+    #         # Train for specified epochs
+    #         for _ in range(config.epochs_per_iteration):
+    #             actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+    #             epoch_stats = trainer.train_epoch(
+    #                 batch_size=config.batch_size,
+    #                 batches_per_epoch=actual_batches
+    #             )
+    #
+    #         # Get the latest losses
+    #         policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
+    #         value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
+    #
+    #         # Evaluate against baseline
+    #         elo_change = self._evaluate_against_baseline(network)
+    #
+    #         # Save checkpoint for this iteration
+    #         self._save_checkpoint(network, "mcts", config_name, iteration)
+    #
+    #         # Run tournament evaluation if we have previous iterations
+    #         tournament_elo = 0.0  # Default if no tournament run
+    #         if iteration > 0:
+    #             print("Running tournament evaluation...")
+    #             self.tournament_manager.run_full_round_robin_tournament(
+    #                 experiment_type="mcts",
+    #                 config_name=config_name,
+    #                 current_iteration=iteration
+    #             )
+    #             tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+    #             tournament_elo = tournament_stats['current_rating']
+    #             print(f"Tournament ELO: {tournament_elo:+.1f}")
+    #
+    #
+    #         # Record metrics
+    #         metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+    #         metrics["value_losses"].append(float(epoch_stats['value_loss']))
+    #         metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+    #         metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+    #         metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
+    #         metrics["elo_changes"].append(float(elo_change))
+    #         metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
+    #         metrics["timestamps"].append(time.time() - start_time)
+    #
+    #         self.logger.info(
+    #             f"Iteration {iteration + 1}/{config.num_iterations}: "
+    #             f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, "
+    #             f"ELO Change: {elo_change:+.1f}"
+    #         )
+    #
+    #     return metrics
+    #
+    # def _run_temperature_experiment(self, config: TemperatureConfig, config_name: str) -> Dict:
+    #     """Run temperature annealing experiment."""
+    #     metrics = {
+    #         "policy_losses": [],
+    #         "value_losses": [],
+    #         "elo_changes": [],
+    #         "tournament_elo": [],
+    #         "game_lengths": [],
+    #         "timestamps": [],
+    #         "value_accuracies": [],
+    #         "move_accuracies": [],
+    #         "policy_entropy": [],
+    #         "move_entropies": []
+    #     }
+    #
+    #     # Initialize model and trainer
+    #     network = NetworkWrapper(device=self.device)
+    #     trainer = YinshTrainer(network, device=self.device)
+    #
+    #     for iteration in range(config.num_iterations):
+    #         # Tell metrics logger we're starting a new iteration
+    #         self.metrics_logger.start_iteration(iteration)
+    #         start_time = time.time()
+    #
+    #         # Generate self-play games with temperature configuration
+    #         self_play = SelfPlay(
+    #             network=network,
+    #         #     num_workers=4,
+    #             num_simulations=config.mcts_simulations,
+    #             initial_temp=config.initial_temp,
+    #             final_temp=config.final_temp,
+    #             annealing_steps=config.annealing_steps
+    #         )
+    #         self_play.current_iteration = iteration
+    #
+    #
+    #         games = self_play.generate_games(num_games=config.games_per_iteration)
+    #
+    #         # Add games to trainer's experience
+    #         for states, policies, outcome in games:
+    #             trainer.add_game_experience(states, policies, outcome)
+    #
+    #         # Train for specified epochs
+    #         for _ in range(config.epochs_per_iteration):
+    #             actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
+    #             epoch_stats = trainer.train_epoch(
+    #                 batch_size=config.batch_size,
+    #                 batches_per_epoch=actual_batches
+    #             )
+    #
+    #         # Get the latest losses
+    #         policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
+    #         value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
+    #
+    #         # Calculate average move entropy for this iteration
+    #         move_entropy = np.mean([
+    #             -np.sum(p * np.log(p + 1e-8))
+    #             for game in games
+    #             for p in game[1]  # game[1] contains policy vectors
+    #         ])
+    #
+    #         # Evaluate against baseline
+    #         elo_change = self._evaluate_against_baseline(network)
+    #
+    #         # Save checkpoint for this iteration
+    #         self._save_checkpoint(network, "temperature", config_name, iteration)
+    #
+    #         # Run tournament evaluation if we have previous iterations
+    #         tournament_elo = 0.0  # Default if no tournament run
+    #         if iteration > 0:
+    #             print("Running tournament evaluation...")
+    #             self.tournament_manager.run_full_round_robin_tournament(
+    #                 experiment_type="temperature",
+    #                 config_name=config_name,
+    #                 current_iteration=iteration
+    #             )
+    #             tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+    #             tournament_elo = tournament_stats['current_rating']
+    #             print(f"Tournament ELO: {tournament_elo:+.1f}")
+    #
+    #
+    #         # Record metrics
+    #         metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+    #         metrics["value_losses"].append(float(epoch_stats['value_loss']))
+    #         metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+    #         metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+    #         metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
+    #         metrics["elo_changes"].append(float(elo_change))
+    #         metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
+    #         metrics["timestamps"].append(time.time() - start_time)
+    #
+    #         # Log progress
+    #         self.logger.info(
+    #             f"Iteration {iteration + 1}/{config.num_iterations}: "
+    #             f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, "
+    #             f"ELO Change: {elo_change:+.1f}, Move Entropy: {move_entropy:.3f}"
+    #         )
+    #
+    #         # Early stopping check
+    #         if self._should_stop_early(metrics):
+    #             self.logger.info("Early stopping triggered")
+    #             break
+    #
+    #     return metrics
+    #
+    # def _run_combined_experiment(self, config: CombinedConfig, config_name: str) -> Dict:
+    #     """Run combined experiment using multiple parameter types."""
+    #     metrics = {
+    #         "policy_losses": [],
+    #         "value_losses": [],
+    #         "elo_changes": [],
+    #         "tournament_elo": [],
+    #         "game_lengths": [],
+    #         "timestamps": [],
+    #         "value_accuracies": [],
+    #         "move_accuracies": [],
+    #         "policy_entropy": []
+    #     }
+    #
+    #     experiment_dir = self.checkpoint_dir / "combined_experiments" / config_name
+    #     experiment_dir.mkdir(parents=True, exist_ok=True)
+    #     replay_buffer_file = experiment_dir / "replay_buffer.pkl"
+    #
+    #     print(f"Starting combined experiment with config: {config}")
+    #     total_start_time = time.time()
+    #
+    #     # Initialize model and trainer
+    #     print("Initializing model and trainer...")
+    #     network = NetworkWrapper(device=self.device)
+    #     trainer = YinshTrainer(network,
+    #                            device=self.device,
+    #                            l2_reg=0.0,
+    #                            metrics_logger=self.metrics_logger,
+    #                            value_head_lr_factor=config.value_head_lr_factor,  # Pass the factor
+    #                            value_loss_weights=config.value_loss_weights,  # Pass the weights
+    #                            replay_buffer_path=str(replay_buffer_file))
+    #
+    #     # Set learning rate configuration for both optimizers
+    #     trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
+    #     trainer.value_optimizer.param_groups[0][
+    #         'lr'] = config.lr * config.value_head_lr_factor  # Value head uses higher lr
+    #
+    #     # Set weight decay for both optimizers
+    #     trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay
+    #     trainer.value_optimizer.param_groups[0][
+    #         'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
+    #
+    #     for iteration in range(config.num_iterations):
+    #         # Create experiment-specific checkpoint directory
+    #         iteration_dir = self.checkpoint_dir / config_name / f"iteration_{iteration}"
+    #         iteration_dir.mkdir(parents=True, exist_ok=True)
+    #
+    #         # Create experiment-specific metrics directory
+    #         metrics_dir = self.results_dir / "combined" / config_name / f"iteration_{iteration}" / "metrics"
+    #         metrics_dir.mkdir(parents=True, exist_ok=True)
+    #
+    #         # Tell metrics logger we're starting a new iteration
+    #         self.metrics_logger.start_iteration(iteration)
+    #         iter_start_time = time.time()
+    #         print(f"\nIteration {iteration + 1}/{config.num_iterations}")
+    #
+    #         # Generate self-play games with MCTS parameters
+    #         print(f"Generating {config.games_per_iteration} self-play games...")
+    #         game_start_time = time.time()
+    #         self_play = SelfPlay(
+    #             network=network,
+    #             metrics_logger=self.metrics_logger,
+    #             num_simulations=config.num_simulations,
+    #             initial_temp=config.initial_temp,
+    #             final_temp=config.final_temp,
+    #             c_puct=config.c_puct,
+    #             max_depth=config.max_depth
+    #         )
+    #         self_play.current_iteration = iteration
+    #
+    #         games = self_play.generate_games(num_games=config.games_per_iteration)
+    #         print(f"Games generated in {time.time() - game_start_time:.2f} seconds")
+    #
+    #         # Save Value Head Metrics and plots
+    #         value_metrics_path = metrics_dir / "value_metrics.json"
+    #         self.value_head_metrics.save(str(value_metrics_path))
+    #         self.logger.info(f"Value head metrics saved to {value_metrics_path}")
+    #         value_metrics_plots = metrics_dir / "value_head_diagnostics.png"
+    #         self.value_head_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
+    #
+    #         # Save MCTS Metrics if they exist
+    #         if hasattr(self_play.mcts, 'metrics') and self_play.mcts.metrics:
+    #             mcts_metrics_path = iteration_dir / "mcts_metrics.json"
+    #             self_play.mcts.metrics.save(str(mcts_metrics_path))
+    #             self.logger.info(f"MCTS metrics saved to {mcts_metrics_path}")
+    #
+    #         # Add games to trainer's experience
+    #         print("Adding games to trainer's experience...")
+    #         exp_start_time = time.time()
+    #         for states, policies, outcome, game_history in games:
+    #             # Debug: print lengths of states and game_history
+    #             print(
+    #                 f"[DEBUG] Adding game experience: len(states)={len(states)}, len(game_history)={len(game_history)}")
+    #
+    #             # Check if game_history is available and has a 'state' field in its last entry
+    #             if game_history and isinstance(game_history, list) and len(game_history) > 0 and 'state' in \
+    #                     game_history[-1]:
+    #                 candidate = game_history[-1]['state']
+    #                 # If candidate is already a GameState, use it directly; otherwise, decode it.
+    #                 if isinstance(candidate, GameState):
+    #                     final_state = candidate
+    #                     print(
+    #                         f"[DEBUG] Using GameState from game_history: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
+    #                 else:
+    #                     final_state = trainer.state_encoder.decode_state(candidate)
+    #                     print(
+    #                         f"[DEBUG] Decoded terminal state from game_history: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
+    #             else:
+    #                 final_state = self.get_terminal_state(states, trainer.state_encoder)
+    #                 print(
+    #                     f"[DEBUG] Using scanned terminal state: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
+    #
+    #             final_white_score = final_state.white_score
+    #             final_black_score = final_state.black_score
+    #             trainer.add_game_experience(states, policies, (final_white_score, final_black_score))
+    #
+    #         print(f"Experience added in {time.time() - exp_start_time:.2f} seconds")
+    #
+    #         # Train on games
+    #         print(f"Training for {config.epochs_per_iteration} epochs...")
+    #         train_start_time = time.time()
+    #         for _ in range(config.epochs_per_iteration):
+    #             actual_batches = config.batches_per_epoch
+    #             ring_weight = 1.0 + iteration * 0.0125  # Schedule: ring placement weight increases as iterations progress.
+    #             epoch_stats = trainer.train_epoch(
+    #                 batch_size=config.batch_size,
+    #                 batches_per_epoch=actual_batches,
+    #                 ring_placement_weight=ring_weight
+    #             )
+    #         print(f"Training completed in {time.time() - train_start_time:.2f} seconds")
+    #
+    #         # Get the latest losses
+    #         policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
+    #         value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
+    #
+    #         # Evaluate against baseline
+    #         print("Evaluating against baseline...")
+    #         eval_start_time = time.time()
+    #         elo_change = self._evaluate_against_baseline(network, quick_eval=True)
+    #         print(f"Evaluation completed in {time.time() - eval_start_time:.2f} seconds")
+    #
+    #         # Save checkpoint for this iteration
+    #         self._save_checkpoint(network, "combined", config_name, iteration)
+    #
+    #         # Save replay buffer to disk
+    #         trainer.experience.save_buffer(str(replay_buffer_file))
+    #
+    #         # Run tournament evaluation if applicable
+    #         tournament_elo = 0.0  # Default if no tournament run
+    #         if iteration > 0:
+    #             print("Running tournament evaluation...")
+    #             self.tournament_manager.run_full_round_robin_tournament(current_iteration=iteration)
+    #             tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
+    #             tournament_elo = tournament_stats['current_rating']
+    #             print(f"Tournament ELO: {tournament_elo:+.1f}")
+    #
+    #         # Record metrics
+    #         metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
+    #         metrics["value_losses"].append(float(epoch_stats['value_loss']))
+    #         metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
+    #         metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
+    #         metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
+    #         metrics["elo_changes"].append(float(elo_change))
+    #         metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
+    #         metrics["timestamps"].append(time.time() - iter_start_time)
+    #
+    #         # Save and plot metrics for this iteration
+    #         self.metrics_logger.summarize_iteration()
+    #         self.metrics_logger.plot_current_metrics()
+    #         self.metrics_logger.save_iteration()
+    #
+    #         print(f"Iteration completed in {time.time() - iter_start_time:.2f} seconds")
+    #         print(f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, ELO Change: {elo_change:+.1f}")
+    #
+    #     total_time = time.time() - total_start_time
+    #     print(f"\nExperiment completed in {total_time / 60:.2f} minutes")
+    #     return metrics
 
-        print(f"\nStarting learning rate experiment with config: {config}")
+    def _run_combined_experiment(self, cfg: CombinedConfig, name: str):
+        return self._run_supervised_experiment(cfg, name, "combined")
 
-        # Initialize model and trainer
-        print("Initializing model and trainer...")
+    def _run_learning_rate_experiment(self, cfg: LearningRateConfig, name: str):
+        return self._run_supervised_experiment(cfg, name, "learning_rate")
 
+    def _run_mcts_experiment(self, cfg: MCTSConfig, name: str):
+        return self._run_supervised_experiment(cfg, name, "mcts")
+
+    def _run_temperature_experiment(self, cfg: TemperatureConfig, name: str):
+        return self._run_supervised_experiment(cfg, name, "temperature")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    #   REPLACE _run_combined_experiment  (and the three siblings)   WITH THIS ONE
+    # ─────────────────────────────────────────────────────────────────────────────
+    def _run_supervised_experiment(self,
+                                   cfg: object,
+                                   cfg_name: str,
+                                   experiment_type: str) -> Dict[str, List]:
+        """
+        Generic driver:  build a TrainingSupervisor from *cfg* and let it
+        execute the canonical gate‑aware loop.  Works for combined/LR/MCTS/…
+        """
+
+        # ── paths ----------------------------------------------------------------
+        exp_root = self.checkpoint_dir / experiment_type / cfg_name
+        exp_root.mkdir(parents=True, exist_ok=True)
+
+        # ── build network & supervisor ------------------------------------------
         network = NetworkWrapper(device=self.device)
-        trainer = YinshTrainer(network, device=self.device)
+        sup_kw = _supervisor_kwargs_from_config(cfg)
+        supervisor = TrainingSupervisor(
+            network=network,
+            save_dir=str(exp_root),
+            device=self.device,
+            **sup_kw  # ← everything else forwarded
+        )
 
-        # Set learning rate configuration
-        trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
-        trainer.value_optimizer.param_groups[0]['lr'] = config.lr * 0.1  # Value head uses lower lr
+        metrics: Dict[str, List] = defaultdict(list)
 
-        # Set weight decay
-        trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay
-        trainer.value_optimizer.param_groups[0][
-            'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
+        # ── main loop ------------------------------------------------------------
+        for it in range(cfg.num_iterations):
+            self.logger.info(f"[{experiment_type}/{cfg_name}] iteration {it + 1}/{cfg.num_iterations}")
 
-        for iteration in range(config.num_iterations):
-            # Tell metrics logger we're starting a new iteration
-            self.metrics_logger.start_iteration(iteration)
-            start_time = time.time()
-            print(f"\nIteration {iteration + 1}/{config.num_iterations}")
-
-            # Generate self-play games
-            print(f"Generating {config.games_per_iteration} self-play games...")
-
-            self._current_selfplay = SelfPlay(
-                network=network,
-            #    num_workers=self._get_optimal_workers(), # 4 on local, will use more cores on cloud compute
-                num_simulations=100
-            )
-            self._current_selfplay.current_iteration = iteration
-
-            games = self._current_selfplay.generate_games(num_games=config.games_per_iteration)
-
-            # Rest of the method remains the same...
-            # Add games to trainer's experience
-            print("Adding games to trainer's experience...")
-
-            for states, policies, outcome in games:
-                trainer.add_game_experience(states, policies, outcome)
-
-            # Train on games
-            print(f"Training for {config.epochs_per_iteration} epochs...")
-
-            for _ in range(config.epochs_per_iteration):
-                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
-                epoch_stats = trainer.train_epoch(
-                    batch_size=config.batch_size,
-                    batches_per_epoch=actual_batches
-                )
-
-            print("Training completed")
-
-            # Get the losses from trainer's stored metrics
-            policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
-            value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
-
-            # Evaluate against baseline
-            print("Evaluating against baseline...")
-            elo_change = self._evaluate_against_baseline(network, quick_eval=True)
-
-            # Save checkpoint for this iteration
-            self._save_checkpoint(network, "learning_rate", config_name, iteration)
-
-            # Run tournament evaluation if we have previous iterations
-            tournament_elo = 0.0  # Default if no tournament run
-            if iteration > 0:
-                print("Running tournament evaluation...")
-                self.tournament_manager.run_full_round_robin_tournament(
-                    experiment_type="learning_rate",
-                    config_name=config_name,
-                    current_iteration=iteration
-                )
-                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
-                tournament_elo = tournament_stats['current_rating']
-                print(f"Tournament ELO: {tournament_elo:+.1f}")
-
-
-            # Record metrics
-            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
-            metrics["value_losses"].append(float(epoch_stats['value_loss']))
-            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
-            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
-            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
-            metrics["elo_changes"].append(float(elo_change))
-            metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
-            metrics["timestamps"].append(time.time() - start_time)
-
-            # Log progress
-            self.logger.info(
-                f"Iteration {iteration + 1}/{config.num_iterations}: "
-                f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, "
-                f"ELO Change: {elo_change:+.1f}"
+            summary = supervisor.train_iteration(
+                num_games=cfg.games_per_iteration,
+                epochs=cfg.epochs_per_iteration
             )
 
-        # After training completes
-        # Save value head metrics
-        value_metrics_path = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_value_metrics.json"
-        value_metrics_plots = RESULTS_SUBDIRS[experiment_type] / f"{config_name}_value_diagnostics.png"
+            # ── quick bookkeeping for the caller --------------------------------
+            tr = summary['training']
+            eval = summary['evaluation']['tournament']
+            metr = summary['training_games']
+
+            metrics['policy_loss'].append(float(tr['policy_loss']))
+            metrics['value_loss'].append(float(tr['value_loss']))
+            metrics['win_rate'].append(float(metr['win_rate']))
+            metrics['tournament_elo'].append(float(eval['rating']))
+            metrics['tournament_win_rate'].append(float(eval['win_rate']))
+
+            # checkpoint already handled inside supervisor → nothing else to do
+
+        # ── persist metrics ------------------------------------------------------
+        out = self.results_dir / experiment_type / f"{cfg_name}_metrics.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w") as fp:
+            json.dump(metrics, fp, indent=2)
+        self.logger.info(f"Saved aggregate metrics → {out}")
+
+        metrics['policy_losses'] = supervisor.trainer.policy_losses
+        metrics['value_losses'] = supervisor.trainer.value_losses
 
-        trainer.value_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
-
-        with open(value_metrics_path, 'w') as f:
-            json.dump(trainer.value_metrics.generate_report(), f, indent=2)
-
-        self.logger.info(f"Value head metrics saved to {value_metrics_path}")
-        self.logger.info(f"Value head diagnostics plotted to {value_metrics_plots}")
-
-
-        return metrics
-
-    def _run_mcts_experiment(self, config: MCTSConfig, config_name: str) -> Dict:
-        """Run MCTS simulation experiment."""
-        metrics = {
-            "policy_losses": [],
-            "value_losses": [],
-            "elo_changes": [],
-            "tournament_elo": [],
-            "game_lengths": [],
-            "timestamps": [],
-            "value_accuracies": [],
-            "move_accuracies": [],
-            "policy_entropy": []
-        }
-        # Initialize model and trainer
-        network = NetworkWrapper(device=self.device)
-        trainer = YinshTrainer(network, device=self.device)
-
-        for iteration in range(config.num_iterations):
-            # Tell metrics logger we're starting a new iteration
-            self.metrics_logger.start_iteration(iteration)
-            start_time = time.time()
-
-            # Generate games with specified MCTS depth
-            self_play = SelfPlay(
-                network=network,
-            #     num_workers=4,
-                num_simulations=config.num_simulations,
-                initial_temp=1.0,  # Use your default values
-                final_temp=0.2,
-                annealing_steps=30
-            )
-            self_play.current_iteration = iteration
-
-            games = self_play.generate_games(num_games=config.games_per_iteration)
-
-            # Add games to trainer's experience
-            for states, policies, outcome in games:
-                trainer.add_game_experience(states, policies, outcome)
-
-            # Train for specified epochs
-            for _ in range(config.epochs_per_iteration):
-                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
-                epoch_stats = trainer.train_epoch(
-                    batch_size=config.batch_size,
-                    batches_per_epoch=actual_batches
-                )
-
-            # Get the latest losses
-            policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
-            value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
-
-            # Evaluate against baseline
-            elo_change = self._evaluate_against_baseline(network)
-
-            # Save checkpoint for this iteration
-            self._save_checkpoint(network, "mcts", config_name, iteration)
-
-            # Run tournament evaluation if we have previous iterations
-            tournament_elo = 0.0  # Default if no tournament run
-            if iteration > 0:
-                print("Running tournament evaluation...")
-                self.tournament_manager.run_full_round_robin_tournament(
-                    experiment_type="mcts",
-                    config_name=config_name,
-                    current_iteration=iteration
-                )
-                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
-                tournament_elo = tournament_stats['current_rating']
-                print(f"Tournament ELO: {tournament_elo:+.1f}")
-
-
-            # Record metrics
-            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
-            metrics["value_losses"].append(float(epoch_stats['value_loss']))
-            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
-            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
-            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
-            metrics["elo_changes"].append(float(elo_change))
-            metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
-            metrics["timestamps"].append(time.time() - start_time)
-
-            self.logger.info(
-                f"Iteration {iteration + 1}/{config.num_iterations}: "
-                f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, "
-                f"ELO Change: {elo_change:+.1f}"
-            )
-
-        return metrics
-
-    def _run_temperature_experiment(self, config: TemperatureConfig, config_name: str) -> Dict:
-        """Run temperature annealing experiment."""
-        metrics = {
-            "policy_losses": [],
-            "value_losses": [],
-            "elo_changes": [],
-            "tournament_elo": [],
-            "game_lengths": [],
-            "timestamps": [],
-            "value_accuracies": [],
-            "move_accuracies": [],
-            "policy_entropy": [],
-            "move_entropies": []
-        }
-
-        # Initialize model and trainer
-        network = NetworkWrapper(device=self.device)
-        trainer = YinshTrainer(network, device=self.device)
-
-        for iteration in range(config.num_iterations):
-            # Tell metrics logger we're starting a new iteration
-            self.metrics_logger.start_iteration(iteration)
-            start_time = time.time()
-
-            # Generate self-play games with temperature configuration
-            self_play = SelfPlay(
-                network=network,
-            #     num_workers=4,
-                num_simulations=config.mcts_simulations,
-                initial_temp=config.initial_temp,
-                final_temp=config.final_temp,
-                annealing_steps=config.annealing_steps
-            )
-            self_play.current_iteration = iteration
-
-
-            games = self_play.generate_games(num_games=config.games_per_iteration)
-
-            # Add games to trainer's experience
-            for states, policies, outcome in games:
-                trainer.add_game_experience(states, policies, outcome)
-
-            # Train for specified epochs
-            for _ in range(config.epochs_per_iteration):
-                actual_batches = 10 if config.batches_per_epoch > 10 else config.batches_per_epoch
-                epoch_stats = trainer.train_epoch(
-                    batch_size=config.batch_size,
-                    batches_per_epoch=actual_batches
-                )
-
-            # Get the latest losses
-            policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
-            value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
-
-            # Calculate average move entropy for this iteration
-            move_entropy = np.mean([
-                -np.sum(p * np.log(p + 1e-8))
-                for game in games
-                for p in game[1]  # game[1] contains policy vectors
-            ])
-
-            # Evaluate against baseline
-            elo_change = self._evaluate_against_baseline(network)
-
-            # Save checkpoint for this iteration
-            self._save_checkpoint(network, "temperature", config_name, iteration)
-
-            # Run tournament evaluation if we have previous iterations
-            tournament_elo = 0.0  # Default if no tournament run
-            if iteration > 0:
-                print("Running tournament evaluation...")
-                self.tournament_manager.run_full_round_robin_tournament(
-                    experiment_type="temperature",
-                    config_name=config_name,
-                    current_iteration=iteration
-                )
-                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
-                tournament_elo = tournament_stats['current_rating']
-                print(f"Tournament ELO: {tournament_elo:+.1f}")
-
-
-            # Record metrics
-            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
-            metrics["value_losses"].append(float(epoch_stats['value_loss']))
-            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
-            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
-            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
-            metrics["elo_changes"].append(float(elo_change))
-            metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
-            metrics["timestamps"].append(time.time() - start_time)
-
-            # Log progress
-            self.logger.info(
-                f"Iteration {iteration + 1}/{config.num_iterations}: "
-                f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, "
-                f"ELO Change: {elo_change:+.1f}, Move Entropy: {move_entropy:.3f}"
-            )
-
-            # Early stopping check
-            if self._should_stop_early(metrics):
-                self.logger.info("Early stopping triggered")
-                break
-
-        return metrics
-
-    def _run_combined_experiment(self, config: CombinedConfig, config_name: str) -> Dict:
-        """Run combined experiment using multiple parameter types."""
-        metrics = {
-            "policy_losses": [],
-            "value_losses": [],
-            "elo_changes": [],
-            "tournament_elo": [],
-            "game_lengths": [],
-            "timestamps": [],
-            "value_accuracies": [],
-            "move_accuracies": [],
-            "policy_entropy": []
-        }
-
-        experiment_dir = self.checkpoint_dir / "combined_experiments" / config_name
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-        replay_buffer_file = experiment_dir / "replay_buffer.pkl"
-
-        print(f"Starting combined experiment with config: {config}")
-        total_start_time = time.time()
-
-        # Initialize model and trainer
-        print("Initializing model and trainer...")
-        network = NetworkWrapper(device=self.device)
-        trainer = YinshTrainer(network,
-                               device=self.device,
-                               l2_reg=0.0,
-                               metrics_logger=self.metrics_logger,
-                               value_head_lr_factor=config.value_head_lr_factor,  # Pass the factor
-                               value_loss_weights=config.value_loss_weights,  # Pass the weights
-                               replay_buffer_path=str(replay_buffer_file))
-
-        # Set learning rate configuration for both optimizers
-        trainer.policy_optimizer.param_groups[0]['lr'] = config.lr
-        trainer.value_optimizer.param_groups[0][
-            'lr'] = config.lr * config.value_head_lr_factor  # Value head uses higher lr
-
-        # Set weight decay for both optimizers
-        trainer.policy_optimizer.param_groups[0]['weight_decay'] = config.weight_decay
-        trainer.value_optimizer.param_groups[0][
-            'weight_decay'] = config.weight_decay * 10  # Higher regularization for value head
-
-        for iteration in range(config.num_iterations):
-            # Create experiment-specific checkpoint directory
-            iteration_dir = self.checkpoint_dir / config_name / f"iteration_{iteration}"
-            iteration_dir.mkdir(parents=True, exist_ok=True)
-
-            # Create experiment-specific metrics directory
-            metrics_dir = self.results_dir / "combined" / config_name / f"iteration_{iteration}" / "metrics"
-            metrics_dir.mkdir(parents=True, exist_ok=True)
-
-            # Tell metrics logger we're starting a new iteration
-            self.metrics_logger.start_iteration(iteration)
-            iter_start_time = time.time()
-            print(f"\nIteration {iteration + 1}/{config.num_iterations}")
-
-            # Generate self-play games with MCTS parameters
-            print(f"Generating {config.games_per_iteration} self-play games...")
-            game_start_time = time.time()
-            self_play = SelfPlay(
-                network=network,
-                metrics_logger=self.metrics_logger,
-                num_simulations=config.num_simulations,
-                initial_temp=config.initial_temp,
-                final_temp=config.final_temp,
-                c_puct=config.c_puct,
-                max_depth=config.max_depth
-            )
-            self_play.current_iteration = iteration
-
-            games = self_play.generate_games(num_games=config.games_per_iteration)
-            print(f"Games generated in {time.time() - game_start_time:.2f} seconds")
-
-            # Save Value Head Metrics and plots
-            value_metrics_path = metrics_dir / "value_metrics.json"
-            self.value_head_metrics.save(str(value_metrics_path))
-            self.logger.info(f"Value head metrics saved to {value_metrics_path}")
-            value_metrics_plots = metrics_dir / "value_head_diagnostics.png"
-            self.value_head_metrics.plot_diagnostics(save_path=str(value_metrics_plots))
-
-            # Save MCTS Metrics if they exist
-            if hasattr(self_play.mcts, 'metrics') and self_play.mcts.metrics:
-                mcts_metrics_path = iteration_dir / "mcts_metrics.json"
-                self_play.mcts.metrics.save(str(mcts_metrics_path))
-                self.logger.info(f"MCTS metrics saved to {mcts_metrics_path}")
-
-            # Add games to trainer's experience
-            print("Adding games to trainer's experience...")
-            exp_start_time = time.time()
-            for states, policies, outcome, game_history in games:
-                # Debug: print lengths of states and game_history
-                print(
-                    f"[DEBUG] Adding game experience: len(states)={len(states)}, len(game_history)={len(game_history)}")
-
-                # Check if game_history is available and has a 'state' field in its last entry
-                if game_history and isinstance(game_history, list) and len(game_history) > 0 and 'state' in \
-                        game_history[-1]:
-                    candidate = game_history[-1]['state']
-                    # If candidate is already a GameState, use it directly; otherwise, decode it.
-                    if isinstance(candidate, GameState):
-                        final_state = candidate
-                        print(
-                            f"[DEBUG] Using GameState from game_history: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
-                    else:
-                        final_state = trainer.state_encoder.decode_state(candidate)
-                        print(
-                            f"[DEBUG] Decoded terminal state from game_history: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
-                else:
-                    final_state = self.get_terminal_state(states, trainer.state_encoder)
-                    print(
-                        f"[DEBUG] Using scanned terminal state: W={final_state.white_score}, B={final_state.black_score}, Terminal={final_state.is_terminal()}")
-
-                final_white_score = final_state.white_score
-                final_black_score = final_state.black_score
-                trainer.add_game_experience(states, policies, (final_white_score, final_black_score))
-
-            print(f"Experience added in {time.time() - exp_start_time:.2f} seconds")
-
-            # Train on games
-            print(f"Training for {config.epochs_per_iteration} epochs...")
-            train_start_time = time.time()
-            for _ in range(config.epochs_per_iteration):
-                actual_batches = config.batches_per_epoch
-                ring_weight = 1.0 + iteration * 0.0125  # Schedule: ring placement weight increases as iterations progress.
-                epoch_stats = trainer.train_epoch(
-                    batch_size=config.batch_size,
-                    batches_per_epoch=actual_batches,
-                    ring_placement_weight=ring_weight
-                )
-            print(f"Training completed in {time.time() - train_start_time:.2f} seconds")
-
-            # Get the latest losses
-            policy_loss = trainer.policy_losses[-1] if trainer.policy_losses else 0
-            value_loss = trainer.value_losses[-1] if trainer.value_losses else 0
-
-            # Evaluate against baseline
-            print("Evaluating against baseline...")
-            eval_start_time = time.time()
-            elo_change = self._evaluate_against_baseline(network, quick_eval=True)
-            print(f"Evaluation completed in {time.time() - eval_start_time:.2f} seconds")
-
-            # Save checkpoint for this iteration
-            self._save_checkpoint(network, "combined", config_name, iteration)
-
-            # Save replay buffer to disk
-            trainer.experience.save_buffer(str(replay_buffer_file))
-
-            # Run tournament evaluation if applicable
-            tournament_elo = 0.0  # Default if no tournament run
-            if iteration > 0:
-                print("Running tournament evaluation...")
-                self.tournament_manager.run_full_round_robin_tournament(current_iteration=iteration)
-                tournament_stats = self.tournament_manager.get_model_performance(f"iteration_{iteration}")
-                tournament_elo = tournament_stats['current_rating']
-                print(f"Tournament ELO: {tournament_elo:+.1f}")
-
-            # Record metrics
-            metrics["policy_losses"].append(float(epoch_stats['policy_loss']))
-            metrics["value_losses"].append(float(epoch_stats['value_loss']))
-            metrics["value_accuracies"].append(float(epoch_stats['value_accuracy']))
-            metrics["move_accuracies"].append(epoch_stats['move_accuracies'])
-            metrics["policy_entropy"].append(float(epoch_stats.get('policy_entropy', 0.0)))
-            metrics["elo_changes"].append(float(elo_change))
-            metrics["game_lengths"].append(float(np.mean([len(g[0]) for g in games])))
-            metrics["timestamps"].append(time.time() - iter_start_time)
-
-            # Save and plot metrics for this iteration
-            self.metrics_logger.summarize_iteration()
-            self.metrics_logger.plot_current_metrics()
-            self.metrics_logger.save_iteration()
-
-            print(f"Iteration completed in {time.time() - iter_start_time:.2f} seconds")
-            print(f"Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, ELO Change: {elo_change:+.1f}")
-
-        total_time = time.time() - total_start_time
-        print(f"\nExperiment completed in {total_time / 60:.2f} minutes")
         return metrics
 
     def _evaluate_against_baseline(self, network: NetworkWrapper,
