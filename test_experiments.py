@@ -377,62 +377,84 @@ def check_hardware():
 def main():
     check_hardware()
 
-    # Force MPS backend for M2 Mac
-    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-    print(f"Using device: {device}")
-
-    failures = []
     parser = argparse.ArgumentParser(description='Test YINSH experiment configurations')
+    # REMOVED type argument:
+    # parser.add_argument('--type',
+    #                     choices=['learning_rate', 'mcts', 'temperature', 'combined'],
+    #                     help='Test specific experiment type')
+    parser.add_argument('--config', required=True, # Make config required now
+                        help='Test specific configuration name (e.g., "smoke", "value_head_config")')
     parser.add_argument('--quick', action='store_true',
-                        help='Run quick validation with minimal iterations')
-    parser.add_argument('--type',
-                        choices=['learning_rate', 'mcts', 'temperature', 'combined'],
-                        help='Test specific experiment type')
-    parser.add_argument('--config', help='Test specific configuration')
-    # Add device argument with smart default
-    # parser.add_argument('--device',
-    #                     choices=['cuda', 'mps', 'cpu'],
-    #                     default='mps' if torch.backends.mps.is_available() else
-    #                     ('cuda' if torch.cuda.is_available() else 'cpu'),
-    #                     help='Device to run on (default: best available)')
+                        help='Run quick validation with minimal iterations (Note: May need config adjustments)')
     parser.add_argument('--device',
                         choices=['cuda', 'mps', 'cpu'],
-                        default=device,
+                        default='mps' if torch.backends.mps.is_available() else
+                        ('cuda' if torch.cuda.is_available() else 'cpu'),
                         help='Device to run on (default: best available)')
-
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging') # Added debug flag propagation
     parser.add_argument('--dashboard', action='store_true',
                         help='Start Streamlit dashboard after tests')
-    parser.add_argument('--combined-only', action='store_true',
-                        help='Only test combined configurations')
+    # REMOVED combined-only as --config specifies the run now
+    # parser.add_argument('--combined-only', action='store_true',
+    #                     help='Only test combined configurations')
+
 
     args = parser.parse_args()
+    print(f"Using device: {args.device}") # Use the selected device
 
-    if args.combined_only:
-        print("Running combined configuration tests...")
-        results, failures = test_combined_configs(quick_test=args.quick)
-    elif args.quick:
-        print("Running quick validation tests...")
-        run_quick_test(args.type, args.config)
-    elif args.type and args.config:
-        print(f"Testing specific configuration: {args.type}/{args.config}")
-        runner = ExperimentRunner(device='cuda' if torch.cuda.is_available() else 'cpu')
-        result = runner.run_experiment(args.type, args.config)
-        _print_metrics(result)
-    else:
-        print("Running full test suite...")
-        test_all_experiments()
+    failures = [] # Keep track of failures if running multiple tests
 
+    # Initialize Runner with selected device and debug flag
+    runner = ExperimentRunner(device=args.device, debug=args.debug)
+
+    # --- Simplified Logic: Run the specified config ---
+    print(f"Testing specific configuration: {args.config}")
+    try:
+        # MODIFIED: Pass only config name to run_experiment
+        result = runner.run_experiment(args.config)
+        if result: # Check if result is not empty (indicating success)
+            _print_metrics(result) # Assuming _print_metrics is defined elsewhere
+            print(f"✓ Config '{args.config}' completed.")
+        else:
+            failures.append(("", args.config, "ExperimentRunner returned empty results"))
+            print(f"✗ Config '{args.config}' failed (returned empty results).")
+
+    except Exception as e:
+        failures.append(("", args.config, str(e)))
+        print(f"✗ Config '{args.config}' failed with exception: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
+
+    # --- Removed old logic branches for --quick, --combined-only, test_all_experiments ---
+    # If you need quick testing, you should ideally define specific "smoke" or "quick" configs
+    # in your config.py rather than modifying them on the fly here.
+
+    # --- Report Failures ---
     if failures:
         print("\nFailed configurations:")
-        for exp_type, config, error in failures:
-            print(f"• {exp_type}/{config}: {error}")
+        for _, config, error in failures:
+            print(f"• {config}: {error}")
 
+    # --- Optional Dashboard ---
     if args.dashboard:
         print("\nStarting dashboard...")
-        import streamlit
-        streamlit.run("experiments/visualizer.py")
+        # Make sure streamlit is installed: pip install streamlit
+        try:
+            import streamlit.web.cli as stcli
+            # Assuming visualizer.py is in the same directory or adjust path
+            dashboard_path = Path(__file__).parent / "visualizer.py"
+            if dashboard_path.exists():
+                 # Use sys.argv manipulation for Streamlit run
+                 import sys
+                 sys.argv = ["streamlit", "run", str(dashboard_path)]
+                 stcli.main()
+            else:
+                 print(f"Dashboard file not found at {dashboard_path}")
+        except ImportError:
+             print("Streamlit is not installed. Cannot start dashboard. `pip install streamlit`")
+        except Exception as e:
+             print(f"Failed to start dashboard: {e}")
 
 
 if __name__ == "__main__":
-    # multiprocessing.set_start_method('spawn')
     main()
