@@ -1,6 +1,8 @@
+# experiments/config.py
+
 """Configuration for YINSH training experiments."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 import logging
 from pathlib import Path
@@ -13,609 +15,262 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 @dataclass
-class BaseExperimentConfig:
-    """Base configuration shared across all experiment types."""
-    num_iterations: int
-    games_per_iteration: int
-    epochs_per_iteration: int
-    batches_per_epoch: int
+class CombinedConfig:
+    """Unified configuration for YINSH experiments."""
 
+    # --------------------------------------------------------------------------
+    # Core Training Loop Parameters (Previously in BaseExperimentConfig)
+    # --------------------------------------------------------------------------
+    num_iterations: int = 10
+    games_per_iteration: int = 75
+    epochs_per_iteration: int = 3
+    batches_per_epoch: int = 75 # Note: Trainer might override this dynamically based on experience buffer size
 
-    def __init__(self,
-                 num_iterations: int = 10,
-                 games_per_iteration: int = 75,
-                 epochs_per_iteration: int = 3,
-                 batches_per_epoch: int = 75):
-        self.num_iterations = num_iterations
-        self.games_per_iteration = games_per_iteration
-        self.epochs_per_iteration = epochs_per_iteration
-        self.batches_per_epoch = batches_per_epoch
-
-@dataclass
-class LearningRateConfig(BaseExperimentConfig):
-    """Learning rate specific configuration."""
-    lr: float
-    weight_decay: float
-    batch_size: int
-    lr_schedule: str = "constant"
+    # --------------------------------------------------------------------------
+    # Optimizer/Learning Rate Parameters (Previously in LearningRateConfig)
+    # --------------------------------------------------------------------------
+    lr: float = 0.001                # Base learning rate (often for policy head)
+    weight_decay: float = 1e-4
+    batch_size: int = 256
+    lr_schedule: str = "constant"    # Options: "constant", "cosine", "step", "cyclical"
     warmup_steps: int = 0
+    value_head_lr_factor: float = 5.0 # Multiplier for value head LR relative to base 'lr'
+    l2_reg: float = 0.0               # L2 regularization coefficient (passed to trainer)
 
-    def __init__(self,
-                 lr: float,
-                 weight_decay: float,
-                 batch_size: int,
-                 lr_schedule: str = "constant",
-                 warmup_steps: int = 0,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.batch_size = batch_size
-        self.lr_schedule = lr_schedule
-        self.warmup_steps = warmup_steps
+    # --------------------------------------------------------------------------
+    # MCTS Parameters (Previously in MCTSConfig)
+    # --------------------------------------------------------------------------
+    num_simulations: int = 100        # Default/Early game simulation budget
+    late_simulations: Optional[int] = None # Simulation budget after switch_ply (defaults to num_simulations if None)
+    simulation_switch_ply: int = 20   # Ply at which simulation budget might change
+    c_puct: float = 1.0               # Exploration constant in UCB
+    dirichlet_alpha: float = 0.3      # Noise for root policy exploration
+    value_weight: float = 1.0         # Weighting factor for value in UCB selection (MCTS._select_action)
+    max_depth: int = 20               # Max search depth in MCTS (optional, might prevent overly deep searches)
 
-@dataclass
-class MCTSConfig(BaseExperimentConfig):
-    """MCTS specific configuration."""
-    num_simulations: int
-    c_puct: float = 1.0
-    dirichlet_alpha: float = 0.3
-    value_weight: float = 1.0
+    # --------------------------------------------------------------------------
+    # Temperature Annealing Parameters (Previously in TemperatureConfig)
+    # --------------------------------------------------------------------------
+    initial_temp: float = 1.0         # Starting temperature for action selection probabilities
+    final_temp: float = 0.2           # Final temperature
+    annealing_steps: int = 30         # Number of moves over which to anneal temperature
+    temp_schedule: str = "linear"     # Options: "linear", "cosine", "exponential", "cyclical"
+    temp_clamp_fraction: float = 0.60 # Fraction of annealing_steps before clamping temp to final_temp
+    # --- Optional advanced temperature schedule params ---
+    temp_decay_half_life: float = 0.5 # For exponential decay
+    temp_start_decay_at: float = 0.5  # Fraction of annealing steps to start exponential decay
 
-    def __init__(self,
-                 num_simulations: int,
-                 c_puct: float = 1.0,
-                 dirichlet_alpha: float = 0.3,
-                 value_weight: float = 1.0,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
-        self.dirichlet_alpha = dirichlet_alpha
-        self.value_weight = value_weight
+    # --------------------------------------------------------------------------
+    # Loss Function Parameters (Passed to Trainer)
+    # --------------------------------------------------------------------------
+    value_loss_weights: Tuple[float, float] = (0.5, 0.5) # Weights for (MSE, CrossEntropy) components of value loss
 
-@dataclass
-class TemperatureConfig(BaseExperimentConfig):
-    """Temperature annealing configuration."""
-    initial_temp: float
-    final_temp: float
-    annealing_steps: int
-    temp_schedule: str = "linear"
-    mcts_simulations: int = 100
+    # --------------------------------------------------------------------------
+    # (Optional) Add any other experiment-specific parameters here
+    # --------------------------------------------------------------------------
+    # Example: attention_specific_param: bool = False
 
-    def __init__(self,
-                 initial_temp: float,
-                 final_temp: float,
-                 annealing_steps: int,
-                 temp_schedule: str = "linear",
-                 mcts_simulations: int = 100,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.initial_temp = initial_temp
-        self.final_temp = final_temp
-        self.annealing_steps = annealing_steps
-        self.temp_schedule = temp_schedule
-        self.mcts_simulations = mcts_simulations
 
-@dataclass
-class CombinedConfig(BaseExperimentConfig):
-    """Configuration for combined experiments."""
+# ==========================================================================
+# Experiment Configurations Dictionary
+# ==========================================================================
+# Now only contains 'CombinedConfig' instances
+COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
 
-    # ───────── existing fields ────────────────────────────────────────────
-    lr: float
-    weight_decay: float
-    batch_size: int
-    lr_schedule: str = "constant"
-    warmup_steps: int = 0
-
-    # MCTS search quality
-    num_simulations: int = 100
-    late_simulations: int = 100          # ← NEW  (after switch‑ply)
-    simulation_switch_ply: int = 20      # ← NEW
-    c_puct: float = 1.0
-    dirichlet_alpha: float = 0.3
-    value_weight: float = 1.0
-
-    # Temperature schedule
-    initial_temp: float = 1.0
-    final_temp: float = 0.2
-    temp_schedule: str = "linear"
-    temp_clamp_fraction: float = 0.60    # ← NEW  (clamp after 60 % of anneal steps)
-    temp_decay_half_life: float = 0.5
-    temp_start_decay_at: float = 0.5
-
-    # Value‑head
-    value_head_lr_factor: float = 5.0
-    value_loss_weights: Tuple[float, float] = (0.5, 0.5)
-
-    max_depth: int = 20
-
-    def __init__(self,
-                 lr: float,
-                 weight_decay: float,
-                 batch_size: int,
-                 # --------- existing kwargs ---------------------------------
-                 num_simulations: int = 100,
-                 late_simulations: int = 100,           # NEW
-                 simulation_switch_ply: int = 20,       # NEW
-                 c_puct: float = 1.0,
-                 dirichlet_alpha: float = 0.3,
-                 value_weight: float = 1.0,
-                 initial_temp: float = 1.0,
-                 final_temp: float = 0.2,
-                 lr_schedule: str = "constant",
-                 temp_schedule: str = "linear",
-                 warmup_steps: int = 0,
-                 temp_clamp_fraction: float = 0.60,     # NEW
-                 temp_decay_half_life: float = 0.5,
-                 temp_start_decay_at: float = 0.5,
-                 value_head_lr_factor: float = 5.0,
-                 value_loss_weights: Tuple[float, float] = (0.5, 0.5),
-                 max_depth: int = 20,
-                 **kwargs):
-        # Let BaseExperimentConfig initialise common metadata
-        super().__init__(**kwargs)
-
-        # ---------- store fields -------------------------------------------
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.batch_size = batch_size
-
-        # MCTS rollout scheduling
-        self.num_simulations = num_simulations
-        self.late_simulations = late_simulations
-        self.simulation_switch_ply = simulation_switch_ply
-        self.c_puct = c_puct
-        self.dirichlet_alpha = dirichlet_alpha
-        self.value_weight = value_weight
-
-        # Temperature
-        self.initial_temp = initial_temp
-        self.final_temp = final_temp
-        self.temp_schedule = temp_schedule
-        self.temp_clamp_fraction = temp_clamp_fraction
-        self.temp_decay_half_life = temp_decay_half_life
-        self.temp_start_decay_at = temp_start_decay_at
-
-        # Optimisation
-        self.lr_schedule = lr_schedule
-        self.warmup_steps = warmup_steps
-        self.value_head_lr_factor = value_head_lr_factor
-        self.value_loss_weights = value_loss_weights
-
-        # Misc
-        self.max_depth = max_depth
-
-# Experiment configurations
-LEARNING_RATE_EXPERIMENTS = {
-    # Hypothesis: Current standard settings provide a good reference point
-    "baseline": LearningRateConfig(
-        lr=0.001,
-        weight_decay=1e-4,
-        batch_size=256
-    ),
-
-    # Hypothesis: Slower learning with cosine annealing might prevent the ELO decline
-    # we're seeing by avoiding overfitting early in training
-    "conservative": LearningRateConfig(
-        lr=0.0001,
-        weight_decay=1e-4,
-        batch_size=256,
-        lr_schedule="cosine"  # Add LR scheduling
-    ),
-
-    # Hypothesis: More aggressive initial learning with step schedule might help
-    # escape local optima in early training, while steps prevent divergence
-    "aggressive": LearningRateConfig(
-        lr=0.003,
-        weight_decay=1e-4,
-        batch_size=256,
-        lr_schedule="step"
-    ),
-
-    # Hypothesis: Stronger regularization might help align training loss with actual
-    # playing strength by preventing memorization of specific patterns
-    "high_reg": LearningRateConfig(
-        lr=0.001,
-        weight_decay=1e-3,
-        batch_size=256
-    ),
-
-    # Hypothesis: Gradual warmup might help establish better initial representations
-    # before full-speed learning begins
-    "warmup": LearningRateConfig(
-        lr=0.001,
-        weight_decay=1e-4,
-        batch_size=256,
-        warmup_steps=1000,
-        lr_schedule="cosine"
-    ),
-
-    # Hypothesis: Larger batches with scaled learning rate might provide more
-    # stable gradient estimates and better generalization
-    "large_batch": LearningRateConfig(
-        lr=0.002,  # Increased LR for larger batch
-        weight_decay=1e-4,
-        batch_size=512
-    )
-}
-
-MCTS_EXPERIMENTS = {
-
-    "baseline": MCTSConfig(
-        num_simulations=100,
-        c_puct=1.0
-    ),
-
-    # Hypothesis: More simulation depth might improve move quality but risks
-    # overfitting to specific positions
-    "deep_search": MCTSConfig(
-        num_simulations=200,
-        c_puct=1.0
-    ),
-
-    "very_deep_search": MCTSConfig(
-        num_simulations=400,
-        c_puct=1.0
-    ),
-
-    # Hypothesis: More exploration in MCTS might help discover novel strategies
-    # that basic search misses, increasing strategic diversity
-    "exploratory": MCTSConfig(
-        num_simulations=100,
-        c_puct=2.0,  # More exploration
-        dirichlet_alpha=0.5  # More noise
-    ),
-
-    # Hypothesis: Rebalancing between policy and value networks might help
-    # align immediate moves with long-term strategy better
-    "balanced": MCTSConfig(
-        num_simulations=200,
-        c_puct=1.5,
-        value_weight=0.7  # Balance between policy and value
-    )
-}
-
-TEMPERATURE_EXPERIMENTS = {
-    "baseline": TemperatureConfig(
-        initial_temp=1.0,
-        final_temp=0.2,
-        annealing_steps=30
-    ),
-
-    # Hypothesis: More early exploration followed by stronger exploitation
-    # might help discover better strategies before locking in behavior
-    "high_exploration": TemperatureConfig(
-        initial_temp=2.0,
-        final_temp=0.1,
-        annealing_steps=50
-    ),
-
-    # Hypothesis: Maintaining higher randomness longer might prevent premature
-    # convergence to suboptimal strategies
-    "slow_annealing": TemperatureConfig(
-        initial_temp=1.0,
-        final_temp=0.5,
-        annealing_steps=40
-    ),
-
-    # Hypothesis: Exponential decay might provide better balance between
-    # exploration and exploitation than linear decay
-    "adaptive": TemperatureConfig(
-        initial_temp=1.5,
-        final_temp=0.2,
-        annealing_steps=40,
-        temp_schedule="exponential"  # Add different schedules
-    ),
-
-    # Hypothesis: Periodically increasing temperature might help escape local
-    # optima throughout training, similar to cyclical learning rates
-    "cyclical": TemperatureConfig(  # Temperature cycling
-        initial_temp=1.0,
-        final_temp=0.3,
-        annealing_steps=30,
-        temp_schedule="cyclical"
-    )
-}
-
-COMBINED_EXPERIMENTS = {
-
-    # Hypothesis: A balanced approach combining moderate values of all parameters
-    # might provide more robust learning than extremes in any one dimension
+    # --- Keep your existing CombinedConfig definitions here ---
+    # Example:
     "balanced_optimizer": CombinedConfig(
         lr=0.0005,
         weight_decay=2e-4,
         batch_size=256,
         num_simulations=200,
         initial_temp=1.5,
-        temp_schedule="cosine"
+        temp_schedule="cosine",
+        num_iterations=50, # Example: Override base defaults if needed
+        games_per_iteration=100,
     ),
 
-    # Hypothesis: Combining deep search with high exploration might discover
-    # sophisticated strategies that simpler approaches miss
     "aggressive_search": CombinedConfig(
         lr=0.001,
         weight_decay=1e-4,
         batch_size=256,
         num_simulations=300,
         c_puct=1.5,
-        initial_temp=2.0
+        initial_temp=2.0,
+        num_iterations=50,
+        games_per_iteration=100,
     ),
 
     "short_baseline": CombinedConfig(
-        # This configuration is designed to thoroughly evaluate the new value head by:
-        # 1. Using longer training to see if value predictions remain stable
-        # 2. Starting with high temperature to encourage exploration
-        # 3. Transitioning to low temperature to test value head's exploitation
-        # 4. Using deeper MCTS to get better value estimates
-        # 5. Employing cosine learning rate schedule for better convergence
-        #
-        # Training parameters
-
-        num_iterations=10, #  was 10
-        games_per_iteration=25, #  was 25
+        num_iterations=10,
+        games_per_iteration=25,
         epochs_per_iteration=3,
-        batches_per_epoch=25,
-
-        # Learning rate parameters
-        lr=0.0005,  # Conservative base learning rate
-        weight_decay=2e-4,  # Moderate regularization
-        batch_size=256,  # Standard batch size
-        lr_schedule="cosine",  # Smooth learning rate decay
-        warmup_steps=1000,  # Gradual warmup for stability
-
-        # MCTS parameters
-        num_simulations=200,  # Deep enough to test value predictions (200)
-        c_puct=1.5,  # Slightly higher exploration
-        dirichlet_alpha=0.3,  # Standard noise
-        value_weight=1.0,  # Full value weighting
-
-        # Temperature parameters - crucial for testing value head
-        initial_temp=2.0,  # Start with high exploration
-        final_temp=0.1,  # End with strong exploitation
-        temp_schedule="exponential"  # Faster transition once value head stabilizes
-
-    ),
-
-    "value_head_eval": CombinedConfig(
-        # Comments explaining the test:
-        # This configuration is designed to thoroughly evaluate the new value head by:
-        # 1. Using longer training to see if value predictions remain stable
-        # 2. Starting with high temperature to encourage exploration
-        # 3. Transitioning to low temperature to test value head's exploitation
-        # 4. Using deeper MCTS to get better value estimates
-        # 5. Employing cosine learning rate schedule for better convergence
-        #
-        # Training parameters
-
-        num_iterations=40,  # Longer run to see learning dynamics
-        games_per_iteration=75,  # Decent sample size
-        epochs_per_iteration=5,  # More training per batch
-        batches_per_epoch=50,  # Substantial training
-
-        # Learning rate parameters
-        lr=0.0005,  # Conservative base learning rate
-        weight_decay=2e-4,  # Moderate regularization
-        batch_size=256,  # Standard batch size
-        lr_schedule="cosine",  # Smooth learning rate decay
-        warmup_steps=1000,  # Gradual warmup for stability
-
-        # MCTS parameters
-        num_simulations=200,  # Deep enough to test value predictions
-        c_puct=1.5,  # Slightly higher exploration
-        dirichlet_alpha=0.3,  # Standard noise
-        value_weight=1.0,  # Full value weighting
-
-        # Temperature parameters - crucial for testing value head
-        initial_temp=2.0,  # Start with high exploration
-        final_temp=0.1,  # End with strong exploitation
-        temp_schedule="exponential"  # Faster transition once value head stabilizes
-
-    ),
-
-    # gonna run this for a week while i'm out of town and i'm hoping I see some dang improvements!
-    "week_run": CombinedConfig(
-        # Training parameters
-        num_iterations=100,  # About 1 week with current timing
-        games_per_iteration=75,  # 50 was about 55 minutes per iteration.
-        epochs_per_iteration=5,  # Increased from 3 for better learning
-        batches_per_epoch=50,
-
-        # Learning rates - more conservative
-        lr=0.0002,  # Reduced from 0.0005
-        weight_decay=5e-4,  # Increased from 2e-4
+        batches_per_epoch=25, # Note: Trainer might adjust this based on experience
+        lr=0.0005,
+        weight_decay=2e-4,
         batch_size=256,
         lr_schedule="cosine",
-        warmup_steps=2000,  # Longer warmup
-
-        # MCTS parameters
-        num_simulations=200,  # Slight increase from 100
-        c_puct=1.2,  # Slightly more exploratory
+        warmup_steps=1000,
+        num_simulations=200,
+        c_puct=1.5,
         dirichlet_alpha=0.3,
-        value_weight=0.8,  # Reduced from 1.0 to rely less on struggling value head
-
-        # Temperature parameters
-        initial_temp=1.5,  # Higher initial exploration
-        final_temp=0.2,
-        temp_schedule="exponential"  # Smoother transition
-    ),
-
-    "value_head_config": CombinedConfig(
-        # Core training settings
-        num_iterations=100,
-        games_per_iteration=75,
-        epochs_per_iteration=7,  # Increased from 5
-        batches_per_epoch=50,
-
-        # Value head focus
-        lr=0.0001,  # Lower learning rate
-        weight_decay=5e-4,  # Keep current regularization
-        batch_size=256,
-        lr_schedule="cosine",
-        warmup_steps=2000,
-
-        # MCTS parameters
-        num_simulations=250,  # Increased from 200
-        c_puct=1.0,  # More conservative
-        dirichlet_alpha=0.3,
-        value_weight=1.2,  # Increased value influence
-
-        # Temperature parameters
-        initial_temp=1.8,  # Higher exploration
-        final_temp=0.1,  # Stronger exploitation
+        value_weight=1.0,
+        initial_temp=2.0,
+        final_temp=0.1,
         temp_schedule="exponential"
     ),
 
-    "value_head_config2": CombinedConfig(
+    "value_head_eval": CombinedConfig(
+        num_iterations=40,
+        games_per_iteration=75,
+        epochs_per_iteration=5,
+        batches_per_epoch=50,
+        lr=0.0005,
+        weight_decay=2e-4,
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=1000,
+        num_simulations=200,
+        c_puct=1.5,
+        dirichlet_alpha=0.3,
+        value_weight=1.0,
+        initial_temp=2.0,
+        final_temp=0.1,
+        temp_schedule="exponential"
+    ),
 
-        # This configuration (value_head_config2) balances three key insights:
-        # First, the moderate increase in learning rate (0.0002) paired with cosine scheduling should allow
-        # more effective learning while maintaining stability.
-        # Second, the combination of higher initial temperature (2.0) and moderate MCTS depth (300 simulations)
-        # creates more diverse training positions - particularly important in the complex placement and main game
-        # phases where the move space is large.
-        # Third, the slight increase in value weight (1.2) and regularization (1e-3) aims to improve value head
-        # learning without overwhelming the successful policy learning we've observed.
-        # This balanced approach should help the value head learn better position evaluation while
-        # preserving the strong move accuracy we've already achieved.
+    "week_run": CombinedConfig(
+        num_iterations=100,
+        games_per_iteration=75,
+        epochs_per_iteration=5,
+        batches_per_epoch=50,
+        lr=0.0002,
+        weight_decay=5e-4,
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=2000,
+        num_simulations=200,
+        c_puct=1.2,
+        dirichlet_alpha=0.3,
+        value_weight=0.8,
+        initial_temp=1.5,
+        final_temp=0.2,
+        temp_schedule="exponential"
+    ),
 
-        # Training parameters
+    "value_head_config": CombinedConfig(
         num_iterations=100,
         games_per_iteration=75,
         epochs_per_iteration=7,
         batches_per_epoch=50,
+        lr=0.0001,
+        weight_decay=5e-4,
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=2000,
+        num_simulations=250,
+        c_puct=1.0,
+        dirichlet_alpha=0.3,
+        value_weight=1.2,
+        initial_temp=1.8,
+        final_temp=0.1,
+        temp_schedule="exponential"
+    ),
 
-        # Learning rates
-        lr=0.0002,  # Modest increase for learning
-        weight_decay=1e-3,  # Increased regularization
+    "value_head_config2": CombinedConfig(
+        num_iterations=100,
+        games_per_iteration=75,
+        epochs_per_iteration=7,
+        batches_per_epoch=50,
+        lr=0.0002,
+        weight_decay=1e-3,
         batch_size=256,
         lr_schedule="cosine",
         warmup_steps=1000,
-
-        # MCTS parameters
-        num_simulations=300,  # Moderate simulation depth
-        c_puct=1.5,  # Balanced exploration
+        num_simulations=300,
+        c_puct=1.5,
         dirichlet_alpha=0.3,
-        value_weight=1.2,  # Slight emphasis on value prediction
-
-        # Temperature parameters - accounting for move space complexity
-        initial_temp=2.0,  # Higher early exploration
-        final_temp=0.1,  # Strong final exploitation
-        temp_schedule="exponential"  # Smoother transition
+        value_weight=1.2,
+        initial_temp=2.0,
+        final_temp=0.1,
+        temp_schedule="exponential"
     ),
 
     "m3_final_revised": CombinedConfig(
-
- # one last run on the good computer to see how this bad boy does
-
-        # Training parameters
         num_iterations=168,
         games_per_iteration=120,
         epochs_per_iteration=5,
         batches_per_epoch=100,
-
-        # Learning rates
-        lr=0.0001,  # Modest increase for learning
-        weight_decay=5e-4,  # Increased regularization
+        lr=0.0001,
+        weight_decay=5e-4,
         batch_size=256,
         lr_schedule="cosine",
         warmup_steps=2000,
-
-        # MCTS parameters
-        num_simulations=200,  # Moderate simulation depth
-        c_puct=2.0,  # Balanced exploration
+        num_simulations=200,
+        c_puct=2.0,
         dirichlet_alpha=0.4,
-        value_weight=1.1,  # Slight emphasis on value prediction
-
-        # Temperature parameters - accounting for move space complexity
-        initial_temp=2.5,  # Higher early exploration
-        final_temp=0.2,  # Strong final exploitation
-        temp_schedule="cosine"  # Smoother transition
+        value_weight=1.1,
+        initial_temp=2.5,
+        final_temp=0.2,
+        temp_schedule="cosine"
     ),
 
     "m3_final_revised2": CombinedConfig(
-
-        # second last run on the good computer to see how this bad boy does
-
-        # Training parameters
         num_iterations=50,
         games_per_iteration=120,
         epochs_per_iteration=8,
         batches_per_epoch=75,
-
-        # Learning rates
-        lr=0.0003,  # Modest increase for learning
-        weight_decay=5e-4,  # Increased regularization
+        lr=0.0003,
+        weight_decay=5e-4,
         batch_size=256,
         lr_schedule="cosine",
         warmup_steps=2000,
-
-        # MCTS parameters
-        num_simulations=300,  # Moderate simulation depth
-        c_puct=2.0,  # Balanced exploration
+        num_simulations=300,
+        c_puct=2.0,
         dirichlet_alpha=0.4,
-        value_weight=0.7,  # Slight emphasis on value prediction
-
-        # Temperature parameters - accounting for move space complexity
-        initial_temp=3.0,  # Higher early exploration
-        final_temp=0.2,  # Strong final exploitation
-        temp_schedule="cosine"  # Smoother transition
+        value_weight=0.7,
+        initial_temp=3.0,
+        final_temp=0.2,
+        temp_schedule="cosine"
     ),
 
     "m3_final_revised_v3": CombinedConfig(
-
-        # second last run on the good computer to see how this bad boy does
-
-        # Training parameters
         num_iterations=50,
         games_per_iteration=500,
         epochs_per_iteration=10,
         batches_per_epoch=250,
-
-        # Learning rates
-        lr=0.0005,  # Slightly increased learning rate
-        weight_decay=1e-4,  # Reduced regularization to improve learning
+        lr=0.0005,
+        weight_decay=1e-4,
         batch_size=512,
         lr_schedule="cosine",
         warmup_steps=4000,
-
-        # MCTS parameters
-        num_simulations=400,  # Increased simulation depth
-        c_puct=4.0,  # Increased exploration
+        num_simulations=400,
+        c_puct=4.0,
         dirichlet_alpha=0.3,
-        value_weight=1.0,  # Balanced value prediction
-
-        # Temperature parameters - accounting for move space complexity
-        initial_temp=1.0,  # Lower initial exploration, more focused on learned policy
-        final_temp=0.1,  # Strong final exploitation, allowing model to play best moves
-        temp_schedule="cosine",  # Smooth transition
+        value_weight=1.0,
+        initial_temp=1.0,
+        final_temp=0.1,
+        temp_schedule="cosine",
         temp_decay_half_life=0.35,
         temp_start_decay_at=0.25
     ),
 
     "separate_value_head": CombinedConfig(
-        # Training parameters (no changes)
         num_iterations=50,
         games_per_iteration=500,
         epochs_per_iteration=10,
         batches_per_epoch=250,
-
-        # Learning rates
-        lr=0.0005,  # Base learning rate (for policy head)
-        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0005,
+        value_head_lr_factor=5.0,
         weight_decay=1e-4,
         batch_size=512,
         lr_schedule="cosine",
         warmup_steps=4000,
-
-        # MCTS parameters
         num_simulations=400,
         c_puct=4.0,
         dirichlet_alpha=0.3,
-        value_weight=1.5,  # Increased value weight
-        value_loss_weights=(0.5, 0.5),  # Add this line
-
-        # Temperature parameters
+        value_weight=1.5,
+        value_loss_weights=(0.5, 0.5),
         initial_temp=1.0,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -624,28 +279,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "feb15_testing": CombinedConfig(
-        # Training parameters (no changes)
         num_iterations=50,
         games_per_iteration=100,
         epochs_per_iteration=5,
         batches_per_epoch=150,
-
-        # Learning rates
-        lr=0.0005,  # Base learning rate (for policy head)
-        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0005,
+        value_head_lr_factor=5.0,
         weight_decay=1e-4,
         batch_size=512,
         lr_schedule="cosine",
         warmup_steps=4000,
-
-        # MCTS parameters
         num_simulations=100,
         c_puct=3.0,
         dirichlet_alpha=0.3,
-        value_weight=1.5,  # Increased value weight
-        value_loss_weights=(0.5, 0.5),  # Add this line
-
-        # Temperature parameters
+        value_weight=1.5,
+        value_loss_weights=(0.5, 0.5),
         initial_temp=1.0,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -654,29 +302,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "feb16_testing": CombinedConfig(
-        # in runner: ring_weight = 1.0 + iteration * 0.2  # or some schedule. this makes ring placement more important as iterations go up.
-        # Training parameters (no changes)
         num_iterations=50,
         games_per_iteration=100,
         epochs_per_iteration=5,
         batches_per_epoch=150,
-
-        # Learning rates
-        lr=0.0005,  # Base learning rate (for policy head)
-        value_head_lr_factor=3.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0005,
+        value_head_lr_factor=3.0,
         weight_decay=1e-4,
         batch_size=512,
         lr_schedule="cosine",
         warmup_steps=4000,
-
-        # MCTS parameters
         num_simulations=200,
         c_puct=2.0,
         dirichlet_alpha=0.15,
-        value_weight=1.5,  # Increased value weight
-        value_loss_weights=(0.5, 0.5),  # Add this line
-
-        # Temperature parameters
+        value_weight=1.5,
+        value_loss_weights=(0.5, 0.5),
         initial_temp=1.0,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -685,29 +325,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "feb18_testing": CombinedConfig(
-        # ring_weight = 1.0 + iteration * 0.025  # or some schedule. this makes ring placement more important as iterations go up.
-        # Training parameters (no changes)
         num_iterations=50,
         games_per_iteration=100,
         epochs_per_iteration=5,
         batches_per_epoch=150,
-
-        # Learning rates
-        lr=0.0007,  # Base learning rate (for policy head)
-        value_head_lr_factor=4.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0007,
+        value_head_lr_factor=4.0,
         weight_decay=1e-4,
         batch_size=512,
         lr_schedule="cosine",
         warmup_steps=2000,
-
-        # MCTS parameters
         num_simulations=250,
         c_puct=2.0,
         dirichlet_alpha=0.15,
-        value_weight=1.5,  # Increased value weight
-        value_loss_weights=(0.5, 0.5),  # Add this line
-
-        # Temperature parameters
+        value_weight=1.5,
+        value_loss_weights=(0.5, 0.5),
         initial_temp=1.0,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -716,35 +348,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "feb20_testing": CombinedConfig(
-        # ring_weight = 1.0 + iteration * 0.0125  # or some schedule. this makes ring placement more important as iterations go up.
-        # I changed the ring_placement_weight in trainer.py to be 0.25 instead of 1.0. I think this'll focus more on main game in early phases.
-        # Training parameters
-        num_iterations= 25, #dropped iterations
-        games_per_iteration=150, #but bumped up games
-#        games_per_iteration=2, #but bumped up games
-        epochs_per_iteration=4, #fewer epochs
-#        epochs_per_iteration=1,  # fewer epochs
-
-#        batches_per_epoch=150,
-#        batches_per_epoch=3,
-
-        # Learning rates
-        lr=0.0007,  # Base learning rate (for policy head)
-        value_head_lr_factor=4.0,  # Value head learning rate will be lr * value_head_lr_factor
+        num_iterations=25,
+        games_per_iteration=150,
+        epochs_per_iteration=4,
+        batches_per_epoch=150, # Kept original value, but trainer might adjust
+        lr=0.0007,
+        value_head_lr_factor=4.0,
         weight_decay=1e-4,
         batch_size=256,
         lr_schedule="cosine",
-        warmup_steps=3000, #maybe in the middle?
-
-        # MCTS parameters
+        warmup_steps=3000,
         num_simulations=125,
-#        num_simulations=20,
         c_puct=2.0,
-        dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
-        value_weight=1.9,  # Increased value weight more
-        value_loss_weights=(0.6, 0.4),  # also put this a bit more towards MSE
-
-        # Temperature parameters
+        dirichlet_alpha=0.17,
+        value_weight=1.9,
+        value_loss_weights=(0.6, 0.4),
         initial_temp=1.0,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -753,35 +371,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "feb26_testing": CombinedConfig(
-        # ring_weight = 1.0 + iteration * 0.0125  # or some schedule. this makes ring placement more important as iterations go up.
-        # I changed the ring_placement_weight in trainer.py to be 0.25 instead of 1.0. I think this'll focus more on main game in early phases.
-        # Training parameters
-        num_iterations= 25, #dropped iterations
-        games_per_iteration=200, #but bumped up games
-#        games_per_iteration=2, #but bumped up games
-        epochs_per_iteration=4, #fewer epochs
-#        epochs_per_iteration=1,  # fewer epochs
-
-#        batches_per_epoch=150,
-#        batches_per_epoch=3,
-
-        # Learning rates
-        lr=0.0007,  # Base learning rate (for policy head)
-        value_head_lr_factor=7.0,  # Value head learning rate will be lr * value_head_lr_factor
+        num_iterations=25,
+        games_per_iteration=200,
+        epochs_per_iteration=4,
+        batches_per_epoch=150, # Kept original value
+        lr=0.0007,
+        value_head_lr_factor=7.0,
         weight_decay=1e-4,
         batch_size=384,
         lr_schedule="cosine",
-        warmup_steps=3000, #maybe in the middle?
-
-        # MCTS parameters
+        warmup_steps=3000,
         num_simulations=125,
-#        num_simulations=20,
         c_puct=2.0,
-        dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
-        value_weight=1.9,  # Increased value weight more
-        value_loss_weights=(0.7, 0.3),  # also put this a bit more towards MSE
-
-        # Temperature parameters
+        dirichlet_alpha=0.17,
+        value_weight=1.9,
+        value_loss_weights=(0.7, 0.3),
         initial_temp=1.5,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -790,35 +394,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "mar2_testing": CombinedConfig(
-        # ring_weight = 1.0 + iteration * 0.0125  # or some schedule. this makes ring placement more important as iterations go up.
-        # I changed the ring_placement_weight in trainer.py to be 0.25 instead of 1.0. I think this'll focus more on main game in early phases.
-        # Training parameters
-        num_iterations= 25, #dropped iterations
-        games_per_iteration=200, #but bumped up games
-#        games_per_iteration=2, #but bumped up games
-        epochs_per_iteration=4, #fewer epochs
-#        epochs_per_iteration=1,  # fewer epochs
-
-#        batches_per_epoch=150,
-#        batches_per_epoch=3,
-
-        # Learning rates
-        lr=0.0007,  # Base learning rate (for policy head)
-        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        num_iterations=25,
+        games_per_iteration=200,
+        epochs_per_iteration=4,
+        batches_per_epoch=150, # Kept original value
+        lr=0.0007,
+        value_head_lr_factor=5.0,
         weight_decay=1e-4,
         batch_size=384,
         lr_schedule="cosine",
-        warmup_steps=2500, #maybe in the middle?
-
-        # MCTS parameters
+        warmup_steps=2500,
         num_simulations=200,
-#        num_simulations=20,
         c_puct=2.0,
-        dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
-        value_weight=1.9,  # Increased value weight more
-        value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
-
-        # Temperature parameters
+        dirichlet_alpha=0.17,
+        value_weight=1.9,
+        value_loss_weights=(0.65, 0.35),
         initial_temp=1.5,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -827,30 +417,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "mar7_test": CombinedConfig(
-        # phase weights are now defined in trainer.py via phase_weight dict
-        # Training parameters
-        num_iterations= 40, #dropped iterations
-        games_per_iteration=205, #but bumped up games
-        epochs_per_iteration=8, #fewer epochs
-
+        num_iterations=40,
+        games_per_iteration=205,
+        epochs_per_iteration=8,
         batches_per_epoch=50,
-
-        # Learning rates
-        lr=0.0007,  # Base learning rate (for policy head)
-        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0007,
+        value_head_lr_factor=5.0,
         weight_decay=1e-4,
         batch_size=384,
         lr_schedule="cyclical",
-        warmup_steps=2500, #maybe in the middle?
-
-        # MCTS parameters
+        warmup_steps=2500,
         num_simulations=50,
         c_puct=2.0,
-        dirichlet_alpha=0.17, #slight bump to flatten move distribution, hopefully
-        value_weight=1.9,  # Increased value weight more
-        value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
-
-        # Temperature parameters
+        dirichlet_alpha=0.17,
+        value_weight=1.9,
+        value_loss_weights=(0.65, 0.35),
         initial_temp=1.5,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -859,32 +440,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "mar_19_test": CombinedConfig(
-        #I know it's basically the same as march 7 but I changed the model configuration
-        #result: basically the same as the 7th.
-        # phase weights are now defined in trainer.py via phase_weight dict
-        # Training parameters
-        num_iterations=20,  # dropped iterations further to get this tested fast
-        games_per_iteration=205,  # but bumped up games
-        epochs_per_iteration=8,  # fewer epochs
-
+        num_iterations=20,
+        games_per_iteration=205,
+        epochs_per_iteration=8,
         batches_per_epoch=50,
-
-        # Learning rates
-        lr=0.0007,  # Base learning rate (for policy head)
-        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0007,
+        value_head_lr_factor=5.0,
         weight_decay=1e-4,
         batch_size=384,
         lr_schedule="cyclical",
-        warmup_steps=2500,  # maybe in the middle?
-
-        # MCTS parameters
+        warmup_steps=2500,
         num_simulations=50,
         c_puct=2.0,
-        dirichlet_alpha=0.17,  # slight bump to flatten move distribution, hopefully
-        value_weight=1.9,  # Increased value weight more
-        value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
-
-        # Temperature parameters
+        dirichlet_alpha=0.17,
+        value_weight=1.9,
+        value_loss_weights=(0.65, 0.35),
         initial_temp=1.5,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -893,31 +463,21 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "mar_22_test": CombinedConfig(
-        # hypothesis: take the 19th config and bump up simulations.
-        # phase weights are now defined in trainer.py via phase_weight dict
-        # Training parameters
-        num_iterations=20,  # dropped iterations further to get this tested fast
-        games_per_iteration=205,  # but bumped up games
-        epochs_per_iteration=8,  # fewer epochs
-
+        num_iterations=20,
+        games_per_iteration=205,
+        epochs_per_iteration=8,
         batches_per_epoch=50,
-
-        # Learning rates
-        lr=0.0007,  # Base learning rate (for policy head)
-        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0007,
+        value_head_lr_factor=5.0,
         weight_decay=1e-4,
         batch_size=384,
         lr_schedule="cyclical",
-        warmup_steps=2500,  # maybe in the middle?
-
-        # MCTS parameters
+        warmup_steps=2500,
         num_simulations=200,
         c_puct=2.0,
-        dirichlet_alpha=0.17,  # slight bump to flatten move distribution, hopefully
-        value_weight=1.9,  # Increased value weight more
-        value_loss_weights=(0.65, 0.35),  # also put this a bit more towards MSE
-
-        # Temperature parameters
+        dirichlet_alpha=0.17,
+        value_weight=1.9,
+        value_loss_weights=(0.65, 0.35),
         initial_temp=1.5,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -926,114 +486,84 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "improved_value_head_mar26": CombinedConfig(
-        # Training parameters
         num_iterations=20,
-        games_per_iteration=300,  # Increase games per iteration
+        games_per_iteration=300,
         epochs_per_iteration=5,
         batches_per_epoch=50,
-
-        # Learning rates
         lr=0.0005,
-        value_head_lr_factor=8.0,  # Significantly increase value head learning rate
-        weight_decay=5e-4,  # Increase weight decay for better regularization
+        value_head_lr_factor=8.0,
+        weight_decay=5e-4,
         batch_size=384,
         lr_schedule="cosine",
         warmup_steps=1500,
-
-        # MCTS parameters
         num_simulations=150,
-        c_puct=3.0,  # Increase exploration
-        dirichlet_alpha=0.2,  # Slightly increase noise
-        value_weight=0.8,  # Reduce value influence until it's better trained
-        value_loss_weights=(0.7, 0.3),  # More emphasis on MSE
-
-        # Temperature parameters
+        c_puct=3.0,
+        dirichlet_alpha=0.2,
+        value_weight=0.8,
+        value_loss_weights=(0.7, 0.3),
         initial_temp=1.8,
         final_temp=0.1,
         temp_schedule="cosine"
     ),
 
     "improved_value_head_apr1": CombinedConfig(
-        # Training parameters
         num_iterations=20,
-        games_per_iteration=300,  # Increase games per iteration
+        games_per_iteration=300,
         epochs_per_iteration=5,
         batches_per_epoch=50,
-
-        # Learning rates
         lr=0.0005,
-        value_head_lr_factor=18.0,  # mega Significantly increase value head learning rate
-        weight_decay=5e-4,  # Increase weight decay for better regularization
+        value_head_lr_factor=18.0,
+        weight_decay=5e-4,
         batch_size=384,
         lr_schedule="cosine",
         warmup_steps=1500,
-
-        # MCTS parameters
         num_simulations=150,
-        c_puct=3.0,  # Increase exploration
-        dirichlet_alpha=0.2,  # Slightly increase noise
-        value_weight=0.8,  # Reduce value influence until it's better trained
-        value_loss_weights=(0.7, 0.3),  # More emphasis on MSE
-
-        # Temperature parameters
+        c_puct=3.0,
+        dirichlet_alpha=0.2,
+        value_weight=0.8,
+        value_loss_weights=(0.7, 0.3),
         initial_temp=1.8,
         final_temp=0.1,
         temp_schedule="cosine"
     ),
 
     "more_games_apr7": CombinedConfig(
-        #so far approx 21 hrs per iteration
-        #compare with apr1
-        # Training parameters
         num_iterations=10,
-        games_per_iteration=1500,  # Massively increase games per iteration
+        games_per_iteration=1500,
         epochs_per_iteration=5,
         batches_per_epoch=50,
-
-        # Learning rates
         lr=0.0005,
-        value_head_lr_factor=18.0,  # mega Significantly increase value head learning rate
-        weight_decay=5e-4,  # Increase weight decay for better regularization
+        value_head_lr_factor=18.0,
+        weight_decay=5e-4,
         batch_size=384,
         lr_schedule="cosine",
         warmup_steps=1500,
-
-        # MCTS parameters
-        num_simulations=50, #drop simulations significantly (5 rings, 10 moves per)
-        c_puct=3.0,  # Increase exploration
-        dirichlet_alpha=0.2,  # Slightly increase noise
-        value_weight=0.8,  # Reduce value influence until it's better trained
-        value_loss_weights=(0.7, 0.3),  # More emphasis on MSE
-
-        # Temperature parameters
+        num_simulations=50,
+        c_puct=3.0,
+        dirichlet_alpha=0.2,
+        value_weight=0.8,
+        value_loss_weights=(0.7, 0.3),
         initial_temp=1.8,
         final_temp=0.1,
         temp_schedule="cosine"
     ),
 
     "separate_value_head_2": CombinedConfig(
-        # Training parameters (no changes)
         num_iterations=50,
         games_per_iteration=500,
         epochs_per_iteration=10,
         batches_per_epoch=250,
-
-        # Learning rates
-        lr=0.0005,  # Base learning rate (for policy head)
-        value_head_lr_factor=15.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0005,
+        value_head_lr_factor=15.0,
         weight_decay=1e-4,
         batch_size=512,
         lr_schedule="cosine",
         warmup_steps=4000,
-
-        # MCTS parameters
         num_simulations=400,
         c_puct=4.0,
         dirichlet_alpha=0.3,
-        value_weight=1.5,  # Increased value weight
-        value_loss_weights=(0.7, 0.3),  # Add this line
-
-        # Temperature parameters
+        value_weight=1.5,
+        value_loss_weights=(0.7, 0.3),
         initial_temp=1.0,
         final_temp=0.1,
         temp_schedule="cosine",
@@ -1042,206 +572,161 @@ COMBINED_EXPERIMENTS = {
     ),
 
     "041725_balanced": CombinedConfig(
-        #------Self Play------
         num_iterations=15,
         games_per_iteration=800,
         num_simulations=120,
-        late_simulations=60,
+        late_simulations=60, # Corrected: default is None, needs explicit value if different
         c_puct=2.5,
         dirichlet_alpha=0.17,
-
-        #-----Training Loop------
         epochs_per_iteration=8,
         batches_per_epoch=60,
         batch_size=512,
-
-        #----Optimizer------
         lr=6e-4,
-        value_head_lr_factor=6.0,  # Value head learning rate will be lr * value_head_lr_factor
+        value_head_lr_factor=6.0,
         weight_decay=1e-4,
         lr_schedule="cosine",
         warmup_steps=2000,
-
-        #------Loss Weights-----
         value_weight=1.0,
-        value_loss_weights=(0.5, 0.5),  # Add this line
-
-        #-----Temperature parameters------
+        value_loss_weights=(0.5, 0.5),
         initial_temp=1.6,
         final_temp=0.15,
         temp_schedule="cosine"
     ),
 
     "separate_value_head_smoke": CombinedConfig(
-        # Training parameters (no changes)
         num_iterations=5,
         games_per_iteration=2,
         epochs_per_iteration=2,
         batches_per_epoch=2,
-
-        # Learning rates
-        lr=0.0005,  # Base learning rate (for policy head)
-        value_head_lr_factor=5.0,  # Value head learning rate will be lr * value_head_lr_factor
+        lr=0.0005,
+        value_head_lr_factor=5.0,
         weight_decay=1e-4,
-        batch_size=128,
+        batch_size=128, # Reduced batch size for smoke test
         lr_schedule="cosine",
-        warmup_steps=4000,
-
-        # MCTS parameters
-        num_simulations=2,
+        warmup_steps=10, # Reduced warmup
+        # --- MCTS ---
+        num_simulations=2, # <<<<< INTENDED LOW VALUE
+        late_simulations=2, # Match early sims for simplicity here
         c_puct=4.0,
         dirichlet_alpha=0.3,
-        value_weight=1.5,  # Increased value weight
-        value_loss_weights=(0.5, 0.5),  # Add this line
-
-        # Temperature parameters
+        value_weight=1.5,
+        # --- Value Loss ---
+        value_loss_weights=(0.5, 0.5),
+        # --- Temperature ---
         initial_temp=1.0,
         final_temp=0.1,
         temp_schedule="cosine",
-        temp_decay_half_life=0.35,
+        annealing_steps=5, # Short anneal for smoke test
+        temp_clamp_fraction=0.5, # Clamp quickly
+        temp_decay_half_life=0.35, # Keep other temp params
         temp_start_decay_at=0.25
     ),
 
     "attention_config": CombinedConfig(
-
-        # The attention_config builds on our learnings from value_head_config2 and addresses its limitations:
-        # While value_head_config2 showed strong ring removal performance (64.9%) but struggled with placement
-        # (48.7%) and main game phases (51.4%), this configuration adds spatial attention to help capture
-        # complex board relationships.
-
-        # Key architectural changes are paired with specific parameter choices:
-        # 1. The attention mechanisms need a lower learning rate (0.0005) and higher regularization (2e-4) for
-        #    stable training of the new spatial attention parameters.
-        # 2. We reduce batch size to 32 (from 256) to allow more frequent updates during the initial learning
-        #    of attention patterns.
-        # 3. We maintain the higher initial temperature (1.5) but reduce simulations (100 from 300) as the
-        #    attention mechanism should provide better immediate position evaluation.
-
-        # The hypothesis is that attention will help the model understand spatial relationships between pieces,
-        # particularly in the placement and main game phases where value_head_config2 struggled to learn
-        # beyond random performance.
-
-        # Training parameters
         num_iterations=100,
-        games_per_iteration=75,     # Keep same as value_head_config2
-        epochs_per_iteration=5,     # Reduced from 7 due to smaller batches
-        batches_per_epoch=200,      # Increased to compensate for smaller batch size
-
-        # Learning parameters
-        lr=0.0005,                  # Higher than value_head but with smaller batches
-        weight_decay=2e-4,          # Moderate regularization for attention
-        batch_size=32,              # Smaller batches for attention training
+        games_per_iteration=75,
+        epochs_per_iteration=5,
+        batches_per_epoch=200,
+        lr=0.0005,
+        weight_decay=2e-4,
+        batch_size=32,
         lr_schedule="cosine",
-        warmup_steps=1000,          # Keep warmup for attention training
-
-        # MCTS parameters
-        num_simulations=100,        # Reduced from 300, relying more on attention
-        c_puct=1.5,                 # Keep balanced exploration
+        warmup_steps=1000,
+        num_simulations=100,
+        c_puct=1.5,
         dirichlet_alpha=0.3,
-        value_weight=1.0,           # Neutral weight to start
-
-        # Temperature parameters
-        initial_temp=1.5,           # High but not as extreme as value_head_config2
-        final_temp=0.1,             # Keep strong final exploitation
+        value_weight=1.0,
+        initial_temp=1.5,
+        final_temp=0.1,
+        # attention_specific_param=True # Example if needed
     ),
 
     "smoke": CombinedConfig(
-        # Training parameters
-        num_iterations=3,  # About 1 week with current timing
-        games_per_iteration=2,  # Reduced from 75 for speed
-        epochs_per_iteration=2,  # Increased from 3 for better learning
-        batches_per_epoch=50,
-
-        # Learning rates - more conservative
-        lr=0.0002,  # Reduced from 0.0005
-        weight_decay=5e-4,  # Increased from 2e-4
-        batch_size=256,
+        num_iterations=3,
+        games_per_iteration=2,
+        epochs_per_iteration=2,
+        batches_per_epoch=5, # Reduced batches further
+        lr=0.0002,
+        weight_decay=5e-4,
+        batch_size=64, # Reduced batch size
         lr_schedule="cosine",
-        warmup_steps=2000,  # Longer warmup
-
-        # MCTS parameters
-        num_simulations=2,  # Slight increase from 100
-        c_puct=1.2,  # Slightly more exploratory
+        warmup_steps=10, # Reduced warmup
+        # --- MCTS ---
+        num_simulations=2, # <<<<< INTENDED LOW VALUE
+        late_simulations=2,
+        c_puct=1.2,
         dirichlet_alpha=0.3,
-        value_weight=0.8,  # Reduced from 1.0 to rely less on struggling value head
-
-        # Temperature parameters
-        initial_temp=1.5,  # Higher initial exploration
+        value_weight=0.8,
+        # --- Temperature ---
+        initial_temp=1.5,
         final_temp=0.2,
-        temp_schedule="exponential"  # Smoother transition
+        temp_schedule="exponential",
+        annealing_steps=5,
+        temp_clamp_fraction=0.5,
     )
+
+    # --- Add any other CombinedConfig entries here ---
+
 }
 
-# Results directory structure
+# ==========================================================================
+# Results Directory Structure (Simplified)
+# ==========================================================================
 RESULTS_DIR = Path("results")
-RESULTS_SUBDIRS = {
-    "learning_rate": RESULTS_DIR / "learning_rate",
-    "mcts": RESULTS_DIR / "mcts",
-    "temperature": RESULTS_DIR / "temperature",
-    "combined": RESULTS_DIR / "combined"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True) # Ensure base results dir exists
 
-}
-
-# Create results directories
-for dir_path in RESULTS_SUBDIRS.values():
-    dir_path.mkdir(parents=True, exist_ok=True)
+# Removed RESULTS_SUBDIRS as we only have one type now
 
 
-def validate_config(config_name: str, config_dict: Dict) -> bool:
-    """Validate experiment configuration."""
+# ==========================================================================
+# Configuration Loading Function (Simplified)
+# ==========================================================================
+def get_experiment_config(config_name: str) -> Optional[CombinedConfig]:
+    """
+    Get specific experiment configuration from the COMBINED_EXPERIMENTS dictionary.
+
+    Args:
+        config_name: The name of the configuration to retrieve (e.g., "smoke").
+
+    Returns:
+        The corresponding CombinedConfig object if found, otherwise None.
+    """
+    if config_name not in COMBINED_EXPERIMENTS:
+        logger.error(f"Configuration '{config_name}' not found in COMBINED_EXPERIMENTS.")
+        return None
+
+    config = COMBINED_EXPERIMENTS[config_name]
+
+    # Basic validation inherent in dataclass structure (type hints)
+    # Add any crucial cross-parameter checks here if needed, e.g.:
     try:
-        if config_name not in config_dict:
-            logger.error(f"Configuration '{config_name}' not found")
-            return False
-
-        config = config_dict[config_name]
-
-        # Check required fields based on config type
-        if isinstance(config, LearningRateConfig):
-            assert config.lr > 0, "Learning rate must be positive"
-            assert config.weight_decay >= 0, "Weight decay must be non-negative"
-            assert config.batch_size > 0, "Batch size must be positive"
-
-        elif isinstance(config, MCTSConfig):
-            assert config.num_simulations > 0, "Number of simulations must be positive"
-
-        elif isinstance(config, TemperatureConfig):
-            assert config.initial_temp > config.final_temp, "Initial temperature should be higher than final"
-            assert config.annealing_steps > 0, "Annealing steps must be positive"
-
-        return True
-
+        assert config.num_simulations > 0, "num_simulations must be positive"
+        assert config.lr > 0, "Learning rate must be positive"
+        assert config.batch_size > 0, "Batch size must be positive"
+        if config.late_simulations is not None:
+             assert config.late_simulations > 0, "late_simulations must be positive if specified"
+        # Add more assertions as needed...
     except AssertionError as e:
-        logger.error(f"Configuration validation failed: {str(e)}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error validating configuration: {str(e)}")
-        return False
-
-
-def get_experiment_config(experiment_type: str, config_name: str) -> Optional[object]:
-    """Get specific experiment configuration."""
-    config_maps = {
-        "learning_rate": LEARNING_RATE_EXPERIMENTS,
-        "mcts": MCTS_EXPERIMENTS,
-        "temperature": TEMPERATURE_EXPERIMENTS,
-        "combined": COMBINED_EXPERIMENTS
-    }
-
-    if experiment_type not in config_maps:
-        logger.error(f"Unknown experiment type: {experiment_type}")
+        logger.error(f"Configuration validation failed for '{config_name}': {e}")
         return None
 
-    config_dict = config_maps[experiment_type]
+    logger.info(f"Successfully loaded configuration '{config_name}'")
+    return config
 
-    if not validate_config(config_name, config_dict):
-        return None
-
-    return config_dict[config_name]
 
 if __name__ == "__main__":
-    config = get_experiment_config("combined", "attention_config")
-    if config:
-        print("Attention Config Loaded Successfully!")
+    # Example of loading a config
+    smoke_config = get_experiment_config("smoke")
+    if smoke_config:
+        print("\nSmoke Config Loaded Successfully!")
+        print(f"Num Simulations: {smoke_config.num_simulations}") # Verify the value
+        print(f"LR: {smoke_config.lr}")
+        # print(vars(smoke_config)) # Print all fields if needed
     else:
-        print("Failed to Load Attention Config.")
+        print("\nFailed to Load Smoke Config.")
+
+    attention_config = get_experiment_config("attention_config")
+    if attention_config:
+        print("\nAttention Config Loaded Successfully!")
+    else:
+        print("\nFailed to Load Attention Config.")

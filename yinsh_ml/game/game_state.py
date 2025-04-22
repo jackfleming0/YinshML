@@ -153,12 +153,12 @@ class GameState:
         #logger.debug(f"\nProcessing move execution...")  # Debug
 
         if move.type == MoveType.PLACE_RING:
-            logger.debug("Processing ring placement")
-            logger.debug(f"Current game phase: {self.phase}")  # Debug
-            logger.debug(f"Current player: {self.current_player}")  # Debug
-            logger.debug(f"Rings placed: {self.rings_placed}")  # Debug
+            # logger.debug("Processing ring placement")
+            # logger.debug(f"Current game phase: {self.phase}")  # Debug
+            # logger.debug(f"Current player: {self.current_player}")  # Debug
+            # logger.debug(f"Rings placed: {self.rings_placed}")  # Debug
             success = self._handle_ring_placement(move)
-            logger.debug(f"Ring placement success: {success}")
+            # logger.debug(f"Ring placement success: {success}")
 
         elif move.type == MoveType.MOVE_RING:
             success = self.board.move_ring(move.source, move.destination)
