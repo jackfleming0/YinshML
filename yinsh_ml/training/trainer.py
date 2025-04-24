@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class GameExperience:
     """Stores game states and outcomes for training, with persistence support."""
 
-    def __init__(self, max_size: int = 100000):
+    def __init__(self, max_size: int = 10000):
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
