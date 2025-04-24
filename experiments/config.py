@@ -572,6 +572,8 @@ COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
     ),
 
     "041725_balanced": CombinedConfig(
+        #don't use this one, crashes at iteration 8 from memory constraints
+
         num_iterations=15,
         games_per_iteration=800,
         num_simulations=120,
@@ -579,6 +581,30 @@ COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
         c_puct=2.5,
         dirichlet_alpha=0.17,
         epochs_per_iteration=8,
+        batches_per_epoch=60,
+        batch_size=512,
+        lr=6e-4,
+        value_head_lr_factor=6.0,
+        weight_decay=1e-4,
+        lr_schedule="cosine",
+        warmup_steps=2000,
+        value_weight=1.0,
+        value_loss_weights=(0.5, 0.5),
+        initial_temp=1.6,
+        final_temp=0.15,
+        temp_schedule="cosine"
+    ),
+
+    "042425_balanced": CombinedConfig(
+        # don't use this one, crashes at iteration 8 from memory constraints
+
+        num_iterations=30,
+        games_per_iteration=200,
+        num_simulations=120,
+        late_simulations=60,  # Corrected: default is None, needs explicit value if different
+        c_puct=2.5,
+        dirichlet_alpha=0.17,
+        epochs_per_iteration=16,
         batches_per_epoch=60,
         batch_size=512,
         lr=6e-4,
