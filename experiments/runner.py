@@ -41,58 +41,26 @@ def _supervisor_kwargs_from_config(cfg: CombinedConfig) -> dict:
     # Convert the dataclass to a dictionary
     config_dict = asdict(cfg)
 
-    # --- Parameters explicitly handled by TrainingSupervisor's __init__ ---
-    # These should NOT be passed via **mode_settings if they are direct args
-    supervisor_direct_args = {
-        'mcts_simulations' # This is the one causing potential issues
-        # Add any other direct arguments of TrainingSupervisor.__init__ here
-        # (excluding network, save_dir, device which are handled separately)
-    }
-
     # --- Prepare the **mode_settings dictionary ---
     # Start with all config parameters
     mode_settings = config_dict.copy()
 
-    # Rename keys where the config name differs from the expected name
-    # in downstream components (Trainer, SelfPlay, MCTS)
-    # Example: If Trainer expects 'learning_rate' but config has 'lr'
-    rename_for_mode_settings = {
-        # 'lr': 'learning_rate' # Example if needed
-    }
-    for old_key, new_key in rename_for_mode_settings.items():
-        if old_key in mode_settings:
-            mode_settings[new_key] = mode_settings.pop(old_key)
-
     # --- Prepare the final kwargs for TrainingSupervisor ---
     supervisor_kwargs = {}
 
-    # 1. Add parameters that are direct arguments to TrainingSupervisor
-    #    *Crucially*, we map the config's 'num_simulations' to the supervisor's 'mcts_simulations' argument.
+    # 1. Map the config's 'num_simulations' to the supervisor's 'mcts_simulations' argument
     if 'num_simulations' in config_dict:
-         supervisor_kwargs['mcts_simulations'] = config_dict['num_simulations']
-    # Add other direct arguments if any, mapping from config_dict if needed
+        supervisor_kwargs['mcts_simulations'] = config_dict['num_simulations']
 
-    # 2. Remove the direct arguments from the mode_settings dict to avoid conflicts
-    if 'mcts_simulations' in mode_settings: # Remove the key if it exists after potential renaming
-        del mode_settings['mcts_simulations']
-    if 'num_simulations' in mode_settings: # Remove the original key too just in case
-         del mode_settings['num_simulations']
-
-    # Remove other direct args from mode_settings
-    # for arg_name in supervisor_direct_args:
-    #     if arg_name in mode_settings:
-    #         del mode_settings[arg_name]
-    #     # Also remove the original config key if it was different before renaming
-    #     original_key = next((k for k, v in rename_for_mode_settings.items() if v == arg_name), None)
-    #     if original_key and original_key in mode_settings:
-    #         del mode_settings[original_key]
-
+    # 2. FIXED: Don't remove num_simulations from mode_settings
+    #    This ensures both keys exist downstream
 
     # 3. Add the remaining parameters as **mode_settings
     supervisor_kwargs['mode_settings'] = mode_settings
 
-    logger.debug(f"Supervisor direct kwargs: { {k: supervisor_kwargs[k] for k in supervisor_kwargs if k != 'mode_settings'} }")
-    logger.debug(f"Supervisor mode_settings: {supervisor_kwargs['mode_settings']}")
+    # Add debugging information
+    logger.debug(f"Supervisor: mcts_simulations = {supervisor_kwargs.get('mcts_simulations', 'NOT SET')}")
+    logger.debug(f"mode_settings: num_simulations = {mode_settings.get('num_simulations', 'NOT SET')}")
 
     return supervisor_kwargs
 

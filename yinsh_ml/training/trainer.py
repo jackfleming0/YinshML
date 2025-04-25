@@ -24,13 +24,19 @@ from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 logger = logging.getLogger(__name__)
 
 class GameExperience:
-    """Stores game states and outcomes for training, with persistence support."""
+    """Stores game states and outcomes for training, with optimized memory usage."""
 
-    def __init__(self, max_size: int = 10000):
+    def __init__(self, max_size: int = 10000, subsample_long_games: bool = True):
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
         self.phases = deque(maxlen=max_size)
+        self.subsample_long_games = subsample_long_games
+
+        # Memory monitoring
+        self._total_states_added = 0
+        self._memory_check_interval = 500
+        self._last_memory_check = 0
 
     def add_game_experience(self,
                             states: list,
@@ -39,39 +45,56 @@ class GameExperience:
                             final_black_score: int,
                             discount_factor: float = 1.0):
         """
-        Add a completed game to the replay buffer using a continuous
-        margin-based value in [-1, +1] normalized by max score = 3.
+        Add a completed game to the replay buffer with memory optimization.
 
         Args:
             states:             List of game states (numpy arrays).
             policies:           List of move probability distributions.
             final_white_score:  White's final score (0 to 3).
             final_black_score:  Black's final score (0 to 3).
-            discount_factor:    Optional discount factor, e.g. 0.99, applied per move
-                                (from the end of the game backward). Default = 1.0 (no discount).
+            discount_factor:    Optional discount factor for value calculation.
         """
         # Safety check
         assert len(states) == len(policies), "Mismatch: states vs. policies!"
 
-        # Helper to decode phases from channel 5, if needed
+        # Memory optimization: Subsample very long games
+        if self.subsample_long_games and len(states) > 100:
+            # For very long games, keep early, late, and sample middle positions
+            keep_early = 20  # Keep first 20 moves
+            keep_late = 20  # Keep last 20 moves
+
+            # If game is long enough to need subsampling
+            if len(states) > (keep_early + keep_late + 10):
+                # Take positions from the middle
+                middle_indices = list(range(keep_early, len(states) - keep_late))
+                # Sample up to 30 positions from middle
+                num_to_sample = min(30, len(middle_indices))
+                if num_to_sample > 0:
+                    sampled_indices = sorted(random.sample(middle_indices, num_to_sample))
+                    keep_indices = list(range(keep_early)) + sampled_indices + list(
+                        range(len(states) - keep_late, len(states)))
+
+                    # Create subsampled game
+                    states = [states[i] for i in keep_indices]
+                    policies = [policies[i] for i in keep_indices]
+
+                    print(f"[Memory Opt] Reduced long game from {len(states)} → {len(keep_indices)} states")
+
+        # Helper to decode phases from channel 5
         def decode_phase(state: np.ndarray) -> str:
             phase_channel = state[5]  # 5th channel for 'GAME_PHASE'
-            # Use absolute value to ignore current player sign.
             avg = np.mean(np.abs(phase_channel))
-            # Adjust thresholds to match your observed distribution.
             if avg < 0.2:
                 phase = "RING_PLACEMENT"
             elif avg < 0.6:
                 phase = "MAIN_GAME"
             else:
                 phase = "RING_REMOVAL"
-#            print(f"[DEBUG] decode_phase: avg={avg:.3f}")
-#            print(f"[DEBUG] Classified phase: {phase}")
             return phase
 
         # Compute the normalized margin in [-1, +1]
-        score_diff = final_white_score - final_black_score  # e.g. +2 if 3–1
-        normalized_margin = score_diff / 3.0                # e.g. +0.666..., range is [-1, +1]
+        score_diff = final_white_score - final_black_score
+        normalized_margin = score_diff / 3.0
 
         # Precompute phases
         phases = [decode_phase(s) for s in states]
@@ -79,8 +102,7 @@ class GameExperience:
 
         # Iterate over each move/state in the completed game
         for idx, (state, policy, phase) in enumerate(zip(states, policies, phases)):
-            # If you want to discount earlier moves more heavily, you can do:
-            # (game_length - 1 - idx) as the exponent for discount_factor
+            # Calculate discounted value
             discounted_value = normalized_margin * (discount_factor ** (game_length - 1 - idx))
 
             self.states.append(state)
@@ -88,38 +110,123 @@ class GameExperience:
             self.values.append(discounted_value)
             self.phases.append(phase)
 
-        print(f"[Replay Buffer] Added game with final scores W={final_white_score}, B={final_black_score}, "
+            # Track total states for memory monitoring
+            self._total_states_added += 1
+
+        # Log information about the replay buffer
+        print(f"[Replay Buffer] Added game with scores W={final_white_score}, B={final_black_score}, "
               f"margin={normalized_margin:.3f}. Replay size={self.size()}")
 
-    def save_buffer(self, path: str):
-        """Save the replay buffer to disk using pickle."""
+        # Periodically check memory usage
+        if self._total_states_added - self._last_memory_check > self._memory_check_interval:
+            self._monitor_memory()
+            self._last_memory_check = self._total_states_added
+
+    def _monitor_memory(self):
+        """Monitor memory usage and take action if needed."""
+        try:
+            import psutil
+            import sys
+
+            # Check overall process memory
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / (1024 * 1024)
+
+            # Estimate buffer size
+            if self.states:
+                sample_state = self.states[0]
+                sample_policy = self.move_probs[0]
+                # Rough estimate of per-item memory
+                state_size = sys.getsizeof(sample_state) + sample_state.nbytes
+                policy_size = sys.getsizeof(sample_policy) + sample_policy.nbytes
+                item_size = state_size + policy_size + 16  # Extra for values/phases
+                buffer_mb = (item_size * len(self.states)) / (1024 * 1024)
+
+                print(
+                    f"[Memory Monitor] Process: {memory_mb:.1f}MB, Buffer: ~{buffer_mb:.1f}MB, States: {len(self.states)}")
+
+                # If memory is getting high, force garbage collection
+                if memory_mb > 4000:  # 4GB threshold, adjust as needed
+                    import gc
+                    gc.collect()
+
+                    # If still high after GC, reduce buffer size
+                    if memory_mb > 6000:  # 6GB threshold
+                        current_size = len(self.states)
+                        target_size = max(1000, int(current_size * 0.7))  # Reduce by 30%
+
+                        # Create new smaller deques and keep newest data
+                        start_idx = max(0, current_size - target_size)
+                        self.states = deque(list(self.states)[start_idx:], maxlen=target_size)
+                        self.move_probs = deque(list(self.move_probs)[start_idx:], maxlen=target_size)
+                        self.values = deque(list(self.values)[start_idx:], maxlen=target_size)
+                        self.phases = deque(list(self.phases)[start_idx:], maxlen=target_size)
+
+                        print(f"[Memory Manager] Reduced buffer from {current_size} to {len(self.states)} states")
+        except Exception as e:
+            print(f"[Memory Monitor] Error checking memory: {e}")
+
+    def save_buffer(self, path: str, compress: bool = True):
+        """Save the replay buffer to disk with compression option."""
         import pickle
-        with open(path, 'wb') as f:
-            pickle.dump({
-                'states': list(self.states),
-                'move_probs': list(self.move_probs),
-                'values': list(self.values),
-                'phases': list(self.phases)  # Save phases along with other data
-            }, f)
-        print(f"[Replay Buffer] Saved to {path}. Current size: {self.size()}")
+
+        save_data = {
+            'states': list(self.states),
+            'move_probs': list(self.move_probs),
+            'values': list(self.values),
+            'phases': list(self.phases)
+        }
+
+        mode = 'wb'
+        protocol = pickle.HIGHEST_PROTOCOL
+
+        if compress:
+            try:
+                import gzip
+                path = path if path.endswith('.gz') else path + '.gz'
+                with gzip.open(path, mode) as f:
+                    pickle.dump(save_data, f, protocol=protocol)
+                print(f"[Replay Buffer] Saved compressed buffer to {path}. Size: {self.size()}")
+                return
+            except ImportError:
+                print("[Replay Buffer] gzip module not available, saving uncompressed")
+
+        # Regular save if compression fails or is disabled
+        with open(path, mode) as f:
+            pickle.dump(save_data, f, protocol=protocol)
+        print(f"[Replay Buffer] Saved to {path}. Size: {self.size()}")
 
     def load_buffer(self, path: str):
-        """Load the replay buffer from disk using pickle."""
+        """Load the replay buffer from disk, handling compressed files."""
         import pickle
+
         try:
-            with open(path, 'rb') as f:
-                data = pickle.load(f)
+            # Try to detect gzip compression
+            if path.endswith('.gz'):
+                import gzip
+                with gzip.open(path, 'rb') as f:
+                    data = pickle.load(f)
+            else:
+                # Try normal file loading
+                with open(path, 'rb') as f:
+                    data = pickle.load(f)
+
+            # Restore buffer data
             self.states = deque(data.get('states', []), maxlen=self.states.maxlen)
             self.move_probs = deque(data.get('move_probs', []), maxlen=self.move_probs.maxlen)
             self.values = deque(data.get('values', []), maxlen=self.values.maxlen)
-            # If phases are not present, default to "MAIN_GAME" for each state.
             loaded_phases = data.get('phases', None)
+
+            # Handle phases if they exist
             if loaded_phases is None or len(loaded_phases) != len(self.states):
                 default_phase = "MAIN_GAME"
                 self.phases = deque([default_phase] * len(self.states), maxlen=self.states.maxlen)
             else:
                 self.phases = deque(loaded_phases, maxlen=self.states.maxlen)
-            print(f"[Replay Buffer] Loaded from {path}. Current size: {self.size()}")
+
+            print(f"[Replay Buffer] Loaded from {path}. Size: {self.size()}")
+
         except Exception as e:
             print(f"[Replay Buffer] Failed to load from {path}: {e}")
 
@@ -134,14 +241,6 @@ class GameExperience:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample a random batch of experiences, weighting certain phases more/less.
-
-        Args:
-            batch_size: Number of samples to draw.
-            phase_weights: Dictionary of phase -> weight multipliers.
-                           Example: {"RING_PLACEMENT": 0.5, "MAIN_GAME": 2.0, "RING_REMOVAL": 0.5}
-                           If None, defaults to 1.0 for everything.
-        Returns:
-            (states, move_probs, values) as tensors.
         """
         n = len(self.states)
         if n == 0:
@@ -156,7 +255,7 @@ class GameExperience:
             }
 
         # Initialize equal probabilities for each sample
-        p = np.ones(n, dtype=np.float64)
+        p = np.ones(n, dtype=np.float32)  # Use float32 to save memory
 
         # Apply phase-based weighting
         for i, phase in enumerate(self.phases):
@@ -165,18 +264,20 @@ class GameExperience:
         # Normalize to make a proper probability distribution
         p = p / p.sum()
 
-        # Sample without replacement
+        # Sample without replacement (faster with numpy choice)
         indices = np.random.choice(n, batch_size, replace=False, p=p)
 
+        # Create tensors from selected indices
         states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])
         probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])
         values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
 
-        # Optional debug: Log how many states of each phase are in this batch
-        phase_counts = {"RING_PLACEMENT": 0, "MAIN_GAME": 0, "RING_REMOVAL": 0}
-        for idx in indices:
-            phase_counts[self.phases[idx]] += 1
-        print(f"[DEBUG] Sampled Batch Phase Counts: {phase_counts}")
+        # Optional debug: Count phases in batch
+        if random.random() < 0.05:  # Only log 5% of the time to reduce spam
+            phase_counts = {"RING_PLACEMENT": 0, "MAIN_GAME": 0, "RING_REMOVAL": 0}
+            for idx in indices:
+                phase_counts[self.phases[idx]] += 1
+            print(f"[Batch Stats] Phase distribution: {phase_counts}")
 
         return states, probs, values.unsqueeze(1)
 

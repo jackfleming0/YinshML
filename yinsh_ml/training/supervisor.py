@@ -211,7 +211,6 @@ class TrainingSupervisor:
                 self.logger.warning(f"Best model path {self.best_model_path} not found. Using initial network weights.")
                 self._reset_best_model_state() # Reset tracking if path is invalid
 
-
     # --- Rest of the methods (_compute_num_workers, _load/save_best_model_state, train_iteration, helpers) ---
     # Keep these methods as they were in the previous version, ensuring they use
     # self.save_dir correctly for paths.
@@ -221,25 +220,39 @@ class TrainingSupervisor:
         """
         One full self-play -> training -> evaluation -> model-selection cycle.
         Uses configuration parameters stored in self.self_play and self.trainer.
+        Memory-optimized version to reduce RAM usage.
 
         Args:
             num_games: Number of self-play games to generate for this iteration.
             epochs: Number of training epochs for this iteration.
         """
+        # Initialize memory monitoring
+        try:
+            import psutil
+            process = psutil.Process()
+            initial_memory_mb = process.memory_info().rss / (1024 * 1024)
+            self.logger.info(f"Initial memory usage: {initial_memory_mb:.1f} MB")
+        except:
+            initial_memory_mb = 0
+
+        # Force garbage collection at the start
+        import gc
+        gc.collect()
+
         current_iteration = self._iteration_counter
-        self.logger.info(f"\n{'='*15} Starting Iteration {current_iteration} {'='*15}")
+        self.logger.info(f"\n{'=' * 15} Starting Iteration {current_iteration} {'=' * 15}")
 
         # Iteration-specific directory within the main save_dir
         iteration_dir = self.save_dir / f"iteration_{current_iteration}"
         iteration_dir.mkdir(exist_ok=True, parents=True)
 
         # ------------------------------------------------------------------ #
-        # 1. SELF-PLAY
+        # 1. SELF-PLAY (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
         # Ensure self_play uses the *current* network weights (potentially reverted from previous iter)
         self.self_play.network = self.network
         # Pass the number of games for this iteration
-        self.self_play.current_iteration = current_iteration # Pass iteration for potential use in worker logging/metrics
+        self.self_play.current_iteration = current_iteration
 
         self.logger.info(f"Generating {num_games} self-play games...")
         # Log MCTS parameters being used by SelfPlay for this iteration for verification
@@ -248,133 +261,204 @@ class TrainingSupervisor:
                          f"Switch Ply: {self.self_play.mcts.switch_ply}, "
                          f"cPUCT: {self.self_play.mcts.c_puct}, "
                          f"Alpha: {self.self_play.mcts.dirichlet_alpha}, "
-                         f"Value Weight: {self.self_play.mcts.value_weight}") # Check actual value weight used
-
+                         f"Value Weight: {self.self_play.mcts.value_weight}")
 
         t0 = time.time()
-        # generate_games now uses the num_games argument passed to train_iteration
-        games = self.self_play.generate_games(num_games=num_games)
+
+        # MEMORY-OPTIMIZATION: Process games in batches to reduce peak memory usage
+        batch_size = min(25, num_games)  # Generate in smaller batches
+        games = []
+
+        for batch_start in range(0, num_games, batch_size):
+            batch_end = min(batch_start + batch_size, num_games)
+            batch_size_actual = batch_end - batch_start
+
+            self.logger.info(f"Generating game batch {batch_start + 1}-{batch_end} of {num_games}")
+
+            # Generate batch of games
+            batch_games = self.self_play.generate_games(num_games=batch_size_actual)
+            games.extend(batch_games)
+
+            # Force garbage collection after each batch
+            gc.collect()
+
+            # Log progress and memory usage
+            try:
+                if initial_memory_mb > 0:
+                    current_memory_mb = process.memory_info().rss / (1024 * 1024)
+                    self.logger.info(
+                        f"Memory after batch: {current_memory_mb:.1f} MB (Change: {current_memory_mb - initial_memory_mb:+.1f} MB)")
+            except:
+                pass
+
+            self.logger.info(f"Completed {len(games)}/{num_games} games")
+
         game_time = time.time() - t0
 
         if not games:
             # Handle case where no games are generated (e.g., worker errors)
             self.logger.error("Self-play generated zero games! Skipping training and evaluation for this iteration.")
-             # Increment counter and return an empty summary or raise error
+            # Increment counter and return an empty summary or raise error
             self._iteration_counter += 1
-            return { 'error': 'No games generated' } # Or raise specific exception
-
+            return {'error': 'No games generated'}
 
         self.logger.info(f"Generated {len(games)} games in {game_time:.1f}s")
 
         # --- Basic game stats ---
-        game_lengths = [len(g[0]) for g in games if g[0]] # Check if states exist
+        game_lengths = [len(g[0]) for g in games if g[0]]
         avg_game_len = np.mean(game_lengths) if game_lengths else 0
-        # Calculate ring mobility safely
-        # Use the game_history part if available, otherwise decode last state
+
+        # MEMORY-OPTIMIZATION: Process last states more efficiently
         last_states_decoded = []
-        for game_data in games:
-            if len(game_data) >= 4 and isinstance(game_data[3], list) and game_data[3]: # game_history
-                 if 'state' in game_data[3][-1] and isinstance(game_data[3][-1]['state'], GameState):
-                      last_states_decoded.append(game_data[3][-1]['state'])
-                 elif game_data[0]: # Fallback to decoding last state tensor if history incomplete
-                      last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
-            elif game_data[0]: # Fallback if no game_history
-                last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
+        for game_idx, game_data in enumerate(games):
+            try:
+                if len(game_data) >= 4 and isinstance(game_data[3], list) and game_data[3]:
+                    if 'state' in game_data[3][-1] and isinstance(game_data[3][-1]['state'], GameState):
+                        last_states_decoded.append(game_data[3][-1]['state'])
+                    elif game_data[0]:
+                        last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
+                elif game_data[0]:
+                    last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
+
+                # MEMORY-OPTIMIZATION: Process every 10 games to avoid memory buildup
+                if game_idx % 10 == 9:
+                    gc.collect()
+            except Exception as e:
+                self.logger.warning(f"Error processing game {game_idx} for stats: {e}")
 
         ring_mobility_list = [self._calculate_ring_mobility_from_state(gs) for gs in last_states_decoded]
         avg_ring_mobility = np.mean(ring_mobility_list) if ring_mobility_list else 0.0
 
-        outcomes = [g[2] for g in games] # Outcome is now the normalized value
-        # We need a different way to calculate wins/losses if outcome is float
-        # Let's infer from the final scores stored in the replay buffer later,
-        # or estimate based on outcome sign for a rough idea.
-        pseudo_wins_white = sum(1 for o in outcomes if o > 0.1) # Example threshold
+        outcomes = [g[2] for g in games]
+        pseudo_wins_white = sum(1 for o in outcomes if o > 0.1)
         pseudo_wins_black = sum(1 for o in outcomes if o < -0.1)
         pseudo_draws = len(outcomes) - pseudo_wins_white - pseudo_wins_black
         pseudo_win_rate = (pseudo_wins_white + pseudo_wins_black) / len(outcomes) if outcomes else 0
 
-        self.logger.info(f"Self-Play Stats: avg_len={avg_game_len:.1f} | W/B/D (estimated) = {pseudo_wins_white}/{pseudo_wins_black}/{pseudo_draws}")
-
+        self.logger.info(
+            f"Self-Play Stats: avg_len={avg_game_len:.1f} | W/B/D (estimated) = {pseudo_wins_white}/{pseudo_wins_black}/{pseudo_draws}")
 
         # ------------------------------------------------------------------ #
-        # 2. ADD EXPERIENCE & TRAIN
+        # 2. ADD EXPERIENCE & TRAIN (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
-        games_path = iteration_dir / "games.npy"
-        # Assuming export_games saves states, policies, outcomes correctly
-        # self.self_play.export_games(games, str(games_path)) # Decide if saving raw games is needed
+        # MEMORY-OPTIMIZATION: Clear some memory before adding experience
+        last_states_decoded = None
+        gc.collect()
 
         # Ensure trainer uses the current network
         self.trainer.network = self.network
-        # Add games to trainer's replay buffer
-        for game_data in games:
-            # Unpack game data (assuming format: states, policies, outcome, history)
-            states, policies, outcome, game_history = game_data
-            if not states or not policies:
-                 self.logger.warning("Skipping empty game data.")
-                 continue
 
-            # Get final scores from the replay buffer's logic
-            # This assumes the last state in the history accurately reflects the end.
-            # The add_game_experience method in Trainer now handles extracting scores.
-            # We just need to pass the raw data.
+        # MEMORY-OPTIMIZATION: Process games in smaller chunks to limit peak memory
+        chunk_size = 10  # Process 10 games at a time
+        total_games = len(games)
+
+        self.logger.info(f"Adding game experience in {(total_games + chunk_size - 1) // chunk_size} chunks...")
+
+        for i in range(0, total_games, chunk_size):
+            chunk = games[i:i + chunk_size]
+            chunk_end = min(i + chunk_size, total_games)
+            self.logger.info(f"Processing game chunk {i + 1}-{chunk_end} of {total_games}")
+
+            # Process each game in the chunk
+            for game_data in chunk:
+                # Unpack game data (assuming format: states, policies, outcome, history)
+                states, policies, outcome, game_history = game_data
+                if not states or not policies:
+                    self.logger.warning("Skipping empty game data.")
+                    continue
+
+                try:
+                    # Decode last state to get scores for add_game_experience
+                    if game_history and 'state' in game_history[-1]:
+                        final_state = game_history[-1]['state']
+                        if isinstance(final_state, GameState):
+                            final_scores = (final_state.white_score, final_state.black_score)
+                        else:
+                            decoded_state = self.state_encoder.decode_state(final_state)
+                            final_scores = (decoded_state.white_score, decoded_state.black_score)
+                    else:
+                        decoded_state = self.state_encoder.decode_state(states[-1])
+                        final_scores = (decoded_state.white_score, decoded_state.black_score)
+
+                    self.trainer.add_game_experience(states, policies, final_scores)
+                except Exception as e:
+                    self.logger.error(
+                        f"Error adding game experience: {e}. State/Policy lengths: {len(states)}/{len(policies)}",
+                        exc_info=True)
+
+            # MEMORY-OPTIMIZATION: Force garbage collection after each chunk
+            # Also free the chunk data itself
+            chunk = None
+            gc.collect()
+
+            # Log memory usage after each chunk
             try:
-                # Decode last state to get scores for add_game_experience
-                # It expects (white_score, black_score)
-                if game_history and 'state' in game_history[-1]:
-                     final_state = game_history[-1]['state']
-                     if isinstance(final_state, GameState):
-                         final_scores = (final_state.white_score, final_state.black_score)
-                     else: # Need to decode if not GameState object
-                         decoded_state = self.state_encoder.decode_state(final_state)
-                         final_scores = (decoded_state.white_score, decoded_state.black_score)
-                else: # Fallback if history is missing/malformed
-                     decoded_state = self.state_encoder.decode_state(states[-1])
-                     final_scores = (decoded_state.white_score, decoded_state.black_score)
+                if initial_memory_mb > 0:
+                    current_memory_mb = process.memory_info().rss / (1024 * 1024)
+                    self.logger.info(
+                        f"Memory after chunk: {current_memory_mb:.1f} MB (Change: {current_memory_mb - initial_memory_mb:+.1f} MB)")
+            except:
+                pass
 
-                self.trainer.add_game_experience(states, policies, final_scores)
-            except Exception as e:
-                 self.logger.error(f"Error adding game experience: {e}. State/Policy lengths: {len(states)}/{len(policies)}", exc_info=True)
-                 continue # Skip faulty game data
-
+        # MEMORY-OPTIMIZATION: Free up games data now that it's been processed
+        games = None
+        gc.collect()
 
         # Train the network using data in the replay buffer
         self.logger.info(f"Training network for {epochs} epochs...")
         t1 = time.time()
-        self.trainer.policy_losses.clear(); self.trainer.value_losses.clear() # Reset epoch losses
+        self.trainer.policy_losses.clear()
+        self.trainer.value_losses.clear()
         avg_epoch_stats = defaultdict(list)
-        # Use the number of epochs passed to train_iteration
+
+        # MEMORY-OPTIMIZATION: Calculate optimal batch count
+        buffer_size = self.trainer.experience.size()
+
         for epoch in range(epochs):
-             self.logger.info(f"Starting Epoch {epoch+1}/{epochs}")
-             # Trainer now uses its configured batch_size
-             # batches_per_epoch needs careful handling - how many batches are useful?
-             # Maybe base it on replay buffer size?
-             buffer_size = self.trainer.experience.size()
-             if buffer_size < self.trainer.batch_size:
-                  self.logger.warning(f"Replay buffer size ({buffer_size}) is smaller than batch size ({self.trainer.batch_size}). Skipping training epoch.")
-                  continue
+            self.logger.info(f"Starting Epoch {epoch + 1}/{epochs}")
 
-             # Example: Train on roughly half the buffer per epoch?
-             num_batches = max(1, (buffer_size // self.trainer.batch_size) // 2)
-             # Or use the value from config if provided and sensible
-             # num_batches = mode_settings.get('batches_per_epoch', max(1, (buffer_size // self.trainer.batch_size) // 2))
+            if buffer_size < self.trainer.batch_size:
+                self.logger.warning(
+                    f"Replay buffer size ({buffer_size}) is smaller than batch size ({self.trainer.batch_size}). Skipping training epoch.")
+                continue
 
+            # MEMORY-OPTIMIZATION: Use optimal batch count based on buffer size
+            optimal_batches = max(10, (buffer_size // self.trainer.batch_size) // 2)
+            # Use config if provided, otherwise use calculated optimal batches
+            batches_per_epoch = self.mode_settings.get('batches_per_epoch', optimal_batches)
+            actual_batches = min(batches_per_epoch, optimal_batches)
 
-             epoch_stats = self.trainer.train_epoch(
-                 batch_size=self.trainer.batch_size, # Use trainer's configured batch size
-                 batches_per_epoch=num_batches # Dynamically determined number of batches
-                 # ring_placement_weight=... # Add back if needed, pull from mode_settings
-             )
-             # Aggregate stats across epochs if needed
-             for key, value in epoch_stats.items():
-                 # Handle nested dicts like move_accuracies
-                 if isinstance(value, dict):
-                      if not isinstance(avg_epoch_stats[key], list): # Initialize if first time
-                           avg_epoch_stats[key] = [defaultdict(list) for _ in range(len(value))]
-                      # This part needs refinement if aggregating nested dicts
-                      pass # Skip complex aggregation for now
-                 elif isinstance(value, (int, float)):
-                      avg_epoch_stats[key].append(value)
+            self.logger.info(
+                f"Using {actual_batches} batches (buffer size: {buffer_size}, batch size: {self.trainer.batch_size})")
 
+            epoch_stats = self.trainer.train_epoch(
+                batch_size=self.trainer.batch_size,
+                batches_per_epoch=actual_batches
+            )
+
+            # Aggregate stats
+            for key, value in epoch_stats.items():
+                if isinstance(value, dict):
+                    if not isinstance(avg_epoch_stats[key], list):
+                        avg_epoch_stats[key] = [defaultdict(list) for _ in range(len(value))]
+                    # Skip complex aggregation
+                    pass
+                elif isinstance(value, (int, float)):
+                    avg_epoch_stats[key].append(value)
+
+            # MEMORY-OPTIMIZATION: Force garbage collection between epochs
+            if epoch < epochs - 1:  # Skip on last epoch
+                gc.collect()
+
+            # Log memory usage every other epoch
+            if epoch % 2 == 0:
+                try:
+                    if initial_memory_mb > 0:
+                        current_memory_mb = process.memory_info().rss / (1024 * 1024)
+                        self.logger.info(
+                            f"Memory after epoch {epoch + 1}: {current_memory_mb:.1f} MB (Change: {current_memory_mb - initial_memory_mb:+.1f} MB)")
+                except:
+                    pass
 
         train_time = time.time() - t1
 
@@ -382,46 +466,56 @@ class TrainingSupervisor:
         final_pol_loss = np.mean(self.trainer.policy_losses) if self.trainer.policy_losses else 0
         final_val_loss = np.mean(self.trainer.value_losses) if self.trainer.value_losses else 0
 
-        self.logger.info(f"Training done in {train_time:.1f}s (Avg Policy Loss={final_pol_loss:.4f}, Avg Value Loss={final_val_loss:.4f})")
-
+        self.logger.info(
+            f"Training done in {train_time:.1f}s (Avg Policy Loss={final_pol_loss:.4f}, Avg Value Loss={final_val_loss:.4f})")
 
         # ------------------------------------------------------------------ #
-        # 3. SAVE CANDIDATE CHECKPOINT
+        # 3. SAVE CANDIDATE CHECKPOINT (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
+        # MEMORY-OPTIMIZATION: Force garbage collection before saving
+        gc.collect()
+
         checkpoint_path = iteration_dir / f"checkpoint_iteration_{current_iteration}.pt"
         self.network.save_model(str(checkpoint_path))
         self.logger.info(f"Candidate checkpoint saved to {checkpoint_path}")
 
+        # MEMORY-OPTIMIZATION: Check checkpoint file size
+        try:
+            import os
+            checkpoint_size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
+            self.logger.info(f"Checkpoint file size: {checkpoint_size_mb:.1f} MB")
+        except:
+            pass
 
         # ------------------------------------------------------------------ #
         # 4. TOURNAMENT EVALUATION
         # ------------------------------------------------------------------ #
+        # The rest of the code remains mostly unchanged as tournament evaluation
+        # typically doesn't have significant memory issues
+
         self.logger.info("Running tournament evaluation...")
-        # Ensure tournament manager knows about models in the save_dir
-        # discover_models might need adjustment if checkpoint path changed
-        # self.tournament_manager.discover_models() # Maybe not needed if paths are consistent
+
         try:
-             self.tournament_manager.run_full_round_robin_tournament(current_iteration)
-             # Use _canon to get the standardized model ID
-             model_id_canon = _canon(str(checkpoint_path)) # e.g., "checkpoint_iteration_X"
-             self.logger.info(f"Fetching tournament performance for canonical ID: {model_id_canon}")
-             tournament_stats = self.tournament_manager.get_model_performance(model_id_canon) or {}
-             current_elo = tournament_stats.get('current_rating', self.tournament_manager.glicko_tracker.initial_rating) # Default to initial if no stats
-             tourn_win_rate = tournament_stats.get('win_rate', 0.0)
-             self.logger.info(f"Tournament Results for {model_id_canon}: Elo={current_elo:.1f}, Win Rate={tourn_win_rate:.1%}")
+            self.tournament_manager.run_full_round_robin_tournament(current_iteration)
+            model_id_canon = _canon(str(checkpoint_path))
+            self.logger.info(f"Fetching tournament performance for canonical ID: {model_id_canon}")
+            tournament_stats = self.tournament_manager.get_model_performance(model_id_canon) or {}
+            current_elo = tournament_stats.get('current_rating', self.tournament_manager.glicko_tracker.initial_rating)
+            tourn_win_rate = tournament_stats.get('win_rate', 0.0)
+            self.logger.info(
+                f"Tournament Results for {model_id_canon}: Elo={current_elo:.1f}, Win Rate={tourn_win_rate:.1%}")
 
         except FileNotFoundError as e:
-             self.logger.error(f"Tournament failed: Could not find a model checkpoint. Check paths. Error: {e}", exc_info=True)
-             # Handle failure gracefully, e.g., assign default ELO, skip promotion check
-             current_elo = self.best_model_elo # Fallback to previous best ELO
-             tourn_win_rate = 0.0
-             tournament_stats = {} # Ensure it's a dict
+            self.logger.error(f"Tournament failed: Could not find a model checkpoint. Check paths. Error: {e}",
+                              exc_info=True)
+            current_elo = self.best_model_elo
+            tourn_win_rate = 0.0
+            tournament_stats = {}
         except Exception as e:
-             self.logger.error(f"An unexpected error occurred during tournament: {e}", exc_info=True)
-             current_elo = self.best_model_elo # Fallback
-             tourn_win_rate = 0.0
-             tournament_stats = {}
-
+            self.logger.error(f"An unexpected error occurred during tournament: {e}", exc_info=True)
+            current_elo = self.best_model_elo
+            tourn_win_rate = 0.0
+            tournament_stats = {}
 
         # ------------------------------------------------------------------ #
         # 5. PROMOTION / REVERSION (using Wilson Gate)
@@ -436,119 +530,116 @@ class TrainingSupervisor:
         perform_wilson_check = False
 
         # --- Check if comparison is needed and possible ---
-        # Ensure best_model_iteration is valid AND different from candidate
-        # AND that we have a valid path for the previous best model
         if self.best_model_iteration >= 0 and self.best_model_iteration != candidate_iteration and self.best_model_path:
             best_id_canon = _canon(str(self.best_model_path))
             self.logger.info(f"Comparing Candidate ({candidate_id_canon}) vs Best ({best_id_canon}) for Wilson gate.")
             try:
-                 wins, total = self.tournament_manager.get_head_to_head(candidate_id_canon, best_id_canon)
-                 if total > 0:
-                     perform_wilson_check = True
-                     self.logger.info(f"Head-to-head results found: Candidate Wins={wins}, Total Games={total}")
-                 else:
-                      self.logger.warning(f"No head-to-head games recorded between {candidate_id_canon} and {best_id_canon}. Cannot run Wilson gate.")
+                wins, total = self.tournament_manager.get_head_to_head(candidate_id_canon, best_id_canon)
+                if total > 0:
+                    perform_wilson_check = True
+                    self.logger.info(f"Head-to-head results found: Candidate Wins={wins}, Total Games={total}")
+                else:
+                    self.logger.warning(
+                        f"No head-to-head games recorded between {candidate_id_canon} and {best_id_canon}. Cannot run Wilson gate.")
             except Exception as e:
-                 self.logger.error(f"Error getting head-to-head results: {e}", exc_info=True)
-
+                self.logger.error(f"Error getting head-to-head results: {e}", exc_info=True)
 
         elif self.best_model_iteration < 0:
             self.logger.info("No previous best model recorded. Wilson gate skipped.")
-        else: # best_model_iteration == candidate_iteration
-            self.logger.info(f"Candidate ({candidate_id_canon}) is the current best model ({_canon(str(self.best_model_path))}). Wilson gate skipped.")
-
+        else:
+            self.logger.info(
+                f"Candidate ({candidate_id_canon}) is the current best model ({_canon(str(self.best_model_path))}). Wilson gate skipped.")
 
         # --- Run Wilson Gate if applicable ---
         promote_by_wilson = False
         if perform_wilson_check:
-            # *** Use self.mode_settings here ***
             wilson_threshold = self.mode_settings.get('promotion_threshold', 0.55)
             promote_by_wilson = self._should_promote(wins, total, threshold=wilson_threshold)
-            self.logger.info(f"Wilson Gate Check: Wins={wins}, Total={total}, LB={self._wilson_lower_bound(wins, total):.3f}, Threshold={wilson_threshold} -> {'PROMOTE' if promote_by_wilson else 'REJECT'}")
+            self.logger.info(
+                f"Wilson Gate Check: Wins={wins}, Total={total}, LB={self._wilson_lower_bound(wins, total):.3f}, Threshold={wilson_threshold} -> {'PROMOTE' if promote_by_wilson else 'REJECT'}")
 
         # --- Final Promotion Decision Logic ---
         promote = False
         reverted = False
-        kept_current_best = (self.best_model_iteration == candidate_iteration) # Check if candidate is already best
+        kept_current_best = (self.best_model_iteration == candidate_iteration)
 
         if promote_by_wilson:
             promote = True
             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) passed Wilson gate.")
         elif self.best_model_iteration < 0:
-             promote = True
-             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) is the first model.")
+            promote = True
+            self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) is the first model.")
         elif candidate_elo > self.best_model_elo:
-             promote = True
-             reason = f"Elo improved ({candidate_elo:.1f} > {self.best_model_elo:.1f})"
-             if perform_wilson_check and not promote_by_wilson:
-                 reason = f"Wilson failed ({wins}/{total}) but Elo improved"
-             # elif not perform_wilson_check and not kept_current_best: # Already handled by kept_current_best flag
-             #     reason = "Wilson skipped (no prior best?) and Elo improved"
-             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) - {reason}.")
+            promote = True
+            reason = f"Elo improved ({candidate_elo:.1f} > {self.best_model_elo:.1f})"
+            if perform_wilson_check and not promote_by_wilson:
+                reason = f"Wilson failed ({wins}/{total}) but Elo improved"
+            self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) - {reason}.")
 
         # --- Apply Decision ---
         if promote:
             self.best_model_elo = candidate_elo
             self.best_model_iteration = candidate_iteration
-            self.best_model_path = checkpoint_path # The candidate's checkpoint path
-            # Save the promoted model's weights to the canonical "best_model.pt"
+            self.best_model_path = checkpoint_path
             if self.best_model_path.exists():
-                 self.network.save_model(str(self.best_model_save_path))
-                 self.logger.info(f"Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
+                self.network.save_model(str(self.best_model_save_path))
+                self.logger.info(f"Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
             else:
-                 self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
-            self._save_best_model_state() # Persist the new best state
-
-        elif kept_current_best:
-             self.logger.info(f" Kandidat ({candidate_id_canon}) is already the best model. Keeping current state.")
-             # No state change needed, weights are already correct
-             self._save_best_model_state() # Save state anyway to update iteration counter if needed
-
-        else: # Reject candidate (Wilson failed AND Elo insufficient)
-            self.logger.info(f"🚫 REJECTED: Candidate Iter {candidate_iteration} ({candidate_id_canon}) not promoted.")
-            if self.best_model_path and self.best_model_path.exists():
-                 self.logger.info(f"Reverting network weights to previous best: {self.best_model_path.name} (Iter {self.best_model_iteration})")
-                 try:
-                     self.network.load_model(str(self.best_model_path))
-                     reverted = True
-                 except Exception as e:
-                      self.logger.error(f"Failed to revert weights from {self.best_model_path}: {e}. Network weights remain as rejected candidate.", exc_info=True)
-            else:
-                 self.logger.warning(f"Cannot revert: Previous best model path invalid or not found ({self.best_model_path}). Keeping rejected candidate weights.")
-            # Save state even if rejected, to record the current iteration counter
+                self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
             self._save_best_model_state()
 
+        elif kept_current_best:
+            self.logger.info(f" Kandidat ({candidate_id_canon}) is already the best model. Keeping current state.")
+            self._save_best_model_state()
+
+        else:
+            self.logger.info(f"🚫 REJECTED: Candidate Iter {candidate_iteration} ({candidate_id_canon}) not promoted.")
+            if self.best_model_path and self.best_model_path.exists():
+                self.logger.info(
+                    f"Reverting network weights to previous best: {self.best_model_path.name} (Iter {self.best_model_iteration})")
+                try:
+                    self.network.load_model(str(self.best_model_path))
+                    reverted = True
+                except Exception as e:
+                    self.logger.error(
+                        f"Failed to revert weights from {self.best_model_path}: {e}. Network weights remain as rejected candidate.",
+                        exc_info=True)
+            else:
+                self.logger.warning(
+                    f"Cannot revert: Previous best model path invalid or not found ({self.best_model_path}). Keeping rejected candidate weights.")
+            self._save_best_model_state()
 
         # Determine active network weights for clarity
         active_iter = self.best_model_iteration if (promote or reverted or kept_current_best) else candidate_iteration
         self.logger.info(f"Active network weights in memory correspond to iteration {active_iter}")
 
+        # ------------------------------------------------------------------ #
+        # 6. METRICS, VISUALS, HOUSE-KEEPING (MEMORY-OPTIMIZED)
+        # ------------------------------------------------------------------ #
+        # MEMORY-OPTIMIZATION: Final garbage collection
+        gc.collect()
 
-        # ------------------------------------------------------------------ #
-        # 6. METRICS, VISUALS, HOUSE-KEEPING
-        # ------------------------------------------------------------------ #
+        # Log final memory usage
+        try:
+            if initial_memory_mb > 0:
+                final_memory_mb = process.memory_info().rss / (1024 * 1024)
+                self.logger.info(
+                    f"Final memory usage: {final_memory_mb:.1f} MB (Change: {final_memory_mb - initial_memory_mb:+.1f} MB)")
+        except:
+            pass
+
         # Aggregate metrics for this iteration
         self.metrics.add_iteration_metrics(
-            avg_game_length = avg_game_len,
-            avg_ring_mobility = avg_ring_mobility,
-            win_rate = pseudo_win_rate, # Use estimated win rate from self-play
-            draw_rate = pseudo_draws / len(outcomes) if outcomes else 0,
-            policy_loss = final_pol_loss,
-            value_loss = final_val_loss,
-            tournament_rating = current_elo,
-            tournament_win_rate = tourn_win_rate
-            # Add more metrics if needed
+            avg_game_length=avg_game_len,
+            avg_ring_mobility=avg_ring_mobility,
+            win_rate=pseudo_win_rate,
+            draw_rate=pseudo_draws / len(outcomes) if outcomes else 0,
+            policy_loss=final_pol_loss,
+            value_loss=final_val_loss,
+            tournament_rating=current_elo,
+            tournament_win_rate=tourn_win_rate
         )
-        self._save_metrics(iteration_dir) # Save latest metrics to iteration dir
-
-        # --- Visualize training progress (optional) ---
-        # if hasattr(self, 'visualizer'):
-        #     self.visualizer.plot_metrics(self.metrics, save_path=iteration_dir / "training_plot.png")
-
-        # --- Stability Check (optional) ---
-        # stability_report = self.metrics.assess_stability()
-        # self.logger.info(f"Stability Check: {stability_report}")
-
+        self._save_metrics(iteration_dir)
 
         # --- Advance counter for the next iteration ---
         self._iteration_counter += 1
@@ -556,14 +647,13 @@ class TrainingSupervisor:
         # ------------------------------------------------------------------ #
         # 7. RETURN SUMMARY
         # ------------------------------------------------------------------ #
-        # Return a summary dictionary compatible with the runner
         return {
             'iteration': current_iteration,
             'training_games': {
                 'pseudo_wins_white': pseudo_wins_white,
                 'pseudo_wins_black': pseudo_wins_black,
                 'pseudo_draws': pseudo_draws,
-                'win_rate': pseudo_win_rate, # Estimated
+                'win_rate': pseudo_win_rate,
                 'avg_game_length': avg_game_len
             },
             'training': {
@@ -576,7 +666,7 @@ class TrainingSupervisor:
                 'tournament': {
                     'rating': current_elo,
                     'win_rate': tourn_win_rate,
-                    'raw_stats': tournament_stats # Include full stats dict if needed
+                    'raw_stats': tournament_stats
                 }
             },
             'model_selection': {
