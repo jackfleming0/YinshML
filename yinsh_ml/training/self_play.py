@@ -137,6 +137,19 @@ class MCTS:
         self.logger.info(f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
         self.logger.info(f"  Temperature: Initial={self.initial_temp:.2f}, Final={self.final_temp:.2f}, Steps={self.annealing_steps}, Clamp Frac={self.temp_clamp_frac:.2f}")
 
+        self.debug_config()
+
+    def debug_config(self):
+        """Log all configuration parameters to verify they're being set correctly."""
+        self.logger.info("====== MCTS Configuration Debug ======")
+        self.logger.info(f"Early Simulations: {self.early_simulations}")
+        self.logger.info(f"Late Simulations: {self.late_simulations}")
+        self.logger.info(f"Switch Ply: {self.switch_ply}")
+        self.logger.info(f"c_puct: {self.c_puct}")
+        self.logger.info(f"Dirichlet Alpha: {self.dirichlet_alpha}")
+        self.logger.info(f"Value Weight: {self.value_weight}")
+        self.logger.info(f"Max Depth: {self.max_depth}")
+        self.logger.info("======================================")
 
     def get_temperature(self, move_number: int) -> float:
         """
@@ -543,6 +556,10 @@ class SelfPlay:
         games_completed = 0
         futures = []
 
+        self.logger.info(f"MCTS config being used: sims={self.mcts.early_simulations}, "
+                         f"late_sims={self.mcts.late_simulations}, "
+                         f"switch_ply={self.mcts.switch_ply}, c_puct={self.mcts.c_puct}")
+
         try:
             with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
                 for game_id in range(num_games):
@@ -623,254 +640,175 @@ class SelfPlay:
 
 
 def play_game_worker(
-    model_path: str,
-    game_id: int,
-    # --- Receive MCTS configuration as a dictionary ---
-    mcts_config: Dict,
-    # --- Optional metrics ---
-    # mcts_metrics: Optional[MCTSMetrics] = None # Can be passed if MCTS/worker needs to log metrics
+        model_path: str,
+        game_id: int,
+        mcts_config: Dict,
 ) -> Optional[Tuple[List[np.ndarray], List[np.ndarray], float, Dict, List[Dict]]]:
     """
-    Worker function executed in a separate process to play a single self-play game.
-
-    It initializes its own MCTS instance based on the provided configuration and
-    simulates a game from start to finish, collecting state, policy, and outcome data.
-
-    Args:
-        model_path: Path to the saved model state_dict file (usually temporary).
-        game_id: Identifier for the game being played (for logging).
-        mcts_config: Dictionary containing all necessary parameters for initializing
-                     the MCTS instance (e.g., simulation counts, c_puct, alpha, temp settings).
-        # mcts_metrics: Optional MCTSMetrics collector instance (if shared metrics are needed).
-
-    Returns:
-        A tuple containing:
-            - states (List[np.ndarray]): List of encoded game states encountered.
-            - policies (List[np.ndarray]): List of full MCTS policy vectors corresponding to each state.
-            - outcome (float): The normalized game outcome margin (score_diff / 3.0) in [-1, 1].
-            - temp_data (Dict): Dictionary containing temperature and entropy metrics during the game.
-            - game_history (List[Dict]): A detailed log of each step, including move, probabilities, times, etc.
-        Returns None if a critical error occurs during game play.
+    Memory-optimized worker function for self-play game generation.
     """
-    # Configure logging for the worker process independently.
-    # This helps isolate logs from different game simulations.
+    # Configure minimal logging to reduce memory overhead
     worker_logger = logging.getLogger(f"Worker-{game_id}")
-    # Set level - inheriting from the root logger configuration is often best practice.
-    # If the root logger isn't configured (e.g., running this worker standalone),
-    # we set a default level and handler.
-    if not worker_logger.hasHandlers() and not logging.getLogger().hasHandlers():
-         # Setup basic console logging if no handlers are configured at all
-         handler = logging.StreamHandler()
-         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-         handler.setFormatter(formatter)
-         # Add handler to this specific worker logger
-         worker_logger.addHandler(handler)
-         worker_logger.propagate = False # Prevent duplicate logging if root also gets configured later
-    worker_logger.setLevel(logging.INFO) # Set desired level (INFO or DEBUG)
+    if not worker_logger.hasHandlers():
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        worker_logger.addHandler(handler)
+        worker_logger.propagate = False
+    worker_logger.setLevel(logging.INFO)
 
-    worker_logger.info(f"Initializing worker and starting game simulation...")
+    worker_logger.info(f"Starting game {game_id}")
 
     try:
-        # --- Initialization within the Worker Process ---
-
-        # Device: Workers typically run on CPU to avoid GPU contention/memory issues
-        # when running many workers, unless specifically designed for multi-GPU setups.
+        # Initialize with CPU device for worker
         device = torch.device('cpu')
 
-        # Network: Load the model architecture and weights from the provided path.
-        # Create a new NetworkWrapper instance within the worker.
-        network = NetworkWrapper(device=device) # Initialize on the worker's device (CPU)
-        network.load_model(model_path) # Load the state dict
-        network.network.eval() # Set the network to evaluation mode (important for consistent predictions)
-        worker_logger.debug(f"Network loaded from {model_path} onto {device}.")
+        # Load network with careful memory handling
+        network = NetworkWrapper(device=device)
+        network.load_model(model_path)
+        network.network.eval()
 
-        # Utilities: Initialize state encoder.
         state_encoder = StateEncoder()
+        mcts = MCTS(network=network, **mcts_config)
 
-        # MCTS: Instantiate the MCTS engine using the configuration passed from the supervisor.
-        # The '**mcts_config' unpacks the dictionary into keyword arguments for MCTS.__init__.
-        mcts = MCTS(
-            network=network, # Pass the worker's network instance
-            # mcts_metrics=mcts_metrics, # Pass metrics collector if provided and needed
-            **mcts_config
-        )
-        # Log key MCTS parameters being used by this worker for verification.
-        worker_logger.info(f"Worker MCTS check: Sims={mcts.early_simulations}, cPUCT={mcts.c_puct}, Alpha={mcts.dirichlet_alpha}, ValueWeight={mcts.value_weight}")
+        # --- Memory-Efficient Game Data Structures ---
+        state = GameState()
+        # Use lists instead of deques (less overhead)
+        states = []
+        policies = []
 
-        # --- Game Simulation Data Structures ---
-        state = GameState() # Initialize a new game state
-        states: List[np.ndarray] = [] # To store encoded states before each move
-        policies: List[np.ndarray] = [] # To store the full MCTS policy vector for each state
-        game_history: List[Dict] = [] # To store detailed step-by-step game information
-        temp_data: Dict[str, List] = defaultdict(list) # To store temperature/entropy related metrics
-        mcts_search_times: List[float] = [] # To store the duration of each MCTS search call
+        # Keep minimal game history - just essentials for debugging
+        game_history = []
+
+        # Use a lightweight dict for temperature data
+        temp_data = {'temperatures': [], 'entropies': [], 'search_times': []}
 
         move_count = 0
-        max_game_moves = 500 # Safety limit to prevent potential infinite loops
+        max_game_moves = 300  # Safety limit
 
         # --- Main Game Loop ---
-        # Continue as long as the game is not terminal and the move limit hasn't been reached.
         while not state.is_terminal() and move_count < max_game_moves:
+            # MCTS search with timing
+            search_start = time.time()
+            move_probs = mcts.search(state, move_count)
+            search_time = time.time() - search_start
 
-            # --- MCTS Search and Timing ---
-            search_start_time = time.time()
-            # Perform MCTS search from the current state.
-            # The mcts.search method handles simulation budget switching internally based on move_count.
-            move_probs = mcts.search(state, move_count) # Returns the full policy vector over all possible moves
-            search_time = time.time() - search_start_time
-            mcts_search_times.append(search_time) # Record the search duration
+            # Record search time
+            temp_data['search_times'].append(search_time)
 
             # --- Action Selection ---
-            # Get the current temperature for sampling.
             temp = mcts.get_temperature(move_count)
-            # Get the list of currently valid moves from the game state.
             valid_moves = state.get_valid_moves()
 
-            # Handle the case where no valid moves are available (should signal a terminal state, but check defensively).
             if not valid_moves:
-                worker_logger.warning(f"No valid moves available at move {move_count}. Game state indicates terminal: {state.is_terminal()}. Ending game.")
-                break # Exit the loop if no moves can be made
+                worker_logger.warning(f"No valid moves at move {move_count}. Ending game.")
+                break
 
-            # Filter the full policy vector to only include probabilities for valid moves.
+            # Get valid move probabilities
             valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
-            # Use advanced indexing to get probabilities for valid moves efficiently.
             valid_move_probs = move_probs[valid_indices]
 
-            # Normalize the probabilities for valid moves to ensure they sum to 1.
+            # Normalize probabilities
             prob_sum = valid_move_probs.sum()
-            if prob_sum < 1e-6: # Check if the sum is close to zero
-                worker_logger.warning(f"Sum of probabilities for valid moves is near zero at move {move_count}. Using uniform distribution.")
-                num_valid = len(valid_moves)
-                # Assign uniform probability if possible, otherwise handle the zero-move case (already checked by 'if not valid_moves').
-                valid_move_probs = np.ones(num_valid, dtype=np.float32) / num_valid if num_valid > 0 else np.array([], dtype=np.float32)
+            if prob_sum < 1e-6:
+                valid_move_probs = np.ones(len(valid_moves), dtype=np.float32) / len(valid_moves)
             else:
-                 # Normalize the valid probabilities.
-                 valid_move_probs /= prob_sum
+                valid_move_probs /= prob_sum
 
-            # Sample the action to take based on the normalized, valid probabilities and temperature.
-            if temp == 0:
-                 # If temperature is zero, choose the move with the highest probability (greedy).
-                 selected_idx_in_valid = np.argmax(valid_move_probs)
+            # Sample action based on temperature
+            if temp == 0 or temp < 0.01:  # Greedy selection for very low temp
+                selected_idx_in_valid = np.argmax(valid_move_probs)
             else:
-                 # If temperature is non-zero, sample probabilistically.
-                 # MCTS search output (move_probs) should already be temperature-adjusted if designed that way.
-                 # If not, apply power scaling here: probs^(1/temp) and re-normalize.
-                 # Assuming MCTS output is ready for sampling:
-                 if not np.isclose(valid_move_probs.sum(), 1.0): # Final check for normalization
-                      worker_logger.warning(f"Probabilities for valid moves do not sum to 1 ({valid_move_probs.sum()}) before sampling. Renormalizing.")
-                      valid_move_probs /= valid_move_probs.sum()
+                # Sample move based on probabilities
+                try:
+                    selected_idx_in_valid = np.random.choice(len(valid_moves), p=valid_move_probs)
+                except ValueError as e:
+                    worker_logger.error(f"Sampling error: {e}")
+                    selected_idx_in_valid = np.argmax(valid_move_probs)
 
-                 # Ensure there are probabilities to sample from
-                 if valid_move_probs.size == 0:
-                     worker_logger.error(f"Cannot sample move at move {move_count}: valid_move_probs is empty.")
-                     break # Exit loop if sampling is impossible
-
-                 try:
-                      selected_idx_in_valid = np.random.choice(len(valid_moves), p=valid_move_probs)
-                 except ValueError as e:
-                      worker_logger.error(f"Error sampling move at move {move_count}: {e}. Probs sum: {valid_move_probs.sum()}, Probs: {valid_move_probs}", exc_info=True)
-                      # Fallback: Choose the best move greedily if sampling fails
-                      selected_idx_in_valid = np.argmax(valid_move_probs)
-
-
-            # Get the selected Move object.
             selected_move = valid_moves[selected_idx_in_valid]
 
-            # --- Record State and Policy Data (BEFORE the move is made) ---
-            # Store the encoded state representation.
-            encoded_state = state_encoder.encode_state(state)
+            # --- Record State and Policy ---
+            # Store encoded state - using np.float32 instead of float64 reduces memory by half
+            encoded_state = state_encoder.encode_state(state).astype(np.float32)
             states.append(encoded_state)
-            # Store the full policy vector generated by MCTS for this state.
             policies.append(move_probs)
 
-            # --- Calculate Metrics for this Step ---
-            # Calculate entropy of the probability distribution over valid moves.
-            entropy = -np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9)) if valid_move_probs.size > 0 else 0.0
+            # Calculate entropy for temperature adaptation
+            entropy = -np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9))
 
-            # --- Append Detailed Step Information to Game History ---
-            # This history is useful for detailed analysis and debugging.
-            game_history.append({
-                # Optional: Store full GameState object (can consume significant memory if kept for many games)
-                # 'state': state.copy(),
-                'state_encoded': encoded_state, # Store lightweight encoded state
-                'move': str(selected_move), # Store string representation of the chosen move
-                'policy_valid': valid_move_probs.tolist() if valid_move_probs.size > 0 else [], # Policy distribution over valid moves
-                'policy_full': move_probs.tolist(), # Full policy vector from MCTS
-                'temperature': temp, # Temperature used for sampling this move
-                'entropy': entropy, # Entropy of the valid move distribution
-                'mcts_search_time': search_time, # Time taken for MCTS search for this move
-                'value_pred': None # Placeholder: Could fetch MCTS root value here if needed
-            })
-
-            # --- Record Temperature Data ---
+            # Record temperature data - just essentials
             temp_data['temperatures'].append(temp)
             temp_data['entropies'].append(entropy)
-            temp_data['move_stats'].append({ # More detailed stats per move
-                'move_number': move_count + 1, # Move number (starting from 1)
-                'temperature': temp,
-                'entropy': entropy,
-                'top_prob': float(np.max(valid_move_probs)) if valid_move_probs.size > 0 else 0.0,
-                'selected_prob': float(valid_move_probs[selected_idx_in_valid]) if valid_move_probs.size > 0 else 0.0,
-                'search_time': search_time # Record the search time here as well
-            })
 
-            # --- Apply the Selected Move to the Game State ---
+            # Only store minimal state info in history to save memory
+            if move_count % 5 == 0:  # Only record every 5th move to history to save memory
+                game_history.append({
+                    'move_number': move_count,
+                    'move': str(selected_move),
+                    'phase': str(state.game_phase) if hasattr(state, 'game_phase') else "UNKNOWN",
+                })
+
+            # Make move
             state.make_move(selected_move)
-            move_count += 1 # Increment move counter
+            move_count += 1
 
-            # --- Check for Terminal State After Move ---
+            # Perform occasional garbage collection during very long games
+            if move_count > 100 and move_count % 50 == 0:
+                import gc
+                gc.collect()
+
+            # Check for terminal state
             if state.is_terminal():
-                worker_logger.debug(f"Terminal state reached after {move_count} moves.")
-                break # Exit the loop immediately if game ends
+                worker_logger.debug(f"Terminal state reached after {move_count} moves")
+                break
 
-        # --- After Game Loop Ends (Terminal State or Max Moves) ---
-
-        if move_count >= max_game_moves:
-            worker_logger.warning(f"Game reached max move limit ({max_game_moves}).")
-            # The game state might not be technically terminal according to rules,
-            # but we treat it as finished for training purposes.
-
-        # --- Record the Final State ---
-        # Append the final encoded state reached after the last move (or at max moves).
-        final_encoded_state = state_encoder.encode_state(state)
+        # --- After Game Loop Ends ---
+        # Record final state
+        final_encoded_state = state_encoder.encode_state(state).astype(np.float32)
         states.append(final_encoded_state)
-        # Append a dummy policy vector (e.g., zeros) for the final state, as no action
-        # is taken from it. This keeps the lengths of states and policies aligned.
+
+        # Add dummy policy for final state
         dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(state_encoder.total_moves, dtype=np.float32)
         policies.append(dummy_policy)
 
-        # Add a final entry to game_history representing the end state.
+        # Add final game info
         game_history.append({
-            'state_encoded': final_encoded_state,
-            'move': None, 'policy_valid': None, 'policy_full': None,
-            'temperature': None, 'entropy': None, 'mcts_search_time': None,
-            'value_pred': None # Could potentially store final actual value here
+            'move_number': move_count,
+            'final_state': True,
+            'white_score': state.white_score,
+            'black_score': state.black_score
         })
 
-        # --- Determine Final Game Outcome ---
-        # Calculate the normalized margin based on the final scores.
+        # Calculate outcome
         score_diff = state.white_score - state.black_score
-        # Normalize by the maximum possible score difference (3-0 vs 0-3 => range 6, centered at 0). Max absolute score is 3.
-        normalized_margin = np.clip(score_diff / 3.0, -1.0, 1.0) # Ensure value is within [-1, 1]
+        normalized_margin = np.clip(score_diff / 3.0, -1.0, 1.0)
         outcome = float(normalized_margin)
 
-        # --- Log Final Game Summary ---
-        avg_search_time_ms = np.mean(mcts_search_times) * 1000 if mcts_search_times else 0
+        # Log final summary - minimal logging to reduce overhead
         worker_logger.info(
-            f"Game finished in {move_count} moves. "
-            f"Final Score: W={state.white_score}, B={state.black_score}. Outcome={outcome:.3f}. "
-            f"Avg MCTS Search Time: {avg_search_time_ms:.2f} ms"
+            f"Game {game_id} finished in {move_count} moves. "
+            f"Score: W={state.white_score}, B={state.black_score}. Outcome={outcome:.3f}"
         )
 
-        # Add final collected timings to temp_data if needed by the caller.
-        temp_data['mcts_search_times'] = mcts_search_times
+        # Clean up memory before returning
+        del network
+        del mcts.network  # Explicitly clear network reference
+        del mcts
 
-        # --- Return Collected Data ---
-        # Return the list of states, policies, the final outcome, temperature data, and detailed history.
+        import gc
+        gc.collect()
+
         return states, policies, outcome, temp_data, game_history
 
     except Exception as e:
-        # Log any unexpected exceptions that occur within the worker process.
-        worker_logger.error(f"Critical error during game play: {e}", exc_info=True)
-        # Return None to signal that this worker failed to produce a valid game.
+        worker_logger.error(f"Error in game {game_id}: {e}", exc_info=True)
+        # Ensure cleanup even on error
+        try:
+            del network
+            del mcts
+            import gc
+            gc.collect()
+        except:
+            pass
         return None
