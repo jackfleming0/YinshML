@@ -596,17 +596,16 @@ COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
     ),
 
     "042425_balanced": CombinedConfig(
-        # don't use this one, crashes at iteration 8 from memory constraints
-
+        # trying to troubleshoot the memory constraint questions
         num_iterations=30,
-        games_per_iteration=200,
+        games_per_iteration=50,
         num_simulations=120,
         late_simulations=60,  # Corrected: default is None, needs explicit value if different
         c_puct=2.5,
         dirichlet_alpha=0.17,
         epochs_per_iteration=16,
         batches_per_epoch=60,
-        batch_size=512,
+        batch_size=256,
         lr=6e-4,
         value_head_lr_factor=6.0,
         weight_decay=1e-4,
