@@ -616,6 +616,13 @@ class TrainingSupervisor:
         # ------------------------------------------------------------------ #
         # 6. METRICS, VISUALS, HOUSE-KEEPING (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
+
+        if hasattr(self.tournament_manager, 'glicko_tracker'):
+            # Force garbage collection
+            import gc
+            gc.collect()
+            self.logger.info("Performed garbage collection after tournament")
+
         # MEMORY-OPTIMIZATION: Final garbage collection
         gc.collect()
 
@@ -643,6 +650,16 @@ class TrainingSupervisor:
 
         # --- Advance counter for the next iteration ---
         self._iteration_counter += 1
+
+        self.prune_old_experiences()
+        self.clear_pytorch_memory()
+
+        # Every 2-3 iterations, reset network objects completely
+        if self._iteration_counter % 3 == 0:
+            self._reset_network_objects()
+
+        # MEMORY OPTIMIZATION: Prune old experiences to prevent memory growth
+        self.prune_old_experiences()  # Add this line here
 
         # ------------------------------------------------------------------ #
         # 7. RETURN SUMMARY
@@ -680,6 +697,122 @@ class TrainingSupervisor:
     # --- Helper Methods ---
     # Keep _compute_num_workers, _load/save_best_model_state, _save_metrics,
     # _calculate_ring_mobility_from_state (new helper), _wilson_lower_bound, _should_promote
+
+    def clear_pytorch_memory(self):
+        """Aggressively clear PyTorch's memory caches."""
+        import gc
+        import torch
+
+        # Force garbage collection
+        gc.collect()
+
+        # Clear PyTorch's CUDA cache if using CUDA
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Move model to CPU temporarily to clear GPU memory
+        if hasattr(self.network, 'network') and hasattr(self.network.network, 'to'):
+            original_device = next(self.network.network.parameters()).device
+            if original_device.type != 'cpu':
+                self.network.network.to(torch.device('cpu'))
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                self.network.network.to(original_device)
+
+        # Try advanced memory release techniques
+        try:
+            import ctypes
+            # Try calling malloc_trim to release memory back to the OS
+            try:
+                ctypes.CDLL('libc.so.6').malloc_trim(0)
+            except:
+                pass  # May not work on macOS
+        except Exception as e:
+            self.logger.warning(f"Error attempting advanced memory cleanup: {e}")
+
+        gc.collect()
+
+    def _reset_network_objects(self):
+        """Recreate network objects to eliminate memory leaks."""
+        import tempfile, torch, os
+
+        self.logger.info("Recreating network objects to eliminate memory leaks")
+
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp:
+                temp_path = tmp.name
+                # Save current network state
+                self.network.save_model(temp_path)
+
+                # Get device information
+                device = getattr(self.network, 'device', torch.device('cpu'))
+
+                # Recreate network
+                from yinsh_ml.network.wrapper import NetworkWrapper
+                new_network = NetworkWrapper(device=device)
+                new_network.load_model(temp_path)
+
+                # Replace old network
+                self.network = new_network
+                self.self_play.network = self.network
+                self.trainer.network = self.network
+
+                os.unlink(temp_path)
+        except Exception as e:
+            self.logger.error(f"Error recreating network objects: {e}")
+
+    def prune_old_experiences(self):
+        """
+        Trim experience buffer to maintain memory efficiency between iterations.
+        Add this method to your TrainingSupervisor class.
+        """
+        if hasattr(self.trainer, 'experience'):
+            buffer_size = self.trainer.experience.size()
+            keep_size = 15000  # Target size to maintain
+
+            if buffer_size > 20000:  # Only prune if significantly over target
+                # We need to add a prune method to the GameExperience class first
+                if not hasattr(self.trainer.experience, 'prune_oldest'):
+                    # Add the prune method dynamically if it doesn't exist
+                    def prune_oldest(exp_obj, keep_newest):
+                        """Keep only the most recent experiences."""
+                        if len(exp_obj.states) <= keep_newest:
+                            return  # Nothing to prune
+
+                        # Calculate how many to remove
+                        to_remove = len(exp_obj.states) - keep_newest
+
+                        # Remove oldest entries (those at the start of the deque)
+                        for _ in range(to_remove):
+                            exp_obj.states.popleft()
+                            exp_obj.move_probs.popleft()
+                            exp_obj.values.popleft()
+                            exp_obj.phases.popleft()
+
+                        self.logger.info(f"Pruned {to_remove} experiences, keeping {keep_newest}")
+
+                    # Attach the method to the experience object
+                    import types
+                    self.trainer.experience.prune_oldest = types.MethodType(
+                        prune_oldest, self.trainer.experience)
+
+                # Now we can call it
+                self.logger.info(f"Pruning experience buffer from {buffer_size} to {keep_size} states")
+                self.trainer.experience.prune_oldest(keep_size)
+
+                # Force garbage collection
+                import gc
+                gc.collect()
+
+                # Log memory usage after pruning
+                try:
+                    import psutil
+                    process = psutil.Process()
+                    memory_mb = process.memory_info().rss / (1024 * 1024)
+                    self.logger.info(f"Memory after pruning: {memory_mb:.1f} MB")
+                except:
+                    pass
 
     def _compute_num_workers(self) -> int:
         """Calculate optimal number of workers based on CPU cores."""
