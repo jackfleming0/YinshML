@@ -618,6 +618,39 @@ COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
         temp_schedule="cosine"
     ),
 
+    "2025_04_25_balanced_scale_up": CombinedConfig(
+        # Core training parameters - balanced increase
+        num_iterations=40,  # More iterations for longer training
+        games_per_iteration=200,  # 4x your current games volume
+        epochs_per_iteration=6,
+        batches_per_epoch=25,  # Much more training per epoch
+
+        # Optimizer settings - standard
+        lr=5e-4,
+        value_head_lr_factor=6.0,
+        weight_decay=1e-4,
+        batch_size=256,
+        lr_schedule="cosine",
+        warmup_steps=2000,
+
+        # MCTS parameters - moderate increase
+        num_simulations=150,  # 25% more simulations
+        late_simulations=80,
+        simulation_switch_ply=20,
+        c_puct=2.5,
+        dirichlet_alpha=0.17,
+        value_weight=1.0,
+        max_depth=40,
+
+        # Value head settings
+        value_loss_weights=(0.6, 0.4),
+
+        # Temperature settings - standard
+        initial_temp=1.6,
+        final_temp=0.15,
+        temp_schedule="cosine"
+    ),
+
     "separate_value_head_smoke": CombinedConfig(
         num_iterations=5,
         games_per_iteration=2,

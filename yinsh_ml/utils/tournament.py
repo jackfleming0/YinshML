@@ -142,6 +142,41 @@ class GlickoTracker:
         # Clear match history after processing the rating period.
         self.match_history = []
 
+    def clear_model_cache(self):
+        """
+        Clear cached models to free memory.
+        Add this method to your GlickoTracker class.
+        """
+        # If your GlickoTracker stores models in a dictionary or other structure:
+        if hasattr(self, 'players'):
+            # We only want to clear cached data, not ratings
+            # So we'll keep the ratings but clear any large objects
+            current_ratings = {}
+            for model_id, player in self.players.items():
+                # Store just the essential rating data
+                current_ratings[model_id] = {
+                    'rating': player.rating,
+                    'rd': player.rd
+                }
+
+            # Clear the full players dictionary
+            self.players.clear()
+
+            # Restore just the ratings data
+            for model_id, rating_data in current_ratings.items():
+                if model_id not in self.players:
+                    from yinsh_ml.utils.tournament import GlickoPlayer
+                    self.players[model_id] = GlickoPlayer(
+                        rating=rating_data['rating'],
+                        rd=rating_data['rd']
+                    )
+
+            # Force garbage collection
+            import gc
+            gc.collect()
+
+            print(f"[Tournament] Cleared model cache, keeping {len(self.players)} player ratings")
+
     def get_rating(self, model_id):
         """Return the current rating of the specified model."""
         if model_id in self.players:
