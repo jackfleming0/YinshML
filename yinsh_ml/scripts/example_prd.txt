@@ -1,0 +1,111 @@
+Requirements Document: Integrating Yinsh into AlphaZero Boosted Framework
+1. Introduction
+Goal: Integrate the provided Yinsh game logic into the alpha_zero_boosted Python framework. The objective is to enable training an AI agent for Yinsh using the framework's MCTS algorithm and GBDT-based value/policy models.
+Target Framework: alpha_zero_boosted (code provided separately).
+Source Code: Existing Yinsh implementation (board.py, constants.py, game_state.py, moves.py, types.py, state_encoder.py).
+Key Challenge: Adapting the existing object-oriented Yinsh logic to fit the functional and interface requirements of the alpha_zero_boosted environment.Environment class and its associated data structures (State, feature generation).
+2. Core Task: Implement yinsh.py
+The primary deliverable is a new Python file, yinsh.py, containing the necessary components to represent and run the game of Yinsh within the framework. This involves creating:
+A State dataclass.
+An Environment class inheriting from alpha_zero_boosted.environment.Environment.
+A generate_features function.
+3. Detailed Requirements
+3.1. yinsh.py: State Dataclass
+Purpose: Represent the minimal immutable state of a Yinsh game required for the MCTS and training loop. This replaces the mutable GameState class from the source code for the framework's core state representation.
+Fields:
+whose_move: int: The index of the current player (0 for White, 1 for Black). Map from Player enum.
+pieces: Dict[Tuple[str, int], int]: A dictionary mapping board positions (represented as (column_char, row_int) tuples) to piece types (represented as integers, mapping from PieceType enum). This represents the board configuration.
+white_score: int: Number of rings removed by White.
+black_score: int: Number of rings removed by Black.
+rings_placed_white: int: Number of rings placed by White (needed for placement phase tracking).
+rings_placed_black: int: Number of rings placed by Black.
+Optional but Recommended: phase: int: Current game phase (map from GamePhase enum to integer). While not strictly needed by MCTS if rules can be derived, it simplifies implementation within Environment methods.
+Methods:
+marshall(self) -> Dict: Convert the State object into a JSON-serializable dictionary. Ensure Position tuples in the pieces dict keys are converted to a serializable format (e.g., strings like "A2").
+unmarshall(cls, data: Dict) -> State: Class method to reconstruct a State object from a dictionary created by marshall(). Convert position strings back to tuples.
+Implementation Notes:
+Use @dataclass(frozen=True) if possible to encourage immutability, though deep copies might be needed for the pieces dictionary during transitions if not fully immutable.
+Map Player enum to integers 0/1.
+Map PieceType enum to integers (e.g., 0: Empty, 1: W_Ring, 2: B_Ring, 3: W_Marker, 4: B_Marker).
+Map GamePhase enum to integers (0-4).
+3.2. yinsh.py: Environment Class
+Inheritance: Must inherit from alpha_zero_boosted.environment.Environment.
+Purpose: Encapsulate Yinsh game rules and provide the interface required by the framework. This class will use logic from the source Board, GameState, and MoveGenerator classes, but the state transitions will operate on the new State dataclass.
+Required Method Implementations:
+get_name(self) -> str: Return "yinsh".
+initial_state(self) -> State: Create and return an instance of the new yinsh.State dataclass representing the starting position (empty board, phase=RING_PLACEMENT, player 0's turn, scores=0, rings_placed=0).
+transition_state(self, state: State, move: int) -> State:
+Input: The current yinsh.State object and an integer action ID (move).
+Action:
+Decode the integer move ID back into the specific Yinsh action details (e.g., Place Ring at Pos, Move Ring Source->Dest, Remove Markers Sequence, Remove Ring at Pos). This requires the action mapping defined in all_possible_actions.
+Create a copy of the input state's data (especially the pieces dictionary).
+Apply the decoded action to the copied state data using refactored logic from the source GameState.make_move and Board methods.
+Update whose_move based on game rules and phase transitions.
+Update scores, rings_placed, and phase fields as necessary.
+Return a new yinsh.State object with the updated fields.
+Note: This is a critical method requiring careful adaptation of the source logic to operate immutably on the State dataclass.
+is_terminal(self, state: State) -> bool: Check if the game has ended based on the state.white_score or state.black_score reaching 3 (or potentially other draw conditions if applicable). Return True if terminal, False otherwise.
+enumerate_actions(self, state: State) -> List[int]:
+Action:
+Determine the valid Yinsh moves (Move objects) from the current state using adapted logic from GameState.get_valid_moves / MoveGenerator.
+For each valid Move object, convert it to its corresponding unique integer action ID based on the mapping defined in all_possible_actions.
+Return the list of valid integer action IDs.
+all_possible_actions(self) -> Tuple[int]:
+Action: Define and return a fixed tuple containing every single possible action ID (integer) that could ever occur in Yinsh. This defines the size and order of the policy network's output.
+Design: This requires a careful mapping. Suggestions:
+Placement/Ring Removal: Map each valid board position (e.g., 85 positions) to an ID (e.g., 0-84 for placement, another 85 IDs for ring removal).
+Ring Movement: Map every possible (source_position_id, destination_position_id) pair. Since there are 85 positions, this could be up to 85 * 84 actions. Consider if a sparser representation is feasible or necessary for the GBDT model.
+Marker Removal: This is complex. Mapping every possible 5-marker sequence is likely infeasible (~85 choose 5). Recommendation: Decouple marker/ring removal from the main MCTS action. Treat ROW_COMPLETION and RING_REMOVAL phases as automatic transitions within the transition_state method after a row-completing move, rather than requiring the MCTS agent to select the removal actions. If this simplification is made, these actions do not need IDs in all_possible_actions. If the agent must choose removals, a different action representation (e.g., choosing which row to remove if multiple exist) is needed. Prioritize the decoupled approach first.
+Output: A tuple like tuple(range(TOTAL_ACTION_IDS)). The total number of IDs must be constant throughout training.
+rewards(self, state: State) -> Tuple[float, float]: For a terminal state, return the outcome based on white_score and black_score: (1.0, -1.0) if White wins, (-1.0, 1.0) if Black wins, (0.0, 0.0) otherwise (or for draws).
+text_display(self, state: State) -> str: Adapt the logic from Board.__str__ or GameState.__str__ to render the board based on the state.pieces dictionary.
+build_action_maps(self) -> Tuple[Dict[str, int], Dict[int, str]]: Optional but Recommended for Debugging. Implement mappings between integer action IDs and human-readable strings (e.g., "PLACE A2", "MOVE C3>E5", "REMOVE D4").
+translate_human_input(self, human_input: str) -> int: Optional but Recommended for Debugging. Implement the inverse of build_action_maps.
+3.3. yinsh.py: generate_features Function
+Signature: generate_features(state: State, agents: List[Any]) -> np.ndarray
+Purpose: Convert a yinsh.State object into a feature vector suitable for the GBDT models. This replaces the source StateEncoder.encode_state.
+Output: A 2D numpy.ndarray of shape (2, num_features) and dtype=np.float32.
+Row 0: Features from Player 0 (White)'s perspective.
+Row 1: Features from Player 1 (Black)'s perspective.
+num_features must be a fixed constant size.
+Required Features:
+player_pov: First feature, 0.0 for White's perspective (row 0), 1.0 for Black's perspective (row 1).
+whose_move: Second feature, 0.0 if White moves, 1.0 if Black moves.
+is_pov_move: Third feature, 1.0 if player_pov == whose_move, else 0.0.
+Board Representation: Use one-hot encoding for each piece type at each valid board position. For 85 valid positions and 4 piece types (W_Ring, B_Ring, W_Marker, B_Marker), this requires 85 * 4 = 340 features. For each valid position index i (0-84):
+Feature 3 + i: 1.0 if White Ring at position i, else 0.0.
+Feature 3 + 85 + i: 1.0 if Black Ring at position i, else 0.0.
+Feature 3 + (2*85) + i: 1.0 if White Marker at position i, else 0.0.
+Feature 3 + (3*85) + i: 1.0 if Black Marker at position i, else 0.0.
+white_score: Feature 3 + (4*85).
+black_score: Feature 3 + (4*85) + 1.
+rings_placed_white: Feature 3 + (4*85) + 2.
+rings_placed_black: Feature 3 + (4*85) + 3.
+phase: Feature 3 + (4*85) + 4 (normalized phase integer, e.g., state.phase / 4.0).
+Total Features: 3 + (85 * 4) + 2 + 2 + 1 = 3 + 340 + 5 = 348 (Verify exact count based on valid positions).
+Implementation Notes: Ensure the feature order is consistent. The GBDT framework relies heavily on well-engineered features. Start with this basic set; more complex features (e.g., number of markers, potential rows) might be added later if performance is poor.
+3.4. environment_registry.py Modification
+Add import yinsh at the top.
+Add the entry "yinsh": yinsh to the ENVIRONMENT_REGISTRY dictionary.
+4. Refactoring and Code Adaptation
+The existing GameState class should be largely replaced by the new yinsh.State dataclass for framework interaction. However, GameState methods (like make_move, get_valid_moves, _update_game_phase) contain valuable logic that needs to be extracted and adapted to work within the yinsh.Environment class methods, operating on the new State object.
+The existing Board class methods (place_piece, remove_piece, move_ring, valid_move_positions, find_marker_rows) can likely be reused but may need slight modifications to accept/return data compatible with the new State structure (e.g., using the pieces dictionary directly).
+The existing StateEncoder class should be completely replaced by the new generate_features function.
+Focus on making the Environment methods operate functionally: they take a state, apply logic, and return a new state, rather than modifying the state in place.
+5. Action Space Design (Critical Consideration)
+The definition of all_possible_actions() and the mapping between Move objects and integer IDs is crucial and potentially complex.
+The recommended approach is to map (source, destination) for MOVE_RING actions and single positions for PLACE_RING/REMOVE_RING actions.
+Strongly consider handling marker/ring removal implicitly within transition_state after a row-completing move, rather than making them explicit actions the agent must choose via MCTS. This significantly simplifies the action space.
+The total number of action IDs must remain fixed throughout the entire training process.
+6. Testing
+Implement unit tests for the yinsh.Environment class methods, especially:
+initial_state()
+transition_state() for all move types (placement, movement, implicit removals).
+is_terminal()
+rewards()
+enumerate_actions() for various game states and phases.
+Ensure action ID mapping/demapping is consistent.
+Test the generate_features function to ensure correct output shape, dtype, and feature values for different states and player perspectives.
+Thoroughly test the interaction between enumerate_actions and transition_state using the integer action IDs.
+7. Dependencies
+The yinsh.py module should primarily rely on standard Python libraries, numpy, and potentially dataclasses. It should import the base Environment class from the framework.

@@ -148,8 +148,8 @@ class GameExperience:
 
                 # If memory is getting high, force garbage collection
                 if memory_mb > 4000:  # 4GB threshold, adjust as needed
-                    import gc
-                    gc.collect()
+                    # Memory pools handle cleanup automatically
+                    pass
 
                     # If still high after GC, reduce buffer size
                     if memory_mb > 6000:  # 6GB threshold

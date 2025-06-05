@@ -22,7 +22,7 @@ def _canon(model_id: str) -> str:
 
     • strips directory components
     • strips the `.pt` extension
-    • keeps the “iteration_X” stem
+    • keeps the "iteration_X" stem
     """
     return Path(model_id).stem            # "…/checkpoint_iteration_3.pt" → "checkpoint_iteration_3"
 
@@ -83,7 +83,7 @@ class GlickoTracker:
 
     def update_ratings(self):
         """
-        Update all players’ ratings and RDs using Glicko-1 formulas over the entire rating period.
+        Update all players' ratings and RDs using Glicko-1 formulas over the entire rating period.
 
         For each player, gather all matches played in this period and then:
           1. Compute the variance v.
@@ -172,8 +172,8 @@ class GlickoTracker:
                     )
 
             # Force garbage collection
-            import gc
-            gc.collect()
+            # Memory pools handle cleanup automatically
+            pass
 
             print(f"[Tournament] Cleared model cache, keeping {len(self.players)} player ratings")
 

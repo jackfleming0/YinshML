@@ -125,16 +125,41 @@ class GameState:
         self.rings_placed = {Player.WHITE: 0, Player.BLACK: 0}
         self.move_history = []
 
+    def copy_from(self, source: 'GameState') -> None:
+        """Efficiently copy state from another GameState instance.
+        
+        This method is optimized for memory pool usage and is much faster
+        than using copy.deepcopy() as it directly assigns field values
+        and calls the board's copy_from method.
+        
+        Args:
+            source: GameState instance to copy from
+        """
+        self.board.copy_from(source.board)
+        self.current_player = source.current_player
+        self.phase = source.phase
+        self.white_score = source.white_score
+        self.black_score = source.black_score
+        
+        # Copy dictionary efficiently
+        self.rings_placed.clear()
+        self.rings_placed.update(source.rings_placed)
+        
+        # Copy list efficiently
+        self.move_history.clear()
+        self.move_history.extend(source.move_history)
+        
+        # Copy any temporary attributes that might exist during row completion
+        for attr in ['_move_maker', '_prev_player', '_last_regular_player']:
+            if hasattr(source, attr):
+                setattr(self, attr, getattr(source, attr))
+            elif hasattr(self, attr):
+                delattr(self, attr)
+
     def copy(self) -> 'GameState':
         """Create a deep copy of the game state."""
         new_state = GameState()
-        new_state.board = self.board.copy()
-        new_state.current_player = self.current_player
-        new_state.phase = self.phase
-        new_state.white_score = self.white_score
-        new_state.black_score = self.black_score
-        new_state.rings_placed = self.rings_placed.copy()
-        new_state.move_history = self.move_history.copy()
+        new_state.copy_from(self)
         return new_state
 
     def make_move(self, move: Move) -> bool:

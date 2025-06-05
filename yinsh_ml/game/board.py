@@ -40,6 +40,18 @@ class Board:
         # Initialize an empty board
         self.pieces: Dict[Position, PieceType] = {}
 
+    def copy_from(self, source: 'Board') -> None:
+        """Efficiently copy board state from another Board instance.
+        
+        This is optimized for memory pool usage and avoids creating
+        a new dictionary by clearing and updating the existing one.
+        
+        Args:
+            source: Board instance to copy from
+        """
+        self.pieces.clear()
+        self.pieces.update(source.pieces)
+
     def copy(self) -> 'Board':
         """Create a deep copy of the board."""
         new_board = Board()

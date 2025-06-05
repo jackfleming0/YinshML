@@ -6,6 +6,7 @@ from pathlib import Path
 import logging
 from typing import Dict, List, Optional
 import torch
+import numpy as np
 from collections import defaultdict
 from dataclasses import asdict # Needed for _supervisor_kwargs_from_config
 

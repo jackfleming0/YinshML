@@ -12,6 +12,8 @@ from ..game.moves import Move, MoveType
 from .model import YinshNetwork
 from ..utils.encoding import StateEncoder  # Add this line
 import torch.nn.functional as F
+# --- Memory Pool Imports ---
+from ..memory import TensorPool, TensorPoolConfig
 
 # Define output type for traced model
 ModelOutput = namedtuple('ModelOutput', ['policy', 'value'])
@@ -21,13 +23,15 @@ logging.getLogger('NetworkWrapper').setLevel(logging.DEBUG)
 class NetworkWrapper:
     """Wrapper class for the YINSH neural network model."""
 
-    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None):
+    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None, 
+                 tensor_pool: Optional[TensorPool] = None):
         """
         Initialize the network wrapper.
 
         Args:
             model_path: Optional path to load a pre-trained model
             device: Device to use ('cuda', 'mps', or 'cpu')
+            tensor_pool: Optional TensorPool for memory management
         """
         if device:
             self.device = torch.device(device)
@@ -43,6 +47,22 @@ class NetworkWrapper:
         self.logger = logging.getLogger("NetworkWrapper")
         self.logger.setLevel(logging.ERROR)
 
+        # Memory Pool Management
+        if tensor_pool is not None:
+            self.tensor_pool = tensor_pool
+            self._pool_enabled = True
+        else:
+            # Create a default tensor pool for this device
+            pool_config = TensorPoolConfig(
+                initial_size=20,  # Start with moderate pool
+                enable_statistics=False,  # Keep overhead low
+                enable_adaptive_sizing=True,  # Enable adaptive sizing
+                enable_tensor_reshaping=True,  # Enable tensor reshaping
+                auto_device_selection=True   # Enable device-specific pooling
+            )
+            self.tensor_pool = TensorPool(pool_config)
+            self._pool_enabled = True
+
         if model_path and os.path.exists(model_path):
             self.load_model(model_path)
 
@@ -50,6 +70,61 @@ class NetworkWrapper:
 
         # Initialize StateEncoder
         self.state_encoder = StateEncoder()
+        
+        # Cache common tensor shapes for pooling
+        self._input_shape = (6, 11, 11)  # YINSH state shape
+        self._policy_size = self.state_encoder.total_moves
+
+    def _acquire_input_tensor(self, batch_size: int = 1) -> torch.Tensor:
+        """Acquire an input tensor from the pool."""
+        if self._pool_enabled:
+            try:
+                shape = (batch_size, *self._input_shape)
+                return self.tensor_pool.get(shape=shape, device=self.device, dtype=torch.float32)
+            except Exception as e:
+                self.logger.warning(f"Failed to acquire input tensor from pool: {e}")
+                return torch.zeros(batch_size, *self._input_shape, device=self.device, dtype=torch.float32)
+        else:
+            return torch.zeros(batch_size, *self._input_shape, device=self.device, dtype=torch.float32)
+
+    def _acquire_output_tensors(self, batch_size: int = 1) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Acquire output tensors (policy and value) from the pool."""
+        if self._pool_enabled:
+            try:
+                policy_tensor = self.tensor_pool.get(
+                    shape=(batch_size, self._policy_size), 
+                    device=self.device, 
+                    dtype=torch.float32
+                )
+                value_tensor = self.tensor_pool.get(
+                    shape=(batch_size, 1), 
+                    device=self.device, 
+                    dtype=torch.float32
+                )
+                return policy_tensor, value_tensor
+            except Exception as e:
+                self.logger.warning(f"Failed to acquire output tensors from pool: {e}")
+                # Fallback to creating new tensors
+                policy_tensor = torch.zeros(batch_size, self._policy_size, device=self.device, dtype=torch.float32)
+                value_tensor = torch.zeros(batch_size, 1, device=self.device, dtype=torch.float32)
+                return policy_tensor, value_tensor
+        else:
+            policy_tensor = torch.zeros(batch_size, self._policy_size, device=self.device, dtype=torch.float32)
+            value_tensor = torch.zeros(batch_size, 1, device=self.device, dtype=torch.float32)
+            return policy_tensor, value_tensor
+
+    def _release_tensor(self, tensor: torch.Tensor) -> None:
+        """Release a tensor back to the pool."""
+        if self._pool_enabled and tensor is not None:
+            try:
+                self.tensor_pool.release(tensor)
+            except Exception as e:
+                self.logger.warning(f"Failed to release tensor to pool: {e}")
+
+    def _release_tensors(self, *tensors: torch.Tensor) -> None:
+        """Release multiple tensors back to the pool."""
+        for tensor in tensors:
+            self._release_tensor(tensor)
 
     def predict(self, state_tensor: torch.Tensor,
                 move_mask: Optional[torch.Tensor] = None,
@@ -236,4 +311,35 @@ class NetworkWrapper:
         except Exception as e:
             self.logger.error(f"Error exporting to CoreML: {str(e)}")
             raise
+
+    def predict_from_state(self, game_state, 
+                          move_mask: Optional[torch.Tensor] = None,
+                          temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Make a prediction directly from a GameState using tensor pooling.
+
+        Args:
+            game_state: GameState object to encode and predict
+            move_mask: Optional mask for valid moves (True for valid moves)
+            temperature: Temperature for move probability scaling
+
+        Returns:
+            Tuple of (move_probabilities, value)
+        """
+        # Acquire input tensor from pool
+        input_tensor = self._acquire_input_tensor(batch_size=1)
+        
+        try:
+            # Encode the state into the pooled tensor
+            state_array = self.state_encoder.encode_state(game_state)
+            input_tensor[0] = torch.from_numpy(state_array).float()
+            
+            # Use the regular predict method
+            result = self.predict(input_tensor, move_mask, temperature)
+            
+            return result
+            
+        finally:
+            # Always release the input tensor
+            self._release_tensor(input_tensor)
 

@@ -12,12 +12,15 @@ coremltools>=6.3.0
 matplotlib>=3.7.1
 seaborn>=0.12.2
 plotly>=5.0.0
-psutil>=5.9.0
+psutil>=5.9.0  # For system monitoring and activity detection
 
 # Training utilities
 tqdm>=4.65.0  # For progress bars
 tensorboard>=2.14.0  # For training monitoring
 pandas>=2.0.3  # For data handling
+
+# Compression libraries
+lz4>=4.3.0  # For tiered storage compression
 
 # Testing
 pytest>=7.4.0  # For running tests

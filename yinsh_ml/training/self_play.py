@@ -15,6 +15,7 @@ import concurrent.futures
 import psutil
 import platform
 import random
+import copy
 
 # --- YINSH ML Imports ---
 # Assuming these paths are correct relative to this file
@@ -26,6 +27,8 @@ from ..game.game_state import GameState, GamePhase # Added GamePhase
 from ..game.constants import Player, PieceType # Added PieceType
 from ..network.wrapper import NetworkWrapper
 from ..game.moves import Move
+# --- Memory Pool Imports ---
+from ..memory import GameStatePool, TensorPool, GameStatePoolConfig, TensorPoolConfig
 
 # Configure the logger at the module level
 # Use getLogger to ensure consistency if already configured elsewhere
@@ -40,7 +43,7 @@ if not logger.hasHandlers():
 class Node:
     """Monte Carlo Tree Search node."""
     # --- NO CHANGES NEEDED ---
-    def __init__(self, state: GameState, parent=None, prior_prob=0.0, c_puct=1.0):
+    def __init__(self, state: GameState, parent=None, prior_prob=0.0, c_puct=1.0, state_pool=None):
         self.state = state
         self.parent = parent
         self.children = {}  # Dictionary of move -> Node
@@ -49,6 +52,18 @@ class Node:
         self.prior_prob = prior_prob
         self.is_expanded = False
         self.c_puct = c_puct # Store c_puct as instance variable
+        self._state_pool = state_pool  # Reference to state pool for cleanup
+        self._owns_state = False  # Track if this node owns the state for cleanup
+
+    def __del__(self):
+        """Clean up GameState when node is destroyed."""
+        if self._owns_state and self._state_pool is not None and self.state is not None:
+            try:
+                self._state_pool.return_game_state(self.state)
+            except Exception as e:
+                # Use basic logging since logger might not be available
+                import logging
+                logging.getLogger("Node").warning(f"Failed to release state in Node destructor: {e}")
 
     def value(self) -> float:
         """Get mean value of node."""
@@ -86,6 +101,8 @@ class MCTS:
                  temp_clamp_fraction: float,
                  # --- Optional Metrics ---
                  mcts_metrics: Optional[MCTSMetrics] = None,
+                 # --- Memory Pools ---
+                 game_state_pool: Optional[GameStatePool] = None,
                 ):
         """
         Initialize MCTS.
@@ -104,10 +121,15 @@ class MCTS:
             annealing_steps: Number of moves over which temperature anneals.
             temp_clamp_fraction: Fraction of annealing_steps before clamping temperature.
             mcts_metrics: Optional MCTSMetrics collector instance.
+            game_state_pool: Optional GameStatePool for memory management.
         """
         self.network = network
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS") # Use module-level logger
+
+        # Memory Pool Management
+        self.game_state_pool = game_state_pool
+        self._pool_enabled = game_state_pool is not None
 
         # MCTS Core Parameters
         self.c_puct = c_puct
@@ -133,6 +155,7 @@ class MCTS:
         self.current_iteration = 0 # Can be updated externally if needed
 
         self.logger.info(f"MCTS Initialized:")
+        self.logger.info(f"  Memory: Pool enabled={self._pool_enabled}")
         self.logger.info(f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
         self.logger.info(f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
         self.logger.info(f"  Temperature: Initial={self.initial_temp:.2f}, Final={self.final_temp:.2f}, Steps={self.annealing_steps}, Clamp Frac={self.temp_clamp_frac:.2f}")
@@ -150,6 +173,52 @@ class MCTS:
         self.logger.info(f"Value Weight: {self.value_weight}")
         self.logger.info(f"Max Depth: {self.max_depth}")
         self.logger.info("======================================")
+
+    def _acquire_state_copy(self, original_state: GameState) -> GameState:
+        """Get a GameState copy from pool or create new one."""
+        if self._pool_enabled:
+            try:
+                pooled_state = self.game_state_pool.get()
+                # Copy state data from original to pooled state
+                # This is more efficient than creating a brand new state
+                pooled_state.copy_from(original_state)
+                return pooled_state
+            except Exception as e:
+                self.logger.warning(f"Failed to get state from pool: {e}, falling back to copy()")
+                return copy.deepcopy(original_state)
+        else:
+            return copy.deepcopy(original_state)
+
+    def _release_state(self, state: GameState) -> None:
+        """Release a GameState back to the pool."""
+        if self._pool_enabled and state is not None:
+            try:
+                self.game_state_pool.return_game_state(state)
+            except Exception as e:
+                self.logger.warning(f"Failed to return state to pool: {e}")
+
+    def _create_child_node(self, state: GameState, parent, prior_prob: float) -> 'Node':
+        """Create a child node with proper memory management."""
+        if self._pool_enabled:
+            # Get a state from the pool for the child node
+            child_state = self._acquire_state_copy(state)
+            child_node = Node(
+                child_state, 
+                parent=parent, 
+                prior_prob=prior_prob, 
+                c_puct=self.c_puct, 
+                state_pool=self.game_state_pool
+            )
+            child_node._owns_state = True  # Mark that this node owns the state
+            return child_node
+        else:
+            # Fall back to regular copy
+            return Node(
+                state.copy(), 
+                parent=parent, 
+                prior_prob=prior_prob, 
+                c_puct=self.c_puct
+            )
 
     def get_temperature(self, move_number: int) -> float:
         """
@@ -187,10 +256,13 @@ class MCTS:
         move_probs = np.zeros(self.state_encoder.total_moves, dtype=np.float32)
 
         # --- Run Simulations ---
+        simulation_states = []  # Track states acquired from pool for cleanup
+        
         for sim in range(budget):
             node = root
             search_path = [node]
-            current_state = state.copy()
+            current_state = self._acquire_state_copy(state)
+            simulation_states.append(current_state)  # Track for cleanup
             depth = 0
             action = None
 
@@ -233,11 +305,10 @@ class MCTS:
                         node.is_expanded = True
                         policy = self._mask_invalid_moves(policy, valid_moves)
                         for move in valid_moves:
-                            node.children[move] = Node(
-                                current_state.copy(),
+                            node.children[move] = self._create_child_node(
+                                current_state,
                                 parent=node,
-                                prior_prob=self._get_move_prob(policy, move),
-                                c_puct=self.c_puct
+                                prior_prob=self._get_move_prob(policy, move)
                             )
 
                     # Apply Dirichlet noise at the root node ONCE per search call
@@ -267,6 +338,10 @@ class MCTS:
                  self.logger.error(f"MCTS Error: Value is None before backpropagation. State terminal: {current_state.is_terminal()}")
                  value = 0.0 # Default value if something went wrong
             self._backpropagate(search_path, value)
+
+        # Clean up simulation states
+        for state in simulation_states:
+            self._release_state(state)
 
         # --- After all simulations ---
         # Calculate final move probabilities based on visit counts
@@ -374,15 +449,12 @@ class MCTS:
 
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
         """Get policy and value from neural network."""
-        state_tensor = self.state_encoder.encode_state(state)
-        # Ensure tensor is float and add batch dimension
-        state_tensor = torch.from_numpy(state_tensor).float().unsqueeze(0).to(self.network.device)
-
+        # Use the new pool-enabled prediction method
         with torch.no_grad():
-            policy_logits, value = self.network.predict(state_tensor)
-            # Apply softmax to logits to get probabilities, move to CPU, remove batch dim
-            policy_probs = torch.softmax(policy_logits, dim=1).squeeze(0).cpu().numpy()
-            value_scalar = value.item() # Get scalar value
+            policy_tensor, value_tensor = self.network.predict_from_state(state)
+            # Convert to numpy and extract values
+            policy_probs = torch.softmax(policy_tensor, dim=1).squeeze(0).cpu().numpy()
+            value_scalar = value_tensor.item() # Get scalar value
             return policy_probs, value_scalar
 
     def _get_value(self, state: GameState) -> Optional[float]:
@@ -487,7 +559,9 @@ class SelfPlay:
                  # --- Optional Metrics ---
                  metrics_logger: Optional[MetricsLogger] = None,
                  mcts_metrics: Optional[MCTSMetrics] = None,
-                 ):
+                 # --- Memory Pools ---
+                 game_state_pool: Optional[GameStatePool] = None,
+                ):
         """
         Initialize SelfPlay with explicit MCTS and temperature parameters.
         """
@@ -497,6 +571,9 @@ class SelfPlay:
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("SelfPlay") # Use module logger
         self.current_iteration = 0 # Track current training iteration if needed
+
+        # Store memory pools
+        self.game_state_pool = game_state_pool
 
         # Store all parameters needed by MCTS and workers explicitly
         self.mcts_config = {
@@ -521,6 +598,7 @@ class SelfPlay:
         self.mcts = MCTS(
             network=self.network,
             mcts_metrics=self.mcts_metrics, # Pass metrics instance
+            game_state_pool=self.game_state_pool, # Pass memory pool
             **self.mcts_config # Unpack the config dict
         )
 
@@ -663,16 +741,40 @@ def play_game_worker(
         # Initialize with CPU device for worker
         device = torch.device('cpu')
 
-        # Load network with careful memory handling
-        network = NetworkWrapper(device=device)
+        # Create local tensor pool for network operations
+        from ..memory import TensorPool, TensorPoolConfig
+        tensor_pool_config = TensorPoolConfig(
+            initial_size=30,   # Enough for several concurrent predictions
+            enable_statistics=False,  # Keep overhead low in workers
+            enable_adaptive_sizing=True,  # Enable adaptive sizing
+            enable_tensor_reshaping=True,  # Enable tensor reshaping
+            auto_device_selection=True    # Enable device-specific pooling
+        )
+        local_tensor_pool = TensorPool(tensor_pool_config)
+
+        # Create network with tensor pool
+        network = NetworkWrapper(device=device, tensor_pool=local_tensor_pool)
         network.load_model(model_path)
         network.network.eval()
 
+        # Create local memory pool for this worker
+        from ..memory import GameStatePool, GameStatePoolConfig
+        from ..game import GameState
+        pool_config = GameStatePoolConfig(
+            initial_size=50,  # Start with moderate pool size for worker
+            enable_statistics=False,  # Disable stats in workers for performance
+            factory_func=GameState  # Use GameState constructor as factory
+        )
+        local_game_state_pool = GameStatePool(pool_config)
+
         state_encoder = StateEncoder()
-        mcts = MCTS(network=network, **mcts_config)
+        mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_config)
 
         # --- Memory-Efficient Game Data Structures ---
-        state = GameState()
+        state = local_game_state_pool.get()  # Get initial state from pool
+        from ..memory import reset_game_state
+        reset_game_state(state)  # Ensure it's properly initialized
+        
         # Use lists instead of deques (less overhead)
         states = []
         policies = []
@@ -755,8 +857,7 @@ def play_game_worker(
 
             # Perform occasional garbage collection during very long games
             if move_count > 100 and move_count % 50 == 0:
-                import gc
-                gc.collect()
+                pass  # Memory pools handle cleanup automatically
 
             # Check for terminal state
             if state.is_terminal():
@@ -792,12 +893,15 @@ def play_game_worker(
         )
 
         # Clean up memory before returning
+        # Release state if possible
+        if 'local_game_state_pool' in locals() and 'state' in locals() and state is not None:
+            local_game_state_pool.return_game_state(state)
+            
         del network
         del mcts.network  # Explicitly clear network reference
         del mcts
 
-        import gc
-        gc.collect()
+        # Memory pools handle cleanup automatically
 
         return states, policies, outcome, temp_data, game_history
 
@@ -805,10 +909,12 @@ def play_game_worker(
         worker_logger.error(f"Error in game {game_id}: {e}", exc_info=True)
         # Ensure cleanup even on error
         try:
+            # Release state if possible
+            if 'local_game_state_pool' in locals() and 'state' in locals() and state is not None:
+                local_game_state_pool.return_game_state(state)
             del network
             del mcts
-            import gc
-            gc.collect()
+            # Memory pools handle cleanup automatically
         except:
             pass
         return None

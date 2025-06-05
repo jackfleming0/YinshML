@@ -9,6 +9,7 @@ import json
 import psutil, platform
 from collections import defaultdict
 import math
+import torch
 
 # --- YINSH ML Imports ---
 from ..network.wrapper import NetworkWrapper
@@ -20,6 +21,11 @@ from ..game.constants import Player, PieceType
 from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics # Keep if used for internal tracking
 from ..utils.tournament import ModelTournament, _canon # Import _canon if used directly
+# --- Memory Pool Imports ---
+from ..memory import (
+    GameStatePool, TensorPool, 
+    GameStatePoolConfig, TensorPoolConfig
+)
 
 # --- Logging Setup ---
 # Configure logger for this module
@@ -73,7 +79,12 @@ class TrainingSupervisor:
         # self.logger.debug(f"Received mode_settings: {mode_settings}")
 
         # ==================================================================
-        # 1. Extract Parameters from mode_settings with Defaults
+        # 1. Initialize Memory Management Pools
+        # ==================================================================
+        self._initialize_memory_pools(mcts_simulations)
+
+        # ==================================================================
+        # 2. Extract Parameters from mode_settings with Defaults
         # ==================================================================
         # --- SelfPlay / MCTS specific ---
         late_simulations = self.mode_settings.get('late_simulations', None)
@@ -135,6 +146,7 @@ class TrainingSupervisor:
         self.self_play = SelfPlay(
             network=self.network,
             num_workers=self._compute_num_workers(),
+            game_state_pool=self.game_state_pool,  # Pass memory pool
             **_mcts_config_for_init # Pass the explicitly constructed dict
             # metrics_logger=... , mcts_metrics=... # Add if needed
         )
@@ -198,7 +210,7 @@ class TrainingSupervisor:
         self._load_best_model_state() # Load previous state if exists for this run directory
         self.logger.info("=== Training Supervisor Initialized ===")
         if self.best_model_path:
-            self.logger.info(f"Loaded previous best model state: Iteration {self.best_model_iteration}, ELO {self.best_model_elo:.1f} from {self.best_model_path}")
+            self.logger.info(f"Loaded best model state: Iteration {self.best_model_iteration}, ELO {self.best_model_elo:.1f}")
             # Load best model weights into the network managed by the supervisor
             if self.best_model_path.exists():
                 try:
@@ -211,11 +223,67 @@ class TrainingSupervisor:
                 self.logger.warning(f"Best model path {self.best_model_path} not found. Using initial network weights.")
                 self._reset_best_model_state() # Reset tracking if path is invalid
 
-    # --- Rest of the methods (_compute_num_workers, _load/save_best_model_state, train_iteration, helpers) ---
-    # Keep these methods as they were in the previous version, ensuring they use
-    # self.save_dir correctly for paths.
+    def _initialize_memory_pools(self, mcts_simulations: int):
+        """Initialize memory pools for efficient resource management."""
+        self.logger.info("Initializing memory management pools...")
+        
+        # Calculate pool sizes based on MCTS simulations and worker count
+        num_workers = self._compute_num_workers()
+        
+        # GameStatePool: Size based on MCTS simulations per worker
+        # Each worker needs states for simulations + some buffer
+        game_state_pool_size = max(100, mcts_simulations * 2)  # At least 100, or 2x simulations
+        game_state_config = GameStatePoolConfig(
+            initial_size=game_state_pool_size,
+            max_capacity=game_state_pool_size * 3,  # Allow 3x growth
+            mcts_batch_size=max(10, mcts_simulations // 10),  # Reasonable batch size
+            enable_statistics=True,  # Enable stats for monitoring
+            training_mode=True  # Enable training optimizations
+        )
+        self.game_state_pool = GameStatePool(game_state_config)
+        
+        # TensorPool: Size based on network operations
+        # Need tensors for input states, policy outputs, value outputs
+        tensor_pool_size = max(50, num_workers * 10)  # At least 50, or 10 per worker
+        tensor_config = TensorPoolConfig(
+            initial_size=tensor_pool_size,
+            max_capacity=tensor_pool_size * 2,  # Allow 2x growth
+            enable_statistics=True,  # Enable stats for monitoring
+            auto_device_selection=True,  # Enable device-specific pooling
+            enable_adaptive_sizing=True  # Enable adaptive pool sizing
+        )
+        self.tensor_pool = TensorPool(tensor_config)
+        
+        # Update network to use the tensor pool if it doesn't have one
+        if not hasattr(self.network, 'tensor_pool') or self.network.tensor_pool is None:
+            self.network.tensor_pool = self.tensor_pool
+            self.network._pool_enabled = True
+        
+        self.logger.info(f"Memory pools initialized:")
+        self.logger.info(f"  GameStatePool: {game_state_pool_size} initial, {game_state_pool_size * 3} max")
+        self.logger.info(f"  TensorPool: {tensor_pool_size} initial, {tensor_pool_size * 2} max")
+        self.logger.info(f"  Workers: {num_workers}")
 
-    # --- train_iteration method (ensure it uses config values passed via self.trainer, self.self_play) ---
+    def cleanup_memory_pools(self):
+        """Clean up memory pools and release all resources."""
+        self.logger.info("Cleaning up memory pools...")
+        
+        if hasattr(self, 'game_state_pool') and self.game_state_pool is not None:
+            # Log statistics before cleanup
+            if hasattr(self.game_state_pool, 'get_statistics'):
+                stats = self.game_state_pool.get_statistics()
+                self.logger.info(f"GameStatePool final stats: {stats}")
+            self.game_state_pool = None
+            
+        if hasattr(self, 'tensor_pool') and self.tensor_pool is not None:
+            # Log statistics before cleanup
+            if hasattr(self.tensor_pool, 'get_statistics'):
+                stats = self.tensor_pool.get_statistics()
+                self.logger.info(f"TensorPool final stats: {stats}")
+            self.tensor_pool = None
+            
+        self.logger.info("Memory pools cleaned up")
+
     def train_iteration(self, num_games: int, epochs: int):
         """
         One full self-play -> training -> evaluation -> model-selection cycle.
@@ -235,10 +303,7 @@ class TrainingSupervisor:
         except:
             initial_memory_mb = 0
 
-        # Force garbage collection at the start
-        import gc
-        gc.collect()
-
+        # Memory pools handle resource management now - no need for manual GC
         current_iteration = self._iteration_counter
         self.logger.info(f"\n{'=' * 15} Starting Iteration {current_iteration} {'=' * 15}")
 
@@ -278,9 +343,6 @@ class TrainingSupervisor:
             # Generate batch of games
             batch_games = self.self_play.generate_games(num_games=batch_size_actual)
             games.extend(batch_games)
-
-            # Force garbage collection after each batch
-            gc.collect()
 
             # Log progress and memory usage
             try:
@@ -322,7 +384,7 @@ class TrainingSupervisor:
 
                 # MEMORY-OPTIMIZATION: Process every 10 games to avoid memory buildup
                 if game_idx % 10 == 9:
-                    gc.collect()
+                    pass  # Memory pools handle cleanup automatically
             except Exception as e:
                 self.logger.warning(f"Error processing game {game_idx} for stats: {e}")
 
@@ -343,7 +405,7 @@ class TrainingSupervisor:
         # ------------------------------------------------------------------ #
         # MEMORY-OPTIMIZATION: Clear some memory before adding experience
         last_states_decoded = None
-        gc.collect()
+        # Memory pools handle cleanup automatically
 
         # Ensure trainer uses the current network
         self.trainer.network = self.network
@@ -389,7 +451,7 @@ class TrainingSupervisor:
             # MEMORY-OPTIMIZATION: Force garbage collection after each chunk
             # Also free the chunk data itself
             chunk = None
-            gc.collect()
+            # Memory pools handle cleanup automatically
 
             # Log memory usage after each chunk
             try:
@@ -402,7 +464,7 @@ class TrainingSupervisor:
 
         # MEMORY-OPTIMIZATION: Free up games data now that it's been processed
         games = None
-        gc.collect()
+        # Memory pools handle cleanup automatically
 
         # Train the network using data in the replay buffer
         self.logger.info(f"Training network for {epochs} epochs...")
@@ -448,7 +510,7 @@ class TrainingSupervisor:
 
             # MEMORY-OPTIMIZATION: Force garbage collection between epochs
             if epoch < epochs - 1:  # Skip on last epoch
-                gc.collect()
+                pass  # Memory pools handle cleanup automatically
 
             # Log memory usage every other epoch
             if epoch % 2 == 0:
@@ -473,7 +535,7 @@ class TrainingSupervisor:
         # 3. SAVE CANDIDATE CHECKPOINT (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
         # MEMORY-OPTIMIZATION: Force garbage collection before saving
-        gc.collect()
+        pass  # Memory pools handle cleanup automatically
 
         checkpoint_path = iteration_dir / f"checkpoint_iteration_{current_iteration}.pt"
         self.network.save_model(str(checkpoint_path))
@@ -619,12 +681,10 @@ class TrainingSupervisor:
 
         if hasattr(self.tournament_manager, 'glicko_tracker'):
             # Force garbage collection
-            import gc
-            gc.collect()
-            self.logger.info("Performed garbage collection after tournament")
+            pass  # Memory pools handle cleanup automatically
 
         # MEMORY-OPTIMIZATION: Final garbage collection
-        gc.collect()
+        pass  # Memory pools handle cleanup automatically
 
         # Log final memory usage
         try:
@@ -699,12 +759,8 @@ class TrainingSupervisor:
     # _calculate_ring_mobility_from_state (new helper), _wilson_lower_bound, _should_promote
 
     def clear_pytorch_memory(self):
-        """Aggressively clear PyTorch's memory caches."""
-        import gc
-        import torch
-
-        # Force garbage collection
-        gc.collect()
+        """Clear PyTorch memory caches and force garbage collection."""
+        self.logger.info("Clearing PyTorch memory...")
 
         # Clear PyTorch's CUDA cache if using CUDA
         if torch.cuda.is_available():
@@ -715,7 +771,7 @@ class TrainingSupervisor:
             original_device = next(self.network.network.parameters()).device
             if original_device.type != 'cpu':
                 self.network.network.to(torch.device('cpu'))
-                gc.collect()
+                # Memory pools handle cleanup automatically
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 self.network.network.to(original_device)
@@ -731,7 +787,7 @@ class TrainingSupervisor:
         except Exception as e:
             self.logger.warning(f"Error attempting advanced memory cleanup: {e}")
 
-        gc.collect()
+        # Memory pools handle cleanup automatically
 
     def _reset_network_objects(self):
         """Recreate network objects to eliminate memory leaks."""
@@ -748,9 +804,9 @@ class TrainingSupervisor:
                 # Get device information
                 device = getattr(self.network, 'device', torch.device('cpu'))
 
-                # Recreate network
+                # Recreate network with tensor pool
                 from yinsh_ml.network.wrapper import NetworkWrapper
-                new_network = NetworkWrapper(device=device)
+                new_network = NetworkWrapper(device=device, tensor_pool=self.tensor_pool)
                 new_network.load_model(temp_path)
 
                 # Replace old network
@@ -801,9 +857,7 @@ class TrainingSupervisor:
                 self.logger.info(f"Pruning experience buffer from {buffer_size} to {keep_size} states")
                 self.trainer.experience.prune_oldest(keep_size)
 
-                # Force garbage collection
-                import gc
-                gc.collect()
+                # Memory pools handle cleanup automatically
 
                 # Log memory usage after pruning
                 try:
