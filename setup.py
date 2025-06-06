@@ -15,6 +15,12 @@ setup(
         "tensorboard>=2.14.0",
         "pandas>=2.0.3",
         "pytest>=7.4.0",
+        "click>=8.0.0",
     ],
+    entry_points={
+        'console_scripts': [
+            'yinsh-track=yinsh_ml.cli.main:cli',
+        ],
+    },
     python_requires=">=3.9",
 )

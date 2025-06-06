@@ -22,5 +22,8 @@ pandas>=2.0.3  # For data handling
 # Compression libraries
 lz4>=4.3.0  # For tiered storage compression
 
+# CLI interface
+click>=8.0.0  # For command-line interface
+
 # Testing
 pytest>=7.4.0  # For running tests
