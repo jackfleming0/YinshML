@@ -12,5 +12,6 @@ from . import reproduce
 from . import search
 from . import tensorboard
 from . import migrate
+from . import launch
 
-__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search', 'tensorboard', 'migrate'] 
+__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search', 'tensorboard', 'migrate', 'launch'] 

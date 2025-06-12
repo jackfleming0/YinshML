@@ -36,6 +36,12 @@ class CLIConfig:
         'confirm_destructive': True,
         'verbose': False,
         'quiet': False,
+        
+        # TensorBoard settings
+        'tensorboard_enabled': True,
+        'tensorboard_log_dir': './logs',
+        'tensorboard_port': 6006,
+        'tensorboard_host': '0.0.0.0',
     }
     
     def __init__(self, config_file: Optional[str] = None):
@@ -93,16 +99,44 @@ class CLIConfig:
             'YINSH_TRACK_COLOR': 'color_output',
             'YINSH_TRACK_VERBOSE': 'verbose',
             'YINSH_TRACK_QUIET': 'quiet',
+            # TensorBoard environment variables
+            'YINSH_TENSORBOARD_LOGGING': 'tensorboard_enabled',
+            'YINSH_TENSORBOARD_LOG_DIR': 'tensorboard_log_dir',
+            'YINSH_TENSORBOARD_PORT': 'tensorboard_port',
+            'YINSH_TENSORBOARD_HOST': 'tensorboard_host',
         }
         
         for env_var, config_key in env_mappings.items():
             env_value = os.environ.get(env_var)
             if env_value is not None:
                 # Convert string values to appropriate types
-                if config_key in ['color_output', 'verbose', 'quiet']:
+                if config_key in ['color_output', 'verbose', 'quiet', 'tensorboard_enabled']:
                     self._config[config_key] = env_value.lower() in ('true', '1', 'yes', 'on')
+                elif config_key in ['tensorboard_port']:
+                    try:
+                        self._config[config_key] = int(env_value)
+                    except ValueError:
+                        logger.warning(f"Invalid integer value for {config_key}: {env_value}")
                 else:
                     self._config[config_key] = env_value
+    
+    def setup_tensorboard_environment(self):
+        """Set up TensorBoard environment variables based on configuration."""
+        if self._config.get('tensorboard_enabled', True):
+            os.environ['YINSH_TENSORBOARD_LOGGING'] = 'true'
+            os.environ['YINSH_TENSORBOARD_LOG_DIR'] = str(self._config.get('tensorboard_log_dir', './logs'))
+            os.environ['YINSH_TENSORBOARD_PORT'] = str(self._config.get('tensorboard_port', 6006))
+            os.environ['YINSH_TENSORBOARD_HOST'] = str(self._config.get('tensorboard_host', '0.0.0.0'))
+            
+            logger.debug(f"TensorBoard environment configured:")
+            logger.debug(f"  YINSH_TENSORBOARD_LOGGING = {os.environ['YINSH_TENSORBOARD_LOGGING']}")
+            logger.debug(f"  YINSH_TENSORBOARD_LOG_DIR = {os.environ['YINSH_TENSORBOARD_LOG_DIR']}")
+            logger.debug(f"  YINSH_TENSORBOARD_PORT = {os.environ['YINSH_TENSORBOARD_PORT']}")
+            logger.debug(f"  YINSH_TENSORBOARD_HOST = {os.environ['YINSH_TENSORBOARD_HOST']}")
+        else:
+            # Disable TensorBoard logging if explicitly disabled
+            os.environ['YINSH_TENSORBOARD_LOGGING'] = 'false'
+            logger.debug("TensorBoard logging disabled by configuration")
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value."""

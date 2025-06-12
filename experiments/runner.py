@@ -19,7 +19,7 @@ from yinsh_ml.utils.metrics_logger import MetricsLogger # Still useful potential
 # Import experiment tracking
 try:
     from yinsh_ml.tracking.experiment_tracker import ExperimentTracker
-    from yinsh_ml.tracking.config_serializer import ConfigurationSerializer, ConfigurationMask
+    from yinsh_ml.tracking.config_serializer import ConfigurationSerializer
     TRACKING_AVAILABLE = True
 except ImportError:
     TRACKING_AVAILABLE = False
@@ -149,7 +149,7 @@ class ExperimentRunner:
                 # Collect configuration objects from various components
                 config_objects = {
                     'experiment_config': config,
-                    'device_config': {'device': self.device, 'debug': debug},
+                    'device_config': {'device': self.device, 'debug': self.logger.level == logging.DEBUG},
                 }
                 
                 # Add capture manager configuration if available

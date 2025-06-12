@@ -9,6 +9,9 @@ description = "ML training infrastructure for YINSH game"
 authors = [{name = "Your Name", email = "your.email@example.com"}]
 requires-python = ">=3.9"
 
+[project.scripts]
+yinsh-track = "yinsh_ml.cli.main:cli"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
