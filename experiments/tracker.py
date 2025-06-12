@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 
-from experiments.config import RESULTS_SUBDIRS
+from experiments.config import RESULTS_DIR
 
 
 @dataclass
@@ -34,21 +34,36 @@ class MetricsTracker:
         # Cache for loaded metrics
         self._metrics_cache: Dict[str, Dict[str, ExperimentMetrics]] = {}
 
-    def load_experiment_results(self, experiment_type: str) -> Dict[str, ExperimentMetrics]:
+    def load_experiment_results(self, experiment_type: str = "combined") -> Dict[str, ExperimentMetrics]:
         """Load all results for a given experiment type."""
         if experiment_type in self._metrics_cache:
             return self._metrics_cache[experiment_type]
 
-        results_dir = RESULTS_SUBDIRS[experiment_type]
+        # Since all experiments now use combined configs, look in main results directory
+        results_dir = RESULTS_DIR / experiment_type if (RESULTS_DIR / experiment_type).exists() else RESULTS_DIR
         metrics_by_config = {}
 
+        # Look for JSON files in the results directory
         for result_file in results_dir.glob("*.json"):
             try:
                 with open(result_file) as f:
                     data = json.load(f)
 
                 config_name = result_file.stem
-                metrics = ExperimentMetrics(**data["metrics"])
+                # Handle both old and new data formats
+                metrics_data = data.get("final_metrics", data.get("metrics", {}))
+                
+                # Convert to ExperimentMetrics format
+                metrics = ExperimentMetrics(
+                    policy_losses=metrics_data.get('policy_loss', []),
+                    value_losses=metrics_data.get('value_loss', []),
+                    elo_changes=metrics_data.get('tournament_rating', []),
+                    game_lengths=metrics_data.get('game_length', []),
+                    timestamps=metrics_data.get('timestamp', []),
+                    move_entropies=metrics_data.get('move_entropy', None),
+                    win_rates=metrics_data.get('win_rate', None),
+                    search_times=metrics_data.get('search_time', None)
+                )
                 metrics_by_config[config_name] = metrics
 
             except Exception as e:

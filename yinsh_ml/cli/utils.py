@@ -1,19 +1,49 @@
 """
 Utility functions for YinshML CLI.
 
-Provides formatting, table display, color coding, and other helper functions.
+Provides formatting, table display, color coding, progress bars, and other helper functions.
 """
 
 import sys
 import json
 import csv
 import io
+import re
+import difflib
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Callable
 import click
 
 from .config import get_config
 
+# Progress bar utilities
+def show_progress(iterable, length=None, label="Processing", show_eta=True):
+    """Show a progress bar for long-running operations."""
+    config = get_config()
+    if config.get('quiet', False):
+        # In quiet mode, don't show progress bars
+        return iterable
+    
+    return click.progressbar(
+        iterable, 
+        length=length,
+        label=label,
+        show_eta=show_eta,
+        show_percent=True,
+        show_pos=True
+    )
+
+def progress_callback(label: str = "Processing"):
+    """Create a progress callback for operations without iterables."""
+    config = get_config()
+    if config.get('quiet', False):
+        return lambda: None
+    
+    def callback():
+        click.echo(f"{label}...", nl=False)
+        return lambda: click.echo(" done")
+    
+    return callback
 
 def format_datetime(dt: Union[str, datetime, None]) -> str:
     """Format datetime for display."""
@@ -250,42 +280,102 @@ def output_experiments(experiments: List[Dict[str, Any]],
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=headers)
         writer.writeheader()
+        
+        # Prepare data for table display first to get the right format
+        table_data = []
         for exp in experiments:
-            # Remove color codes for CSV
-            clean_exp = {}
-            for k, v in exp.items():
-                if isinstance(v, str) and '\x1b[' in v:
-                    clean_exp[k] = click.unstyle(v)
+            row = {}
+            for header in headers:
+                # Handle case variations and custom headers
+                header_lower = header.lower()
+                
+                if header_lower == 'duration':
+                    row[header] = format_duration(exp.get('timestamp'), None)
+                elif header_lower in ['created', 'created_at']:
+                    row[header] = format_datetime(exp.get('timestamp'))
+                elif header_lower == 'updated_at':
+                    row[header] = format_datetime(exp.get('updated_at') or exp.get('timestamp'))
+                elif header_lower in ['name']:
+                    row[header] = exp.get('name', '')
+                elif header_lower in ['description']:
+                    row[header] = exp.get('notes', '')
+                elif header_lower in ['id']:
+                    row[header] = exp.get('id', '')
+                elif header_lower in ['status']:
+                    row[header] = exp.get('status', 'unknown')
+                elif header_lower in ['tags']:
+                    tags = exp.get('tags', [])
+                    if isinstance(tags, list):
+                        row[header] = ', '.join(tags) if tags else 'None'
+                    else:
+                        row[header] = str(tags) if tags else 'None'
+                elif '(latest)' in header:
+                    # Handle metric columns like 'accuracy (latest)'
+                    metric_name = header.split(' ')[0].lower()
+                    metric_key = f'{metric_name}_latest'
+                    row[header] = exp.get(metric_key, 'N/A')
                 else:
-                    clean_exp[k] = v
-            writer.writerow(clean_exp)
+                    # Direct mapping for other headers
+                    row[header] = exp.get(header, exp.get(header_lower, 'N/A'))
+            table_data.append(row)
+        
+        # Write the processed data
+        for row in table_data:
+            # Remove color codes for CSV
+            clean_row = {}
+            for k, v in row.items():
+                if isinstance(v, str) and '\x1b[' in v:
+                    clean_row[k] = click.unstyle(v)
+                else:
+                    clean_row[k] = v
+            writer.writerow(clean_row)
         return output.getvalue()
     
     else:  # table format
         if not headers:
-            headers = ['id', 'name', 'status', 'created_at', 'duration']
+            headers = ['ID', 'Name', 'Status', 'Tags', 'Created']
         
         # Prepare data for table display
         table_data = []
         for exp in experiments:
             row = {}
             for header in headers:
-                if header == 'duration':
+                # Handle case variations and custom headers
+                header_lower = header.lower()
+                
+                if header_lower == 'duration':
                     # Use timestamp field for duration calculation
                     row[header] = format_duration(exp.get('timestamp'), None)
-                elif header == 'created_at':
+                elif header_lower in ['created', 'created_at']:
                     # Map created_at to timestamp field from database
                     row[header] = format_datetime(exp.get('timestamp'))
-                elif header == 'updated_at':
+                elif header_lower == 'updated_at':
                     # Check if there's an updated_at field, otherwise use timestamp
                     row[header] = format_datetime(exp.get('updated_at') or exp.get('timestamp'))
-                elif header == 'name':
-                    row[header] = truncate_text(exp.get(header, ''), 25)
-                elif header == 'description':
+                elif header_lower in ['name']:
+                    row[header] = truncate_text(exp.get('name', ''), 25)
+                elif header_lower in ['description']:
                     # Map description to notes field from database
                     row[header] = truncate_text(exp.get('notes', ''), 40)
+                elif header_lower in ['id']:
+                    row[header] = exp.get('id', 'N/A')
+                elif header_lower in ['status']:
+                    status = exp.get('status', 'unknown')
+                    row[header] = colorize_status(status, use_color)
+                elif header_lower in ['tags']:
+                    tags = exp.get('tags', [])
+                    if isinstance(tags, list):
+                        row[header] = ', '.join(tags) if tags else 'None'
+                    else:
+                        row[header] = str(tags) if tags else 'None'
+                elif '(latest)' in header:
+                    # Handle metric columns like 'accuracy (latest)'
+                    metric_name = header.split(' ')[0].lower()
+                    metric_key = f'{metric_name}_latest'
+                    row[header] = exp.get(metric_key, 'N/A')
                 else:
-                    row[header] = exp.get(header, 'N/A')
+                    # Direct mapping for other headers
+                    row[header] = exp.get(header, exp.get(header_lower, 'N/A'))
             table_data.append(row)
         
         max_widths = {
@@ -297,14 +387,71 @@ def output_experiments(experiments: List[Dict[str, Any]],
         return format_table(table_data, headers, max_widths, use_color)
 
 
-def handle_error(error: Exception, verbose: bool = False) -> None:
-    """Handle and display errors appropriately."""
+def handle_error(error: Exception, verbose: bool = False, context: str = None) -> None:
+    """Handle and display errors appropriately with helpful suggestions."""
+    error_msg = str(error).lower()
+    suggestions = []
+    
+    # Common error patterns and suggestions
+    if "no such file or directory" in error_msg or "file not found" in error_msg:
+        suggestions.append("• Check if the file path is correct")
+        suggestions.append("• Ensure the file exists and you have read permissions")
+    elif "permission denied" in error_msg:
+        suggestions.append("• Check file/directory permissions")
+        suggestions.append("• You may need to run with appropriate privileges")
+    elif "database" in error_msg:
+        suggestions.append("• Verify the database path is correct")
+        suggestions.append("• Check if the database file is accessible")
+        suggestions.append("• Try initializing a new experiment database")
+    elif "experiment" in error_msg and "not found" in error_msg:
+        suggestions.append("• Use 'yinsh-track list' to see available experiments")
+        suggestions.append("• Check if the experiment ID is correct")
+    elif "connection" in error_msg or "network" in error_msg:
+        suggestions.append("• Check your network connection")
+        suggestions.append("• Verify any API endpoints are accessible")
+    elif "invalid" in error_msg or "format" in error_msg:
+        suggestions.append("• Check the input format and syntax")
+        suggestions.append("• Refer to help text with --help for examples")
+    elif "dependency" in error_msg or "import" in error_msg:
+        suggestions.append("• Ensure all required packages are installed")
+        suggestions.append("• Try: pip install -r requirements.txt")
+    
+    # Display error
+    click.echo(click.style(f"✗ Error: {error}", fg='red'), err=True)
+    
+    # Show context if provided
+    if context:
+        click.echo(f"  Context: {context}", err=True)
+    
+    # Show suggestions
+    if suggestions:
+        click.echo(click.style("\nSuggestions:", fg='yellow'), err=True)
+        for suggestion in suggestions:
+            click.echo(f"  {suggestion}", err=True)
+    
+    # Show verbose traceback
     if verbose:
-        click.echo(f"Error: {error}", err=True)
+        click.echo(click.style("\nDetailed traceback:", fg='cyan'), err=True)
         import traceback
         click.echo(traceback.format_exc(), err=True)
     else:
-        click.echo(f"Error: {error}", err=True)
+        click.echo("\nUse --verbose for detailed error information", err=True)
+
+def suggest_command(invalid_cmd: str, available_commands: List[str]) -> Optional[str]:
+    """Suggest the closest matching command for typos."""
+    matches = difflib.get_close_matches(invalid_cmd, available_commands, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+def format_success_message(message: str, details: Dict[str, Any] = None) -> str:
+    """Format a consistent success message with optional details."""
+    lines = [click.style(f"✓ {message}", fg='green')]
+    
+    if details:
+        for key, value in details.items():
+            if value is not None:
+                lines.append(f"  {key}: {value}")
+    
+    return "\n".join(lines)
 
 
 def confirm_action(message: str, default: bool = False) -> bool:
@@ -314,6 +461,24 @@ def confirm_action(message: str, default: bool = False) -> bool:
         return True
     
     return click.confirm(message, default=default)
+
+def verbose_echo(message: str, **kwargs):
+    """Echo message only in verbose mode."""
+    config = get_config()
+    if config.get('verbose', False):
+        click.echo(message, **kwargs)
+
+def quiet_echo(message: str, **kwargs):
+    """Echo message unless in quiet mode."""
+    config = get_config()
+    if not config.get('quiet', False):
+        click.echo(message, **kwargs)
+
+def debug_echo(message: str, **kwargs):
+    """Echo debug message only in verbose mode with debug styling."""
+    config = get_config()
+    if config.get('verbose', False):
+        click.echo(click.style(f"DEBUG: {message}", fg='cyan'), **kwargs)
 
 
 def get_experiment_tracker():
@@ -602,4 +767,89 @@ def validate_experiments_exist(tracker, experiment_ids: List[int]) -> List[int]:
         except Exception as e:
             click.echo(f"Warning: Could not check experiment {exp_id}: {e}", err=True)
     
-    return valid_ids 
+    return valid_ids
+
+
+def search_experiments_by_text(tracker, query: str, existing_experiments: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Search experiments by text query in name and description fields."""
+    if not query:
+        return existing_experiments or []
+    
+    # If we have existing experiments, filter them
+    if existing_experiments:
+        filtered = []
+        for exp in existing_experiments:
+            name = exp.get('name', '').lower()
+            description = exp.get('notes', '').lower()
+            query_lower = query.lower()
+            
+            if query_lower in name or query_lower in description:
+                filtered.append(exp)
+        return filtered
+    
+    # Otherwise, we need to do a more complex database query
+    # For now, we'll get all experiments and filter them
+    # In a production system, this would be optimized with SQL LIKE queries
+    try:
+        all_experiments = tracker.query_experiments(include_tags=True)
+        filtered = []
+        
+        query_lower = query.lower()
+        for exp in all_experiments:
+            name = exp.get('name', '').lower()
+            description = exp.get('notes', '').lower()
+            
+            if query_lower in name or query_lower in description:
+                filtered.append(exp)
+        
+        return filtered
+    except Exception as e:
+        click.echo(f"Error searching experiments: {e}", err=True)
+        return []
+
+
+def filter_experiments_by_metrics(tracker, experiments: List[Dict[str, Any]], 
+                                metric_name: str, min_value: float = None, 
+                                max_value: float = None) -> List[Dict[str, Any]]:
+    """Filter experiments by metric values."""
+    if not metric_name:
+        return experiments
+    
+    filtered = []
+    
+    for exp in experiments:
+        try:
+            # Get metrics for this experiment using the correct method
+            metrics = tracker.get_metric_history(exp['id'], metric_name)
+            
+            if not metrics:
+                continue  # Skip experiments without this metric
+            
+            # Get the latest value for this metric
+            latest_metric = metrics[-1]  # Assuming metrics are ordered by timestamp
+            metric_value = latest_metric['metric_value']
+            
+            # Apply min/max filters
+            if min_value is not None and metric_value < min_value:
+                continue
+            
+            if max_value is not None and metric_value > max_value:
+                continue
+            
+            # Add metric info to experiment for display
+            exp['latest_metric_value'] = metric_value
+            filtered.append(exp)
+            
+        except Exception as e:
+            # Skip experiments where we can't get metrics
+            continue
+    
+    return filtered
+
+
+def parse_search_tags(tags_str: str) -> List[str]:
+    """Parse comma-separated tags string into list."""
+    if not tags_str:
+        return []
+    
+    return [tag.strip() for tag in tags_str.split(',') if tag.strip()] 

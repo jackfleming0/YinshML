@@ -27,14 +27,47 @@ from ..utils import (
 def compare(ctx, experiment_ids: List[int], metrics: List[str], 
            output_format: str, include_config: bool, statistical: bool):
     """
-    Compare experiments.
+    Compare multiple experiments side-by-side with detailed analysis.
     
-    Takes multiple EXPERIMENT_IDS and shows detailed comparison including
-    configuration differences, metric values, and statistical analysis.
+    Analyzes differences between 2-10 experiments, showing configuration
+    parameters, metrics, and statistical comparisons. Helps identify what
+    changes led to performance improvements or regressions.
     
+    \b
+    The comparison includes:
+    • Basic experiment information (status, creation dates, tags)
+    • Configuration parameter differences (highlighted)
+    • Metric comparisons with statistical analysis
+    • Visual indicators for significant differences
+    
+    \b
     Examples:
-        yinsh-track compare 1 2 3 --metrics accuracy loss
-        yinsh-track compare 1 2 --include-config --statistical
+        # Basic comparison of three experiments
+        yinsh-track compare 1 2 3
+        
+        # Compare specific metrics only
+        yinsh-track compare 1 2 3 --metrics accuracy loss f1_score
+        
+        # Include configuration differences
+        yinsh-track compare 1 2 --include-config
+        
+        # Full analysis with statistical tests
+        yinsh-track compare 1 2 3 --include-config --statistical
+        
+        # Export comparison for further analysis
+        yinsh-track compare 1 2 --format json > comparison.json
+        yinsh-track compare 1 2 --format csv > comparison.csv
+        
+        # Quick comparison of recent experiments
+        yinsh-track list --limit 3 --format json | jq -r '.[].id' | xargs yinsh-track compare
+    
+    \b
+    Tips:
+        • Use --include-config to spot configuration differences
+        • Statistical analysis helps determine significant improvements
+        • JSON/CSV output is ideal for automated analysis
+        • Compare experiments with similar setups for meaningful insights
+        • Look for patterns in successful experiment configurations
     """
     config = get_config()
     use_color = config.get('color_output', True) and not output_format

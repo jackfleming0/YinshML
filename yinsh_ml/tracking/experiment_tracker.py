@@ -26,9 +26,13 @@ from enum import Enum
 try:
     from .utils import DatabaseConnectionManager, initialize_database, create_experiment as utils_create_experiment
     from .database import ExperimentDatabase
+    from .tensorboard_logger import TensorBoardLogger, TensorBoardLoggerError
+    from .config_serializer import ConfigurationSerializer
 except ImportError:
     from utils import DatabaseConnectionManager, initialize_database, create_experiment as utils_create_experiment
     from database import ExperimentDatabase
+    from tensorboard_logger import TensorBoardLogger, TensorBoardLoggerError
+    from config_serializer import ConfigurationSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +563,10 @@ class ExperimentTracker:
             'log_level': 'INFO',
             'flush_interval': 5.0,  # seconds
             'queue_size_limit': 1000,
+            'enable_tensorboard': True,
+            'tensorboard_log_dir': None,  # Will default to 'logs/' if None
+            'tensorboard_flush_secs': 120,
+            'tensorboard_max_queue': 10,
         }
         
         # Update with provided config
@@ -591,8 +599,23 @@ class ExperimentTracker:
         if self._async_enabled:
             self._initialize_async_logging()
         
+        # Initialize TensorBoard logging
+        self._tensorboard_logger = None
+        self._tensorboard_enabled = self._config.get('enable_tensorboard', True)
+        
+        if self._tensorboard_enabled:
+            self._initialize_tensorboard_logging()
+        
+        # Initialize configuration serializer
+        self._config_serializer = ConfigurationSerializer(
+            sensitive_patterns=self._config.get('sensitive_patterns'),
+            mask_value=self._config.get('mask_value', '***MASKED***'),
+            max_config_files=self._config.get('max_config_files', 20),
+            max_file_size_mb=self._config.get('max_file_size_mb', 10.0)
+        )
+        
         self._initialized = True
-        logger.info(f"ExperimentTracker initialized successfully (async_logging: {self._async_enabled})")
+        logger.info(f"ExperimentTracker initialized successfully (async_logging: {self._async_enabled}, tensorboard: {self._tensorboard_enabled})")
     
     @classmethod
     def get_instance(cls, db_path: str = None, config: Dict[str, Any] = None):
@@ -827,25 +850,57 @@ class ExperimentTracker:
         
         return env_info
     
-    def _create_configuration_snapshot(self, user_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _create_configuration_snapshot(self, user_config: Dict[str, Any] = None, 
+                                      experiment_path: Optional[Path] = None) -> Dict[str, Any]:
         """
-        Create a snapshot of current configuration state.
+        Create a comprehensive configuration snapshot using ConfigurationSerializer.
         
         Args:
             user_config: User-provided configuration to include
+            experiment_path: Optional path to experiment directory for file config capture
             
         Returns:
-            Dict containing configuration snapshot
+            Dict containing comprehensive configuration snapshot
         """
-        config_snapshot = {
-            'tracker_config': self._config.copy(),
-            'timestamp': datetime.now().isoformat(),
-        }
-        
-        if user_config:
-            config_snapshot['user_config'] = user_config
-        
-        return config_snapshot
+        try:
+            # Use ConfigurationSerializer for comprehensive configuration capture
+            comprehensive_config = self._config_serializer.capture_comprehensive_configuration(
+                user_config=user_config,
+                experiment_path=experiment_path,
+                include_environment=self._config.get('auto_capture_environment', True),
+                include_system_config=self._config.get('auto_capture_system', True)
+            )
+            
+            # Add tracker-specific configuration
+            tracker_config, masked_keys = self._config_serializer.mask_sensitive_values(self._config.copy())
+            comprehensive_config['tracker_config'] = {
+                'data': tracker_config,
+                'metadata': {
+                    'timestamp': datetime.now().isoformat(),
+                    'source': 'experiment_tracker',
+                    'masked_keys': masked_keys
+                }
+            }
+            
+            # Update total masked keys count
+            comprehensive_config['metadata']['total_masked_keys'] += len(masked_keys)
+            comprehensive_config['metadata']['capture_sources'].append('tracker_config')
+            
+            return comprehensive_config
+            
+        except Exception as e:
+            logger.warning(f"Failed to create comprehensive configuration snapshot: {e}")
+            # Fallback to basic configuration snapshot
+            config_snapshot = {
+                'tracker_config': self._config.copy(),
+                'timestamp': datetime.now().isoformat(),
+                'error': f"Comprehensive capture failed: {e}"
+            }
+            
+            if user_config:
+                config_snapshot['user_config'] = user_config
+            
+            return config_snapshot
     
     # =================================================================
     # Core Interface Methods
@@ -875,7 +930,27 @@ class ExperimentTracker:
             git_metadata = self._capture_git_metadata()
             system_metadata = self._capture_system_metadata()
             environment_metadata = self._capture_environment_metadata()
-            config_snapshot = self._create_configuration_snapshot(config)
+            
+            # Try to determine experiment path for config file capture
+            experiment_path = None
+            try:
+                # Look for common experiment directories
+                current_path = Path.cwd()
+                potential_paths = [
+                    current_path,
+                    current_path / 'experiments',
+                    current_path / 'configs',
+                    current_path / 'config'
+                ]
+                
+                for path in potential_paths:
+                    if path.exists() and any(path.glob('*.json')) or any(path.glob('*.yaml')):
+                        experiment_path = path
+                        break
+            except Exception as e:
+                logger.debug(f"Failed to determine experiment path: {e}")
+            
+            config_snapshot = self._create_configuration_snapshot(config, experiment_path)
             
             # Prepare data for database storage
             git_commit = git_metadata.get('commit', 'unknown')
@@ -1862,6 +1937,34 @@ class ExperimentTracker:
             self._async_enabled = False
             self._async_logger = None
     
+    def _initialize_tensorboard_logging(self):
+        """Initialize TensorBoard logging capabilities."""
+        try:
+            # Get configuration parameters
+            log_dir = self._config.get('tensorboard_log_dir')
+            tensorboard_config = {
+                'enabled': self._config.get('enable_tensorboard', True),
+                'flush_secs': self._config.get('tensorboard_flush_secs', 120),
+                'max_queue': self._config.get('tensorboard_max_queue', 10),
+            }
+            
+            # Create TensorBoard logger
+            self._tensorboard_logger = TensorBoardLogger(
+                log_dir=log_dir,
+                config=tensorboard_config
+            )
+            
+            logger.info(f"TensorBoard logging initialized with log_dir={self._tensorboard_logger._base_log_dir}")
+            
+        except TensorBoardLoggerError as e:
+            logger.warning(f"TensorBoard not available: {e}")
+            self._tensorboard_enabled = False
+            self._tensorboard_logger = None
+        except Exception as e:
+            logger.error(f"Failed to initialize TensorBoard logging: {e}")
+            self._tensorboard_enabled = False
+            self._tensorboard_logger = None
+    
     def start_async_logging(self):
         """Start asynchronous logging worker."""
         if not self._async_enabled:
@@ -1979,6 +2082,24 @@ class ExperimentTracker:
             # Log the metric using existing utility function
             from .utils import add_metric_to_experiment
             add_metric_to_experiment(experiment_id, metric_name, value, iteration, timestamp)
+            
+            # Log to TensorBoard if enabled
+            logger.debug(f"TensorBoard logging check: enabled={self._tensorboard_enabled}, logger_exists={self._tensorboard_logger is not None}")
+            if self._tensorboard_enabled and self._tensorboard_logger:
+                try:
+                    logger.debug(f"Calling TensorBoard log_scalar for {metric_name}={value}")
+                    self._tensorboard_logger.log_scalar(
+                        experiment_id=experiment_id,
+                        metric_name=metric_name,
+                        value=value,
+                        iteration=iteration,
+                        timestamp=timestamp
+                    )
+                    logger.debug(f"TensorBoard log_scalar completed for {metric_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to log metric to TensorBoard: {e}")
+                    import traceback
+                    logger.warning(traceback.format_exc())
             
             # Update active experiment tracking
             with self._experiment_lock:
@@ -2210,6 +2331,237 @@ class ExperimentTracker:
         """Get the current database path."""
         return self._db_path
     
+    # =================================================================
+    # TensorBoard Integration Methods
+    # =================================================================
+    
+    def get_tensorboard_log_dir(self, experiment_id: int) -> str:
+        """
+        Get the TensorBoard log directory for a specific experiment.
+        
+        Args:
+            experiment_id: Experiment ID
+            
+        Returns:
+            Path to the experiment's TensorBoard log directory
+        """
+        if not self._tensorboard_enabled or not self._tensorboard_logger:
+            return None
+        return str(self._tensorboard_logger.get_log_dir(experiment_id))
+    
+    def flush_tensorboard(self, experiment_id: Optional[int] = None) -> None:
+        """
+        Flush TensorBoard logs to ensure they are written to disk.
+        
+        Args:
+            experiment_id: Specific experiment to flush, or None to flush all
+        """
+        if self._tensorboard_enabled and self._tensorboard_logger:
+            self._tensorboard_logger.flush(experiment_id)
+    
+    def close_tensorboard_experiment(self, experiment_id: int) -> None:
+        """
+        Close TensorBoard logging for a specific experiment.
+        
+        Args:
+            experiment_id: Experiment ID to close
+        """
+        if self._tensorboard_enabled and self._tensorboard_logger:
+            self._tensorboard_logger.close_experiment(experiment_id)
+    
+    def get_tensorboard_config(self) -> Dict[str, Any]:
+        """
+        Get current TensorBoard configuration.
+        
+        Returns:
+            Dictionary containing TensorBoard configuration
+        """
+        if not self._tensorboard_enabled or not self._tensorboard_logger:
+            return {'enabled': False}
+        
+        config = self._tensorboard_logger.get_config()
+        config['base_log_dir'] = str(self._tensorboard_logger._base_log_dir)
+        config['active_experiments'] = self._tensorboard_logger.get_active_experiments()
+        return config
+    
+    # =================================================================
+    # Enhanced Configuration Management Methods
+    # =================================================================
+    
+    def compare_experiment_configurations(self, experiment_ids: List[int]) -> Dict[str, Any]:
+        """
+        Compare configurations between multiple experiments using enhanced comparison.
+        
+        Args:
+            experiment_ids: List of experiment IDs to compare configurations
+            
+        Returns:
+            Dict containing detailed configuration comparison results
+            
+        Raises:
+            ExperimentNotFoundError: If any experiment is not found
+            ExperimentConfigurationError: If comparison fails
+        """
+        try:
+            if not experiment_ids or len(experiment_ids) < 2:
+                raise ExperimentConfigurationError("At least 2 experiments required for configuration comparison")
+            
+            # Get experiment configurations
+            experiments = []
+            configs = []
+            
+            for exp_id in experiment_ids:
+                exp_data = self.get_experiment(exp_id)
+                if not exp_data:
+                    raise ExperimentNotFoundError(f"Experiment {exp_id} not found")
+                
+                experiments.append(exp_data)
+                config = exp_data.get('config', {})
+                configs.append(config)
+            
+            # Perform detailed configuration comparison
+            comparison_results = {
+                'experiment_ids': experiment_ids,
+                'experiment_names': [exp['name'] for exp in experiments],
+                'comparison_timestamp': datetime.now().isoformat(),
+                'pairwise_comparisons': {},
+                'summary': {}
+            }
+            
+            # Compare each experiment with the first one as baseline
+            base_config = configs[0]
+            base_exp_id = experiment_ids[0]
+            
+            total_differences = 0
+            
+            for i, (exp_id, config) in enumerate(zip(experiment_ids[1:], configs[1:]), 1):
+                try:
+                    detailed_comparison = self._config_serializer.compare_configurations(base_config, config)
+                    comparison_results['pairwise_comparisons'][f"{base_exp_id}_vs_{exp_id}"] = detailed_comparison
+                    total_differences += detailed_comparison.get('summary', {}).get('total_differences', 0)
+                except Exception as e:
+                    logger.warning(f"Failed to compare configurations for experiments {base_exp_id} vs {exp_id}: {e}")
+                    comparison_results['pairwise_comparisons'][f"{base_exp_id}_vs_{exp_id}"] = {
+                        'error': str(e),
+                        'identical': base_config == config
+                    }
+            
+            # Generate summary
+            comparison_results['summary'] = {
+                'total_experiments': len(experiment_ids),
+                'baseline_experiment': base_exp_id,
+                'total_differences_found': total_differences,
+                'all_identical': total_differences == 0
+            }
+            
+            logger.info(f"Compared configurations for {len(experiment_ids)} experiments, found {total_differences} differences")
+            return comparison_results
+            
+        except (ExperimentConfigurationError, ExperimentNotFoundError):
+            raise
+        except Exception as e:
+            error_msg = f"Failed to compare experiment configurations: {e}"
+            logger.error(error_msg)
+            raise ExperimentConfigurationError(error_msg)
+    
+    def reconstruct_experiment_configuration(self, experiment_id: int, 
+                                           unmask_sensitive: bool = False) -> Dict[str, Any]:
+        """
+        Reconstruct the full configuration for an experiment.
+        
+        Args:
+            experiment_id: Experiment ID
+            unmask_sensitive: Whether to attempt to unmask sensitive values (not recommended)
+            
+        Returns:
+            Dict containing reconstructed configuration
+            
+        Raises:
+            ExperimentNotFoundError: If experiment is not found
+            ExperimentConfigurationError: If reconstruction fails
+        """
+        try:
+            # Get experiment data
+            exp_data = self.get_experiment(experiment_id)
+            if not exp_data:
+                raise ExperimentNotFoundError(f"Experiment {experiment_id} not found")
+            
+            config_snapshot = exp_data.get('config', {})
+            
+            # Use ConfigurationSerializer to reconstruct configuration
+            reconstructed_config = self._config_serializer.reconstruct_configuration(
+                config_snapshot, unmask_sensitive=unmask_sensitive
+            )
+            
+            # Add experiment metadata
+            reconstructed_config['_experiment_metadata'] = {
+                'experiment_id': experiment_id,
+                'experiment_name': exp_data.get('name'),
+                'created_at': exp_data.get('created_at'),
+                'status': exp_data.get('status'),
+                'reconstruction_timestamp': datetime.now().isoformat()
+            }
+            
+            logger.info(f"Reconstructed configuration for experiment {experiment_id}")
+            return reconstructed_config
+            
+        except (ExperimentConfigurationError, ExperimentNotFoundError):
+            raise
+        except Exception as e:
+            error_msg = f"Failed to reconstruct configuration for experiment {experiment_id}: {e}"
+            logger.error(error_msg)
+            raise ExperimentConfigurationError(error_msg)
+    
+    def validate_experiment_configuration(self, experiment_id: int) -> Dict[str, Any]:
+        """
+        Validate the integrity of an experiment's configuration.
+        
+        Args:
+            experiment_id: Experiment ID
+            
+        Returns:
+            Dict containing validation results
+            
+        Raises:
+            ExperimentNotFoundError: If experiment is not found
+            ExperimentConfigurationError: If validation fails
+        """
+        try:
+            # Get experiment data
+            exp_data = self.get_experiment(experiment_id)
+            if not exp_data:
+                raise ExperimentNotFoundError(f"Experiment {experiment_id} not found")
+            
+            config_snapshot = exp_data.get('config', {})
+            
+            # Use ConfigurationSerializer to validate configuration integrity
+            validation_results = self._config_serializer.validate_configuration_integrity(config_snapshot)
+            
+            # Add experiment context
+            validation_results['experiment_id'] = experiment_id
+            validation_results['experiment_name'] = exp_data.get('name')
+            validation_results['validation_timestamp'] = datetime.now().isoformat()
+            
+            logger.info(f"Validated configuration for experiment {experiment_id}: "
+                       f"{'VALID' if validation_results['valid'] else 'INVALID'}")
+            return validation_results
+            
+        except (ExperimentConfigurationError, ExperimentNotFoundError):
+            raise
+        except Exception as e:
+            error_msg = f"Failed to validate configuration for experiment {experiment_id}: {e}"
+            logger.error(error_msg)
+            raise ExperimentConfigurationError(error_msg)
+    
+    def get_configuration_serializer(self) -> ConfigurationSerializer:
+        """
+        Get the ConfigurationSerializer instance for advanced configuration operations.
+        
+        Returns:
+            ConfigurationSerializer instance
+        """
+        return self._config_serializer
+    
     def shutdown(self):
         """
         Shutdown the tracker and cleanup resources.
@@ -2223,6 +2575,14 @@ class ExperimentTracker:
                 self.stop_async_logging()
             except Exception as e:
                 logger.error(f"Error stopping async logging: {e}")
+        
+        # Close TensorBoard logging if running
+        if hasattr(self, '_tensorboard_logger') and self._tensorboard_logger:
+            try:
+                self._tensorboard_logger.close_all()
+                logger.info("TensorBoard logging stopped")
+            except Exception as e:
+                logger.error(f"Error stopping TensorBoard logging: {e}")
         
         # Close database connections
         if hasattr(self, '_connection_manager'):

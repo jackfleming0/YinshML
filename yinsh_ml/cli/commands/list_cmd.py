@@ -9,7 +9,9 @@ from typing import Optional
 from ..utils import (
     handle_error, 
     get_experiment_tracker,
-    output_experiments
+    output_experiments,
+    verbose_echo,
+    show_progress
 )
 from ..config import get_config
 
@@ -40,15 +42,48 @@ def list_experiments(ctx, status: Optional[str], tags: Optional[str],
                     sort: str, reverse: bool, date_from: Optional[str],
                     date_to: Optional[str]):
     """
-    List experiments.
+    List and filter experiments with detailed information.
     
-    Shows a list of experiments with their basic information.
-    Use filters to narrow down the results.
+    Shows a table, JSON, or CSV view of experiments with filtering and sorting
+    options. Results can be filtered by status, tags, date ranges, and more.
     
+    \b
+    Available status values: running, done, failed, paused, cancelled, pending
+    
+    \b
     Examples:
+        # List all experiments (default table format)
+        yinsh-track list
+        
+        # Filter by status
         yinsh-track list --status running
-        yinsh-track list --tags "ml,tuning" --limit 10
-        yinsh-track list --sort name --format json
+        yinsh-track list --status done --limit 5
+        
+        # Filter by tags (comma-separated)
+        yinsh-track list --tags "ml,training"
+        yinsh-track list --tags "production"
+        
+        # Date range filtering
+        yinsh-track list --date-from 2024-01-01 --date-to 2024-12-31
+        yinsh-track list --date-from 2024-06-01
+        
+        # Sorting and ordering
+        yinsh-track list --sort name
+        yinsh-track list --sort created --reverse
+        
+        # Different output formats
+        yinsh-track list --format json --limit 10
+        yinsh-track list --format csv > experiments.csv
+        
+        # Combined filters
+        yinsh-track list --status running --tags ml --sort updated --reverse
+    
+    \b
+    Tips:
+        • Use --limit to control number of results (default: 20)
+        • JSON format is ideal for programmatic processing
+        • CSV format can be imported into spreadsheets
+        • Combine multiple filters for precise results
     """
     config = get_config()
     verbose = config.get('verbose', False)
@@ -83,8 +118,21 @@ def list_experiments(ctx, status: Optional[str], tags: Optional[str],
             except ValueError:
                 raise click.ClickException(f"Invalid date format for --date-to: {date_to}. Use YYYY-MM-DD")
         
-        if verbose:
-            click.echo("Fetching experiments...")
+        verbose_echo("Fetching experiments from database...")
+        
+        # Build query description for verbose mode
+        query_parts = []
+        if status:
+            query_parts.append(f"status={status}")
+        if tag_list:
+            query_parts.append(f"tags={','.join(tag_list)}")
+        if start_date:
+            query_parts.append(f"from={start_date}")
+        if end_date:
+            query_parts.append(f"to={end_date}")
+        
+        if query_parts and verbose:
+            verbose_echo(f"Applying filters: {', '.join(query_parts)}")
         
         # Query experiments
         experiments = tracker.query_experiments(
@@ -97,6 +145,8 @@ def list_experiments(ctx, status: Optional[str], tags: Optional[str],
             include_metrics=False,  # Don't include metrics for list view
             include_tags=True
         )
+        
+        verbose_echo(f"Retrieved {len(experiments)} experiments")
         
         if not experiments:
             click.echo("No experiments found.")

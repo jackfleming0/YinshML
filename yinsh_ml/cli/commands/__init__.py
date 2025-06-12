@@ -10,5 +10,7 @@ from . import list_cmd
 from . import compare
 from . import reproduce
 from . import search
+from . import tensorboard
+from . import migrate
 
-__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search'] 
+__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search', 'tensorboard', 'migrate'] 

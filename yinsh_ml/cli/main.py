@@ -10,7 +10,8 @@ import click
 from typing import Optional
 
 from .config import get_config, set_config, CLIConfig
-from .commands import start, list_cmd, compare, reproduce, search
+from .commands import start, list_cmd, compare, reproduce, search, tensorboard, migrate
+from .completion import generate_completion_script, install_completion
 
 
 def setup_logging(verbose: bool = False, quiet: bool = False):
@@ -28,7 +29,7 @@ def setup_logging(verbose: bool = False, quiet: bool = False):
     )
 
 
-@click.group(name='yinsh-track')
+@click.group(name='yinsh-track', invoke_without_command=True)
 @click.option('--config', '-c', 
               help='Path to configuration file')
 @click.option('--database', '--db', 
@@ -39,10 +40,13 @@ def setup_logging(verbose: bool = False, quiet: bool = False):
               help='Suppress non-essential output')
 @click.option('--no-color', is_flag=True,
               help='Disable colored output')
+@click.option('--install-completion', 
+              type=click.Choice(['bash', 'zsh']),
+              help='Generate shell completion script')
 @click.version_option(version='0.1.0', prog_name='yinsh-track')
 @click.pass_context
 def cli(ctx, config: Optional[str], database: Optional[str], 
-        verbose: bool, quiet: bool, no_color: bool):
+        verbose: bool, quiet: bool, no_color: bool, install_completion: Optional[str]):
     """
     YinshML Experiment Tracking CLI
     
@@ -55,6 +59,17 @@ def cli(ctx, config: Optional[str], database: Optional[str],
         yinsh-track compare 123 124 --metrics accuracy loss
         yinsh-track reproduce 123
     """
+    # Handle completion installation first, before other processing
+    if install_completion:
+        script = generate_completion_script(install_completion)
+        click.echo(script)
+        return
+    
+    # If no command is provided, show help
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        return
+    
     # Setup logging
     setup_logging(verbose, quiet)
     
@@ -87,6 +102,8 @@ cli.add_command(list_cmd.list_experiments)
 cli.add_command(compare.compare)
 cli.add_command(reproduce.reproduce)
 cli.add_command(search.search)
+cli.add_command(tensorboard.tensorboard)
+cli.add_command(migrate.migrate)
 
 
 @cli.command()

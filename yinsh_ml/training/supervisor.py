@@ -207,6 +207,10 @@ class TrainingSupervisor:
         self.best_model_save_path: Path = self.save_dir / "best_model.pt"
         self._iteration_counter: int = 0 # Initialize iteration counter
 
+        # --- Experiment Tracking ---
+        self.experiment_tracker = None
+        self.experiment_id = None
+
         self._load_best_model_state() # Load previous state if exists for this run directory
         self.logger.info("=== Training Supervisor Initialized ===")
         if self.best_model_path:
@@ -283,6 +287,38 @@ class TrainingSupervisor:
             self.tensor_pool = None
             
         self.logger.info("Memory pools cleaned up")
+
+    def set_experiment_tracker(self, tracker, experiment_id: int):
+        """
+        Set the experiment tracker and ID for metric logging.
+        
+        Args:
+            tracker: ExperimentTracker instance
+            experiment_id: Experiment ID for this training session
+        """
+        self.experiment_tracker = tracker
+        self.experiment_id = experiment_id
+        self.logger.info(f"Experiment tracker set with experiment ID: {experiment_id}")
+
+    def _log_metric_safe(self, metric_name: str, value: float, iteration: int = None):
+        """
+        Safely log a metric to the experiment tracker.
+        
+        Args:
+            metric_name: Name of the metric
+            value: Metric value
+            iteration: Optional iteration number
+        """
+        if self.experiment_tracker and self.experiment_id:
+            try:
+                self.experiment_tracker.log_metric(
+                    self.experiment_id, 
+                    metric_name, 
+                    float(value), 
+                    iteration
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to log metric '{metric_name}': {e}")
 
     def train_iteration(self, num_games: int, epochs: int):
         """
@@ -399,6 +435,19 @@ class TrainingSupervisor:
 
         self.logger.info(
             f"Self-Play Stats: avg_len={avg_game_len:.1f} | W/B/D (estimated) = {pseudo_wins_white}/{pseudo_wins_black}/{pseudo_draws}")
+
+        # --- Log self-play metrics to experiment tracker ---
+        if self.experiment_tracker and self.experiment_id:
+            try:
+                iteration = current_iteration + 1  # 1-based iteration numbering
+                self._log_metric_safe('selfplay_game_time', game_time, iteration)
+                self._log_metric_safe('selfplay_avg_game_length', avg_game_len, iteration)
+                self._log_metric_safe('selfplay_avg_ring_mobility', avg_ring_mobility, iteration)
+                self._log_metric_safe('selfplay_win_rate', pseudo_win_rate, iteration)
+                self._log_metric_safe('selfplay_draw_rate', pseudo_draws / len(outcomes) if outcomes else 0, iteration)
+                self._log_metric_safe('selfplay_num_games', len(games), iteration)
+            except Exception as e:
+                self.logger.warning(f"Failed to log self-play metrics: {e}")
 
         # ------------------------------------------------------------------ #
         # 2. ADD EXPERIENCE & TRAIN (MEMORY-OPTIMIZED)
@@ -531,6 +580,24 @@ class TrainingSupervisor:
         self.logger.info(
             f"Training done in {train_time:.1f}s (Avg Policy Loss={final_pol_loss:.4f}, Avg Value Loss={final_val_loss:.4f})")
 
+        # --- Log training metrics to experiment tracker ---
+        if self.experiment_tracker and self.experiment_id:
+            try:
+                iteration = current_iteration + 1  # 1-based iteration numbering
+                self._log_metric_safe('training_time', train_time, iteration)
+                self._log_metric_safe('policy_loss', final_pol_loss, iteration)
+                self._log_metric_safe('value_loss', final_val_loss, iteration)
+                self._log_metric_safe('training_epochs', epochs, iteration)
+                self._log_metric_safe('buffer_size', buffer_size, iteration)
+                if avg_epoch_stats:
+                    # Log additional epoch-level metrics if available
+                    for key, values in avg_epoch_stats.items():
+                        if isinstance(values, list) and values and isinstance(values[0], (int, float)):
+                            avg_value = np.mean(values)
+                            self._log_metric_safe(f'epoch_avg_{key}', avg_value, iteration)
+            except Exception as e:
+                self.logger.warning(f"Failed to log training metrics: {e}")
+
         # ------------------------------------------------------------------ #
         # 3. SAVE CANDIDATE CHECKPOINT (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
@@ -566,6 +633,20 @@ class TrainingSupervisor:
             tourn_win_rate = tournament_stats.get('win_rate', 0.0)
             self.logger.info(
                 f"Tournament Results for {model_id_canon}: Elo={current_elo:.1f}, Win Rate={tourn_win_rate:.1%}")
+
+            # --- Log tournament metrics to experiment tracker ---
+            if self.experiment_tracker and self.experiment_id:
+                try:
+                    iteration = current_iteration + 1  # 1-based iteration numbering
+                    self._log_metric_safe('tournament_rating', current_elo, iteration)
+                    self._log_metric_safe('tournament_win_rate', tourn_win_rate, iteration)
+                    # Log additional tournament stats if available
+                    if tournament_stats:
+                        for key, value in tournament_stats.items():
+                            if isinstance(value, (int, float)) and key not in ['current_rating', 'win_rate']:
+                                self._log_metric_safe(f'tournament_{key}', value, iteration)
+                except Exception as e:
+                    self.logger.warning(f"Failed to log tournament metrics: {e}")
 
         except FileNotFoundError as e:
             self.logger.error(f"Tournament failed: Could not find a model checkpoint. Check paths. Error: {e}",
@@ -650,6 +731,20 @@ class TrainingSupervisor:
                 self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
             self._save_best_model_state()
 
+            # --- Log model promotion to experiment tracker ---
+            if self.experiment_tracker and self.experiment_id:
+                try:
+                    iteration = current_iteration + 1  # 1-based iteration numbering
+                    self._log_metric_safe('model_promoted', 1.0, iteration)
+                    self._log_metric_safe('best_model_elo', self.best_model_elo, iteration)
+                    self._log_metric_safe('best_model_iteration', self.best_model_iteration, iteration)
+                    if perform_wilson_check:
+                        self._log_metric_safe('wilson_wins', wins, iteration)
+                        self._log_metric_safe('wilson_total', total, iteration)
+                        self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
+                except Exception as e:
+                    self.logger.warning(f"Failed to log promotion metrics: {e}")
+
         elif kept_current_best:
             self.logger.info(f" Kandidat ({candidate_id_canon}) is already the best model. Keeping current state.")
             self._save_best_model_state()
@@ -670,6 +765,21 @@ class TrainingSupervisor:
                 self.logger.warning(
                     f"Cannot revert: Previous best model path invalid or not found ({self.best_model_path}). Keeping rejected candidate weights.")
             self._save_best_model_state()
+
+            # --- Log model rejection/reversion to experiment tracker ---
+            if self.experiment_tracker and self.experiment_id:
+                try:
+                    iteration = current_iteration + 1  # 1-based iteration numbering
+                    self._log_metric_safe('model_promoted', 0.0, iteration)
+                    self._log_metric_safe('model_reverted', 1.0 if reverted else 0.0, iteration)
+                    self._log_metric_safe('candidate_elo', candidate_elo, iteration)
+                    if perform_wilson_check:
+                        self._log_metric_safe('wilson_wins', wins, iteration)
+                        self._log_metric_safe('wilson_total', total, iteration)
+                        self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
+                        self._log_metric_safe('wilson_passed', 0.0, iteration)
+                except Exception as e:
+                    self.logger.warning(f"Failed to log rejection metrics: {e}")
 
         # Determine active network weights for clarity
         active_iter = self.best_model_iteration if (promote or reverted or kept_current_best) else candidate_iteration
@@ -707,6 +817,28 @@ class TrainingSupervisor:
             tournament_win_rate=tourn_win_rate
         )
         self._save_metrics(iteration_dir)
+
+        # --- Log final iteration summary metrics to experiment tracker ---
+        if self.experiment_tracker and self.experiment_id:
+            try:
+                iteration = current_iteration + 1  # 1-based iteration numbering
+                total_iteration_time = time.time() - t0  # Total time from start of iteration
+                self._log_metric_safe('iteration_time', total_iteration_time, iteration)
+                self._log_metric_safe('avg_game_length', avg_game_len, iteration)
+                self._log_metric_safe('avg_ring_mobility', avg_ring_mobility, iteration)
+                self._log_metric_safe('active_network_iteration', active_iter, iteration)
+                
+                # Log memory usage if available
+                try:
+                    if initial_memory_mb > 0:
+                        final_memory_mb = process.memory_info().rss / (1024 * 1024)
+                        memory_change = final_memory_mb - initial_memory_mb
+                        self._log_metric_safe('memory_usage_mb', final_memory_mb, iteration)
+                        self._log_metric_safe('memory_change_mb', memory_change, iteration)
+                except:
+                    pass
+            except Exception as e:
+                self.logger.warning(f"Failed to log final iteration metrics: {e}")
 
         # --- Advance counter for the next iteration ---
         self._iteration_counter += 1

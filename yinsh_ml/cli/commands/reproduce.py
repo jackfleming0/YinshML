@@ -11,6 +11,7 @@ from ..utils import (
     get_experiment_tracker, create_reproduction_script,
     get_config, colorize_status
 )
+from ...tracking.reproduction import ReproductionEngine
 
 
 @click.command()
@@ -27,20 +28,77 @@ from ..utils import (
               help='Skip data validation/download')
 @click.option('--script-only', is_flag=True,
               help='Only generate reproduction script without environment setup')
+@click.option('--advanced', is_flag=True,
+              help='Use advanced ReproductionEngine with full environment recreation')
+@click.option('--env-name', 
+              help='Name for recreated environment (advanced mode only)', 
+              default='reproduced-experiment')
+@click.option('--no-config', is_flag=True,
+              help='Skip configuration restoration (advanced mode only)')
+@click.option('--no-checkpoints', is_flag=True,
+              help='Skip checkpoint processing (advanced mode only)')
+@click.option('--no-seeds', is_flag=True,
+              help='Skip random seed restoration (advanced mode only)')
 @click.pass_context
 def reproduce(ctx, experiment_id: int, output_dir: Optional[str], 
              force: bool, dry_run: bool, skip_env: bool, skip_data: bool,
-             script_only: bool):
+             script_only: bool, advanced: bool, env_name: str,
+             no_config: bool, no_checkpoints: bool, no_seeds: bool):
     """
-    Reproduce an experiment.
+    Reproduce an experiment with complete environment recreation.
     
-    Recreates the environment and configuration for EXPERIMENT_ID,
-    generating reproduction scripts and validating dependencies.
+    Creates a comprehensive reproduction package for EXPERIMENT_ID including
+    executable scripts, environment setup, dependencies, and step-by-step
+    instructions. Ensures reproducible results by recreating the exact
+    conditions of the original experiment.
     
+    \b
+    Generated reproduction package includes:
+    • Executable Python reproduction script with environment validation
+    • requirements.txt with exact package versions
+    • experiment_metadata.json with complete experiment data
+    • REPRODUCTION_INSTRUCTIONS.md with detailed setup guide
+    • Environment compatibility checks and warnings
+    
+    \b
     Examples:
+        # Basic reproduction (creates reproduced_exp_123/ directory)
         yinsh-track reproduce 123
-        yinsh-track reproduce 123 --output-dir ./reproduced_exp
-        yinsh-track reproduce 123 --dry-run --script-only
+        
+        # Custom output directory
+        yinsh-track reproduce 123 --output-dir ./experiments/exp123_repro
+        
+        # Preview what would be generated (no files created)
+        yinsh-track reproduce 123 --dry-run
+        
+        # Generate only the reproduction script
+        yinsh-track reproduce 123 --script-only
+        
+        # Skip environment setup (useful for different platforms)
+        yinsh-track reproduce 123 --skip-env
+        
+        # Force reproduction of incomplete experiments
+        yinsh-track reproduce 123 --force
+        
+        # Quick script generation for manual setup
+        yinsh-track reproduce 123 --script-only > reproduce_exp123.py
+    
+    \b
+    Workflow:
+        1. Validates experiment exists and is reproducible
+        2. Extracts all experiment metadata and configuration
+        3. Generates executable reproduction script with checks
+        4. Creates requirements.txt with package dependencies
+        5. Sets up environment validation and compatibility checks
+        6. Provides detailed instructions for manual reproduction
+    
+    \b
+    Tips:
+        • Use --dry-run first to preview the reproduction plan
+        • Generated scripts include environment validation
+        • Requirements include exact versions for consistency
+        • Check REPRODUCTION_INSTRUCTIONS.md for manual steps
+        • Use --force for experiments that didn't complete normally
     """
     config = get_config()
     use_color = config.get('color_output', True)
@@ -93,8 +151,20 @@ def reproduce(ctx, experiment_id: int, output_dir: Optional[str],
         
         if dry_run:
             click.echo(f"\n🔍 DRY RUN - Would reproduce experiment to: {output_path}")
-            _display_reproduction_plan(experiment_data, output_path, skip_env, skip_data)
+            if advanced:
+                _display_advanced_reproduction_plan(experiment_data, output_path, env_name, 
+                                                   not no_config, not no_checkpoints, not no_seeds)
+            else:
+                _display_reproduction_plan(experiment_data, output_path, skip_env, skip_data)
             return
+        
+        # Use advanced reproduction workflow if requested
+        if advanced:
+            click.echo(f"\n🚀 Using Advanced ReproductionEngine...")
+            return _reproduce_with_advanced_engine(
+                experiment_id, experiment_data, output_path, env_name,
+                not no_config, not no_checkpoints, not no_seeds, use_color
+            )
         
         # Create output directory
         if not script_only:
@@ -316,4 +386,165 @@ Review the original experiment metrics in `experiment_metadata.json` to compare 
     with open(instructions_path, 'w') as f:
         f.write(instructions)
     
-    click.echo(f"✅ Generated instructions: {instructions_path}") 
+    click.echo(f"✅ Generated instructions: {instructions_path}")
+
+
+def _display_advanced_reproduction_plan(experiment_data: dict, output_path: Path,
+                                      env_name: str, restore_config: bool,
+                                      restore_checkpoints: bool, restore_seeds: bool):
+    """Display advanced reproduction plan."""
+    click.echo("\n📋 Advanced Reproduction Plan:")
+    click.echo(f"   1. Create directory: {output_path}")
+    click.echo(f"   2. Load comprehensive experiment metadata")
+    click.echo(f"   3. Recreate environment: {env_name}")
+    
+    if restore_config:
+        click.echo(f"   4. Restore configuration files")
+    else:
+        click.echo(f"   4. Skip configuration restoration")
+    
+    if restore_checkpoints:
+        click.echo(f"   5. Process and validate checkpoints")
+    else:
+        click.echo(f"   5. Skip checkpoint processing")
+    
+    if restore_seeds:
+        click.echo(f"   6. Restore random seed states")
+    else:
+        click.echo(f"   6. Skip random seed restoration")
+    
+    click.echo(f"   7. Validate reproduction completeness")
+    click.echo(f"   8. Generate detailed reproduction report")
+
+
+def _reproduce_with_advanced_engine(experiment_id: int, experiment_data: dict,
+                                   output_path: Path, env_name: str,
+                                   restore_config: bool, restore_checkpoints: bool,
+                                   restore_seeds: bool, use_color: bool):
+    """Reproduce experiment using the advanced ReproductionEngine."""
+    try:
+        # Initialize the ReproductionEngine
+        tracker = get_experiment_tracker()
+        engine = ReproductionEngine(experiment_id=experiment_id, tracker=tracker)
+        
+        # Progress tracking
+        progress_messages = []
+        
+        def progress_callback(message: str):
+            progress_messages.append(message)
+            if use_color:
+                status_msg = click.style(f"🔄 {message}", fg='blue')
+            else:
+                status_msg = f"🔄 {message}"
+            click.echo(status_msg)
+        
+        # Create output directory
+        output_path.mkdir(parents=True, exist_ok=True)
+        click.echo(f"📁 Created reproduction directory: {output_path}")
+        
+        # Execute the comprehensive reproduction
+        click.echo("\n⚡ Starting advanced reproduction workflow...")
+        results = engine.reproduce_experiment(
+            experiment_id=experiment_id,
+            output_dir=output_path,
+            environment_name=env_name,
+            restore_config=restore_config,
+            restore_checkpoints=restore_checkpoints,
+            restore_seeds=restore_seeds,
+            progress_callback=progress_callback
+        )
+        
+        # Display results
+        click.echo("\n" + "="*60)
+        success = results.get('success', False)
+        if success:
+            if use_color:
+                click.echo(click.style("✅ REPRODUCTION SUCCESSFUL!", fg='green', bold=True))
+            else:
+                click.echo("✅ REPRODUCTION SUCCESSFUL!")
+        else:
+            if use_color:
+                click.echo(click.style("❌ REPRODUCTION COMPLETED WITH ISSUES", fg='yellow', bold=True))
+            else:
+                click.echo("❌ REPRODUCTION COMPLETED WITH ISSUES")
+        
+        # Show summary
+        completed_steps = len(results.get('steps_completed', []))
+        failed_steps = len(results.get('steps_failed', []))
+        click.echo(f"📊 Steps completed: {completed_steps}")
+        click.echo(f"⚠️  Steps with issues: {failed_steps}")
+        
+        # Show step details
+        if results.get('steps_completed'):
+            click.echo("\n✅ Completed Steps:")
+            for step in results['steps_completed']:
+                click.echo(f"   • {step.replace('_', ' ').title()}")
+        
+        if results.get('steps_failed'):
+            click.echo("\n❌ Steps with Issues:")
+            for step, error in results['steps_failed']:
+                step_name = step.replace('_', ' ').title()
+                click.echo(f"   • {step_name}: {error}")
+        
+        # Environment details
+        env_result = results.get('environment', {})
+        if env_result:
+            click.echo(f"\n🐍 Environment: {env_result.get('environment_name', 'Unknown')}")
+            click.echo(f"   Package Manager: {env_result.get('package_manager', 'Unknown')}")
+            if env_result.get('success'):
+                click.echo("   Status: ✅ Created successfully")
+            else:
+                click.echo("   Status: ❌ Failed to create")
+        
+        # Configuration details
+        config_result = results.get('configuration', {})
+        if config_result:
+            restored_count = len(config_result.get('restored_files', []))
+            click.echo(f"\n⚙️  Configuration: {restored_count} files restored")
+            if config_result.get('errors'):
+                error_count = len(config_result['errors'])
+                click.echo(f"   Errors: {error_count}")
+        
+        # Checkpoint details
+        checkpoint_result = results.get('checkpoints', {})
+        if checkpoint_result:
+            checkpoint_count = len(checkpoint_result.get('checkpoints_found', []))
+            click.echo(f"\n💾 Checkpoints: {checkpoint_count} found")
+        
+        # Random seed details
+        seed_result = results.get('random_seeds', {})
+        if seed_result:
+            restored_count = len(seed_result.get('seeds_restored', []))
+            failed_count = len(seed_result.get('seeds_failed', []))
+            click.echo(f"\n🎲 Random Seeds: {restored_count} restored, {failed_count} failed")
+        
+        # Generate and save detailed report
+        report_path = output_path / "reproduction_report.md"
+        report_content = engine.generate_reproduction_report(results, report_path)
+        
+        click.echo(f"\n📄 Detailed report saved: {report_path}")
+        
+        # Final instructions
+        click.echo("\n" + "="*60)
+        click.echo(f"🎯 Reproduction Complete!")
+        click.echo(f"📂 Location: {output_path}")
+        click.echo(f"📖 Report: {report_path}")
+        
+        if env_result.get('success'):
+            click.echo(f"🐍 Activate environment: conda activate {env_name}")
+        
+        validation = results.get('validation', {})
+        if validation and validation.get('overall_valid'):
+            click.echo("✨ Reproduction validation passed - you're ready to replicate the experiment!")
+        else:
+            click.echo("⚠️  Check the report for any issues that need manual resolution")
+        
+        return results
+        
+    except Exception as e:
+        error_msg = f"Advanced reproduction failed: {e}"
+        if use_color:
+            click.echo(click.style(f"❌ {error_msg}", fg='red'))
+        else:
+            click.echo(f"❌ {error_msg}")
+        raise click.ClickException(error_msg)
