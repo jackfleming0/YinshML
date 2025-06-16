@@ -91,6 +91,13 @@ class Board:
             logger.debug("Destination is occupied")
             return False
 
+        # CRITICAL FIX: Validate that destination is a legal move
+        valid_destinations = self.valid_move_positions(source)
+        if destination not in valid_destinations:
+            logger.debug(f"Destination {destination} is not a valid move from {source}")
+            logger.debug(f"Valid destinations are: {[str(pos) for pos in valid_destinations]}")
+            return False
+
         # Calculate directional vector
         col_diff = ord(destination.column) - ord(source.column)
         row_diff = destination.row - source.row

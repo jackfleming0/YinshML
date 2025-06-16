@@ -301,13 +301,16 @@ class GameState:
                 logger.debug(f"Invalid source piece: {source_piece}")
                 return False
 
-            # Check destination is empty and path is valid
+            # Check destination is empty
             if self.board.get_piece(move.destination) is not None:
                 logger.debug("Destination is occupied")
                 return False
 
-            if not self._check_valid_move_path(move.source, move.destination):
-                logger.debug("Invalid move path")
+            # Use board's valid_move_positions to check if destination is valid
+            valid_destinations = self.board.valid_move_positions(move.source)
+            if move.destination not in valid_destinations:
+                logger.debug(f"Invalid destination: {move.destination}")
+                logger.debug(f"Valid destinations: {[str(pos) for pos in valid_destinations]}")
                 return False
 
             return True
@@ -384,45 +387,7 @@ class GameState:
         logger.debug(self.board)
         return True
 
-    def _check_valid_move_path(self, source: Position, destination: Position) -> bool:
-        """Check if there's a valid path for ring movement."""
-        # Calculate direction vector
-        col_diff = ord(destination.column) - ord(source.column)
-        row_diff = destination.row - source.row
 
-        if col_diff == 0 and row_diff == 0:
-            return False
-
-        # Normalize direction
-        steps = max(abs(col_diff), abs(row_diff))
-        dx = col_diff // steps if col_diff != 0 else 0
-        dy = row_diff // steps if row_diff != 0 else 0
-
-        # Check each position along the path
-        current = source
-        found_marker = False
-        for _ in range(steps):
-            col_idx = ord(current.column) - ord('A')
-            new_col = chr(ord('A') + col_idx + dx)
-            new_row = current.row + dy
-            next_pos = Position(new_col, new_row)
-
-            if not is_valid_position(next_pos):
-                return False
-
-            piece = self.board.get_piece(next_pos)
-            if piece:
-                if piece.is_ring():
-                    return False  # Can't jump over rings
-                else:
-                    found_marker = True  # Can jump over markers
-            elif found_marker:
-                # Must stop at first empty space after marker
-                return next_pos == destination
-
-            current = next_pos
-
-        return True
 
     def _handle_ring_movement(self, move: 'Move') -> bool:
         """Handle ring movement and marker placement."""
