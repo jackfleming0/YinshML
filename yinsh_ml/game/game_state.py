@@ -1,5 +1,5 @@
 """Game state and encoding for YINSH."""
-
+ 
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
@@ -13,7 +13,7 @@ from .types import Move, MoveType, GamePhase
 from .moves import MoveGenerator  # Add this import
 
 import logging
-
+#pease work
 # Setup logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

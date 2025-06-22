@@ -571,6 +571,43 @@ COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
         temp_start_decay_at=0.25
     ),
 
+    "value_head_optimization_20250119": CombinedConfig(
+        # Core training loop - increased volume for better learning
+        num_iterations=50,
+        games_per_iteration=1000,  # Doubled from 500 for more diverse training data
+        epochs_per_iteration=20,   # Doubled from 10 for more gradient updates
+        batches_per_epoch=250,     # Keep same, trainer may adjust based on buffer
+        
+        # Learning rate configuration - higher base LR with gentler schedule
+        lr=0.001,                  # Doubled from 0.0005 for faster initial learning
+        value_head_lr_factor=5.0,  # Reduced from 15.0, with higher base LR this gives 5e-3 for value head
+        weight_decay=1e-4,         # Keep same
+        batch_size=1024,           # Doubled from 512 for more stable gradients
+        lr_schedule="cosine",      # Keep cosine schedule
+        warmup_steps=2000,         # Reduced from 4000 for faster warmup with higher LR
+        
+        # MCTS parameters - more simulations with less exploration
+        num_simulations=600,       # Increased from 400 for better quality moves
+        late_simulations=800,      # New: even more simulations in endgame
+        simulation_switch_ply=20,  # Keep same transition point
+        c_puct=2.5,               # Reduced from 4.0 for less exploration, more exploitation
+        dirichlet_alpha=0.5,      # Increased from 0.3 for more root exploration
+        value_weight=1.5,         # Keep same
+        max_depth=20,             # Keep same
+        
+        # Value loss configuration - emphasize value learning
+        value_loss_weights=(0.8, 0.2),  # Increased MSE weight from (0.7, 0.3) for stronger value signal
+        
+        # Temperature annealing - keep same proven settings
+        initial_temp=1.0,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        annealing_steps=30,
+        temp_clamp_fraction=0.60,
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
     "041725_balanced": CombinedConfig(
         #don't use this one, crashes at iteration 8 from memory constraints
 

@@ -161,9 +161,9 @@ class ExperimentRunner:
                     self.logger.debug(f"Could not capture CaptureManager config: {e}")
                 
                 # Create comprehensive configuration snapshot
-                comprehensive_config = self.config_serializer.capture_comprehensive_config(
+                comprehensive_config = self.config_serializer.capture_comprehensive_configuration(
                     user_config=user_config,
-                    config_objects=config_objects
+                    experiment_path=Path(self.results_dir) / config_name
                 )
                 
                 experiment_id = self.experiment_tracker.create_experiment(
