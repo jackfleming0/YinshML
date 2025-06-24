@@ -608,6 +608,44 @@ COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
         temp_start_decay_at=0.25
     ),
 
+
+    "iteration_lr_20250624": CombinedConfig(
+        # Core training loop - increased volume for better learning
+        num_iterations=10,
+        games_per_iteration=1500,  # continueto push
+        epochs_per_iteration=30,   # even more
+        batches_per_epoch=250,     # Keep same, trainer may adjust based on buffer
+        
+        # Learning rate configuration - higher base LR with gentler schedule
+        lr=0.001,                  # Doubled from 0.0005 for faster initial learning
+        value_head_lr_factor=2.0,  
+        weight_decay=1e-4,         # Keep same
+        batch_size=1024,           # Doubled from 512 for more stable gradients
+        lr_schedule="cosine",      # Keep cosine schedule
+        warmup_steps=2000,         # Reduced from 4000 for faster warmup with higher LR
+        
+        # MCTS parameters - more simulations with less exploration
+        num_simulations=1600,       # Increased from 400 for better quality moves
+        late_simulations=1200,      # New: even more simulations in endgame
+        simulation_switch_ply=50,  # Keep same transition point
+        c_puct=2.5,               # Reduced from 4.0 for less exploration, more exploitation
+        dirichlet_alpha=0.5,      # Increased from 0.3 for more root exploration
+        value_weight=1.5,         # Keep same
+        max_depth=20,             # Keep same
+        
+        # Value loss configuration - emphasize value learning
+        value_loss_weights=(0.9, 0.1),  # Increased MSE weight from (0.7, 0.3) for stronger value signal
+        
+        # Temperature annealing - keep same proven settings
+        initial_temp=1.0,
+        final_temp=0.1,
+        temp_schedule="cosine",
+        annealing_steps=30,
+        temp_clamp_fraction=0.60,
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
     "041725_balanced": CombinedConfig(
         #don't use this one, crashes at iteration 8 from memory constraints
 
