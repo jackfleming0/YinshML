@@ -796,7 +796,81 @@ COMBINED_EXPERIMENTS: Dict[str, CombinedConfig] = {
         temp_schedule="exponential",
         annealing_steps=5,
         temp_clamp_fraction=0.5,
-    )
+    ),
+
+    "value_recovery_20250630": CombinedConfig(
+        # Core training loop - QUALITY over quantity approach
+        num_iterations=15,          # Moderate iterations for thorough evaluation
+        games_per_iteration=400,    # Reduced from 1500 - focus on quality data
+        epochs_per_iteration=8,     # Reduced from 30 - prevent overfitting
+        batches_per_epoch=50,       # Reasonable batch count
+        
+        # Learning rate configuration - AGGRESSIVE value head learning
+        lr=0.001,                   # Keep higher base LR (2x standard)
+        value_head_lr_factor=20.0,  # MUCH higher than 2.0 - effective value LR: 2e-2
+        weight_decay=1e-4,          # Standard regularization
+        batch_size=512,             # Reduced from 1024 - better gradient stability
+        lr_schedule="cosine",       # Proven schedule
+        warmup_steps=1500,          # Faster warmup than previous 2000
+        
+        # MCTS parameters - EFFICIENCY focused
+        num_simulations=250,        # Drastically reduced from 1600 - computational efficiency
+        late_simulations=350,       # Moderate increase for endgame
+        simulation_switch_ply=30,   # Earlier switch than 50
+        c_puct=3.0,                # Increased from 2.5 - more exploration to escape local minima
+        dirichlet_alpha=0.4,        # Balanced exploration
+        value_weight=1.2,           # Slightly favor value guidance
+        max_depth=20,               # Keep standard depth
+        
+        # Value loss configuration - BALANCED approach
+        value_loss_weights=(0.65, 0.35),  # Reduced from extreme (0.9, 0.1) - prevent optimization conflicts
+        
+        # Temperature annealing - proven settings
+        initial_temp=1.2,           # Slightly higher for exploration
+        final_temp=0.1,
+        temp_schedule="cosine",
+        annealing_steps=30,
+        temp_clamp_fraction=0.60,
+        temp_decay_half_life=0.35,
+        temp_start_decay_at=0.25
+    ),
+
+    "gradient_focus_20250702": CombinedConfig(
+        # Core training loop - MODERATE scale with quality focus
+        num_iterations=20,          # Enough iterations to see patterns emerge
+        games_per_iteration=300,    # Sweet spot between quality (recovery) and volume (iteration_lr)  
+        epochs_per_iteration=6,     # Moderate - avoid overfitting but allow learning
+        batches_per_epoch=50,       # Standard batch count
+        
+        # Learning rate configuration - STABLE, avoid adaptive killing
+        lr=0.0008,                  # Slightly higher than standard but not extreme
+        value_head_lr_factor=8.0,   # High but not extreme (avoids 20x adaptive reduction)
+        weight_decay=1e-4,          # Standard regularization
+        batch_size=512,             # Good balance for gradient stability
+        lr_schedule="constant",     # !!! KEY: Avoid cosine/adaptive that kills value learning
+        warmup_steps=0,             # No warmup - immediate learning
+        
+        # MCTS parameters - EFFICIENT but sufficient
+        num_simulations=200,        # Reasonable simulation budget
+        late_simulations=300,       # Modest increase for endgame
+        simulation_switch_ply=25,   # Standard transition
+        c_puct=2.8,                # Balanced exploration/exploitation
+        dirichlet_alpha=0.35,       # Standard root noise
+        value_weight=1.0,           # Don't over-weight value in selection
+        max_depth=20,               # Standard depth
+        
+        # Value loss configuration - BALANCED approach
+        value_loss_weights=(0.6, 0.4),  # Favor MSE but not extremely (vs 0.9,0.1 failure)
+        
+        # Temperature annealing - STABLE settings
+        initial_temp=1.4,           # Moderate exploration
+        final_temp=0.1,             # Standard final temp
+        temp_schedule="linear",     # Simple, predictable schedule
+        annealing_steps=25,         # Reasonable annealing period
+        temp_clamp_fraction=0.6,    # Standard clamp
+        temp_decay_half_life=0.35,  # Keep standard values
+        temp_start_decay_at=0.25
+    ),
 
     # --- Add any other CombinedConfig entries here ---
 
