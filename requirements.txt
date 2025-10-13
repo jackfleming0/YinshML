@@ -24,6 +24,7 @@ lz4>=4.3.0  # For tiered storage compression
 
 # CLI interface
 click>=8.0.0  # For command-line interface
+PyYAML>=6.0.0  # YAML config
 
 # Testing
 pytest>=7.4.0  # For running tests

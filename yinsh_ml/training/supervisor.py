@@ -536,7 +536,14 @@ class TrainingSupervisor:
             # MEMORY-OPTIMIZATION: Use optimal batch count based on buffer size
             optimal_batches = max(10, (buffer_size // self.trainer.batch_size) // 2)
             # Use config if provided, otherwise use calculated optimal batches
-            batches_per_epoch = self.mode_settings.get('batches_per_epoch', optimal_batches)
+            cfg_batches = self.mode_settings.get('batches_per_epoch', optimal_batches)
+            if isinstance(cfg_batches, str) and cfg_batches.lower() == 'auto':
+                batches_per_epoch = optimal_batches
+            else:
+                try:
+                    batches_per_epoch = int(cfg_batches)
+                except Exception:
+                    batches_per_epoch = optimal_batches
             actual_batches = min(batches_per_epoch, optimal_batches)
 
             self.logger.info(

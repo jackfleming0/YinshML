@@ -70,6 +70,8 @@ class NetworkWrapper:
 
         # Initialize StateEncoder
         self.state_encoder = StateEncoder()
+        # Difficulty presets can be attached by runner for CoreML metadata
+        self.difficulty_presets = None
         
         # Cache common tensor shapes for pooling
         self._input_shape = (6, 11, 11)  # YINSH state shape
@@ -302,6 +304,21 @@ class NetworkWrapper:
             )
 
             # Save the CoreML model
+            # Attach user metadata for difficulty presets if available
+            try:
+                if self.difficulty_presets:
+                    # coremltools models have user_defined_metadata
+                    md = mlmodel.user_defined_metadata or {}
+                    # Keep it compact; store as JSON string
+                    import json
+                    md.update({
+                        'yinsh_difficulty_presets': json.dumps(self.difficulty_presets)
+                    })
+                    mlmodel.user_defined_metadata = md
+            except Exception as _:
+                # Ignore metadata failures
+                pass
+
             mlmodel.save(path)
             self.logger.info(f"Model exported to CoreML format at {path}")
 
