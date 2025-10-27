@@ -345,13 +345,29 @@ class StateEncoder:
 
             elif self.move_ring_base <= index < self.move_ring_range[1]:
                 # Ring movement - reconstruct from hash
+                # Note: The encoding uses a hash which loses information, so we can't
+                # perfectly reverse it. We need to search for a valid move that hashes to this index.
                 relative_idx = index - self.move_ring_base
+                
+                # Try to find a move that hashes to this index
+                # Start with a reasonable guess based on the hash structure
+                for src_idx in range(self.num_positions):
+                    for dst_idx in range(self.num_positions):
+                        if src_idx == dst_idx:
+                            continue
+                        # Check if this combination produces the target hash
+                        test_hash = ((src_idx * 31 + dst_idx) % self.move_ring_space)
+                        if test_hash == relative_idx:
+                            src_pos = Position.from_string(list(self.position_to_index.keys())[src_idx])
+                            dst_pos = Position.from_string(list(self.position_to_index.keys())[dst_idx])
+                            return Move(type=MoveType.MOVE_RING, player=player,
+                                        source=src_pos, destination=dst_pos)
+                
+                # If no exact match found (shouldn't happen), fall back to approximate
                 src_idx = (relative_idx // 31) % self.num_positions
                 dst_idx = relative_idx % self.num_positions
-
                 src_pos = Position.from_string(list(self.position_to_index.keys())[src_idx])
                 dst_pos = Position.from_string(list(self.position_to_index.keys())[dst_idx])
-
                 return Move(type=MoveType.MOVE_RING, player=player,
                             source=src_pos, destination=dst_pos)
 

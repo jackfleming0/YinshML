@@ -159,23 +159,23 @@ class MoveGenerator:
             return False
 
         if move.type == MoveType.PLACE_RING:
-            return (game_state.phase == "PLACE_RINGS" and
+            return (game_state.phase == GamePhase.RING_PLACEMENT and
                     is_valid_position(move.source) and
                     board.is_empty(move.source))
 
         elif move.type == MoveType.MOVE_RING:
-            return (game_state.phase == "MAIN_GAME" and
+            return (game_state.phase == GamePhase.MAIN_GAME and
                     board.is_valid_ring_move(move.source, move.destination))
 
         elif move.type == MoveType.REMOVE_MARKERS:
-            if game_state.phase != "REMOVE_MARKERS":
+            if game_state.phase != GamePhase.ROW_COMPLETION:
                 return False
             if not move.markers or len(move.markers) != 5:
                 return False
             return board.is_valid_marker_sequence(move.markers, move.player)
 
         elif move.type == MoveType.REMOVE_RING:
-            if game_state.phase != "REMOVE_RING":
+            if game_state.phase != GamePhase.RING_REMOVAL:
                 return False
             ring_type = PieceType.WHITE_RING if move.player == Player.WHITE else PieceType.BLACK_RING
             return board.get_piece(move.source) == ring_type

@@ -18,6 +18,8 @@ psutil>=5.9.0  # For system monitoring and activity detection
 tqdm>=4.65.0  # For progress bars
 tensorboard>=2.14.0  # For training monitoring
 pandas>=2.0.3  # For data handling
+pyarrow>=12.0.0  # For parquet file storage
+fastparquet>=0.8.0  # Alternative parquet backend
 
 # Compression libraries
 lz4>=4.3.0  # For tiered storage compression
