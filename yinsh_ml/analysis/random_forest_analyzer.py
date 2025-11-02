@@ -662,3 +662,9 @@ if __name__ == "__main__":
     
     # Print summary
     print(analyzer.generate_analysis_report(analysis))
+
+
+
+
+
+

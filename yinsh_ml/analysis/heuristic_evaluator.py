@@ -101,6 +101,17 @@ class HeuristicEvaluator:
         # Performance tracking
         self.evaluation_count = 0
         self.total_evaluation_time = 0.0
+        # Default symmetric weights used when trained weights are unavailable
+        self._default_weights = {
+            'completed_runs_differential': 1.0,
+            'potential_runs_count': 0.2,
+            'blocking_positions': 0.2,
+            'connected_marker_chains_length': 0.2,
+            'ring_mobility': 0.1,
+            'ring_centrality_score': 0.05,
+            'edge_proximity_score': 0.05,
+            # region densities are low signal individually; omit by default
+        }
         
     def load_analysis_results(self) -> Tuple[Any, Any, Any]:
         """Load results from previous analyses.
@@ -345,28 +356,39 @@ class HeuristicEvaluator:
         """
         start_time = time.time()
         
-        # Extract features
-        features = self.extract_features(game_state, player)
+        # Use symmetric evaluation: (features(player) - features(opponent)) · w
+        start = time.time()
+        # If weights not trained, use default symmetric weights with zero bias
+        if self.weights is None:
+            p_feats = self.feature_extractor.extract_all_features(game_state, player).to_dict()
+            o_feats = self.feature_extractor.extract_all_features(game_state, player.opponent).to_dict()
+            score = 0.0
+            feature_contributions = {}
+            for name, weight in self._default_weights.items():
+                pv = p_feats.get(name, 0.0)
+                ov = o_feats.get(name, 0.0)
+                diff = pv - ov
+                contribution = weight * diff
+                feature_contributions[name] = contribution
+                score += contribution
+        else:
+            # Trained weights path
+            p_feats = self.extract_features(game_state, player)
+            o_feats = self.extract_features(game_state, player.opponent)
+            score = 0.0  # antisymmetric baseline
+            feature_contributions = {}
+            for feature_name, p_val in p_feats.items():
+                # Compute normalized difference
+                p_norm = self.normalize_feature(feature_name, p_val)
+                o_val = o_feats.get(feature_name, 0.0)
+                o_norm = self.normalize_feature(feature_name, o_val)
+                diff = p_norm - o_norm
+                weight = self.weights.get_weight(feature_name)
+                contribution = weight * diff
+                feature_contributions[feature_name] = contribution
+                score += contribution
         
-        # Calculate evaluation score
-        score = self.weights.bias
-        
-        feature_contributions = {}
-        
-        for feature_name, value in features.items():
-            # Normalize feature value
-            normalized_value = self.normalize_feature(feature_name, value)
-            
-            # Get weight
-            weight = self.weights.get_weight(feature_name)
-            
-            # Calculate contribution
-            contribution = weight * normalized_value
-            score += contribution
-            
-            feature_contributions[feature_name] = contribution
-        
-        evaluation_time = time.time() - start_time
+        evaluation_time = time.time() - start
         
         # Update performance tracking
         self.evaluation_count += 1
@@ -388,20 +410,25 @@ class HeuristicEvaluator:
         Returns:
             Evaluation score
         """
-        # Extract features
-        feature_vector = self.feature_extractor.extract_all_features(game_state, player)
-        features = feature_vector.to_dict()
-        
-        # Calculate score directly
-        score = self.weights.bias
-        
-        for feature_name in self.weights.feature_names:
-            value = features.get(feature_name, 0.0)
-            normalized_value = self.normalize_feature(feature_name, value)
-            weight = self.weights.get_weight(feature_name)
-            score += weight * normalized_value
-        
-        return score
+        # Symmetric fast path
+        if self.weights is None:
+            p = self.feature_extractor.extract_all_features(game_state, player).to_dict()
+            o = self.feature_extractor.extract_all_features(game_state, player.opponent).to_dict()
+            score = 0.0
+            for name, weight in self._default_weights.items():
+                score += weight * (p.get(name, 0.0) - o.get(name, 0.0))
+            return score
+        else:
+            p = self.feature_extractor.extract_all_features(game_state, player).to_dict()
+            o = self.feature_extractor.extract_all_features(game_state, player.opponent).to_dict()
+            score = 0.0  # antisymmetric baseline
+            for feature_name in self.weights.feature_names:
+                pn = self.normalize_feature(feature_name, p.get(feature_name, 0.0))
+                on = self.normalize_feature(feature_name, o.get(feature_name, 0.0))
+                diff = pn - on
+                weight = self.weights.get_weight(feature_name)
+                score += weight * diff
+            return score
     
     def benchmark_evaluation_speed(self, num_evaluations: int = 1000) -> Dict[str, float]:
         """Benchmark evaluation speed.
@@ -694,3 +721,8 @@ if __name__ == "__main__":
     
     # Print summary
     print(evaluator.generate_evaluation_report())
+
+
+
+
+

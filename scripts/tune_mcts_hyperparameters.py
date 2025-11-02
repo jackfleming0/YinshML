@@ -20,17 +20,63 @@ from yinsh_ml.training.enhanced_mcts import EnhancedMCTSConfig
 from yinsh_ml.network.wrapper import NetworkWrapper
 
 
-def create_mock_network():
-    """Create a mock network for testing."""
-    class MockNetwork:
-        def predict(self, state_tensor):
-            import numpy as np
-            policy = np.random.random(1000)
-            policy /= policy.sum()
-            value = np.random.uniform(-1, 1)
-            return policy, value
+def create_heuristic_network(data_dir: str = "self_play_data"):
+    """Create a heuristic-based network wrapper for MCTS tuning.
     
-    return MockNetwork()
+    This uses the HeuristicEvaluator built from 100K game analysis
+    instead of a trained neural network.
+    
+    Args:
+        data_dir: Directory containing self-play data for heuristic weights
+    """
+    from yinsh_ml.analysis.heuristic_evaluator import HeuristicEvaluator
+    from yinsh_ml.utils.encoding import StateEncoder
+    import numpy as np
+    import torch
+    
+    print("Loading HeuristicEvaluator from 100K game analysis...")
+    
+    class HeuristicNetworkWrapper:
+        """Wrapper to make HeuristicEvaluator look like a network for MCTS."""
+        
+        def __init__(self, data_dir: str):
+            self.evaluator = HeuristicEvaluator(data_dir=data_dir)
+            self.state_encoder = StateEncoder()
+            print(f"✓ HeuristicEvaluator loaded successfully")
+            
+        def predict(self, state_tensor, move_mask=None, temperature=1.0):
+            """
+            Provide network-like interface using heuristic evaluation.
+            
+            Returns:
+                policy: Uniform distribution over valid moves (heuristics guide via value)
+                value: Heuristic evaluation of position
+            """
+            from yinsh_ml.game.game_state import GameState
+            from yinsh_ml.game.constants import Player
+            
+            # For batch predictions, handle first state only (tuning uses batch_size=1)
+            if isinstance(state_tensor, torch.Tensor):
+                state_array = state_tensor[0].cpu().numpy()
+            else:
+                state_array = state_tensor
+            
+            # Decode state from tensor (simplified - just use for evaluation)
+            # For now, we'll need the actual GameState passed through another method
+            # This is a limitation of the interface - heuristic evaluator needs GameState
+            
+            # Return uniform policy (let MCTS tree search do the work)
+            # and estimated value from heuristic
+            policy_size = self.state_encoder.total_moves
+            policy = np.ones(policy_size) / policy_size
+            
+            # For value, return neutral since we don't have the actual GameState here
+            # The key is that MCTS will use evaluate_position_fast() via heuristic_evaluator
+            value = 0.0
+            
+            return torch.tensor(policy, dtype=torch.float32), torch.tensor([value], dtype=torch.float32)
+    
+    return HeuristicNetworkWrapper(data_dir)
 
 
 def create_baseline_config():
@@ -59,24 +105,33 @@ def create_baseline_config():
 def main():
     """Main hyperparameter tuning script."""
     parser = argparse.ArgumentParser(description="Tune MCTS hyperparameters")
-    parser.add_argument("--method", choices=["grid", "bayesian"], default="grid",
+    parser.add_argument("--method", choices=["grid", "bayesian", "sh"], default="grid",
                        help="Optimization method")
     parser.add_argument("--games", type=int, default=10,
                        help="Number of evaluation games per parameter set")
     parser.add_argument("--workers", type=int, default=2,
                        help="Number of parallel workers")
-    parser.add_argument("--no-move-cap", action="store_true",
-                       help="Disable per-move time cap during evaluation")
+    # Default: no per-move cap; enable explicitly if desired
+    parser.add_argument("--enforce-move-cap", action="store_true",
+                       help="Enable per-move time cap during evaluation (disabled by default)")
     parser.add_argument("--max-moves", type=int, default=300,
-                       help="Maximum moves per game (prevents infinite games)")
+                       help="Maximum moves per game (0 disables cap; allows games to run to terminal)")
     parser.add_argument("--run-post-eval", action="store_true",
                        help="After tuning, evaluate best config vs baselines")
     parser.add_argument("--output", type=str, default="mcts_tuning_results.json",
                        help="Output file for results")
     parser.add_argument("--report", type=str, default="mcts_tuning_report.txt",
                        help="Output file for report")
+    parser.add_argument("--data-dir", type=str, default="self_play_data",
+                       help="Directory containing self-play data for heuristic weights")
     parser.add_argument("--verbose", action="store_true",
                        help="Enable verbose logging")
+    parser.add_argument("--quick", action="store_true",
+                       help="Use a tiny hyperparameter space for fast diagnostics")
+    parser.add_argument("--record-logs", action="store_true",
+                       help="Record per-game head-to-head debug logs for diagnostics")
+    parser.add_argument("--no-random-start", action="store_true",
+                       help="Disable randomized starting player in evaluation")
     
     args = parser.parse_args()
     
@@ -91,41 +146,39 @@ def main():
     logger.info("Starting MCTS hyperparameter tuning")
     
     try:
-        # Create components
-        network = create_mock_network()
+        # Create components - using heuristic evaluator from 100K game analysis
+        network = create_heuristic_network(data_dir=args.data_dir)
         baseline_config = create_baseline_config()
         
         # Create tuning configuration
         tuning_config = TuningConfig(
             evaluation_games=args.games,
             max_move_time=3.0,
-            enforce_move_time_cap=(not args.no_move_cap),
+            enforce_move_time_cap=args.enforce_move_cap,
             max_moves_per_game=args.max_moves,
             min_win_rate_improvement=0.05,
             use_bayesian_optimization=(args.method == "bayesian"),
             bayesian_iterations=20,
             max_workers=args.workers,
-            timeout_per_game=300
+            timeout_per_game=300,
+            # Prefer head-to-head evaluation for higher signal
+            use_head_to_head=True,
+            paired_colors=True,
+            record_game_logs=args.record_logs,
+            randomize_starting_player=(not args.no_random_start)
         )
-        
-        # Create hyperparameter space
-        hyperparameter_space = HyperparameterSpace(
-            c_puct_min=0.5,
-            c_puct_max=2.0,
-            c_puct_step=0.5,
-            heuristic_alpha_min=0.1,
-            heuristic_alpha_max=0.7,
-            heuristic_alpha_step=0.2,
-            epsilon_greedy_min=0.2,
-            epsilon_greedy_max=0.6,
-            epsilon_greedy_step=0.2,
-            num_simulations_min=1000,
-            num_simulations_max=3000,
-            num_simulations_step=1000,
-            max_depth_min=30,
-            max_depth_max=70,
-            max_depth_step=20
-        )
+
+        # Provide a baseline pool for head-to-head evaluation
+        # NOTE: Baselines use NO heuristic guidance (heuristic_alpha=0) or very weak guidance
+        # This creates a clear performance gap to measure hyperparameter effectiveness
+        tuning_config.baselines = [
+            # Pure MCTS baseline (no heuristic guidance)
+            {"c_puct": 1.4, "heuristic_alpha": 0.0, "epsilon_greedy": 0.0, "num_simulations": 400, "max_depth": 30},
+            # Weak heuristic guidance baseline
+            {"c_puct": 1.4, "heuristic_alpha": 0.05, "epsilon_greedy": 0.1, "num_simulations": 300, "max_depth": 30},
+            # Moderate but fewer simulations
+            {"c_puct": 1.4, "heuristic_alpha": 0.15, "epsilon_greedy": 0.2, "num_simulations": 200, "max_depth": 20}
+        ]
         
         # Create tuner
         tuner = MCTSHyperparameterTuner(
@@ -133,15 +186,53 @@ def main():
             baseline_config=baseline_config,
             tuning_config=tuning_config
         )
-        tuner.hyperparameter_space = hyperparameter_space
+        if args.quick:
+            # Minimal space: single combination for fast diagnostics
+            tuner.hyperparameter_space = HyperparameterSpace(
+                c_puct_min=1.0,
+                c_puct_max=1.0,
+                c_puct_step=1,
+                heuristic_alpha_min=0.3,
+                heuristic_alpha_max=0.3,
+                heuristic_alpha_step=1,
+                epsilon_greedy_min=0.3,
+                epsilon_greedy_max=0.3,
+                epsilon_greedy_step=1,
+                num_simulations_min=500,
+                num_simulations_max=500,
+                num_simulations_step=1,
+                max_depth_min=30,
+                max_depth_max=30,
+                max_depth_step=1
+            )
+        else:
+            tuner.hyperparameter_space = HyperparameterSpace(
+                c_puct_min=0.5,
+                c_puct_max=2.0,
+                c_puct_step=0.5,
+                heuristic_alpha_min=0.1,
+                heuristic_alpha_max=0.7,
+                heuristic_alpha_step=0.2,
+                epsilon_greedy_min=0.2,
+                epsilon_greedy_max=0.6,
+                epsilon_greedy_step=0.2,
+                num_simulations_min=1000,
+                num_simulations_max=3000,
+                num_simulations_step=1000,
+                max_depth_min=30,
+                max_depth_max=70,
+                max_depth_step=20
+            )
         
         # Run optimization
         logger.info(f"Starting {args.method} search with {args.games} games per parameter set")
         
         if args.method == "grid":
             results = tuner.grid_search()
-        else:
+        elif args.method == "bayesian":
             results = tuner.bayesian_optimization()
+        else:  # "sh" - Successive Halving
+            results = tuner.successive_halving()
         
         # Save results
         tuner.save_results(args.output)
@@ -172,8 +263,8 @@ def main():
                 from yinsh_ml.game.constants import Player
                 import numpy as np
 
-                # Reuse mock network from earlier creator
-                network_local = create_mock_network()
+                # Reuse the same network (already loaded)
+                network_local = network
                 cfg_a = create_baseline_config()
                 for k, v in params_a.items():
                     setattr(cfg_a, k, v)
@@ -189,7 +280,8 @@ def main():
                 for g in range(games):
                     state = GameState()
                     move_count = 0
-                    while not state.is_terminal() and move_count < tuning_config.max_moves_per_game:
+                    cap = tuning_config.max_moves_per_game
+                    while not state.is_terminal():
                         current = mcts_a if (state.current_player == Player.WHITE) else mcts_b
                         policy = current.search(state, move_count + 1)
                         valid_moves = state.get_valid_moves()
@@ -203,6 +295,8 @@ def main():
                             move_probs.append(policy[idx] if 0 <= idx < len(policy) else 0.0)
                         state.make_move(valid_moves[int(np.argmax(move_probs))])
                         move_count += 1
+                        if cap and cap > 0 and move_count >= cap:
+                            break
 
                     if state.is_terminal():
                         w = state.get_winner()

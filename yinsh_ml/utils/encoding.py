@@ -209,31 +209,52 @@ class StateEncoder:
             return "INVALID"
 
     def encode_state(self, game_state: GameState) -> np.ndarray:
-        """Encode the game state into a numerical tensor."""
+        """Encode the game state into a numerical tensor.
+
+        Normalizes by side-to-move so channels 0/2 always represent
+        the current player's rings/markers and 1/3 the opponent's.
+        Channel 5 carries phase only (no player sign).
+        """
         state = np.zeros((6, 11, 11), dtype=np.float32)
 
         try:
-            # Channel 0-1: Rings
-            for pos in game_state.board.get_pieces_positions(PieceType.WHITE_RING):
+            # Side-normalized ring channels (0: current player, 1: opponent)
+            is_white = (game_state.current_player == Player.WHITE)
+
+            # Collect rings by absolute color
+            white_ring_positions = game_state.board.get_pieces_positions(PieceType.WHITE_RING)
+            black_ring_positions = game_state.board.get_pieces_positions(PieceType.BLACK_RING)
+
+            # Map to channels based on side to move
+            current_ring_positions = white_ring_positions if is_white else black_ring_positions
+            opponent_ring_positions = black_ring_positions if is_white else white_ring_positions
+
+            for pos in current_ring_positions:
                 col_idx = ord(pos.column) - ord('A')
                 row_idx = pos.row - 1
                 if 0 <= col_idx < 11 and 0 <= row_idx < 11:
                     state[0, row_idx, col_idx] = 1.0
 
-            for pos in game_state.board.get_pieces_positions(PieceType.BLACK_RING):
+            for pos in opponent_ring_positions:
                 col_idx = ord(pos.column) - ord('A')
                 row_idx = pos.row - 1
                 if 0 <= col_idx < 11 and 0 <= row_idx < 11:
                     state[1, row_idx, col_idx] = 1.0
 
-            # Channel 2-3: Markers
-            for pos in game_state.board.get_pieces_positions(PieceType.WHITE_MARKER):
+            # Side-normalized marker channels (2: current player, 3: opponent)
+            white_marker_positions = game_state.board.get_pieces_positions(PieceType.WHITE_MARKER)
+            black_marker_positions = game_state.board.get_pieces_positions(PieceType.BLACK_MARKER)
+
+            current_marker_positions = white_marker_positions if is_white else black_marker_positions
+            opponent_marker_positions = black_marker_positions if is_white else white_marker_positions
+
+            for pos in current_marker_positions:
                 col_idx = ord(pos.column) - ord('A')
                 row_idx = pos.row - 1
                 if 0 <= col_idx < 11 and 0 <= row_idx < 11:
                     state[2, row_idx, col_idx] = 1.0
 
-            for pos in game_state.board.get_pieces_positions(PieceType.BLACK_MARKER):
+            for pos in opponent_marker_positions:
                 col_idx = ord(pos.column) - ord('A')
                 row_idx = pos.row - 1
                 if 0 <= col_idx < 11 and 0 <= row_idx < 11:
@@ -248,10 +269,9 @@ class StateEncoder:
                     if 0 <= col_idx < 11 and 0 <= row_idx < 11:
                         state[4, row_idx, col_idx] = 1.0
 
-            # Channel 5: Game phase and current player
+            # Channel 5: Game phase only (normalized 0..1)
             phase_value = float(game_state.phase.value) / float(len(GamePhase) - 1)
-            player_value = 1.0 if game_state.current_player == Player.WHITE else -1.0
-            state[5] = phase_value * player_value
+            state[5] = phase_value
 
         except Exception as e:
             self.logger.error(f"Error encoding state: {str(e)}")
