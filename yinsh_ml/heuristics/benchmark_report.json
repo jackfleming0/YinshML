@@ -1,0 +1,179 @@
+{
+  "throughput": {
+    "1": {
+      "avg_batch_time_ms": 0.021974839999980844,
+      "total_batch_time_ms": 1.0987419999990422,
+      "avg_individual_time_ms": 0.021573360000104458,
+      "total_individual_time_ms": 1.078668000005223,
+      "evaluations_per_second_batch": 45506.588443914574,
+      "evaluations_per_second_individual": 46353.46557027547,
+      "speedup": 0.9817300148771624,
+      "time_per_eval_batch_ms": 0.021974839999980844,
+      "time_per_eval_individual_ms": 0.021573360000104458
+    },
+    "5": {
+      "avg_batch_time_ms": 0.12770003999996504,
+      "total_batch_time_ms": 6.385001999998252,
+      "avg_individual_time_ms": 0.02148482799999485,
+      "total_individual_time_ms": 5.371206999998712,
+      "evaluations_per_second_batch": 39154.25555075291,
+      "evaluations_per_second_individual": 46544.473151018,
+      "speedup": 0.8412224459757699,
+      "time_per_eval_batch_ms": 0.02554000799999301,
+      "time_per_eval_individual_ms": 0.02148482799999485
+    },
+    "10": {
+      "avg_batch_time_ms": 0.22892584000002714,
+      "total_batch_time_ms": 11.446292000001357,
+      "avg_individual_time_ms": 0.02111144800000453,
+      "total_individual_time_ms": 10.555724000002265,
+      "evaluations_per_second_batch": 43682.268458636274,
+      "evaluations_per_second_individual": 47367.6651644068,
+      "speedup": 0.9221959390867377,
+      "time_per_eval_batch_ms": 0.022892584000002714,
+      "time_per_eval_individual_ms": 0.02111144800000453
+    },
+    "25": {
+      "avg_batch_time_ms": 0.5517224799999276,
+      "total_batch_time_ms": 27.58612399999638,
+      "avg_individual_time_ms": 0.020938930399999833,
+      "total_individual_time_ms": 26.17366299999979,
+      "evaluations_per_second_batch": 45312.63616447762,
+      "evaluations_per_second_individual": 47757.931322032,
+      "speedup": 0.9487981348885123,
+      "time_per_eval_batch_ms": 0.022068899199997105,
+      "time_per_eval_individual_ms": 0.020938930399999833
+    },
+    "50": {
+      "avg_batch_time_ms": 1.0532958600000697,
+      "total_batch_time_ms": 52.664793000003485,
+      "avg_individual_time_ms": 0.0203028308000043,
+      "total_individual_time_ms": 50.75707700001075,
+      "evaluations_per_second_batch": 47470.043222230735,
+      "evaluations_per_second_individual": 49254.21532842544,
+      "speedup": 0.9637762556098416,
+      "time_per_eval_batch_ms": 0.021065917200001394,
+      "time_per_eval_individual_ms": 0.0203028308000043
+    },
+    "100": {
+      "avg_batch_time_ms": 2.1170925399999163,
+      "total_batch_time_ms": 105.85462699999576,
+      "avg_individual_time_ms": 0.02047830859999422,
+      "total_individual_time_ms": 102.39154299996646,
+      "evaluations_per_second_batch": 47234.5908885041,
+      "evaluations_per_second_individual": 48832.15794493534,
+      "speedup": 0.9672845288092183,
+      "time_per_eval_batch_ms": 0.021170925399999162,
+      "time_per_eval_individual_ms": 0.02047830859999422
+    },
+    "250": {
+      "avg_batch_time_ms": 5.441617499999971,
+      "total_batch_time_ms": 272.08087499999857,
+      "avg_individual_time_ms": 0.02025976879999355,
+      "total_individual_time_ms": 253.24710999988835,
+      "evaluations_per_second_batch": 45942.22214258928,
+      "evaluations_per_second_individual": 49358.90482622096,
+      "speedup": 0.9307787987666891,
+      "time_per_eval_batch_ms": 0.021766469999999885,
+      "time_per_eval_individual_ms": 0.02025976879999355
+    },
+    "500": {
+      "avg_batch_time_ms": 11.453665000000015,
+      "total_batch_time_ms": 572.6832500000008,
+      "avg_individual_time_ms": 0.020441629520001284,
+      "total_individual_time_ms": 511.0407380000645,
+      "evaluations_per_second_batch": 43654.14913043111,
+      "evaluations_per_second_individual": 48919.77907247944,
+      "speedup": 0.8923619435352156,
+      "time_per_eval_batch_ms": 0.02290733000000003,
+      "time_per_eval_individual_ms": 0.020441629520001284
+    },
+    "1000": {
+      "avg_batch_time_ms": 26.151549980000155,
+      "total_batch_time_ms": 1307.5774990000075,
+      "avg_individual_time_ms": 0.020216755519999196,
+      "total_individual_time_ms": 1010.8377759999667,
+      "evaluations_per_second_batch": 38238.65127553691,
+      "evaluations_per_second_individual": 49463.921103005596,
+      "speedup": 0.7730614642520404,
+      "time_per_eval_batch_ms": 0.026151549980000154,
+      "time_per_eval_individual_ms": 0.020216755519999196
+    }
+  },
+  "memory": {
+    "1": {
+      "current_mb": 0.00060272216796875,
+      "peak_mb": 0.00124359130859375,
+      "current_kb": 0.6171875,
+      "peak_kb": 1.2734375
+    },
+    "5": {
+      "current_mb": 0.0009765625,
+      "peak_mb": 0.004553794860839844,
+      "current_kb": 1.0,
+      "peak_kb": 4.6630859375
+    },
+    "10": {
+      "current_mb": 0.0008087158203125,
+      "peak_mb": 0.0064983367919921875,
+      "current_kb": 0.828125,
+      "peak_kb": 6.654296875
+    },
+    "25": {
+      "current_mb": 0.00279998779296875,
+      "peak_mb": 0.01585674285888672,
+      "current_kb": 2.8671875,
+      "peak_kb": 16.2373046875
+    },
+    "50": {
+      "current_mb": 0.0053863525390625,
+      "peak_mb": 0.03172874450683594,
+      "current_kb": 5.515625,
+      "peak_kb": 32.490234375
+    },
+    "100": {
+      "current_mb": 0.00824737548828125,
+      "peak_mb": 0.06514358520507812,
+      "current_kb": 8.4453125,
+      "peak_kb": 66.70703125
+    },
+    "250": {
+      "current_mb": 0.01140594482421875,
+      "peak_mb": 0.1706218719482422,
+      "current_kb": 11.6796875,
+      "peak_kb": 174.716796875
+    },
+    "500": {
+      "current_mb": 0.011566162109375,
+      "peak_mb": 0.3573951721191406,
+      "current_kb": 11.84375,
+      "peak_kb": 365.97265625
+    },
+    "1000": {
+      "current_mb": 0.01177978515625,
+      "peak_mb": 0.7344741821289062,
+      "current_kb": 12.0625,
+      "peak_kb": 752.1015625
+    }
+  },
+  "correctness": {
+    "all_correct": true,
+    "max_error": 0.0,
+    "total_tests": 97050,
+    "num_errors": 0,
+    "errors": []
+  },
+  "recommendations": {
+    "best_throughput_batch_size": 50,
+    "best_throughput": 47470.043222230735,
+    "best_speedup_batch_size": 1,
+    "best_speedup": 0.9817300148771624,
+    "recommended_batch_size": 50,
+    "recommendations": {
+      "small_batches": "Use batch sizes 10-50 for interactive applications",
+      "medium_batches": "Use batch size 50 for balanced performance",
+      "large_batches": "Use batch sizes 100-500 for batch processing workloads",
+      "very_large_batches": "Use batch sizes 500-1000 for maximum throughput"
+    }
+  }
+}

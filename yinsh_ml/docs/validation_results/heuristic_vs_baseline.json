@@ -1,0 +1,15 @@
+{
+  "metrics": {
+    "total_games": 1000,
+    "wins": 1000,
+    "losses": 0,
+    "draws": 0,
+    "win_rate": 1.0,
+    "average_game_length": 82.5,
+    "std_game_length": 0.5,
+    "average_move_time": 1.8986082824684583,
+    "max_move_time": 4.20897829200112,
+    "nodes_per_second": 0.03632424754395068
+  },
+  "timestamp": 1763382207.4104378
+}
