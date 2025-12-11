@@ -67,6 +67,15 @@ class HeuristicAgentConfig:
     random_seed: Optional[int] = None
     """Optional seed for deterministic fallback behaviour."""
 
+    use_transposition_table: bool = True
+    """Enable transposition table for caching search results."""
+
+    transposition_table_size_power: int = 20
+    """Transposition table size as power of 2 (default: 20 = 1M entries)."""
+
+    zobrist_seed: Optional[str] = None
+    """Seed for Zobrist hasher (None uses default)."""
+
 
 class HeuristicAgent:
     """Baseline agent that selects moves using heuristic-guided search."""
@@ -88,6 +97,19 @@ class HeuristicAgent:
 
         self.last_search_stats: dict = {}
         self._nodes_searched: int = 0
+
+        # Initialize transposition table and Zobrist hasher if enabled
+        self._transposition_table = None
+        self._zobrist_hasher = None
+        if self.config.use_transposition_table:
+            from ..search.transposition_table import TranspositionTable
+            from ..game.zobrist import ZobristHasher
+
+            self._transposition_table = TranspositionTable(
+                size_power=self.config.transposition_table_size_power,
+                enable_metrics=True,
+            )
+            self._zobrist_hasher = ZobristHasher(seed=self.config.zobrist_seed)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -153,6 +175,11 @@ class HeuristicAgent:
     def get_move(self, game_state: Any) -> Move:
         """Alias for :meth:`select_move` (keeps interface parity with policies)."""
         return self.select_move(game_state)
+
+    def clear_transposition_table(self) -> None:
+        """Clear the transposition table (useful between games)."""
+        if self._transposition_table is not None:
+            self._transposition_table.clear()
 
     # ------------------------------------------------------------------ #
     # Search orchestration
@@ -298,20 +325,75 @@ class HeuristicAgent:
         start_time: float,
         allow_overrun: bool,
     ) -> Tuple[float, bool]:
-        """Negamax search with alpha-beta pruning and time checks."""
+        """Negamax search with alpha-beta pruning, transposition table, and time checks."""
         if self._is_time_exceeded(start_time, allow_overrun=allow_overrun):
             return 0.0, False
 
         self._nodes_searched += 1
 
+        # Check transposition table if enabled
+        original_alpha = alpha
+        hash_key = None
+        tt_entry = None
+        
+        if self._transposition_table is not None and self._zobrist_hasher is not None:
+            hash_key = self._zobrist_hasher.hash_state(state)
+            tt_entry = self._transposition_table.lookup(hash_key)
+            
+            if tt_entry is not None and tt_entry.depth >= depth:
+                # Use cached result if depth is sufficient
+                from ..search.node_type import NodeType
+                if tt_entry.node_type == NodeType.EXACT:
+                    return tt_entry.value, True
+                elif tt_entry.node_type == NodeType.LOWER_BOUND:
+                    alpha = max(alpha, tt_entry.value)
+                elif tt_entry.node_type == NodeType.UPPER_BOUND:
+                    beta = min(beta, tt_entry.value)
+                
+                if alpha >= beta:
+                    return tt_entry.value, True
+
         if depth == 0 or state.is_terminal():
-            return self._evaluate_position(state, perspective), True
+            value = self._evaluate_position(state, perspective)
+            # Store terminal/evaluation result in transposition table
+            if self._transposition_table is not None and hash_key is not None:
+                from ..search.node_type import NodeType
+                self._transposition_table.store(
+                    hash_key=hash_key,
+                    depth=depth,
+                    value=value,
+                    best_move=None,
+                    node_type=NodeType.EXACT,
+                )
+            return value, True
 
         moves = state.get_valid_moves()
         if not moves:
-            return self._evaluate_position(state, perspective), True
+            value = self._evaluate_position(state, perspective)
+            # Store result in transposition table
+            if self._transposition_table is not None and hash_key is not None:
+                from ..search.node_type import NodeType
+                self._transposition_table.store(
+                    hash_key=hash_key,
+                    depth=depth,
+                    value=value,
+                    best_move=None,
+                    node_type=NodeType.EXACT,
+                )
+            return value, True
+
+        # Use best move from transposition table for move ordering
+        best_move_from_tt = None
+        if tt_entry is not None and tt_entry.best_move is not None:
+            best_move_from_tt = tt_entry.best_move
+            # Move best move to front if it's in the moves list
+            if best_move_from_tt in moves:
+                moves = list(moves)
+                moves.remove(best_move_from_tt)
+                moves.insert(0, best_move_from_tt)
 
         best_value = -math.inf
+        best_move_found = None
         all_complete = True
 
         for move in moves:
@@ -335,13 +417,35 @@ class HeuristicAgent:
                 all_complete = False
 
             value = -value
-            best_value = max(best_value, value)
+            if value > best_value:
+                best_value = value
+                best_move_found = move
             alpha = max(alpha, value)
             if alpha >= beta:
                 break
 
         if best_value == -math.inf:
             best_value = self._evaluate_position(state, perspective)
+
+        # Store result in transposition table
+        if self._transposition_table is not None and hash_key is not None:
+            from ..search.node_type import NodeType
+            
+            # Determine node type based on alpha-beta window
+            if best_value <= original_alpha:
+                node_type = NodeType.UPPER_BOUND
+            elif best_value >= beta:
+                node_type = NodeType.LOWER_BOUND
+            else:
+                node_type = NodeType.EXACT
+            
+            self._transposition_table.store(
+                hash_key=hash_key,
+                depth=depth,
+                value=best_value,
+                best_move=best_move_found,
+                node_type=node_type,
+            )
 
         return best_value, all_complete
 
@@ -423,6 +527,11 @@ class HeuristicAgent:
             time_remaining = max(0.0, time_budget - duration)
         nodes_per_second = self._nodes_searched / duration if duration > 0 else None
 
+        # Get transposition table metrics if available
+        tt_metrics = None
+        if self._transposition_table is not None:
+            tt_metrics = self._transposition_table.get_metrics()
+
         self.last_search_stats = {
             "best_move": best_move,
             "best_move_str": str(best_move),
@@ -437,6 +546,7 @@ class HeuristicAgent:
             "time_budget_seconds": time_budget,
             "time_remaining_seconds": time_remaining,
             "nodes_per_second": nodes_per_second,
+            "transposition_table_metrics": tt_metrics,
         }
         if not self.config.debug:
             return

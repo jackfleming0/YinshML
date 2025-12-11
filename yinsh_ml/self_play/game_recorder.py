@@ -99,24 +99,25 @@ class GameRecorder:
         logger.info(f"Started recording game: {game_id}")
         return game_id
     
-    def record_turn(self, game_state: GameState, move: Move) -> None:
+    def record_turn(self, game_state: GameState, move: Move, player: Player) -> Optional[GameTurn]:
         """Record a turn in the current game.
         
         Args:
             game_state: Current game state
             move: Move that was made
+            player: Player who executed the move
         """
         if self.current_game is None:
             logger.error("No active game to record turn")
-            return
+            return None
         
         # Extract features for current player
-        features = self.feature_extractor.extract_all_features(game_state, game_state.current_player)
+        features = self.feature_extractor.extract_all_features(game_state, player)
         
         # Create turn record
         turn = GameTurn(
             turn_number=len(self.current_game.turns) + 1,
-            current_player=game_state.current_player.value,
+            current_player=player.value,
             move=self._serialize_move(move),
             features=features.to_dict(),
             timestamp=time.time()
@@ -126,6 +127,7 @@ class GameRecorder:
         self.current_game.total_turns = len(self.current_game.turns)
         
         logger.debug(f"Recorded turn {turn.turn_number}: {move}")
+        return turn
     
     def end_game(self, game_state: GameState, winner: Optional[Player] = None) -> Optional[GameRecord]:
         """End the current game and return the complete record.
@@ -296,6 +298,12 @@ class GameRecorder:
             "shortest_game": min(game_lengths) if game_lengths else 0,
             "longest_game": max(game_lengths) if game_lengths else 0
         }
+
+    def get_feature_history(self) -> List[Dict[str, Any]]:
+        """Return the feature history for the current game."""
+        if not self.current_game:
+            return []
+        return [turn.features for turn in self.current_game.turns]
     
     def export_to_csv(self, output_file: Union[str, Path]) -> None:
         """Export all game data to CSV format for analysis.

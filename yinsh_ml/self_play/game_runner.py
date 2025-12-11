@@ -80,6 +80,7 @@ class SelfPlayRunner:
         self.config = config or RunnerConfig()
         self.stats = RunnerStats()
         self.stats.quality_metrics = []
+        self.feature_history: List[Dict[str, Any]] = []
         
         # Initialize policy using factory
         self.policy = self._create_policy()
@@ -192,6 +193,7 @@ class SelfPlayRunner:
         
         self.stats.start_time = time.time()
         self.stats.last_update_time = self.stats.start_time
+        self.feature_history.clear()
         
         completed_games = []
         
@@ -292,11 +294,8 @@ class SelfPlayRunner:
                 if not move:
                     logger.warning(f"Game {game_id} failed to select move at turn {turn_count}")
                     break
-                
-                # Record turn
-                self.recorder.record_turn(game_state, move)
-                
                 # Apply move
+                player_before_move = game_state.current_player
                 success = game_state.make_move(move)
                 if not success:
                     logger.warning(f"Game {game_id} failed to apply move: {move}")
@@ -306,6 +305,16 @@ class SelfPlayRunner:
                 
                 # Update turn count in stats
                 self.stats.total_turns += 1
+
+                turn = self.recorder.record_turn(game_state, move, player=player_before_move)
+                if turn:
+                    self.feature_history.append({
+                        "game_id": game_id,
+                        "turn_number": turn.turn_number,
+                        "player": turn.current_player,
+                        "features": turn.features,
+                        "timestamp": turn.timestamp
+                    })
             
             # End game recording
             winner = game_state.get_winner()
@@ -503,6 +512,10 @@ class SelfPlayRunner:
                 callback(self.stats)
             except Exception as e:
                 logger.error(f"Progress callback failed: {e}")
+
+    def get_feature_history(self) -> List[Dict[str, Any]]:
+        """Return the runner-level feature history collected so far."""
+        return list(self.feature_history)
     
     def get_current_stats(self) -> RunnerStats:
         """Get current runner statistics.

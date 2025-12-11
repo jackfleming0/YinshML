@@ -24,6 +24,15 @@ import pytest
 pytestmark = pytest.mark.skip(reason="macOS Accelerate framework bug causes NumPy crash - tests work on other systems")
 
 
+def _apply_move_and_record(recorder, game_state, move):
+    """Helper that applies a move and records the resulting turn."""
+    player = game_state.current_player
+    success = game_state.make_move(move)
+    if success:
+        recorder.record_turn(game_state, move, player=player)
+    return success
+
+
 class TestHeuristicPolicy(unittest.TestCase):
     """Test heuristic policy implementation."""
     
@@ -233,8 +242,7 @@ class TestQualityMetrics(unittest.TestCase):
             valid_moves = game_state.get_valid_moves()
             if valid_moves:
                 move = valid_moves[0]
-                recorder.record_turn(game_state, move)
-                game_state.make_move(move)
+                _apply_move_and_record(recorder, game_state, move)
         
         game_record = recorder.end_game(game_state, None)
         
@@ -330,8 +338,7 @@ class TestQualityComparison(unittest.TestCase):
                 valid_moves = game_state.get_valid_moves()
                 if valid_moves:
                     move = valid_moves[0]
-                    recorder.record_turn(game_state, move)
-                    game_state.make_move(move)
+                    _apply_move_and_record(recorder, game_state, move)
             game_record = recorder.end_game(game_state, None)
             if game_record:
                 baseline_games.append(game_record)
@@ -380,8 +387,7 @@ class TestHeuristicVsRandomQuality(unittest.TestCase):
             valid_moves = game_state.get_valid_moves()
             if valid_moves:
                 move = valid_moves[0]
-                recorder.record_turn(game_state, move)
-                game_state.make_move(move)
+                _apply_move_and_record(recorder, game_state, move)
         
         game_record = recorder.end_game(game_state, None)
         
@@ -551,8 +557,7 @@ class TestQualityMetricsAccuracy(unittest.TestCase):
                 # Try to pick different moves
                 move = valid_moves[i % len(valid_moves)] if len(valid_moves) > 1 else valid_moves[0]
                 diverse_moves.append(move)
-                recorder.record_turn(game_state, move)
-                game_state.make_move(move)
+                _apply_move_and_record(recorder, game_state, move)
         diverse_record = recorder.end_game(game_state, None)
         
         # Create a repetitive game (same move pattern)
@@ -565,8 +570,7 @@ class TestQualityMetricsAccuracy(unittest.TestCase):
                 # Always pick first move
                 move = valid_moves[0]
                 repetitive_moves.append(move)
-                recorder.record_turn(game_state, move)
-                game_state.make_move(move)
+                _apply_move_and_record(recorder, game_state, move)
         repetitive_record = recorder.end_game(game_state, None)
         
         # Compare diversity
@@ -593,8 +597,7 @@ class TestQualityMetricsAccuracy(unittest.TestCase):
             valid_moves = game_state.get_valid_moves()
             if valid_moves:
                 move = valid_moves[0]
-                recorder.record_turn(game_state, move)
-                game_state.make_move(move)
+                _apply_move_and_record(recorder, game_state, move)
         
         game_record = recorder.end_game(game_state, None)
         
@@ -617,8 +620,7 @@ class TestQualityMetricsAccuracy(unittest.TestCase):
             valid_moves = game_state.get_valid_moves()
             if valid_moves:
                 move = valid_moves[0]
-                recorder.record_turn(game_state, move)
-                game_state.make_move(move)
+                _apply_move_and_record(recorder, game_state, move)
         
         game_record = recorder.end_game(game_state, None)
         
@@ -629,6 +631,58 @@ class TestQualityMetricsAccuracy(unittest.TestCase):
             self.assertLessEqual(metrics.strategic_coherence, 1.0)
 
 
+class TestFeatureHistory(unittest.TestCase):
+    """Verify feature history helpers expose move-level data."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_game_recorder_records_post_move_features(self):
+        """Ensure GameRecorder captures features from the player who just moved."""
+        from yinsh_ml.self_play import GameRecorder
+        from yinsh_ml.game import GameState, Move, MoveType, Position, Player
+
+        recorder = GameRecorder(output_dir=self.temp_dir, save_json=False)
+        recorder.start_game("feature-history")
+        game_state = GameState()
+        move = Move(type=MoveType.PLACE_RING, player=Player.WHITE, source=Position.from_string("B2"))
+        applied = _apply_move_and_record(recorder, game_state, move)
+        self.assertTrue(applied)
+
+        history = recorder.get_feature_history()
+        self.assertEqual(len(history), 1)
+
+        turn = recorder.current_game.turns[0]
+        self.assertEqual(turn.current_player, Player.WHITE.value)
+        self.assertIn("ring_centrality_score", turn.features)
+        self.assertEqual(history[0], turn.features)
+
+    def test_self_play_runner_exposes_feature_history(self):
+        """SelfPlayRunner should accumulate feature history as games run."""
+        from yinsh_ml.self_play import SelfPlayRunner, RunnerConfig
+
+        config = RunnerConfig(
+            target_games=1,
+            max_games_per_batch=1,
+            save_interval=1,
+            progress_interval=1,
+            output_dir=self.temp_dir,
+            use_parquet_storage=False
+        )
+        runner = SelfPlayRunner(config=config)
+        runner.run_games()
+
+        history = runner.get_feature_history()
+        self.assertGreater(len(history), 0)
+
+        entry = history[0]
+        self.assertIn("game_id", entry)
+        self.assertIn("turn_number", entry)
+        self.assertIn("player", entry)
+        self.assertIn("features", entry)
 class TestEndToEndIntegration(unittest.TestCase):
     """Test end-to-end integration of all components."""
     

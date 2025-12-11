@@ -7,10 +7,16 @@ from .performance_profiler import (
     BenchmarkResults,
     run_performance_benchmark
 )
+from .transposition_table import (
+    TranspositionTable,
+    TranspositionTableEntry,
+)
+from .node_type import NodeType
 
 __all__ = [
     'MCTS', 'MCTSConfig', 'EvaluationMode',
     'TrainingTracker', 'PerformanceMetrics',
-    'MCTSPerformanceProfiler', 'BenchmarkResults', 'run_performance_benchmark'
+    'MCTSPerformanceProfiler', 'BenchmarkResults', 'run_performance_benchmark',
+    'TranspositionTable', 'TranspositionTableEntry', 'NodeType',
 ]
 

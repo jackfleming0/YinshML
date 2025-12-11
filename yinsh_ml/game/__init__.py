@@ -5,6 +5,7 @@ from .types import Move, MoveType, GamePhase
 from .board import Board
 from .moves import MoveGenerator
 from .game_state import GameState
+from .zobrist import ZobristInitializer, ZobristTable, ZobristHasher
 
 __all__ = [
     'Player',
@@ -18,4 +19,7 @@ __all__ = [
     'Board',
     'MoveGenerator',
     'GameState',
+    'ZobristInitializer',
+    'ZobristTable',
+    'ZobristHasher',
 ]
