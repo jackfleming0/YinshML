@@ -29,6 +29,8 @@ from ..network.wrapper import NetworkWrapper
 from ..game.moves import Move
 # --- Memory Pool Imports ---
 from ..memory import GameStatePool, TensorPool, GameStatePoolConfig, TensorPoolConfig
+# --- Heuristic Evaluation Import ---
+from ..heuristics.evaluator import YinshHeuristics
 
 # Configure the logger at the module level
 # Use getLogger to ensure consistency if already configured elsewhere
@@ -84,21 +86,25 @@ class MCTS:
 
     def __init__(self,
                  network: NetworkWrapper,
+                 # --- Evaluation Mode ---
+                 evaluation_mode: str = "pure_neural",  # Options: "pure_neural", "pure_heuristic", "hybrid"
+                 heuristic_evaluator: Optional[YinshHeuristics] = None,
+                 heuristic_weight: float = 0.5,  # Weight for heuristic in hybrid mode (0.0 = pure neural, 1.0 = pure heuristic)
                  # --- MCTS Search Params ---
-                 num_simulations: int, # Base simulations (early game)
-                 c_puct: float,
-                 dirichlet_alpha: float,
+                 num_simulations: int = 100, # Base simulations (early game)
+                 c_puct: float = 1.0,
+                 dirichlet_alpha: float = 0.3,
                  # *** Rename 'initial_value_weight' to 'value_weight' for clarity ***
-                 value_weight: float, # Weighting for value in UCB selection
-                 max_depth: int,
+                 value_weight: float = 1.0, # Weighting for value in UCB selection
+                 max_depth: int = 500,
                  # --- Rollout Scheduling Params ---
-                 late_simulations: Optional[int], # Use Optional[int] for type hint clarity
-                 simulation_switch_ply: int,
+                 late_simulations: Optional[int] = None, # Use Optional[int] for type hint clarity
+                 simulation_switch_ply: int = 20,
                  # --- Temperature Params (passed down) ---
-                 initial_temp: float,
-                 final_temp: float,
-                 annealing_steps: int,
-                 temp_clamp_fraction: float,
+                 initial_temp: float = 1.0,
+                 final_temp: float = 0.1,
+                 annealing_steps: int = 30,
+                 temp_clamp_fraction: float = 0.6,
                  # --- Optional Metrics ---
                  mcts_metrics: Optional[MCTSMetrics] = None,
                  # --- Memory Pools ---
@@ -109,6 +115,9 @@ class MCTS:
 
         Args:
             network: The neural network wrapper.
+            evaluation_mode: Evaluation mode - "pure_neural", "pure_heuristic", or "hybrid".
+            heuristic_evaluator: YinshHeuristics instance for heuristic evaluation (required for pure_heuristic/hybrid modes).
+            heuristic_weight: Weight for heuristic in hybrid mode (0.0-1.0, where 0.0=pure neural, 1.0=pure heuristic).
             num_simulations: Base simulation budget (used before switch_ply).
             c_puct: Exploration constant for UCB.
             dirichlet_alpha: Alpha parameter for Dirichlet noise at the root.
@@ -126,6 +135,17 @@ class MCTS:
         self.network = network
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS") # Use module-level logger
+
+        # Evaluation Mode Configuration
+        self.evaluation_mode = evaluation_mode.lower()
+        self.heuristic_evaluator = heuristic_evaluator
+        self.heuristic_weight = np.clip(heuristic_weight, 0.0, 1.0)  # Ensure weight is in [0, 1]
+
+        # Validate evaluation mode configuration
+        if self.evaluation_mode not in ["pure_neural", "pure_heuristic", "hybrid"]:
+            raise ValueError(f"Invalid evaluation_mode: {evaluation_mode}. Must be 'pure_neural', 'pure_heuristic', or 'hybrid'.")
+        if self.evaluation_mode in ["pure_heuristic", "hybrid"] and heuristic_evaluator is None:
+            raise ValueError(f"heuristic_evaluator required for evaluation_mode='{evaluation_mode}'")
 
         # Memory Pool Management
         self.game_state_pool = game_state_pool
@@ -155,6 +175,7 @@ class MCTS:
         self.current_iteration = 0 # Can be updated externally if needed
 
         self.logger.info(f"MCTS Initialized:")
+        self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
         self.logger.info(f"  Memory: Pool enabled={self._pool_enabled}")
         self.logger.info(f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
         self.logger.info(f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
@@ -448,14 +469,59 @@ class MCTS:
         return best_move
 
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
-        """Get policy and value from neural network."""
-        # Use the new pool-enabled prediction method
-        with torch.no_grad():
-            policy_tensor, value_tensor = self.network.predict_from_state(state)
-            # Convert to numpy and extract values
-            policy_probs = torch.softmax(policy_tensor, dim=1).squeeze(0).cpu().numpy()
-            value_scalar = value_tensor.item() # Get scalar value
-            return policy_probs, value_scalar
+        """Get policy and value from neural network and/or heuristic evaluator.
+
+        Supports three evaluation modes:
+        - pure_neural: Only use neural network
+        - pure_heuristic: Only use heuristic evaluator
+        - hybrid: Weighted combination of neural network and heuristic
+        """
+        # Get neural network evaluation
+        if self.evaluation_mode in ["pure_neural", "hybrid"]:
+            with torch.no_grad():
+                policy_tensor, value_tensor = self.network.predict_from_state(state)
+                # Convert to numpy and extract values
+                policy_nn = torch.softmax(policy_tensor, dim=1).squeeze(0).cpu().numpy()
+                value_nn = value_tensor.item()  # Get scalar value
+        else:
+            policy_nn = None
+            value_nn = 0.0
+
+        # Get heuristic evaluation
+        if self.evaluation_mode in ["pure_heuristic", "hybrid"]:
+            # Heuristic evaluator returns differential score for current player
+            current_player = state.current_player
+            value_heuristic = self.heuristic_evaluator.evaluate_position(state, current_player)
+
+            # For policy, use uniform distribution over legal moves (heuristics don't provide policy guidance)
+            valid_moves = state.get_valid_moves()
+            policy_heuristic = np.zeros_like(policy_nn) if policy_nn is not None else np.zeros(self.state_encoder.total_moves)
+            if len(valid_moves) > 0:
+                for move in valid_moves:
+                    idx = self.state_encoder.move_to_index(move)
+                    if 0 <= idx < len(policy_heuristic):
+                        policy_heuristic[idx] = 1.0 / len(valid_moves)
+        else:
+            policy_heuristic = None
+            value_heuristic = 0.0
+
+        # Combine based on evaluation mode
+        if self.evaluation_mode == "pure_neural":
+            return policy_nn, value_nn
+        elif self.evaluation_mode == "pure_heuristic":
+            return policy_heuristic, value_heuristic
+        else:  # hybrid mode
+            # Weighted combination
+            w_h = self.heuristic_weight
+            w_n = 1.0 - w_h
+
+            # Combine policy (weighted sum)
+            policy_combined = w_n * policy_nn + w_h * policy_heuristic
+
+            # Combine value (weighted sum)
+            value_combined = w_n * value_nn + w_h * value_heuristic
+
+            return policy_combined, value_combined
 
     def _get_value(self, state: GameState) -> Optional[float]:
         """Get terminal value if game ended, None otherwise. Uses normalized margin."""
@@ -542,20 +608,23 @@ class SelfPlay:
     def __init__(self,
                  network: NetworkWrapper,
                  num_workers: int,
+                 # --- Evaluation Mode ---
+                 evaluation_mode: str = "pure_neural",
+                 heuristic_weight: float = 0.5,
                  # --- MCTS Params (to be passed to MCTS instance) ---
-                 num_simulations: int, # Early game sims
-                 late_simulations: Optional[int],
-                 simulation_switch_ply: int,
-                 c_puct: float,
-                 dirichlet_alpha: float,
+                 num_simulations: int = 100, # Early game sims
+                 late_simulations: Optional[int] = None,
+                 simulation_switch_ply: int = 20,
+                 c_puct: float = 1.0,
+                 dirichlet_alpha: float = 0.3,
                  # *** Use consistent 'value_weight' naming ***
-                 value_weight: float,
-                 max_depth: int,
+                 value_weight: float = 1.0,
+                 max_depth: int = 500,
                  # --- Temp Params (to be passed to MCTS instance) ---
-                 initial_temp: float,
-                 final_temp: float,
-                 annealing_steps: int,
-                 temp_clamp_fraction: float,
+                 initial_temp: float = 1.0,
+                 final_temp: float = 0.1,
+                 annealing_steps: int = 30,
+                 temp_clamp_fraction: float = 0.6,
                  # --- Optional Metrics ---
                  metrics_logger: Optional[MetricsLogger] = None,
                  mcts_metrics: Optional[MCTSMetrics] = None,
@@ -575,8 +644,20 @@ class SelfPlay:
         # Store memory pools
         self.game_state_pool = game_state_pool
 
+        # Initialize heuristic evaluator
+        self.evaluation_mode = evaluation_mode
+        self.heuristic_weight = heuristic_weight
+        if evaluation_mode in ["pure_heuristic", "hybrid"]:
+            self.heuristic_evaluator = YinshHeuristics()
+            self.logger.info(f"Initialized YinshHeuristics evaluator for {evaluation_mode} mode")
+        else:
+            self.heuristic_evaluator = None
+
         # Store all parameters needed by MCTS and workers explicitly
         self.mcts_config = {
+            'evaluation_mode': evaluation_mode,
+            'heuristic_evaluator': self.heuristic_evaluator,
+            'heuristic_weight': heuristic_weight,
             'num_simulations': num_simulations,
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,
@@ -604,6 +685,7 @@ class SelfPlay:
 
         self.logger.info("SelfPlay Initialized:")
         self.logger.info(f"  Workers: {self.num_workers}")
+        self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
         self.logger.info(f"  MCTS Config: {self.mcts_config}")
 
 

@@ -127,7 +127,13 @@ class TrainingSupervisor:
         # 2. Instantiate Components with Extracted Parameters
         # ==================================================================
 
+        # Extract evaluation mode parameters
+        evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
+        heuristic_weight = self.mode_settings.get('heuristic_weight', 0.7)
+
         _mcts_config_for_init = { # Use temporary name to avoid confusion
+            'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
+            'heuristic_weight': heuristic_weight,  # NEW: Heuristic weight
             'num_simulations': mcts_simulations, # Early sims from direct arg
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,
@@ -151,8 +157,9 @@ class TrainingSupervisor:
             # metrics_logger=... , mcts_metrics=... # Add if needed
         )
 
-        self.logger.info(f"SelfPlay Initialized: Early Sims={mcts_simulations}, Late Sims={late_simulations}, Switch Ply={simulation_switch_ply}, cPUCT={c_puct}, Alpha={dirichlet_alpha}, ValueWeight={mcts_value_weight}")
-        self.logger.info(f"Temperature Initialized: Initial={initial_temp}, Final={final_temp}, Anneal Steps={annealing_steps}, Clamp Frac={temp_clamp_fraction}")
+        self.logger.info(f"SelfPlay Initialized with Evaluation Mode: {evaluation_mode} (heuristic_weight={heuristic_weight:.3f})")
+        self.logger.info(f"  MCTS: Early Sims={mcts_simulations}, Late Sims={late_simulations}, Switch Ply={simulation_switch_ply}, cPUCT={c_puct}, Alpha={dirichlet_alpha}, ValueWeight={mcts_value_weight}")
+        self.logger.info(f"  Temperature: Initial={initial_temp}, Final={final_temp}, Anneal Steps={annealing_steps}, Clamp Frac={temp_clamp_fraction}")
 
 
         # Ensure the replay buffer path is within the run's save directory

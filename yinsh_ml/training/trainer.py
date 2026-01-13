@@ -26,11 +26,18 @@ logger = logging.getLogger(__name__)
 class GameExperience:
     """Stores game states and outcomes for training, with optimized memory usage."""
 
-    def __init__(self, max_size: int = 10000, subsample_long_games: bool = True):
+    def __init__(self, max_size: int = 100000, subsample_long_games: bool = True):
+        """Initialize GameExperience replay buffer.
+
+        Args:
+            max_size: Maximum number of samples to store (default: 100000, increased from 10000 for better training)
+            subsample_long_games: Whether to subsample games >100 moves
+        """
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
         self.phases = deque(maxlen=max_size)
+        self.max_size = max_size  # Store for logging
         self.subsample_long_games = subsample_long_games
 
         # Memory monitoring

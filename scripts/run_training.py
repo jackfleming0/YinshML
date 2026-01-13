@@ -75,6 +75,8 @@ def main() -> None:
     # Build mode_settings for supervisor
     mode_settings = {
         # Self-play / MCTS
+        'evaluation_mode': sp.get('evaluation_mode', 'hybrid'),  # NEW: Default to hybrid mode
+        'heuristic_weight': float(sp.get('heuristic_weight', 0.7)),  # NEW: Default 70% heuristic weight
         'late_simulations': sp.get('late_simulations'),
         'simulation_switch_ply': sp.get('simulation_switch_ply', 20),
         'c_puct': float(sp.get('c_puct', 1.0)),
@@ -110,7 +112,7 @@ def main() -> None:
     )
 
     games_per_iteration = int(sp.get('games_per_iteration', 50))
-    epochs_per_iteration = int(trainer_cfg.get('epochs_per_iteration', 4))
+    epochs_per_iteration = int(trainer_cfg.get('epochs_per_iteration', 40))  # INCREASED: from 4 to 40 for better training
 
     start_time = time.time()
     for it in range(num_iterations):
