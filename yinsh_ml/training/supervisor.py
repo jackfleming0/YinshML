@@ -131,6 +131,10 @@ class TrainingSupervisor:
         evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
         heuristic_weight = self.mode_settings.get('heuristic_weight', 0.7)
 
+        # Extract batched MCTS parameters (Phase 2.1)
+        use_batched_mcts = self.mode_settings.get('use_batched_mcts', True)
+        mcts_batch_size = self.mode_settings.get('mcts_batch_size', 32)
+
         _mcts_config_for_init = { # Use temporary name to avoid confusion
             'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
             'heuristic_weight': heuristic_weight,  # NEW: Heuristic weight
@@ -143,6 +147,8 @@ class TrainingSupervisor:
             # It should pass 'value_weight', not 'initial_value_weight'
             'value_weight': mcts_value_weight, # <<< CHANGE THIS KEY
             'max_depth': max_depth,
+            'use_batched_mcts': use_batched_mcts,  # NEW: Enable batched MCTS
+            'mcts_batch_size': mcts_batch_size,  # NEW: Batch size for leaf evaluation
             'initial_temp': initial_temp,
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,
@@ -275,24 +281,46 @@ class TrainingSupervisor:
         self.logger.info(f"  TensorPool: {tensor_pool_size} initial, {tensor_pool_size * 2} max")
         self.logger.info(f"  Workers: {num_workers}")
 
+    def _clear_memory_cache(self, phase_name: str = ""):
+        """Clear PyTorch memory caches to free up memory.
+
+        Args:
+            phase_name: Name of the phase for logging (e.g., "self-play", "training", "tournament")
+        """
+        import gc
+
+        # Run garbage collection
+        gc.collect()
+
+        # Clear PyTorch caches based on device
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            # MPS doesn't have empty_cache, but synchronize helps
+            torch.mps.synchronize()
+
+        if phase_name:
+            self.logger.info(f"Memory cache cleared after {phase_name}")
+
     def cleanup_memory_pools(self):
         """Clean up memory pools and release all resources."""
         self.logger.info("Cleaning up memory pools...")
-        
+
         if hasattr(self, 'game_state_pool') and self.game_state_pool is not None:
             # Log statistics before cleanup
             if hasattr(self.game_state_pool, 'get_statistics'):
                 stats = self.game_state_pool.get_statistics()
                 self.logger.info(f"GameStatePool final stats: {stats}")
             self.game_state_pool = None
-            
+
         if hasattr(self, 'tensor_pool') and self.tensor_pool is not None:
             # Log statistics before cleanup
             if hasattr(self.tensor_pool, 'get_statistics'):
                 stats = self.tensor_pool.get_statistics()
                 self.logger.info(f"TensorPool final stats: {stats}")
             self.tensor_pool = None
-            
+
         self.logger.info("Memory pools cleaned up")
 
     def set_experiment_tracker(self, tracker, experiment_id: int):
@@ -408,6 +436,9 @@ class TrainingSupervisor:
             return {'error': 'No games generated'}
 
         self.logger.info(f"Generated {len(games)} games in {game_time:.1f}s")
+
+        # Clear memory after self-play to prevent accumulation
+        self._clear_memory_cache("self-play")
 
         # --- Basic game stats ---
         game_lengths = [len(g[0]) for g in games if g[0]]
@@ -594,6 +625,9 @@ class TrainingSupervisor:
         self.logger.info(
             f"Training done in {train_time:.1f}s (Avg Policy Loss={final_pol_loss:.4f}, Avg Value Loss={final_val_loss:.4f})")
 
+        # Clear memory after training to prevent accumulation
+        self._clear_memory_cache("training")
+
         # --- Log training metrics to experiment tracker ---
         if self.experiment_tracker and self.experiment_id:
             try:
@@ -673,6 +707,9 @@ class TrainingSupervisor:
             current_elo = self.best_model_elo
             tourn_win_rate = 0.0
             tournament_stats = {}
+
+        # Clear memory after tournament to prevent accumulation
+        self._clear_memory_cache("tournament")
 
         # ------------------------------------------------------------------ #
         # 5. PROMOTION / REVERSION (using Wilson Gate)
@@ -778,6 +815,17 @@ class TrainingSupervisor:
             else:
                 self.logger.warning(
                     f"Cannot revert: Previous best model path invalid or not found ({self.best_model_path}). Keeping rejected candidate weights.")
+
+            # Memory optimization: Delete rejected checkpoint to free disk space
+            # Keep iteration directory for logs/metrics, but remove the large checkpoint file
+            try:
+                if checkpoint_path.exists():
+                    checkpoint_size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
+                    checkpoint_path.unlink()
+                    self.logger.info(f"Deleted rejected checkpoint (freed {checkpoint_size_mb:.1f} MB): {checkpoint_path.name}")
+            except Exception as e:
+                self.logger.warning(f"Failed to delete rejected checkpoint {checkpoint_path}: {e}")
+
             self._save_best_model_state()
 
             # --- Log model rejection/reversion to experiment tracker ---
@@ -1015,7 +1063,15 @@ class TrainingSupervisor:
                     pass
 
     def _compute_num_workers(self) -> int:
-        """Calculate optimal number of workers based on CPU cores."""
+        """Calculate optimal number of workers based on CPU cores.
+
+        MEMORY OPTIMIZATION: Limited to 3 workers maximum to prevent OOM.
+        Each worker process loads models and MCTS trees, multiplying memory usage.
+        With 7 workers, peak memory during tournament can exceed 24GB.
+        """
+        # CRITICAL: Cap at 3 workers to prevent memory exhaustion
+        MAX_WORKERS = 3
+
         # Use platform detection for Apple Silicon
         if platform.system() == "Darwin" and platform.processor() == "arm":
             # Suggest slightly fewer than physical cores for M-series to leave room for system/GPU
@@ -1023,7 +1079,8 @@ class TrainingSupervisor:
             # M1/M2 often have 8 or 10 cores (e.g., 4+4 or 8+2 performance/efficiency)
             # Let's be conservative, maybe leave 2-3 cores free.
             optimal_workers = max(1, physical_cores - 3) # Ensure at least 1 worker
-            self.logger.info(f"Apple Silicon detected. Using {optimal_workers} workers (Physical cores: {physical_cores}).")
+            optimal_workers = min(optimal_workers, MAX_WORKERS)  # Cap for memory
+            self.logger.info(f"Apple Silicon detected. Using {optimal_workers} workers (Physical cores: {physical_cores}, capped at {MAX_WORKERS} for memory).")
             return optimal_workers
 
         # Original logic for other platforms (Linux/Windows, Intel/AMD)
@@ -1037,7 +1094,10 @@ class TrainingSupervisor:
         else:
             optimal_workers = max(4, physical_cores - 1 if physical_cores else logical_cores -1) # Use physical if available
 
-        self.logger.info(f"CPU Info: Logical={logical_cores}, Physical={physical_cores}. Using {optimal_workers} workers.")
+        # MEMORY OPTIMIZATION: Cap at MAX_WORKERS to prevent OOM
+        optimal_workers = min(optimal_workers, MAX_WORKERS)
+
+        self.logger.info(f"CPU Info: Logical={logical_cores}, Physical={physical_cores}. Using {optimal_workers} workers (capped at {MAX_WORKERS} for memory).")
         return optimal_workers
 
     def _load_best_model_state(self):

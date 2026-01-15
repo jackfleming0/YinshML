@@ -511,6 +511,12 @@ class ModelTournament:
             )
         self.logger.info("=" * 60)
 
+        # Memory optimization: Clear loaded models from memory after tournament completes
+        models.clear()
+        import gc
+        gc.collect()
+        self.logger.info("Cleared tournament models from memory")
+
     def _aggregate_round_robin_stats(self, match_results: List[MatchResult]) -> Dict[str, Dict]:
         """
         Aggregate overall and color-specific stats for each model:

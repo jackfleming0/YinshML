@@ -329,7 +329,7 @@ class NetworkWrapper:
             self.logger.error(f"Error exporting to CoreML: {str(e)}")
             raise
 
-    def predict_from_state(self, game_state, 
+    def predict_from_state(self, game_state,
                           move_mask: Optional[torch.Tensor] = None,
                           temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -345,18 +345,69 @@ class NetworkWrapper:
         """
         # Acquire input tensor from pool
         input_tensor = self._acquire_input_tensor(batch_size=1)
-        
+
         try:
             # Encode the state into the pooled tensor
             state_array = self.state_encoder.encode_state(game_state)
             input_tensor[0] = torch.from_numpy(state_array).float()
-            
+
             # Use the regular predict method
             result = self.predict(input_tensor, move_mask, temperature)
-            
+
             return result
-            
+
         finally:
             # Always release the input tensor
             self._release_tensor(input_tensor)
+
+    def predict_batch(self, game_states: List, temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Make predictions for multiple game states in a single forward pass.
+
+        This is the key optimization for batched MCTS - instead of evaluating
+        each leaf node individually, we collect many leaves and evaluate them
+        all at once, dramatically improving throughput.
+
+        Args:
+            game_states: List of GameState objects to encode and predict
+            temperature: Temperature for move probability scaling
+
+        Returns:
+            Tuple of (batch_move_probabilities, batch_values) where:
+                - batch_move_probabilities: tensor of shape (batch_size, num_moves)
+                - batch_values: tensor of shape (batch_size, 1)
+        """
+        if not game_states:
+            raise ValueError("Cannot predict on empty batch of game states")
+
+        batch_size = len(game_states)
+
+        # Acquire batch input tensor from pool
+        batch_tensor = self._acquire_input_tensor(batch_size=batch_size)
+
+        try:
+            # Encode all states into the batch tensor
+            for i, game_state in enumerate(game_states):
+                state_array = self.state_encoder.encode_state(game_state)
+                batch_tensor[i] = torch.from_numpy(state_array).float()
+
+            # Single batched forward pass through the network
+            self.network.eval()
+            with torch.no_grad():
+                policy_logits, values = self.network(batch_tensor)
+
+                # Ensure value predictions are in [-1, 1]
+                values = torch.tanh(values)
+
+                # Apply temperature scaling to policy logits
+                if temperature != 1.0:
+                    policy_logits = policy_logits / temperature
+
+                # Return raw policy logits and values
+                # Note: Caller should apply softmax and masking as needed
+                return policy_logits, values
+
+        finally:
+            # Always release the batch tensor
+            self._release_tensor(batch_tensor)
 

@@ -300,7 +300,8 @@ class YinshTrainer:
                  metrics_logger: Optional[MetricsLogger] = None,
                  value_head_lr_factor: float = 5.0,
                  value_loss_weights: Tuple[float, float] = (0.5, 0.5),
-                 replay_buffer_path: Optional[str] = None,):
+                 replay_buffer_path: Optional[str] = None,
+                 max_buffer_size: int = 10000,):
         """
         Initialize the trainer.
 
@@ -312,6 +313,8 @@ class YinshTrainer:
             metrics_logger: Optional MetricsLogger instance
             value_head_lr_factor: Factor to multiply base lr for value head
             value_loss_weights: Weights for combining MSE and CE loss in value head
+            replay_buffer_path: Path to save/load replay buffer
+            max_buffer_size: Maximum number of samples in replay buffer (default 10000 = ~100 games)
         """
         self.state_encoder = network.state_encoder
         self.batch_size = batch_size
@@ -351,7 +354,14 @@ class YinshTrainer:
             weight_decay=1e-3
         )
 
-        self.experience = GameExperience()
+        # Initialize logger early for logging during initialization
+        self.logger = logging.getLogger("YinshTrainer")
+        self.logger.setLevel(logging.INFO)
+
+        # Memory optimization: Cap replay buffer size to prevent unbounded growth
+        # 10,000 samples = ~100 games at 100 moves each (reasonable for training)
+        self.experience = GameExperience(max_size=max_buffer_size)
+        self.logger.info(f"Replay buffer capped at {max_buffer_size:,} samples")
         if replay_buffer_path is not None:
             from os import path as osp
             if osp.exists(replay_buffer_path):
@@ -385,8 +395,7 @@ class YinshTrainer:
         )
 
         self.l2_reg = l2_reg
-        self.logger = logging.getLogger("YinshTrainer")
-        self.logger.setLevel(logging.INFO)
+        # Logger already initialized earlier for use during __init__
 
         self.current_iteration = 0
         self.policy_losses = []
@@ -722,6 +731,11 @@ class YinshTrainer:
 
         # Add average value confidence
         stats_accum['value_confidence'] = np.mean(value_confidences) if value_confidences else 0.0
+
+        # CRITICAL FIX: Track losses for supervisor reporting
+        # The supervisor reads from these lists to report training progress
+        self.policy_losses.append(stats_accum['policy_loss'])
+        self.value_losses.append(stats_accum['value_loss'])
 
         # Track value head improvement
         current_value_accuracy = stats_accum['value_accuracy']

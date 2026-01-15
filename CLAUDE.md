@@ -367,6 +367,28 @@ MCTS combines neural network + heuristic evaluation:
 - **MCTS**: MCTS with neural network
 - **Adaptive**: Switches policies based on training progress
 
+## Development Principles
+
+### Leave Things Better Than You Found Them
+
+When working in this codebase, **proactively improve what you encounter**:
+
+**Examples of Continuous Improvement**:
+- **Configuration inconsistencies**: If you discover a config value doesn't match the intended default (e.g., `epochs_per_iteration: 4` when it should be `40`), fix it in the config file immediately - don't just work around it
+- **Documentation gaps**: If you need to look up something that should be documented, add it to the docs after finding the answer
+- **Code clarity**: If you find confusing variable names or unclear logic while debugging, refactor them
+- **Test coverage**: If you discover untested code paths, add tests
+- **Performance issues**: If you notice inefficient patterns, optimize them (within scope)
+
+**When to Apply This Principle**:
+- ✅ **Do fix** when the improvement is small, low-risk, and directly related to your current work
+- ✅ **Do fix** when you discover incorrect defaults, outdated comments, or misleading documentation
+- ✅ **Do fix** when the issue will cause confusion or problems for future work
+- ⚠️ **Consider deferring** large refactors that require significant testing or architectural changes
+- ⚠️ **Consider deferring** changes outside the scope of current work that could introduce unrelated issues
+
+**Philosophy**: This is a long-term project. Small, consistent improvements compound over time. Every encounter with the codebase is an opportunity to make it slightly better for the next person (or your future self).
+
 ## Recent Development (heuristic_seeding branch)
 
 **Latest Changes**:
