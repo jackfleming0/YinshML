@@ -147,8 +147,9 @@ class NetworkWrapper:
             # Get network predictions
             move_logits, value = self.network(state_tensor)
 
-            # Ensure value predictions are in [-1, 1]
-            value = torch.tanh(value)
+            # PHASE 1.5 FIX: Value is already tanh'd by the network (model.py:139)
+            # Don't apply tanh again - causes over-compression (tanh(tanh(x)))
+            # value = torch.tanh(value)  # REMOVED
 
             # Apply move mask using proper masking
             if move_mask is not None:

@@ -515,17 +515,22 @@ class YinshTrainer:
             # Recompute (because we did backward above)
             _, pred_values = self.network.network(states)
 
-            # MSE component
-            value_loss_mse = F.mse_loss(pred_values, target_values)
+            # PHASE 1.5 FIX: Use pure MSE loss for perfect training/inference alignment
+            # Network outputs tanh'd values [-1, 1], we want to predict game outcomes [-1, 1]
+            # This matches exactly how values are used during MCTS inference
+            value_loss = F.mse_loss(pred_values, target_values)
 
-            # Optionally keep BCE for sign classification
-            target_outcomes = (target_values > 0).long()
-            value_probs = torch.sigmoid(pred_values)  # interpret as "win" probability
-            value_loss_ce = F.binary_cross_entropy(value_probs, target_outcomes.float())
-
-            # Weighted combination
-            value_loss = (self.value_loss_weights[0] * value_loss_mse +
-                          self.value_loss_weights[1] * value_loss_ce)
+            # OLD HYBRID LOSS (removed for Phase 1.5):
+            # - Combined MSE (regression) + BCE (classification)
+            # - Caused training/inference mismatch: trained for both objectives,
+            #   but only regression used during play
+            # - Also had sigmoid(tanh(x)) compression issue
+            # value_loss_mse = F.mse_loss(pred_values, target_values)
+            # target_outcomes = (target_values > 0).long()
+            # value_probs = torch.sigmoid(pred_values)
+            # value_loss_ce = F.binary_cross_entropy(value_probs, target_outcomes.float())
+            # value_loss = (self.value_loss_weights[0] * value_loss_mse +
+            #               self.value_loss_weights[1] * value_loss_ce)
 
             if self.l2_reg > 0:
                 l2_loss = 0
