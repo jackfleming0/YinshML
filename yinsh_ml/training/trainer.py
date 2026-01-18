@@ -522,23 +522,30 @@ class YinshTrainer:
             # Recompute (because we did backward above)
             _, pred_values = self.network.network(states)
 
-            # Fix #1 complete: MCTS value targets naturally prevent collapse
-            # Variance penalty no longer needed - was constraining discrimination
-            # Now using pure MSE on position-specific MCTS root values
+            # Option 1: Re-add variance penalty with higher weight (1.5)
+            # Bootstrap test showed: pure MSE minimizes variance regardless of target quality
+            # Only Test 2 (penalty 0.5) showed improvement (discrimination 0.059)
+            # Testing higher penalty to reach 0.08-0.10 discrimination target
 
-            # Pure MSE loss on MCTS value targets
-            value_loss = F.mse_loss(pred_values, target_values)
+            # MSE loss on MCTS value targets
+            value_loss_mse = F.mse_loss(pred_values, target_values)
 
-            # Track variance for monitoring (not used in loss)
+            # Variance penalty to counteract MSE's variance minimization
             batch_variance = torch.var(pred_values)
+            variance_weight = 1.5  # Increased from 0.5 based on bootstrap failure analysis
+            variance_penalty = variance_weight * torch.exp(-batch_variance * 10)
 
-            # Log variance for diagnostics (occasional logging)
+            # Combined loss
+            value_loss = value_loss_mse + variance_penalty
+
+            # Log for diagnostics (occasional logging)
             if not hasattr(self, '_batch_counter'):
                 self._batch_counter = 0
             self._batch_counter += 1
             if self._batch_counter % 10 == 0:
                 self.logger.debug(f"Batch {self._batch_counter}: Value variance={batch_variance:.4f}, "
-                                f"MSE={value_loss:.4f}")
+                                f"MSE={value_loss_mse:.4f}, Penalty={variance_penalty:.4f}, "
+                                f"Total={value_loss:.4f}")
 
             # OLD HYBRID LOSS (removed for Phase 1.5):
             # - Combined MSE (regression) + BCE (classification)
