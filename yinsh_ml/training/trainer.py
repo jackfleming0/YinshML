@@ -534,7 +534,9 @@ class YinshTrainer:
                     # Convert continuous target values to discrete class labels
                     # Map target ∈ [-1, 1] to class ∈ {0, 1, 2, 3, 4, 5, 6}
                     # For 7 classes representing: {-3, -2, -1, 0, +1, +2, +3} score differences
-                    target_normalized = (target_values + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
+                    # Ensure target_values is 1D
+                    target_values_flat = target_values.view(-1) if target_values.dim() > 1 else target_values
+                    target_normalized = (target_values_flat + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
                     target_class = torch.round(target_normalized).long().clamp(0, self.network.network.num_value_classes - 1)
 
                     # Cross-entropy loss encourages confident predictions
@@ -622,7 +624,9 @@ class YinshTrainer:
                 # For classification mode: use the accuracy already computed above
                 if hasattr(self.network.network, '_value_logits'):
                     value_logits = self.network.network._value_logits
-                    target_normalized = (target_values + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
+                    # Ensure target_values is 1D
+                    target_values_flat = target_values.view(-1) if target_values.dim() > 1 else target_values
+                    target_normalized = (target_values_flat + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
                     target_class = torch.round(target_normalized).long().clamp(0, self.network.network.num_value_classes - 1)
                     pred_class = torch.argmax(value_logits, dim=-1)
                     value_accuracy = (pred_class == target_class).float().mean().item()
