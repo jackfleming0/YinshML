@@ -532,6 +532,9 @@ class MCTS:
             move_idx = self.state_encoder.move_to_index(move)
             if 0 <= move_idx < len(move_probs):
                 move_probs[move_idx] = prob
-        
+
+        # Store root value for use as training target (Fix #1)
+        self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+
         return move_probs
 

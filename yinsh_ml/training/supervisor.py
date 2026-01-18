@@ -465,7 +465,9 @@ class TrainingSupervisor:
         ring_mobility_list = [self._calculate_ring_mobility_from_state(gs) for gs in last_states_decoded]
         avg_ring_mobility = np.mean(ring_mobility_list) if ring_mobility_list else 0.0
 
-        outcomes = [g[2] for g in games]
+        # Fix #1: g[2] is now values (list of MCTS values), not a single outcome
+        # For statistics, use the mean of all position values as a game-level outcome estimate
+        outcomes = [np.mean(g[2]) if isinstance(g[2], list) and g[2] else 0.0 for g in games]
         pseudo_wins_white = sum(1 for o in outcomes if o > 0.1)
         pseudo_wins_black = sum(1 for o in outcomes if o < -0.1)
         pseudo_draws = len(outcomes) - pseudo_wins_white - pseudo_wins_black
@@ -510,14 +512,14 @@ class TrainingSupervisor:
 
             # Process each game in the chunk
             for game_data in chunk:
-                # Unpack game data (assuming format: states, policies, outcome, history)
-                states, policies, outcome, game_history = game_data
-                if not states or not policies:
+                # Fix #1: Unpack values (MCTS root values) instead of outcome
+                states, policies, values, game_history = game_data
+                if not states or not policies or not values:
                     self.logger.warning("Skipping empty game data.")
                     continue
 
                 try:
-                    # Decode last state to get scores for add_game_experience
+                    # Decode last state to get scores for logging (optional)
                     if game_history and 'state' in game_history[-1]:
                         final_state = game_history[-1]['state']
                         if isinstance(final_state, GameState):
@@ -526,10 +528,19 @@ class TrainingSupervisor:
                             decoded_state = self.state_encoder.decode_state(final_state)
                             final_scores = (decoded_state.white_score, decoded_state.black_score)
                     else:
-                        decoded_state = self.state_encoder.decode_state(states[-1])
-                        final_scores = (decoded_state.white_score, decoded_state.black_score)
+                        # Try to decode scores from last state, but if it fails, use None
+                        try:
+                            decoded_state = self.state_encoder.decode_state(states[-1])
+                            final_scores = (decoded_state.white_score, decoded_state.black_score)
+                        except:
+                            final_scores = (None, None)
 
-                    self.trainer.add_game_experience(states, policies, final_scores)
+                    # Fix #1: Pass values (MCTS root values) to add_game_experience
+                    self.trainer.add_game_experience(
+                        states, policies, values,
+                        final_white_score=final_scores[0],
+                        final_black_score=final_scores[1]
+                    )
                 except Exception as e:
                     self.logger.error(
                         f"Error adding game experience: {e}. State/Policy lengths: {len(states)}/{len(policies)}",

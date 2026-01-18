@@ -562,6 +562,9 @@ class MCTS:
             if 0 <= move_idx < len(move_probs):
                 move_probs[move_idx] = prob
 
+        # Store root value for use as training target (Fix #1)
+        self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+
         return move_probs
 
     def _evaluate_and_backup_batch(self, batch_leaves: List[Tuple], root: Node):
@@ -944,10 +947,14 @@ class SelfPlay:
         self.logger.info(f"  MCTS Config: {self.mcts_config}")
 
 
-    def generate_games(self, num_games: int) -> List[Tuple[List[np.ndarray], List[np.ndarray], float, List[Dict]]]:
-        """Generate self-play games in parallel using multiple workers."""
+    def generate_games(self, num_games: int) -> List[Tuple[List[np.ndarray], List[np.ndarray], List[float], List[Dict]]]:
+        """Generate self-play games in parallel using multiple workers.
+
+        Fix #1: Now returns MCTS root values (List[float]) instead of single game outcome (float)
+        """
         self.logger.info(f"Starting generation of {num_games} games using {self.num_workers} workers...")
-        games_data: List[Tuple[List[np.ndarray], List[np.ndarray], float, List[Dict]]] = []
+        # Fix #1: Changed from outcome (float) to values (List[float]) - MCTS root values per position
+        games_data: List[Tuple[List[np.ndarray], List[np.ndarray], List[float], List[Dict]]] = []
 
         # Ensure the main network is on the CPU before saving state dict for workers
         self.network.network.cpu()
@@ -997,8 +1004,9 @@ class SelfPlay:
                         result = future.result()
                         # Check if worker returned valid data (not None or error)
                         if result is not None:
-                             states, policies, outcome, temp_data, game_history = result
-                             games_data.append((states, policies, outcome, game_history))
+                             # Fix #1: Unpack values (MCTS root values) instead of outcome
+                             states, policies, values, temp_data, game_history = result
+                             games_data.append((states, policies, values, game_history))
                              games_completed += 1
 
                              # Log progress periodically
@@ -1124,6 +1132,7 @@ def play_game_worker(
         # Use lists instead of deques (less overhead)
         states = []
         policies = []
+        values = []  # Fix #1: Store MCTS root values as training targets
 
         # Keep minimal game history - just essentials for debugging
         game_history = []
@@ -1185,6 +1194,11 @@ def play_game_worker(
             states.append(encoded_state)
             policies.append(move_probs)
 
+            # Fix #1: Store MCTS root value as training target (position-specific)
+            # This replaces using game outcome for all positions
+            mcts_value = mcts.last_root_value if hasattr(mcts, 'last_root_value') else 0.0
+            values.append(float(mcts_value))
+
             # Calculate entropy for temperature adaptation
             entropy = -np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9))
 
@@ -1222,6 +1236,11 @@ def play_game_worker(
         dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(state_encoder.total_moves, dtype=np.float32)
         policies.append(dummy_policy)
 
+        # Fix #1: Add value for final state (using game outcome as final value)
+        score_diff = state.white_score - state.black_score
+        final_value = np.clip(score_diff / 3.0, -1.0, 1.0)
+        values.append(float(final_value))
+
         # Add final game info
         game_history.append({
             'move_number': move_count,
@@ -1252,7 +1271,9 @@ def play_game_worker(
 
         # Memory pools handle cleanup automatically
 
-        return states, policies, outcome, temp_data, game_history
+        # Fix #1: Return MCTS values instead of single game outcome
+        # outcome still computed for logging but not used as training target
+        return states, policies, values, temp_data, game_history
 
     except Exception as e:
         worker_logger.error(f"Error in game {game_id}: {e}", exc_info=True)

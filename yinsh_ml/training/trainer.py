@@ -48,21 +48,26 @@ class GameExperience:
     def add_game_experience(self,
                             states: list,
                             policies: list,
-                            final_white_score: int,
-                            final_black_score: int,
+                            values: list,
+                            final_white_score: int = None,
+                            final_black_score: int = None,
                             discount_factor: float = 1.0):
         """
         Add a completed game to the replay buffer with memory optimization.
 
+        Fix #1: Now accepts MCTS root values directly instead of computing from game outcome.
+
         Args:
             states:             List of game states (numpy arrays).
             policies:           List of move probability distributions.
-            final_white_score:  White's final score (0 to 3).
-            final_black_score:  Black's final score (0 to 3).
-            discount_factor:    Optional discount factor for value calculation.
+            values:             List of MCTS root values (position-specific training targets).
+            final_white_score:  (Optional) White's final score - only used for logging.
+            final_black_score:  (Optional) Black's final score - only used for logging.
+            discount_factor:    (Deprecated) No longer used - values are already position-specific.
         """
         # Safety check
         assert len(states) == len(policies), "Mismatch: states vs. policies!"
+        assert len(states) == len(values), "Mismatch: states vs. values!"
 
         # Memory optimization: Subsample very long games
         if self.subsample_long_games and len(states) > 100:
@@ -84,6 +89,7 @@ class GameExperience:
                     # Create subsampled game
                     states = [states[i] for i in keep_indices]
                     policies = [policies[i] for i in keep_indices]
+                    values = [values[i] for i in keep_indices]  # Fix #1: Also subsample values
 
                     print(f"[Memory Opt] Reduced long game from {len(states)} → {len(keep_indices)} states")
 
@@ -99,22 +105,23 @@ class GameExperience:
                 phase = "RING_REMOVAL"
             return phase
 
-        # Compute the normalized margin in [-1, +1]
-        score_diff = final_white_score - final_black_score
-        normalized_margin = score_diff / 3.0
+        # Fix #1: No longer compute normalized_margin - values are already position-specific from MCTS
+        # Keep score computation for logging only
+        if final_white_score is not None and final_black_score is not None:
+            score_diff = final_white_score - final_black_score
+            normalized_margin = score_diff / 3.0
+        else:
+            normalized_margin = 0.0  # Unknown outcome
 
         # Precompute phases
         phases = [decode_phase(s) for s in states]
-        game_length = len(states)
 
         # Iterate over each move/state in the completed game
-        for idx, (state, policy, phase) in enumerate(zip(states, policies, phases)):
-            # Calculate discounted value
-            discounted_value = normalized_margin * (discount_factor ** (game_length - 1 - idx))
-
+        for idx, (state, policy, value, phase) in enumerate(zip(states, policies, values, phases)):
+            # Fix #1: Use MCTS root value directly (position-specific, not game outcome)
             self.states.append(state)
             self.move_probs.append(policy)
-            self.values.append(discounted_value)
+            self.values.append(float(value))  # MCTS root value for this position
             self.phases.append(phase)
 
             # Track total states for memory monitoring
@@ -515,10 +522,23 @@ class YinshTrainer:
             # Recompute (because we did backward above)
             _, pred_values = self.network.network(states)
 
-            # PHASE 1.5 FIX: Use pure MSE loss for perfect training/inference alignment
-            # Network outputs tanh'd values [-1, 1], we want to predict game outcomes [-1, 1]
-            # This matches exactly how values are used during MCTS inference
+            # Fix #1 complete: MCTS value targets naturally prevent collapse
+            # Variance penalty no longer needed - was constraining discrimination
+            # Now using pure MSE on position-specific MCTS root values
+
+            # Pure MSE loss on MCTS value targets
             value_loss = F.mse_loss(pred_values, target_values)
+
+            # Track variance for monitoring (not used in loss)
+            batch_variance = torch.var(pred_values)
+
+            # Log variance for diagnostics (occasional logging)
+            if not hasattr(self, '_batch_counter'):
+                self._batch_counter = 0
+            self._batch_counter += 1
+            if self._batch_counter % 10 == 0:
+                self.logger.debug(f"Batch {self._batch_counter}: Value variance={batch_variance:.4f}, "
+                                f"MSE={value_loss:.4f}")
 
             # OLD HYBRID LOSS (removed for Phase 1.5):
             # - Combined MSE (regression) + BCE (classification)
@@ -540,6 +560,10 @@ class YinshTrainer:
                 value_loss = value_loss + (self.l2_reg * 2) * l2_loss
 
             value_loss_val = float(value_loss.item())
+
+            # Store variance for epoch-level tracking
+            self.last_value_variance = float(batch_variance.item())
+
             value_loss.backward()
 
             # Clip value head gradients
@@ -692,6 +716,7 @@ class YinshTrainer:
         # Keep track of value head metrics for this epoch
         value_confidences = []
         value_sign_matches = []
+        value_variances = []  # Track variance to monitor collapse
 
         for batch in range(batches_per_epoch):
             phase_weights = {
@@ -707,6 +732,10 @@ class YinshTrainer:
             # Track value head metrics
             value_confidences.append(self._get_current_value_confidence())
             value_sign_matches.append(v_acc)
+
+            # Track variance (from last train_step)
+            if hasattr(self, 'last_value_variance'):
+                value_variances.append(self.last_value_variance)
 
             self.logger.debug(f"Batch {batch} losses - Policy: {p_loss:.4f}, Value: {v_loss:.4f}")
 
@@ -734,8 +763,9 @@ class YinshTrainer:
         for k in stats_accum['move_accuracies']:
             stats_accum['move_accuracies'][k] /= batches_per_epoch
 
-        # Add average value confidence
+        # Add average value confidence and variance
         stats_accum['value_confidence'] = np.mean(value_confidences) if value_confidences else 0.0
+        stats_accum['value_variance'] = np.mean(value_variances) if value_variances else 0.0
 
         # CRITICAL FIX: Track losses for supervisor reporting
         # The supervisor reads from these lists to report training progress
@@ -786,7 +816,7 @@ class YinshTrainer:
             f"\n{'=' * 20} Epoch Summary {'=' * 20}\n"
             f"Policy: loss={metrics.policy_loss:.4f}, lr={metrics.learning_rates['policy']:.2e}\n"
             f"Value:  loss={metrics.value_loss:.4f}, acc={metrics.value_accuracy:.2%}, "
-            f"conf={stats_accum['value_confidence']:.3f}, "  # Added confidence reporting
+            f"conf={stats_accum['value_confidence']:.3f}, var={stats_accum['value_variance']:.4f}, "  # Added variance
             f"lr={metrics.learning_rates['value']:.2e}\n"
             f"Moves:  acc={metrics.move_accuracies['top_1_accuracy']:.2%}, "
             f"top3={metrics.move_accuracies['top_3_accuracy']:.2%}\n"
@@ -842,31 +872,26 @@ class YinshTrainer:
                 value.item()
             )
 
-    def add_game_experience(self, states: list, policies: list, outcome, discount_factor: float = 1.0):
+    def add_game_experience(self, states: list, policies: list, values: list,
+                            final_white_score: int = None, final_black_score: int = None):
         """
         Delegating method for backward compatibility.
 
-        **IMPORTANT:** Outcome must be provided as a tuple of final scores,
-        e.g. (final_white_score, final_black_score) such as (3,1) or (3,2),
-        so that the normalized margin is computed correctly.
+        Fix #1: Updated to accept MCTS root values instead of game outcome.
 
         Args:
             states:   List of game state numpy arrays.
             policies: List of move probability distributions.
-            outcome:  Either an integer (1 for white win, -1 for black win, 0 for draw)
-                      or a tuple (final_white_score, final_black_score).
-            discount_factor: Discount factor applied per move (default 1.0, meaning no discount).
+            values:   List of MCTS root values (position-specific training targets).
+            final_white_score: (Optional) White's final score - only used for logging.
+            final_black_score: (Optional) Black's final score - only used for logging.
         """
-        if not (isinstance(outcome, (list, tuple)) and len(outcome) == 2):
-            raise ValueError("Outcome must be a tuple of final scores, e.g. (3,1) or (3,2)")
-
-        final_white_score, final_black_score = outcome
         self.experience.add_game_experience(
             states,
             policies,
+            values,
             final_white_score,
-            final_black_score,
-            discount_factor
+            final_black_score
         )
 
     def _calculate_accuracies(self,
