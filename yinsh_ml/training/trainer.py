@@ -522,30 +522,57 @@ class YinshTrainer:
             # Recompute (because we did backward above)
             _, pred_values = self.network.network(states)
 
-            # Option 1: Re-add variance penalty with higher weight (1.5)
-            # Bootstrap test showed: pure MSE minimizes variance regardless of target quality
-            # Only Test 2 (penalty 0.5) showed improvement (discrimination 0.059)
-            # Testing higher penalty to reach 0.08-0.10 discrimination target
+            # Classification-based value head (AlphaZero approach)
+            # Uses cross-entropy loss on discrete outcome distribution
+            # This naturally encourages confident predictions and avoids MSE's variance minimization bias
 
-            # MSE loss on MCTS value targets
-            value_loss_mse = F.mse_loss(pred_values, target_values)
+            if hasattr(self.network.network, 'value_mode') and self.network.network.value_mode == 'classification':
+                # Get the logits that were stored during forward pass
+                if hasattr(self.network.network, '_value_logits'):
+                    value_logits = self.network.network._value_logits
 
-            # Variance penalty to counteract MSE's variance minimization
-            batch_variance = torch.var(pred_values)
-            variance_weight = 1.5  # Increased from 0.5 based on bootstrap failure analysis
-            variance_penalty = variance_weight * torch.exp(-batch_variance * 10)
+                    # Convert continuous target values to discrete class labels
+                    # Map target ∈ [-1, 1] to class ∈ {0, 1, 2, 3, 4, 5, 6}
+                    # For 7 classes representing: {-3, -2, -1, 0, +1, +2, +3} score differences
+                    target_normalized = (target_values + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
+                    target_class = torch.round(target_normalized).long().clamp(0, self.network.network.num_value_classes - 1)
 
-            # Combined loss
-            value_loss = value_loss_mse + variance_penalty
+                    # Cross-entropy loss encourages confident predictions
+                    value_loss = F.cross_entropy(value_logits, target_class)
 
-            # Log for diagnostics (occasional logging)
-            if not hasattr(self, '_batch_counter'):
-                self._batch_counter = 0
-            self._batch_counter += 1
-            if self._batch_counter % 10 == 0:
-                self.logger.debug(f"Batch {self._batch_counter}: Value variance={batch_variance:.4f}, "
-                                f"MSE={value_loss_mse:.4f}, Penalty={variance_penalty:.4f}, "
-                                f"Total={value_loss:.4f}")
+                    # Track metrics for monitoring
+                    batch_variance = torch.var(pred_values)
+                    with torch.no_grad():
+                        # Compute prediction accuracy for classification
+                        pred_class = torch.argmax(value_logits, dim=-1)
+                        value_accuracy = (pred_class == target_class).float().mean()
+
+                    # Log for diagnostics
+                    if not hasattr(self, '_batch_counter'):
+                        self._batch_counter = 0
+                    self._batch_counter += 1
+                    if self._batch_counter % 10 == 0:
+                        self.logger.debug(f"Batch {self._batch_counter}: Value variance={batch_variance:.4f}, "
+                                        f"CrossEntropy={value_loss:.4f}, Accuracy={value_accuracy:.3f}")
+                else:
+                    # Fallback if logits not available
+                    raise RuntimeError("Classification mode requires logits but none were found")
+
+            else:
+                # Legacy regression mode with MSE + variance penalty (kept for backward compatibility)
+                value_loss_mse = F.mse_loss(pred_values, target_values)
+                batch_variance = torch.var(pred_values)
+                variance_weight = 1.5
+                variance_penalty = variance_weight * torch.exp(-batch_variance * 10)
+                value_loss = value_loss_mse + variance_penalty
+
+                if not hasattr(self, '_batch_counter'):
+                    self._batch_counter = 0
+                self._batch_counter += 1
+                if self._batch_counter % 10 == 0:
+                    self.logger.debug(f"Batch {self._batch_counter}: Value variance={batch_variance:.4f}, "
+                                    f"MSE={value_loss_mse:.4f}, Penalty={variance_penalty:.4f}, "
+                                    f"Total={value_loss:.4f}")
 
             # OLD HYBRID LOSS (removed for Phase 1.5):
             # - Combined MSE (regression) + BCE (classification)
@@ -590,9 +617,22 @@ class YinshTrainer:
 
         # Metrics / logging
         with torch.no_grad():
-            pred_outcomes = (pred_values > 0).float()
-            true_outcomes = (target_values > 0).float()
-            value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
+            # Value accuracy computation depends on mode
+            if hasattr(self.network.network, 'value_mode') and self.network.network.value_mode == 'classification':
+                # For classification mode: use the accuracy already computed above
+                if hasattr(self.network.network, '_value_logits'):
+                    value_logits = self.network.network._value_logits
+                    target_normalized = (target_values + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
+                    target_class = torch.round(target_normalized).long().clamp(0, self.network.network.num_value_classes - 1)
+                    pred_class = torch.argmax(value_logits, dim=-1)
+                    value_accuracy = (pred_class == target_class).float().mean().item()
+                else:
+                    value_accuracy = 0.0
+            else:
+                # For regression mode: binary accuracy (sign prediction)
+                pred_outcomes = (pred_values > 0).float()
+                true_outcomes = (target_values > 0).float()
+                value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
 
             pred_moves = torch.argmax(pred_logits, dim=1)
             true_moves = torch.argmax(target_probs, dim=1)

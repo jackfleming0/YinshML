@@ -23,8 +23,9 @@ logging.getLogger('NetworkWrapper').setLevel(logging.DEBUG)
 class NetworkWrapper:
     """Wrapper class for the YINSH neural network model."""
 
-    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None, 
-                 tensor_pool: Optional[TensorPool] = None):
+    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None,
+                 tensor_pool: Optional[TensorPool] = None,
+                 value_mode: str = 'classification', num_value_classes: int = 7):
         """
         Initialize the network wrapper.
 
@@ -32,6 +33,8 @@ class NetworkWrapper:
             model_path: Optional path to load a pre-trained model
             device: Device to use ('cuda', 'mps', or 'cpu')
             tensor_pool: Optional TensorPool for memory management
+            value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
+            num_value_classes: Number of discrete outcome classes for classification mode
         """
         if device:
             self.device = torch.device(device)
@@ -41,7 +44,12 @@ class NetworkWrapper:
                     "mps" if torch.backends.mps.is_available() else "cpu"
                 )
             )
-        self.network = YinshNetwork(num_channels=256, num_blocks=12).to(self.device)
+        self.network = YinshNetwork(
+            num_channels=256,
+            num_blocks=12,
+            value_mode=value_mode,
+            num_value_classes=num_value_classes
+        ).to(self.device)
 
         # Setup logging
         self.logger = logging.getLogger("NetworkWrapper")
