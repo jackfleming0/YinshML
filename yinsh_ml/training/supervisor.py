@@ -119,6 +119,7 @@ class TrainingSupervisor:
         trainer_l2_reg = self.mode_settings.get('l2_reg', 0.0)
         value_head_lr_factor = self.mode_settings.get('value_head_lr_factor', 5.0)
         value_loss_weights = self.mode_settings.get('value_loss_weights', (0.5, 0.5))
+        discrimination_weight = self.mode_settings.get('discrimination_weight', 0.5)
         base_lr = self.mode_settings.get('lr', 0.001)
         lr_schedule = self.mode_settings.get('lr_schedule', 'constant')
         warmup_steps = self.mode_settings.get('warmup_steps', 0)
@@ -178,6 +179,7 @@ class TrainingSupervisor:
             l2_reg=trainer_l2_reg, # Pass L2 reg from config
             value_head_lr_factor=value_head_lr_factor, # Pass factor from config
             value_loss_weights=value_loss_weights, # Pass weights from config
+            discrimination_weight=discrimination_weight, # Pass discrimination weight from config
             replay_buffer_path=str(replay_buffer_file), # Pass path for persistence
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,

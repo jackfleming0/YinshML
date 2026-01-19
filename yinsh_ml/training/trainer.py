@@ -308,7 +308,8 @@ class YinshTrainer:
                  value_head_lr_factor: float = 5.0,
                  value_loss_weights: Tuple[float, float] = (0.5, 0.5),
                  replay_buffer_path: Optional[str] = None,
-                 max_buffer_size: int = 10000,):
+                 max_buffer_size: int = 10000,
+                 discrimination_weight: float = 0.5):
         """
         Initialize the trainer.
 
@@ -322,6 +323,7 @@ class YinshTrainer:
             value_loss_weights: Weights for combining MSE and CE loss in value head
             replay_buffer_path: Path to save/load replay buffer
             max_buffer_size: Maximum number of samples in replay buffer (default 10000 = ~100 games)
+            discrimination_weight: Weight for discrimination loss term (encourages value spread)
         """
         self.state_encoder = network.state_encoder
         self.batch_size = batch_size
@@ -341,6 +343,7 @@ class YinshTrainer:
 
         self.value_loss_weights = value_loss_weights
         self.value_head_lr_factor = value_head_lr_factor
+        self.discrimination_weight = discrimination_weight
 
         # Separate out parameters for policy vs. value heads
         value_params = [p for n, p in self.network.network.named_parameters()
@@ -540,10 +543,21 @@ class YinshTrainer:
                     target_class = torch.round(target_normalized).long().clamp(0, self.network.network.num_value_classes - 1)
 
                     # Cross-entropy loss encourages confident predictions
-                    value_loss = F.cross_entropy(value_logits, target_class)
+                    ce_loss = F.cross_entropy(value_logits, target_class)
 
                     # Track metrics for monitoring
                     batch_variance = torch.var(pred_values)
+
+                    # DISCRIMINATION LOSS: Explicitly encourage value spread
+                    # Problem: Multi-iteration training causes discrimination collapse
+                    # Solution: Add auxiliary loss term that rewards high variance
+                    # We want to MAXIMIZE variance, so we SUBTRACT it from loss (minimize -variance)
+                    discrimination_weight = getattr(self, 'discrimination_weight', 0.5)
+                    discrimination_loss = -discrimination_weight * batch_variance
+
+                    # Total value loss = classification accuracy + discrimination incentive
+                    value_loss = ce_loss + discrimination_loss
+
                     with torch.no_grad():
                         # Compute prediction accuracy for classification
                         pred_class = torch.argmax(value_logits, dim=-1)
@@ -555,7 +569,8 @@ class YinshTrainer:
                     self._batch_counter += 1
                     if self._batch_counter % 10 == 0:
                         self.logger.debug(f"Batch {self._batch_counter}: Value variance={batch_variance:.4f}, "
-                                        f"CrossEntropy={value_loss:.4f}, Accuracy={value_accuracy:.3f}")
+                                        f"CE={ce_loss:.4f}, Disc={discrimination_loss:.4f}, "
+                                        f"Total={value_loss:.4f}, Accuracy={value_accuracy:.3f}")
                 else:
                     # Fallback if logits not available
                     raise RuntimeError("Classification mode requires logits but none were found")
