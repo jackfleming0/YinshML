@@ -548,14 +548,24 @@ class YinshTrainer:
                     # Track metrics for monitoring
                     batch_variance = torch.var(pred_values)
 
-                    # DISCRIMINATION LOSS: Explicitly encourage value spread
-                    # Problem: Multi-iteration training causes discrimination collapse
-                    # Solution: Add auxiliary loss term that rewards high variance
-                    # We want to MAXIMIZE variance, so we SUBTRACT it from loss (minimize -variance)
+                    # FIXED DISCRIMINATION LOSS: Encourage confident (high absolute value) predictions
+                    # Previous bug: Used batch variance (variance across positions)
+                    # Fixed approach: Encourage high |value| predictions (confidence)
+                    # Logic: Confident predictions (far from 0) naturally discriminate:
+                    #   - Good moves → high positive values
+                    #   - Bad moves → high negative values
+                    #   - Uncertain/equal moves → near zero
+                    # Loss: Penalize predictions close to zero (low confidence)
                     discrimination_weight = getattr(self, 'discrimination_weight', 0.5)
-                    discrimination_loss = -discrimination_weight * batch_variance
 
-                    # Total value loss = classification accuracy + discrimination incentive
+                    # Compute mean absolute value (measure of confidence)
+                    mean_abs_value = torch.mean(torch.abs(pred_values))
+
+                    # Loss: Maximize confidence (minimize its negative)
+                    # We want high |values|, so minimize -mean_abs_value
+                    discrimination_loss = -discrimination_weight * mean_abs_value
+
+                    # Total value loss = classification accuracy + confidence incentive
                     value_loss = ce_loss + discrimination_loss
 
                     with torch.no_grad():
@@ -568,7 +578,7 @@ class YinshTrainer:
                         self._batch_counter = 0
                     self._batch_counter += 1
                     if self._batch_counter % 10 == 0:
-                        self.logger.debug(f"Batch {self._batch_counter}: Value variance={batch_variance:.4f}, "
+                        self.logger.debug(f"Batch {self._batch_counter}: Confidence={mean_abs_value:.4f}, "
                                         f"CE={ce_loss:.4f}, Disc={discrimination_loss:.4f}, "
                                         f"Total={value_loss:.4f}, Accuracy={value_accuracy:.3f}")
                 else:
