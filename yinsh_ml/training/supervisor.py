@@ -818,7 +818,7 @@ class TrainingSupervisor:
 
             # CRITICAL FIX: Save replay buffer snapshot when model is promoted
             # This allows reverting to clean buffer state if future models are rejected
-            buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl"
+            buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl.gz"
             buffer_size_before = self.trainer.experience.size()
             try:
                 self.trainer.experience.save_buffer(str(buffer_snapshot_path))
@@ -855,7 +855,7 @@ class TrainingSupervisor:
 
                     # CRITICAL FIX: Also revert replay buffer to match reverted network
                     # This prevents training on contaminated data from rejected models
-                    buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl"
+                    buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl.gz"
                     buffer_size_before = self.trainer.experience.size()
 
                     if buffer_snapshot_path.exists():
