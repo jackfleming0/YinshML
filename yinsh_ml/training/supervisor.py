@@ -569,6 +569,8 @@ class TrainingSupervisor:
                 pass
 
         # MEMORY-OPTIMIZATION: Free up games data now that it's been processed
+        # Save count before freeing
+        num_games_generated = len(games) if games else num_games
         games = None
         # Memory pools handle cleanup automatically
 
@@ -984,7 +986,7 @@ class TrainingSupervisor:
         self.logger.info(f"ITERATION {current_iteration} SUMMARY")
         self.logger.info("="*80)
         self.logger.info(f"│ SELF-PLAY")
-        self.logger.info(f"│   Games: {len(games) if 'games' in locals() else num_games}, "
+        self.logger.info(f"│   Games: {num_games_generated}, "
                          f"Time: {game_time:.1f}s, Avg Length: {avg_game_len:.1f} moves")
         self.logger.info(f"│   Pseudo W/B/D: {pseudo_wins_white}/{pseudo_wins_black}/{pseudo_draws}")
         self.logger.info(f"│")
