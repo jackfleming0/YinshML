@@ -120,6 +120,7 @@ class TrainingSupervisor:
         value_head_lr_factor = self.mode_settings.get('value_head_lr_factor', 5.0)
         value_loss_weights = self.mode_settings.get('value_loss_weights', (0.5, 0.5))
         discrimination_weight = self.mode_settings.get('discrimination_weight', 0.5)
+        max_buffer_size = self.mode_settings.get('max_buffer_size', 10000)  # Default 10K for backward compatibility
         base_lr = self.mode_settings.get('lr', 0.001)
         lr_schedule = self.mode_settings.get('lr_schedule', 'constant')
         warmup_steps = self.mode_settings.get('warmup_steps', 0)
@@ -180,6 +181,7 @@ class TrainingSupervisor:
             value_head_lr_factor=value_head_lr_factor, # Pass factor from config
             value_loss_weights=value_loss_weights, # Pass weights from config
             discrimination_weight=discrimination_weight, # Pass discrimination weight from config
+            max_buffer_size=max_buffer_size, # Pass buffer size from config
             replay_buffer_path=str(replay_buffer_file), # Pass path for persistence
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,
@@ -187,6 +189,10 @@ class TrainingSupervisor:
             # warmup_steps = warmup_steps
             # metrics_logger=self.metrics_logger, # If using a shared logger instance
         )
+
+        self.logger.info(f"Trainer initialized with buffer size: {max_buffer_size:,} samples "
+                         f"({max_buffer_size/1000:.0f}K, ~{max_buffer_size/100:.0f} games at 100 moves each)")
+
         # --- Configure Trainer Optimizers/Schedulers based on mode_settings ---
         # This assumes YinshTrainer exposes methods or attributes to configure these
         # If Trainer creates optimizers in __init__, we need to pass parameters there.
@@ -576,6 +582,19 @@ class TrainingSupervisor:
         # MEMORY-OPTIMIZATION: Calculate optimal batch count
         buffer_size = self.trainer.experience.size()
 
+        # DEBUG: Log buffer health before training
+        max_buffer = self.trainer.experience.max_size
+        buffer_utilization = (buffer_size / max_buffer) * 100
+        self.logger.info(f"📊 Buffer Health: {buffer_size:,}/{max_buffer:,} samples ({buffer_utilization:.1f}% full)")
+        if buffer_utilization >= 95:
+            self.logger.warning(f"⚠️ Buffer near capacity! Oldest data will be discarded. Consider increasing max_buffer_size.")
+
+        # Estimate how many games worth of data
+        avg_game_length = buffer_size / max(1, current_iteration + 1) / num_games if current_iteration >= 0 else 100
+        estimated_games = buffer_size / max(50, avg_game_length)
+        self.logger.info(f"📊 Buffer contains ~{estimated_games:.0f} games of experience "
+                         f"(avg {avg_game_length:.0f} moves/game)")
+
         for epoch in range(epochs):
             self.logger.info(f"Starting Epoch {epoch + 1}/{epochs}")
 
@@ -795,6 +814,16 @@ class TrainingSupervisor:
                 self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
             self._save_best_model_state()
 
+            # CRITICAL FIX: Save replay buffer snapshot when model is promoted
+            # This allows reverting to clean buffer state if future models are rejected
+            buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl"
+            buffer_size_before = self.trainer.experience.size()
+            try:
+                self.trainer.experience.save_buffer(str(buffer_snapshot_path))
+                self.logger.info(f"📸 Saved replay buffer snapshot: {buffer_size_before:,} samples → {buffer_snapshot_path.name}")
+            except Exception as e:
+                self.logger.error(f"Failed to save buffer snapshot: {e}", exc_info=True)
+
             # --- Log model promotion to experiment tracker ---
             if self.experiment_tracker and self.experiment_id:
                 try:
@@ -821,6 +850,26 @@ class TrainingSupervisor:
                 try:
                     self.network.load_model(str(self.best_model_path))
                     reverted = True
+
+                    # CRITICAL FIX: Also revert replay buffer to match reverted network
+                    # This prevents training on contaminated data from rejected models
+                    buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl"
+                    buffer_size_before = self.trainer.experience.size()
+
+                    if buffer_snapshot_path.exists():
+                        try:
+                            self.trainer.experience.load_buffer(str(buffer_snapshot_path))
+                            buffer_size_after = self.trainer.experience.size()
+                            self.logger.info(
+                                f"🔄 Reverted replay buffer: {buffer_size_before:,} → {buffer_size_after:,} samples "
+                                f"(removed {buffer_size_before - buffer_size_after:,} contaminated samples from rejected model)")
+                        except Exception as e:
+                            self.logger.error(f"Failed to restore buffer snapshot: {e}. Buffer may contain contaminated data!", exc_info=True)
+                    else:
+                        self.logger.warning(
+                            f"⚠️ No buffer snapshot found at {buffer_snapshot_path}. "
+                            f"Cannot revert buffer - it may contain {buffer_size_before:,} samples including data from rejected model!")
+
                 except Exception as e:
                     self.logger.error(
                         f"Failed to revert weights from {self.best_model_path}: {e}. Network weights remain as rejected candidate.",
@@ -929,7 +978,37 @@ class TrainingSupervisor:
         self.prune_old_experiences()  # Add this line here
 
         # ------------------------------------------------------------------ #
-        # 7. RETURN SUMMARY
+        # 7. DEBUG: Print comprehensive iteration summary
+        # ------------------------------------------------------------------ #
+        self.logger.info("\n" + "="*80)
+        self.logger.info(f"ITERATION {current_iteration} SUMMARY")
+        self.logger.info("="*80)
+        self.logger.info(f"│ SELF-PLAY")
+        self.logger.info(f"│   Games: {len(games) if 'games' in locals() else num_games}, "
+                         f"Time: {game_time:.1f}s, Avg Length: {avg_game_len:.1f} moves")
+        self.logger.info(f"│   Pseudo W/B/D: {pseudo_wins_white}/{pseudo_wins_black}/{pseudo_draws}")
+        self.logger.info(f"│")
+        self.logger.info(f"│ TRAINING")
+        self.logger.info(f"│   Epochs: {epochs}, Time: {train_time:.1f}s")
+        self.logger.info(f"│   Final Losses: Policy={final_pol_loss:.4f}, Value={final_val_loss:.4f}")
+        self.logger.info(f"│   Buffer: {buffer_size:,}/{max_buffer:,} samples ({buffer_utilization:.1f}% full)")
+        self.logger.info(f"│")
+        self.logger.info(f"│ TOURNAMENT")
+        self.logger.info(f"│   Candidate ELO: {current_elo:.1f}, Win Rate: {tourn_win_rate:.1%}")
+        self.logger.info(f"│   Best Model: Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
+        self.logger.info(f"│   Decision: {'PROMOTED ✅' if promote else 'REJECTED ❌' if not kept_current_best else 'KEPT (already best)'}")
+        if reverted:
+            self.logger.info(f"│   Reverted: Network + Buffer → Iter {self.best_model_iteration}")
+        self.logger.info(f"│   Active Network: Iteration {active_iter}")
+        self.logger.info(f"│")
+        self.logger.info(f"│ TIMING")
+        self.logger.info(f"│   Total: {total_iteration_time:.1f}s ({total_iteration_time/60:.1f}m)")
+        self.logger.info(f"│   Breakdown: SelfPlay={game_time:.0f}s, Train={train_time:.0f}s, "
+                         f"Tournament={tournament_time if 'tournament_time' in locals() else 0:.0f}s")
+        self.logger.info("="*80 + "\n")
+
+        # ------------------------------------------------------------------ #
+        # 8. RETURN SUMMARY
         # ------------------------------------------------------------------ #
         return {
             'iteration': current_iteration,

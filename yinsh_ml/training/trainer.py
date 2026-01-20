@@ -379,30 +379,24 @@ class YinshTrainer:
             else:
                 print(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
 
-        # Schedulers
-        # self.policy_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        #     self.policy_optimizer,
-        #     T_max=1000,
-        #     eta_min=1e-5
-        # )
-
-        self.policy_scheduler = torch.optim.lr_scheduler.CyclicLR(
+        # Schedulers: Simple StepLR to avoid LR instability
+        # Previous CyclicLR caused dramatic LR drops (1e-3 → 1e-5) causing training instability
+        # StepLR provides gentle, predictable decay
+        self.policy_scheduler = optim.lr_scheduler.StepLR(
             self.policy_optimizer,
-            base_lr=1e-5,
-            max_lr=1e-4,
-            step_size_up=500,
-            mode='triangular2',
-            cycle_momentum=False  # if using Adam, usually no momentum cycling is needed
+            step_size=10,  # Decay every 10 epochs
+            gamma=0.9  # Multiply LR by 0.9
         )
 
-        self.value_scheduler = optim.lr_scheduler.CyclicLR(
+        self.value_scheduler = optim.lr_scheduler.StepLR(
             self.value_optimizer,
-            base_lr=1e-5,
-            max_lr=1e-4,
-            step_size_up=500,
-            mode='triangular2',
-            cycle_momentum=True
+            step_size=10,
+            gamma=0.9
         )
+
+        self.logger.info(f"Schedulers: StepLR (step_size=10, gamma=0.9)")
+        self.logger.info(f"Initial LRs: Policy={self.policy_optimizer.param_groups[0]['lr']:.2e}, "
+                         f"Value={self.value_optimizer.param_groups[0]['lr']:.2e}")
 
         self.l2_reg = l2_reg
         # Logger already initialized earlier for use during __init__
