@@ -944,11 +944,13 @@ class TrainingSupervisor:
         )
         self._save_metrics(iteration_dir)
 
+        # Calculate total iteration time for logging and metrics
+        total_iteration_time = time.time() - t0  # Total time from start of iteration
+
         # --- Log final iteration summary metrics to experiment tracker ---
         if self.experiment_tracker and self.experiment_id:
             try:
                 iteration = current_iteration + 1  # 1-based iteration numbering
-                total_iteration_time = time.time() - t0  # Total time from start of iteration
                 self._log_metric_safe('iteration_time', total_iteration_time, iteration)
                 self._log_metric_safe('avg_game_length', avg_game_len, iteration)
                 self._log_metric_safe('avg_ring_mobility', avg_ring_mobility, iteration)
@@ -1005,8 +1007,9 @@ class TrainingSupervisor:
         self.logger.info(f"│")
         self.logger.info(f"│ TIMING")
         self.logger.info(f"│   Total: {total_iteration_time:.1f}s ({total_iteration_time/60:.1f}m)")
+        other_time = total_iteration_time - game_time - train_time
         self.logger.info(f"│   Breakdown: SelfPlay={game_time:.0f}s, Train={train_time:.0f}s, "
-                         f"Tournament={tournament_time if 'tournament_time' in locals() else 0:.0f}s")
+                         f"Other={other_time:.0f}s (tournament, eval, etc.)")
         self.logger.info("="*80 + "\n")
 
         # ------------------------------------------------------------------ #
