@@ -290,26 +290,60 @@ class TrainingSupervisor:
         self.logger.info(f"  Workers: {num_workers}")
 
     def _clear_memory_cache(self, phase_name: str = ""):
-        """Clear PyTorch memory caches to free up memory.
+        """Clear PyTorch memory caches to free up memory with aggressive tensor cleanup.
 
         Args:
             phase_name: Name of the phase for logging (e.g., "self-play", "training", "tournament")
         """
         import gc
 
-        # Run garbage collection
-        gc.collect()
+        # Log memory before cleanup
+        try:
+            process = psutil.Process()
+            memory_before = process.memory_info().rss / (1024 * 1024)
+            tensor_count_before = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+        except:
+            memory_before = 0
+            tensor_count_before = 0
+
+        # CRITICAL: Clear gradients first to release tensor references
+        try:
+            if hasattr(self.network, 'network'):
+                self.network.network.zero_grad(set_to_none=True)
+        except Exception as e:
+            pass
+
+        # Run garbage collection multiple times for thorough cleanup
+        for _ in range(3):
+            gc.collect()
 
         # Clear PyTorch caches based on device
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
         elif torch.backends.mps.is_available():
-            # MPS doesn't have empty_cache, but synchronize helps
+            # CRITICAL FIX: MPS does have empty_cache in PyTorch 2.0+
+            try:
+                torch.mps.empty_cache()
+            except AttributeError:
+                pass  # Fallback for older PyTorch versions
             torch.mps.synchronize()
 
-        if phase_name:
-            self.logger.info(f"Memory cache cleared after {phase_name}")
+        # Final garbage collection after cache clear
+        gc.collect()
+
+        # Log memory after cleanup
+        try:
+            if memory_before > 0:
+                memory_after = process.memory_info().rss / (1024 * 1024)
+                memory_freed = memory_before - memory_after
+                tensor_count_after = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+                tensors_freed = tensor_count_before - tensor_count_after
+                if phase_name:
+                    self.logger.info(f"Cache cleared after {phase_name}: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
+        except:
+            if phase_name:
+                self.logger.info(f"Memory cache cleared after {phase_name}")
 
     def cleanup_memory_pools(self):
         """Clean up memory pools and release all resources."""
@@ -386,6 +420,31 @@ class TrainingSupervisor:
         current_iteration = self._iteration_counter
         self.logger.info(f"\n{'=' * 15} Starting Iteration {current_iteration} {'=' * 15}")
 
+        # Detailed memory diagnostics at iteration start
+        try:
+            import gc
+            self.logger.info(f"Memory Diagnostics at Iteration {current_iteration} Start:")
+            self.logger.info(f"  Process Memory: {initial_memory_mb:.1f} MB")
+            self.logger.info(f"  Python Objects: {len(gc.get_objects())} objects tracked")
+
+            # Log PyTorch tensor count and memory
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / (1024 * 1024)
+                cached = torch.cuda.memory_reserved() / (1024 * 1024)
+                self.logger.info(f"  CUDA Memory: {allocated:.1f} MB allocated, {cached:.1f} MB cached")
+            elif torch.backends.mps.is_available():
+                # MPS doesn't have detailed memory stats, but we can count tensors
+                tensor_count = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+                self.logger.info(f"  MPS Tensors: {tensor_count} tensors in memory")
+
+            # Log buffer size
+            if hasattr(self.trainer, 'experience'):
+                buffer_size = self.trainer.experience.size()
+                max_buffer = self.trainer.experience.max_size
+                self.logger.info(f"  Replay Buffer: {buffer_size:,}/{max_buffer:,} samples ({100*buffer_size/max_buffer:.1f}% full)")
+        except Exception as e:
+            self.logger.warning(f"Failed to collect memory diagnostics: {e}")
+
         # Iteration-specific directory within the main save_dir
         iteration_dir = self.save_dir / f"iteration_{current_iteration}"
         iteration_dir.mkdir(exist_ok=True, parents=True)
@@ -410,7 +469,8 @@ class TrainingSupervisor:
         t0 = time.time()
 
         # MEMORY-OPTIMIZATION: Process games in batches to reduce peak memory usage
-        batch_size = min(25, num_games)  # Generate in smaller batches
+        # Smaller batches = workers restart more frequently = less tensor accumulation
+        batch_size = min(10, num_games)  # Smaller batches (10 instead of 25) to reduce worker memory
         games = []
 
         for batch_start in range(0, num_games, batch_size):
@@ -446,6 +506,7 @@ class TrainingSupervisor:
         self.logger.info(f"Generated {len(games)} games in {game_time:.1f}s")
 
         # Clear memory after self-play to prevent accumulation
+        # Note: Worker recreation moved to end-of-iteration cleanup for stability
         self._clear_memory_cache("self-play")
 
         # --- Basic game stats ---
@@ -659,6 +720,9 @@ class TrainingSupervisor:
         self.logger.info(
             f"Training done in {train_time:.1f}s (Avg Policy Loss={final_pol_loss:.4f}, Avg Value Loss={final_val_loss:.4f})")
 
+        # MEMORY FIX: Clear trainer's accumulated state
+        self.trainer.clear_training_state()
+
         # Clear memory after training to prevent accumulation
         self._clear_memory_cache("training")
 
@@ -743,6 +807,14 @@ class TrainingSupervisor:
             tournament_stats = {}
 
         # Clear memory after tournament to prevent accumulation
+        # CRITICAL: Tournament workers also accumulate tensors - clear them
+        try:
+            # Force close any worker pools in tournament manager
+            if hasattr(self.tournament_manager, '_close_workers'):
+                self.tournament_manager._close_workers()
+        except Exception as e:
+            self.logger.warning(f"Error closing tournament workers: {e}")
+
         self._clear_memory_cache("tournament")
 
         # ------------------------------------------------------------------ #
@@ -971,15 +1043,63 @@ class TrainingSupervisor:
         # --- Advance counter for the next iteration ---
         self._iteration_counter += 1
 
+        # ------------------------------------------------------------------ #
+        # COMPREHENSIVE MEMORY CLEANUP (End of Iteration)
+        # ------------------------------------------------------------------ #
+        self.logger.info("Running comprehensive memory cleanup...")
+
+        # Log memory before cleanup
+        try:
+            process = psutil.Process()
+            memory_before_cleanup = process.memory_info().rss / (1024 * 1024)
+            self.logger.info(f"Memory before cleanup: {memory_before_cleanup:.1f} MB")
+        except:
+            memory_before_cleanup = 0
+
+        # 1. Prune old experiences from buffer
         self.prune_old_experiences()
+
+        # 2. Clear PyTorch memory caches
         self.clear_pytorch_memory()
 
-        # Every 2-3 iterations, reset network objects completely
+        # 3. Clear memory pools if they exist
+        if hasattr(self, 'game_state_pool') and hasattr(self.game_state_pool, 'clear'):
+            try:
+                self.game_state_pool.clear()
+                self.logger.info("Cleared game state pool")
+            except Exception as e:
+                self.logger.warning(f"Failed to clear game state pool: {e}")
+
+        if hasattr(self, 'tensor_pool') and hasattr(self.tensor_pool, 'clear'):
+            try:
+                self.tensor_pool.clear()
+                self.logger.info("Cleared tensor pool")
+            except Exception as e:
+                self.logger.warning(f"Failed to clear tensor pool: {e}")
+
+        # 4. Reinitialize optimizers every iteration to clear momentum/Adam buffers
+        # These buffers hold tensors that accumulate over time
+        self._reinitialize_optimizers()
+
+        # 5. Worker memory management
+        # With MAX_WORKERS=1, worker tensor accumulation is minimized
+        # Additional cleanup not needed
+
+        # 6. Every 2-3 iterations, reset network objects completely to prevent leaks
         if self._iteration_counter % 3 == 0:
             self._reset_network_objects()
 
-        # MEMORY OPTIMIZATION: Prune old experiences to prevent memory growth
-        self.prune_old_experiences()  # Add this line here
+        # 7. Final comprehensive memory clear
+        self._clear_memory_cache("end-of-iteration")
+
+        # Log memory after cleanup
+        try:
+            if memory_before_cleanup > 0:
+                memory_after_cleanup = process.memory_info().rss / (1024 * 1024)
+                memory_freed_total = memory_before_cleanup - memory_after_cleanup
+                self.logger.info(f"Memory after cleanup: {memory_after_cleanup:.1f} MB (freed {memory_freed_total:.1f} MB total)")
+        except:
+            pass
 
         # ------------------------------------------------------------------ #
         # 7. DEBUG: Print comprehensive iteration summary
@@ -1050,22 +1170,120 @@ class TrainingSupervisor:
     # _calculate_ring_mobility_from_state (new helper), _wilson_lower_bound, _should_promote
 
     def clear_pytorch_memory(self):
-        """Clear PyTorch memory caches and force garbage collection."""
-        self.logger.info("Clearing PyTorch memory...")
+        """Clear PyTorch memory caches and force garbage collection with aggressive tensor cleanup."""
+        import gc
 
-        # Clear PyTorch's CUDA cache if using CUDA
+        self.logger.info("Clearing PyTorch memory and tensors...")
+
+        # Log memory and tensor count before cleanup
+        try:
+            process = psutil.Process()
+            memory_before = process.memory_info().rss / (1024 * 1024)
+            tensor_count_before = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+            self.logger.info(f"Before cleanup: {memory_before:.1f} MB, {tensor_count_before} tensors")
+        except:
+            memory_before = 0
+            tensor_count_before = 0
+
+        # CRITICAL: Zero out all gradients and clear optimizer state FIRST
+        # This releases tensor references that prevent empty_cache from working
+        try:
+            # Clear network gradients
+            if hasattr(self.network, 'network'):
+                self.network.network.zero_grad(set_to_none=True)
+
+            # Clear trainer optimizer state (momentum buffers, etc.)
+            if hasattr(self.trainer, 'policy_optimizer'):
+                self.trainer.policy_optimizer.zero_grad(set_to_none=True)
+                # Clear optimizer state dict to free momentum/adam buffers
+                self.trainer.policy_optimizer.state = {}
+
+            if hasattr(self.trainer, 'value_optimizer'):
+                self.trainer.value_optimizer.zero_grad(set_to_none=True)
+                self.trainer.value_optimizer.state = {}
+
+            self.logger.info("Cleared gradients and optimizer state")
+        except Exception as e:
+            self.logger.warning(f"Error clearing gradients/optimizer state: {e}")
+
+        # CRITICAL: Clear all tensor containers (del in loop doesn't work due to Python references)
+        try:
+            # Clear model's internal buffers and caches
+            if hasattr(self.network, 'network'):
+                # Clear buffers (running stats in BatchNorm, etc.)
+                for module in self.network.network.modules():
+                    if hasattr(module, '_buffers'):
+                        for key in list(module._buffers.keys()):
+                            buffer = module._buffers[key]
+                            if buffer is not None and torch.is_tensor(buffer):
+                                # Re-register as zeros to clear cached tensors
+                                module._buffers[key] = None
+
+            # Clear any cached forward/backward hooks
+            if hasattr(self.trainer, 'experience'):
+                # Clear the loss tracking lists which hold tensor references
+                self.trainer.policy_losses.clear()
+                self.trainer.value_losses.clear()
+
+            self.logger.info(f"Cleared model buffers and caches")
+        except Exception as e:
+            self.logger.warning(f"Error clearing tensor containers: {e}")
+
+        # Force garbage collection before empty_cache
+        for _ in range(3):
+            gc.collect()
+
+        # Clear PyTorch's cache based on device
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            # Clear MPS cache (PyTorch 2.0+)
+            try:
+                torch.mps.empty_cache()
+                self.logger.info("Cleared MPS cache")
+            except AttributeError:
+                pass  # Fallback for older PyTorch versions
+            torch.mps.synchronize()
 
-        # Move model to CPU temporarily to clear GPU memory
+        # Move model to CPU temporarily to clear GPU/MPS memory
         if hasattr(self.network, 'network') and hasattr(self.network.network, 'to'):
-            original_device = next(self.network.network.parameters()).device
-            if original_device.type != 'cpu':
-                self.network.network.to(torch.device('cpu'))
-                # Memory pools handle cleanup automatically
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                self.network.network.to(original_device)
+            try:
+                original_device = next(self.network.network.parameters()).device
+                if original_device.type != 'cpu':
+                    # Move to CPU
+                    self.network.network.to(torch.device('cpu'))
+
+                    # GC and clear cache while on CPU
+                    for _ in range(2):
+                        gc.collect()
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    elif torch.backends.mps.is_available():
+                        try:
+                            torch.mps.empty_cache()
+                        except AttributeError:
+                            pass
+
+                    # Move back to original device
+                    self.network.network.to(original_device)
+                    gc.collect()
+            except Exception as e:
+                self.logger.warning(f"Error during device transfer: {e}")
+
+        # Final aggressive garbage collection
+        for _ in range(3):
+            gc.collect()
+
+        # Final empty_cache call
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            try:
+                torch.mps.empty_cache()
+            except AttributeError:
+                pass
 
         # Try advanced memory release techniques
         try:
@@ -1078,7 +1296,65 @@ class TrainingSupervisor:
         except Exception as e:
             self.logger.warning(f"Error attempting advanced memory cleanup: {e}")
 
-        # Memory pools handle cleanup automatically
+        # Log memory and tensor count after cleanup
+        try:
+            if memory_before > 0:
+                memory_after = process.memory_info().rss / (1024 * 1024)
+                memory_freed = memory_before - memory_after
+                tensor_count_after = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+                tensors_freed = tensor_count_before - tensor_count_after
+                self.logger.info(f"After cleanup: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
+        except:
+            pass
+
+    def _reinitialize_optimizers(self):
+        """Reinitialize optimizers to clear all state (momentum, Adam buffers, etc.)"""
+        try:
+            self.logger.info("Reinitializing optimizers to clear state...")
+
+            # Get current learning rates before reinit
+            policy_lr = self.trainer.policy_optimizer.param_groups[0]['lr']
+            value_lr = self.trainer.value_optimizer.param_groups[0]['lr']
+
+            # Separate out parameters for policy vs. value heads
+            value_params = [p for n, p in self.trainer.network.network.named_parameters()
+                            if 'value_head' in n]
+            policy_params = [p for n, p in self.trainer.network.network.named_parameters()
+                             if 'value_head' not in n]
+
+            # Recreate optimizers with current learning rates
+            import torch.optim as optim
+
+            self.trainer.policy_optimizer = optim.Adam(
+                policy_params,
+                lr=policy_lr,
+                weight_decay=1e-4
+            )
+
+            self.trainer.value_optimizer = optim.SGD(
+                value_params,
+                lr=value_lr,
+                momentum=0.9,
+                weight_decay=1e-3
+            )
+
+            # Recreate schedulers
+            self.trainer.policy_scheduler = optim.lr_scheduler.StepLR(
+                self.trainer.policy_optimizer,
+                step_size=10,
+                gamma=0.9
+            )
+
+            self.trainer.value_scheduler = optim.lr_scheduler.StepLR(
+                self.trainer.value_optimizer,
+                step_size=10,
+                gamma=0.9
+            )
+
+            self.logger.info(f"Optimizers reinitialized (policy_lr={policy_lr:.6f}, value_lr={value_lr:.6f})")
+
+        except Exception as e:
+            self.logger.error(f"Error reinitializing optimizers: {e}")
 
     def _reset_network_objects(self):
         """Recreate network objects to eliminate memory leaks."""
@@ -1106,19 +1382,27 @@ class TrainingSupervisor:
                 self.trainer.network = self.network
 
                 os.unlink(temp_path)
+
+                # Also reinitialize optimizers after network recreation
+                self._reinitialize_optimizers()
+
         except Exception as e:
             self.logger.error(f"Error recreating network objects: {e}")
 
     def prune_old_experiences(self):
         """
         Trim experience buffer to maintain memory efficiency between iterations.
-        Add this method to your TrainingSupervisor class.
+        This prevents unbounded memory growth across iterations.
         """
         if hasattr(self.trainer, 'experience'):
             buffer_size = self.trainer.experience.size()
-            keep_size = 15000  # Target size to maintain
+            max_buffer = self.trainer.experience.max_size
 
-            if buffer_size > 20000:  # Only prune if significantly over target
+            # Only prune if buffer is at 90% capacity to prevent memory bloat
+            prune_threshold = int(max_buffer * 0.9)
+            keep_size = int(max_buffer * 0.75)  # Keep 75% of max capacity
+
+            if buffer_size > prune_threshold:  # Only prune if near capacity
                 # We need to add a prune method to the GameExperience class first
                 if not hasattr(self.trainer.experience, 'prune_oldest'):
                     # Add the prune method dynamically if it doesn't exist
@@ -1162,12 +1446,13 @@ class TrainingSupervisor:
     def _compute_num_workers(self) -> int:
         """Calculate optimal number of workers based on CPU cores.
 
-        MEMORY OPTIMIZATION: Limited to 3 workers maximum to prevent OOM.
-        Each worker process loads models and MCTS trees, multiplying memory usage.
-        With 7 workers, peak memory during tournament can exceed 24GB.
+        MEMORY OPTIMIZATION: Set to 0 workers (synchronous mode) to prevent zombie worker processes.
+        ProcessPoolExecutor workers never properly terminate and accumulate as zombies eating 1-2GB each.
+        Even with 1 worker, tensors still grew to 16K+ and workers became zombies.
+        Synchronous mode is slower but has clean, predictable memory management.
         """
-        # CRITICAL: Cap at 3 workers to prevent memory exhaustion
-        MAX_WORKERS = 3
+        # CRITICAL: Use 0 workers (synchronous mode) to prevent zombie processes
+        MAX_WORKERS = 0
 
         # Use platform detection for Apple Silicon
         if platform.system() == "Darwin" and platform.processor() == "arm":

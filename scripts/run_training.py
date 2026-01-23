@@ -94,6 +94,8 @@ def main() -> None:
         'value_head_lr_factor': float(trainer_cfg.get('value_head_lr_factor', 5.0)),
         'value_loss_weights': tuple(trainer_cfg.get('value_loss_weights', [0.5, 0.5])),
         'batches_per_epoch': trainer_cfg.get('batches_per_epoch', 'auto'),
+        'max_buffer_size': int(trainer_cfg.get('max_buffer_size', 10000)),
+        'discrimination_weight': float(trainer_cfg.get('discrimination_weight', 0.5)),
         # Arena / gating
         'promotion_threshold': float(arena_cfg.get('promotion_threshold', 0.55)),
     }

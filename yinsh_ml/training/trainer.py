@@ -227,17 +227,18 @@ class GameExperience:
                     data = pickle.load(f)
 
             # Restore buffer data
-            self.states = deque(data.get('states', []), maxlen=self.states.maxlen)
-            self.move_probs = deque(data.get('move_probs', []), maxlen=self.move_probs.maxlen)
-            self.values = deque(data.get('values', []), maxlen=self.values.maxlen)
+            # BUGFIX: Use self.max_size instead of self.states.maxlen to respect new buffer size config
+            self.states = deque(data.get('states', []), maxlen=self.max_size)
+            self.move_probs = deque(data.get('move_probs', []), maxlen=self.max_size)
+            self.values = deque(data.get('values', []), maxlen=self.max_size)
             loaded_phases = data.get('phases', None)
 
             # Handle phases if they exist
             if loaded_phases is None or len(loaded_phases) != len(self.states):
                 default_phase = "MAIN_GAME"
-                self.phases = deque([default_phase] * len(self.states), maxlen=self.states.maxlen)
+                self.phases = deque([default_phase] * len(self.states), maxlen=self.max_size)
             else:
-                self.phases = deque(loaded_phases, maxlen=self.states.maxlen)
+                self.phases = deque(loaded_phases, maxlen=self.max_size)
 
             print(f"[Replay Buffer] Loaded from {path}. Size: {self.size()}")
 
@@ -475,17 +476,20 @@ class YinshTrainer:
         )
         self._log_value_head_metrics(value_metrics)
 
-        # Additional logging per-sample if needed
-        for i in range(states.size(0)):
-            game_state = self.state_encoder.decode_state(states[i].cpu().numpy())
-            self.value_metrics.record_evaluation(
-                state=game_state,
-                value_pred=pred_values[i].detach().cpu().numpy(),
-                policy_probs=F.softmax(pred_logits[i], dim=-1).detach().cpu().numpy(),
-                chosen_move=None,
-                temperature=self.temperature,
-                actual_outcome=target_values[i].detach().cpu().numpy()
-            )
+        # MEMORY FIX: Disable per-sample evaluation logging to prevent tensor accumulation
+        # This loop processes 256 samples per batch × 34 batches × 4 epochs = ~35K evaluations
+        # Each evaluation holds tensor references that accumulate
+        # Comment out to prevent memory leak - can re-enable for detailed debugging if needed
+        # for i in range(states.size(0)):
+        #     game_state = self.state_encoder.decode_state(states[i].cpu().numpy())
+        #     self.value_metrics.record_evaluation(
+        #         state=game_state,
+        #         value_pred=pred_values[i].detach().cpu().numpy(),
+        #         policy_probs=F.softmax(pred_logits[i], dim=-1).detach().cpu().numpy(),
+        #         chosen_move=None,
+        #         temperature=self.temperature,
+        #         actual_outcome=target_values[i].detach().cpu().numpy()
+        #     )
 
         # --- Policy Optimization ---
         self.policy_optimizer.zero_grad()
@@ -503,7 +507,9 @@ class YinshTrainer:
                 policy_loss = policy_loss + self.l2_reg * l2_loss
 
             policy_loss_val = float(policy_loss.item())  # for logging
-            policy_loss.backward(retain_graph=True)
+            # CRITICAL FIX: Remove retain_graph=True to prevent memory leak
+            # The graph is no longer needed after this backward pass
+            policy_loss.backward()
 
             # Clip gradients
             policy_params = [p for n, p in self.network.network.named_parameters()
@@ -673,13 +679,65 @@ class YinshTrainer:
                 'top_5_accuracy': top5_acc
             }
 
-            # Track LR
+            # MEMORY FIX: Track LR with bounded history
+            MAX_LR_HISTORY = 100
             self.learning_rates['policy'].append(self.policy_optimizer.param_groups[0]['lr'])
             self.learning_rates['value'].append(self.value_optimizer.param_groups[0]['lr'])
+            if len(self.learning_rates['policy']) > MAX_LR_HISTORY:
+                self.learning_rates['policy'] = self.learning_rates['policy'][-MAX_LR_HISTORY:]
+            if len(self.learning_rates['value']) > MAX_LR_HISTORY:
+                self.learning_rates['value'] = self.learning_rates['value'][-MAX_LR_HISTORY:]
 
         self.current_iteration += 1
 
+        # MEMORY FIX: Explicit tensor cleanup after training step
+        # Move all tensors back to CPU and delete references to free GPU memory
+        del states, target_probs, target_values, pred_logits, pred_values
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
         return (policy_loss_val, value_loss_val, value_accuracy, move_accuracies)
+
+    def clear_training_state(self):
+        """Clear accumulated training state to prevent memory leaks.
+
+        Call this after training is complete to free memory from:
+        - Loss history lists
+        - Learning rate history
+        - Value metrics accumulation
+        """
+        # Keep only recent history instead of clearing completely
+        # This allows the supervisor to still report final stats
+        MAX_KEEP = 10
+        if len(self.policy_losses) > MAX_KEEP:
+            self.policy_losses = self.policy_losses[-MAX_KEEP:]
+        if len(self.value_losses) > MAX_KEEP:
+            self.value_losses = self.value_losses[-MAX_KEEP:]
+        if len(self.total_losses) > MAX_KEEP:
+            self.total_losses = self.total_losses[-MAX_KEEP:]
+        if len(self.value_accuracies) > MAX_KEEP:
+            self.value_accuracies = self.value_accuracies[-MAX_KEEP:]
+
+        # Clear learning rate history (can grow large)
+        if len(self.learning_rates['policy']) > MAX_KEEP:
+            self.learning_rates['policy'] = self.learning_rates['policy'][-MAX_KEEP:]
+        if len(self.learning_rates['value']) > MAX_KEEP:
+            self.learning_rates['value'] = self.learning_rates['value'][-MAX_KEEP:]
+
+        # Clear optimizer state to free momentum/Adam buffers
+        # They'll be rebuilt on next training
+        self.policy_optimizer.zero_grad(set_to_none=True)
+        self.value_optimizer.zero_grad(set_to_none=True)
+
+        # Force garbage collection
+        import gc
+        gc.collect()
+
+        # Clear GPU cache
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _monitor_value_head(self, pred_values: torch.Tensor,
                             target_values: torch.Tensor,
@@ -837,10 +895,17 @@ class YinshTrainer:
         stats_accum['value_confidence'] = np.mean(value_confidences) if value_confidences else 0.0
         stats_accum['value_variance'] = np.mean(value_variances) if value_variances else 0.0
 
-        # CRITICAL FIX: Track losses for supervisor reporting
-        # The supervisor reads from these lists to report training progress
+        # MEMORY FIX: Track losses for supervisor reporting
+        # Keep only recent history to prevent unbounded growth
+        # These lists grow with every epoch: 4 epochs/iter × many iterations = leak
+        # Solution: Keep only last 20 epochs worth of history
+        MAX_HISTORY = 20
         self.policy_losses.append(stats_accum['policy_loss'])
         self.value_losses.append(stats_accum['value_loss'])
+        if len(self.policy_losses) > MAX_HISTORY:
+            self.policy_losses = self.policy_losses[-MAX_HISTORY:]
+        if len(self.value_losses) > MAX_HISTORY:
+            self.value_losses = self.value_losses[-MAX_HISTORY:]
 
         # Track value head improvement
         current_value_accuracy = stats_accum['value_accuracy']
