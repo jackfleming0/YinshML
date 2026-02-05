@@ -1,5 +1,6 @@
 # training/supervisor.py
 
+import gc
 import logging
 from pathlib import Path
 import time
@@ -227,6 +228,12 @@ class TrainingSupervisor:
         # Save best model directly in the run directory for simplicity
         self.best_model_save_path: Path = self.save_dir / "best_model.pt"
         self._iteration_counter: int = 0 # Initialize iteration counter
+
+        # --- Checkpoint Retention ---
+        # -1 = delete rejected (old behavior), 0 = keep all, N = keep top N by ELO
+        self.checkpoint_retention_count: int = self.mode_settings.get('checkpoint_retention_count', 5)
+        # Registry: list of (iteration, elo, path) tuples, sorted by ELO descending
+        self._checkpoint_registry: list = []
 
         # --- Experiment Tracking ---
         self.experiment_tracker = None
@@ -468,10 +475,18 @@ class TrainingSupervisor:
 
         t0 = time.time()
 
-        # MEMORY-OPTIMIZATION: Process games in batches to reduce peak memory usage
-        # Smaller batches = workers restart more frequently = less tensor accumulation
-        batch_size = min(10, num_games)  # Smaller batches (10 instead of 25) to reduce worker memory
-        games = []
+        # Ensure trainer uses the current network
+        self.trainer.network = self.network
+
+        # MEMORY-OPTIMIZATION: Generate and process games in batches immediately
+        # This prevents accumulation of all game data in memory
+        batch_size = min(10, num_games)
+        num_games_generated = 0
+
+        # Lightweight stats accumulators (not full game data)
+        game_lengths = []
+        outcomes = []
+        ring_mobility_list = []
 
         for batch_start in range(0, num_games, batch_size):
             batch_end = min(batch_start + batch_size, num_games)
@@ -481,7 +496,57 @@ class TrainingSupervisor:
 
             # Generate batch of games
             batch_games = self.self_play.generate_games(num_games=batch_size_actual)
-            games.extend(batch_games)
+
+            if not batch_games:
+                self.logger.warning(f"Batch {batch_start + 1}-{batch_end} returned no games")
+                continue
+
+            # IMMEDIATELY process each game in this batch and add to experience buffer
+            for game_data in batch_games:
+                states, policies, values, game_history = game_data
+                if not states or not policies or not values:
+                    self.logger.warning("Skipping empty game data.")
+                    continue
+
+                # Collect lightweight stats
+                game_lengths.append(len(states))
+                outcomes.append(np.mean(values) if isinstance(values, list) and values else 0.0)
+
+                # Calculate ring mobility from last state
+                try:
+                    if game_history and 'white_score' in game_history[-1]:
+                        # Use stored scores directly
+                        pass
+                    elif states:
+                        decoded_state = self.state_encoder.decode_state(states[-1])
+                        ring_mobility_list.append(self._calculate_ring_mobility_from_state(decoded_state))
+                except Exception as e:
+                    pass  # Skip mobility calc on error
+
+                # Add to experience buffer immediately
+                try:
+                    final_scores = (None, None)
+                    if game_history and 'white_score' in game_history[-1]:
+                        final_scores = (game_history[-1].get('white_score'), game_history[-1].get('black_score'))
+                    elif states:
+                        try:
+                            decoded_state = self.state_encoder.decode_state(states[-1])
+                            final_scores = (decoded_state.white_score, decoded_state.black_score)
+                        except:
+                            pass
+
+                    self.trainer.add_game_experience(
+                        states, policies, values,
+                        final_white_score=final_scores[0],
+                        final_black_score=final_scores[1]
+                    )
+                    num_games_generated += 1
+                except Exception as e:
+                    self.logger.error(f"Error adding game experience: {e}", exc_info=True)
+
+            # CRITICAL: Free batch memory immediately after processing
+            del batch_games
+            gc.collect()
 
             # Log progress and memory usage
             try:
@@ -492,51 +557,24 @@ class TrainingSupervisor:
             except:
                 pass
 
-            self.logger.info(f"Completed {len(games)}/{num_games} games")
+            self.logger.info(f"Completed {num_games_generated}/{num_games} games")
 
         game_time = time.time() - t0
 
-        if not games:
-            # Handle case where no games are generated (e.g., worker errors)
+        if num_games_generated == 0:
             self.logger.error("Self-play generated zero games! Skipping training and evaluation for this iteration.")
-            # Increment counter and return an empty summary or raise error
             self._iteration_counter += 1
             return {'error': 'No games generated'}
 
-        self.logger.info(f"Generated {len(games)} games in {game_time:.1f}s")
+        self.logger.info(f"Generated and processed {num_games_generated} games in {game_time:.1f}s")
 
-        # Clear memory after self-play to prevent accumulation
-        # Note: Worker recreation moved to end-of-iteration cleanup for stability
+        # Clear memory after self-play
         self._clear_memory_cache("self-play")
 
-        # --- Basic game stats ---
-        game_lengths = [len(g[0]) for g in games if g[0]]
+        # --- Calculate stats from accumulated lightweight data ---
         avg_game_len = np.mean(game_lengths) if game_lengths else 0
-
-        # MEMORY-OPTIMIZATION: Process last states more efficiently
-        last_states_decoded = []
-        for game_idx, game_data in enumerate(games):
-            try:
-                if len(game_data) >= 4 and isinstance(game_data[3], list) and game_data[3]:
-                    if 'state' in game_data[3][-1] and isinstance(game_data[3][-1]['state'], GameState):
-                        last_states_decoded.append(game_data[3][-1]['state'])
-                    elif game_data[0]:
-                        last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
-                elif game_data[0]:
-                    last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
-
-                # MEMORY-OPTIMIZATION: Process every 10 games to avoid memory buildup
-                if game_idx % 10 == 9:
-                    pass  # Memory pools handle cleanup automatically
-            except Exception as e:
-                self.logger.warning(f"Error processing game {game_idx} for stats: {e}")
-
-        ring_mobility_list = [self._calculate_ring_mobility_from_state(gs) for gs in last_states_decoded]
         avg_ring_mobility = np.mean(ring_mobility_list) if ring_mobility_list else 0.0
 
-        # Fix #1: g[2] is now values (list of MCTS values), not a single outcome
-        # For statistics, use the mean of all position values as a game-level outcome estimate
-        outcomes = [np.mean(g[2]) if isinstance(g[2], list) and g[2] else 0.0 for g in games]
         pseudo_wins_white = sum(1 for o in outcomes if o > 0.1)
         pseudo_wins_black = sum(1 for o in outcomes if o < -0.1)
         pseudo_draws = len(outcomes) - pseudo_wins_white - pseudo_wins_black
@@ -548,92 +586,21 @@ class TrainingSupervisor:
         # --- Log self-play metrics to experiment tracker ---
         if self.experiment_tracker and self.experiment_id:
             try:
-                iteration = current_iteration + 1  # 1-based iteration numbering
+                iteration = current_iteration + 1
                 self._log_metric_safe('selfplay_game_time', game_time, iteration)
                 self._log_metric_safe('selfplay_avg_game_length', avg_game_len, iteration)
                 self._log_metric_safe('selfplay_avg_ring_mobility', avg_ring_mobility, iteration)
                 self._log_metric_safe('selfplay_win_rate', pseudo_win_rate, iteration)
                 self._log_metric_safe('selfplay_draw_rate', pseudo_draws / len(outcomes) if outcomes else 0, iteration)
-                self._log_metric_safe('selfplay_num_games', len(games), iteration)
+                self._log_metric_safe('selfplay_num_games', num_games_generated, iteration)
             except Exception as e:
                 self.logger.warning(f"Failed to log self-play metrics: {e}")
 
-        # ------------------------------------------------------------------ #
-        # 2. ADD EXPERIENCE & TRAIN (MEMORY-OPTIMIZED)
-        # ------------------------------------------------------------------ #
-        # MEMORY-OPTIMIZATION: Clear some memory before adding experience
-        last_states_decoded = None
-        # Memory pools handle cleanup automatically
-
-        # Ensure trainer uses the current network
-        self.trainer.network = self.network
-
-        # MEMORY-OPTIMIZATION: Process games in smaller chunks to limit peak memory
-        chunk_size = 10  # Process 10 games at a time
-        total_games = len(games)
-
-        self.logger.info(f"Adding game experience in {(total_games + chunk_size - 1) // chunk_size} chunks...")
-
-        for i in range(0, total_games, chunk_size):
-            chunk = games[i:i + chunk_size]
-            chunk_end = min(i + chunk_size, total_games)
-            self.logger.info(f"Processing game chunk {i + 1}-{chunk_end} of {total_games}")
-
-            # Process each game in the chunk
-            for game_data in chunk:
-                # Fix #1: Unpack values (MCTS root values) instead of outcome
-                states, policies, values, game_history = game_data
-                if not states or not policies or not values:
-                    self.logger.warning("Skipping empty game data.")
-                    continue
-
-                try:
-                    # Decode last state to get scores for logging (optional)
-                    if game_history and 'state' in game_history[-1]:
-                        final_state = game_history[-1]['state']
-                        if isinstance(final_state, GameState):
-                            final_scores = (final_state.white_score, final_state.black_score)
-                        else:
-                            decoded_state = self.state_encoder.decode_state(final_state)
-                            final_scores = (decoded_state.white_score, decoded_state.black_score)
-                    else:
-                        # Try to decode scores from last state, but if it fails, use None
-                        try:
-                            decoded_state = self.state_encoder.decode_state(states[-1])
-                            final_scores = (decoded_state.white_score, decoded_state.black_score)
-                        except:
-                            final_scores = (None, None)
-
-                    # Fix #1: Pass values (MCTS root values) to add_game_experience
-                    self.trainer.add_game_experience(
-                        states, policies, values,
-                        final_white_score=final_scores[0],
-                        final_black_score=final_scores[1]
-                    )
-                except Exception as e:
-                    self.logger.error(
-                        f"Error adding game experience: {e}. State/Policy lengths: {len(states)}/{len(policies)}",
-                        exc_info=True)
-
-            # MEMORY-OPTIMIZATION: Force garbage collection after each chunk
-            # Also free the chunk data itself
-            chunk = None
-            # Memory pools handle cleanup automatically
-
-            # Log memory usage after each chunk
-            try:
-                if initial_memory_mb > 0:
-                    current_memory_mb = process.memory_info().rss / (1024 * 1024)
-                    self.logger.info(
-                        f"Memory after chunk: {current_memory_mb:.1f} MB (Change: {current_memory_mb - initial_memory_mb:+.1f} MB)")
-            except:
-                pass
-
-        # MEMORY-OPTIMIZATION: Free up games data now that it's been processed
-        # Save count before freeing
-        num_games_generated = len(games) if games else num_games
-        games = None
-        # Memory pools handle cleanup automatically
+        # Free stats accumulators
+        game_lengths = None
+        outcomes = None
+        ring_mobility_list = None
+        gc.collect()
 
         # Train the network using data in the replay buffer
         self.logger.info(f"Training network for {epochs} epochs...")
@@ -826,6 +793,10 @@ class TrainingSupervisor:
         tournament_stats = self.tournament_manager.get_model_performance(candidate_id_canon) or {}
         candidate_elo = tournament_stats.get('current_rating', self.tournament_manager.glicko_tracker.initial_rating)
 
+        # Register checkpoint for retention tracking (if using retention policy)
+        if self.checkpoint_retention_count >= 0:
+            self._register_checkpoint(candidate_iteration, candidate_elo, checkpoint_path)
+
         wins, total = 0, 0
         perform_wilson_check = False
 
@@ -952,15 +923,20 @@ class TrainingSupervisor:
                 self.logger.warning(
                     f"Cannot revert: Previous best model path invalid or not found ({self.best_model_path}). Keeping rejected candidate weights.")
 
-            # Memory optimization: Delete rejected checkpoint to free disk space
-            # Keep iteration directory for logs/metrics, but remove the large checkpoint file
-            try:
-                if checkpoint_path.exists():
-                    checkpoint_size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
-                    checkpoint_path.unlink()
-                    self.logger.info(f"Deleted rejected checkpoint (freed {checkpoint_size_mb:.1f} MB): {checkpoint_path.name}")
-            except Exception as e:
-                self.logger.warning(f"Failed to delete rejected checkpoint {checkpoint_path}: {e}")
+            # Checkpoint retention: only delete immediately if using old behavior (retention_count < 0)
+            # Otherwise, the _register_checkpoint method handles retention policy
+            if self.checkpoint_retention_count < 0:
+                # Old behavior: immediately delete rejected checkpoint
+                try:
+                    if checkpoint_path.exists():
+                        checkpoint_size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
+                        checkpoint_path.unlink()
+                        self.logger.info(f"Deleted rejected checkpoint (freed {checkpoint_size_mb:.1f} MB): {checkpoint_path.name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete rejected checkpoint {checkpoint_path}: {e}")
+            else:
+                # Retention policy is handled by _register_checkpoint
+                self.logger.debug(f"Checkpoint retention active: keeping iter {candidate_iteration} in registry")
 
             self._save_best_model_state()
 
@@ -1546,6 +1522,58 @@ class TrainingSupervisor:
         self.best_model_path = None
         self._iteration_counter = 0 # Reset counter too
         self.logger.info("Reset best model tracking state.")
+
+    def _register_checkpoint(self, iteration: int, elo: float, checkpoint_path: Path):
+        """
+        Register a checkpoint and apply retention policy.
+
+        Args:
+            iteration: The iteration number
+            elo: The ELO rating for this checkpoint
+            checkpoint_path: Path to the checkpoint file
+        """
+        # Add to registry
+        self._checkpoint_registry.append({
+            'iteration': iteration,
+            'elo': elo,
+            'path': checkpoint_path
+        })
+
+        # Sort by ELO descending
+        self._checkpoint_registry.sort(key=lambda x: x['elo'], reverse=True)
+
+        # Apply retention policy
+        if self.checkpoint_retention_count == 0:
+            # Keep all checkpoints
+            self.logger.debug(f"Checkpoint retention: keeping all ({len(self._checkpoint_registry)} checkpoints)")
+            return
+        elif self.checkpoint_retention_count < 0:
+            # Old behavior: handled elsewhere (delete rejected immediately)
+            return
+
+        # Keep top N checkpoints, delete the rest
+        if len(self._checkpoint_registry) > self.checkpoint_retention_count:
+            to_delete = self._checkpoint_registry[self.checkpoint_retention_count:]
+            self._checkpoint_registry = self._checkpoint_registry[:self.checkpoint_retention_count]
+
+            for entry in to_delete:
+                path = entry['path']
+                if path.exists():
+                    try:
+                        size_mb = path.stat().st_size / (1024 * 1024)
+                        path.unlink()
+                        self.logger.info(
+                            f"Checkpoint retention: deleted iter {entry['iteration']} "
+                            f"(ELO {entry['elo']:.0f}, freed {size_mb:.1f} MB) - "
+                            f"outside top {self.checkpoint_retention_count}"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete checkpoint {path}: {e}")
+
+        # Log current retention status
+        if self._checkpoint_registry:
+            elos = [f"{e['iteration']}:{e['elo']:.0f}" for e in self._checkpoint_registry]
+            self.logger.debug(f"Checkpoint retention: keeping {len(self._checkpoint_registry)} checkpoints: {', '.join(elos)}")
 
     def _save_metrics(self, iteration_dir: Path) -> None:
         """Save training metrics for the completed iteration."""

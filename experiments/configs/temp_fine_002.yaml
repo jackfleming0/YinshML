@@ -1,0 +1,59 @@
+# Temperature Fine-Tuning 002: Final Temp 0.25
+# Purpose: Fine-tune around best temperature (0.3)
+# Base: Optimal config + stability fixes
+
+name: temp_fine_002
+description: "Final temp 0.25 (close to best 0.3)"
+iterations: 10
+
+training:
+  batch_size: 256
+  epochs_per_iteration: 4
+  games_per_iteration: 100
+  max_buffer_size: 20000
+  batches_per_epoch: auto
+
+optimizer:
+  policy_lr: 0.001
+  value_lr_factor: 2.5
+  policy_weight_decay: 0.0001
+  value_weight_decay: 0.001
+
+mcts:
+  early_simulations: 200
+  late_simulations: 200
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  max_depth: 500
+  evaluation_mode: hybrid
+  heuristic_weight: 0.7
+  use_batched_mcts: true
+  mcts_batch_size: 32
+
+temperature:
+  initial: 1.0
+  final: 0.25
+  annealing_steps: 30
+  schedule: linear
+  clamp_fraction: 0.6
+
+value_head:
+  mode: classification
+  num_classes: 7
+  discrimination_weight: 0.5
+
+tournament:
+  games_per_match: 40
+  promotion_threshold: 0.55
+
+# Stability fixes
+peak_detection_enabled: true
+peak_patience: 3
+peak_regression_threshold: 30.0
+checkpoint_retention_count: 5
+
+verbosity: info
+tensorboard_enabled: true
+save_checkpoints: true

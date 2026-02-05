@@ -91,7 +91,7 @@ class GameExperience:
                     policies = [policies[i] for i in keep_indices]
                     values = [values[i] for i in keep_indices]  # Fix #1: Also subsample values
 
-                    print(f"[Memory Opt] Reduced long game from {len(states)} → {len(keep_indices)} states")
+                    logger.debug(f"[Memory Opt] Reduced long game from {len(states)} → {len(keep_indices)} states")
 
         # Helper to decode phases from channel 5
         def decode_phase(state: np.ndarray) -> str:
@@ -127,9 +127,9 @@ class GameExperience:
             # Track total states for memory monitoring
             self._total_states_added += 1
 
-        # Log information about the replay buffer
-        print(f"[Replay Buffer] Added game with scores W={final_white_score}, B={final_black_score}, "
-              f"margin={normalized_margin:.3f}. Replay size={self.size()}")
+        # Log information about the replay buffer (debug level to avoid spam)
+        logger.debug(f"[Replay Buffer] Added game with scores W={final_white_score}, B={final_black_score}, "
+                     f"margin={normalized_margin:.3f}. Replay size={self.size()}")
 
         # Periodically check memory usage
         if self._total_states_added - self._last_memory_check > self._memory_check_interval:
@@ -157,7 +157,7 @@ class GameExperience:
                 item_size = state_size + policy_size + 16  # Extra for values/phases
                 buffer_mb = (item_size * len(self.states)) / (1024 * 1024)
 
-                print(
+                logger.debug(
                     f"[Memory Monitor] Process: {memory_mb:.1f}MB, Buffer: ~{buffer_mb:.1f}MB, States: {len(self.states)}")
 
                 # If memory is getting high, force garbage collection
@@ -177,9 +177,9 @@ class GameExperience:
                         self.values = deque(list(self.values)[start_idx:], maxlen=target_size)
                         self.phases = deque(list(self.phases)[start_idx:], maxlen=target_size)
 
-                        print(f"[Memory Manager] Reduced buffer from {current_size} to {len(self.states)} states")
+                        logger.warning(f"[Memory Manager] Reduced buffer from {current_size} to {len(self.states)} states")
         except Exception as e:
-            print(f"[Memory Monitor] Error checking memory: {e}")
+            logger.debug(f"[Memory Monitor] Error checking memory: {e}")
 
     def save_buffer(self, path: str, compress: bool = True):
         """Save the replay buffer to disk with compression option."""
@@ -201,15 +201,15 @@ class GameExperience:
                 path = path if path.endswith('.gz') else path + '.gz'
                 with gzip.open(path, mode) as f:
                     pickle.dump(save_data, f, protocol=protocol)
-                print(f"[Replay Buffer] Saved compressed buffer to {path}. Size: {self.size()}")
+                logger.info(f"[Replay Buffer] Saved compressed buffer to {path}. Size: {self.size()}")
                 return
             except ImportError:
-                print("[Replay Buffer] gzip module not available, saving uncompressed")
+                logger.warning("[Replay Buffer] gzip module not available, saving uncompressed")
 
         # Regular save if compression fails or is disabled
         with open(path, mode) as f:
             pickle.dump(save_data, f, protocol=protocol)
-        print(f"[Replay Buffer] Saved to {path}. Size: {self.size()}")
+        logger.info(f"[Replay Buffer] Saved to {path}. Size: {self.size()}")
 
     def load_buffer(self, path: str):
         """Load the replay buffer from disk, handling compressed files."""
@@ -240,10 +240,10 @@ class GameExperience:
             else:
                 self.phases = deque(loaded_phases, maxlen=self.max_size)
 
-            print(f"[Replay Buffer] Loaded from {path}. Size: {self.size()}")
+            logger.info(f"[Replay Buffer] Loaded from {path}. Size: {self.size()}")
 
         except Exception as e:
-            print(f"[Replay Buffer] Failed to load from {path}: {e}")
+            logger.error(f"[Replay Buffer] Failed to load from {path}: {e}")
 
     def size(self) -> int:
         """Return the current size of the replay buffer."""
@@ -287,12 +287,12 @@ class GameExperience:
         probs = torch.stack([torch.from_numpy(self.move_probs[i]).float() for i in indices])
         values = torch.tensor([self.values[i] for i in indices], dtype=torch.float32)
 
-        # Optional debug: Count phases in batch
-        if random.random() < 0.05:  # Only log 5% of the time to reduce spam
+        # Optional debug: Count phases in batch (debug level only)
+        if logger.isEnabledFor(logging.DEBUG) and random.random() < 0.05:
             phase_counts = {"RING_PLACEMENT": 0, "MAIN_GAME": 0, "RING_REMOVAL": 0}
             for idx in indices:
                 phase_counts[self.phases[idx]] += 1
-            print(f"[Batch Stats] Phase distribution: {phase_counts}")
+            logger.debug(f"[Batch Stats] Phase distribution: {phase_counts}")
 
         return states, probs, values.unsqueeze(1)
 
@@ -378,7 +378,7 @@ class YinshTrainer:
             if osp.exists(replay_buffer_path):
                 self.experience.load_buffer(replay_buffer_path)
             else:
-                print(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
+                self.logger.info(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
 
         # Schedulers: Simple StepLR to avoid LR instability
         # Previous CyclicLR caused dramatic LR drops (1e-3 → 1e-5) causing training instability
@@ -450,20 +450,20 @@ class YinshTrainer:
             phase_weights=phase_weights  # <--- pass in your dictionary
         )
 
-        # Debug print every 20 iterations
-        if self.current_iteration % 20 == 0:
+        # Debug print every 20 iterations (debug level)
+        if self.current_iteration % 20 == 0 and self.logger.isEnabledFor(logging.DEBUG):
             device_before = states.device
-            print(f"Training tensors device before transfer: {device_before}")
+            self.logger.debug(f"Training tensors device before transfer: {device_before}")
 
         states = states.to(self.device)
         target_probs = target_probs.to(self.device)
         target_values = target_values.to(self.device)
 
-        # Debug print every 20 iterations
-        if self.current_iteration % 20 == 0:
+        # Debug print every 20 iterations (debug level)
+        if self.current_iteration % 20 == 0 and self.logger.isEnabledFor(logging.DEBUG):
             device_after = states.device
-            print(f"Training tensors device after transfer: {device_after}")
-            print(f"Network device: {next(self.network.network.parameters()).device}")
+            self.logger.debug(f"Training tensors device after transfer: {device_after}")
+            self.logger.debug(f"Network device: {next(self.network.network.parameters()).device}")
 
         # Forward pass
         pred_logits, pred_values = self.network.network(states)
@@ -635,12 +635,12 @@ class YinshTrainer:
             self.value_optimizer.step()
             self.value_scheduler.step()
 
-        # Debugging prints
-        if self.current_iteration % 10 == 0:
-            print("Value Head Gradients:")
+        # Debugging prints (debug level only)
+        if self.current_iteration % 10 == 0 and self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug("Value Head Gradients:")
             for name, param in self.network.network.named_parameters():
                 if 'value_head' in name and param.grad is not None:
-                    print(f"  {name}: {param.grad.data.norm(2).item():.6f}")
+                    self.logger.debug(f"  {name}: {param.grad.data.norm(2).item():.6f}")
 
         # Metrics / logging
         with torch.no_grad():
@@ -790,30 +790,34 @@ class YinshTrainer:
             return metrics
 
     def _log_value_head_metrics(self, metrics: Dict):
-        print("\nValue Head Analysis:")
-        print("Pre-tanh Activations:")
-        print(f"  Range: [{metrics['pre_tanh']['min']:.3f}, {metrics['pre_tanh']['max']:.3f}]")
-        print(f"  Distribution: {metrics['pre_tanh']['mean']:.3f} ± {metrics['pre_tanh']['std']:.3f}")
-        print(f"  Saturated: {metrics['pre_tanh']['saturated_pct']:.1f}%")
+        """Log value head metrics. Only logs in debug mode to avoid output spam."""
+        if not self.logger.isEnabledFor(logging.DEBUG):
+            return  # Skip detailed logging unless in debug mode
 
-        print("\nPredictions:")
-        print(f"  Confidence: {metrics['predictions']['mean_confidence']:.3f}")
-        print(f"  High Confidence: {metrics['predictions']['high_confidence_pct']:.1f}%")
-        print(f"  Distribution: {metrics['predictions']['mean']:.3f} ± {metrics['predictions']['std']:.3f}")
+        self.logger.debug("\nValue Head Analysis:")
+        self.logger.debug("Pre-tanh Activations:")
+        self.logger.debug(f"  Range: [{metrics['pre_tanh']['min']:.3f}, {metrics['pre_tanh']['max']:.3f}]")
+        self.logger.debug(f"  Distribution: {metrics['pre_tanh']['mean']:.3f} ± {metrics['pre_tanh']['std']:.3f}")
+        self.logger.debug(f"  Saturated: {metrics['pre_tanh']['saturated_pct']:.1f}%")
 
-        print("\nAlignment with Targets:")
-        print(f"  Sign Match: {metrics['alignment']['sign_match_pct']:.1f}%")
-        print(f"  MSE: {metrics['alignment']['mse']:.3f}")
-        print(f"  MAE: {metrics['alignment']['mae']:.3f}")
+        self.logger.debug("\nPredictions:")
+        self.logger.debug(f"  Confidence: {metrics['predictions']['mean_confidence']:.3f}")
+        self.logger.debug(f"  High Confidence: {metrics['predictions']['high_confidence_pct']:.1f}%")
+        self.logger.debug(f"  Distribution: {metrics['predictions']['mean']:.3f} ± {metrics['predictions']['std']:.3f}")
+
+        self.logger.debug("\nAlignment with Targets:")
+        self.logger.debug(f"  Sign Match: {metrics['alignment']['sign_match_pct']:.1f}%")
+        self.logger.debug(f"  MSE: {metrics['alignment']['mse']:.3f}")
+        self.logger.debug(f"  MAE: {metrics['alignment']['mae']:.3f}")
 
         if any(k.startswith('layer_') for k in metrics.keys()):
-            print("\nLayer-wise Activations:")
+            self.logger.debug("\nLayer-wise Activations:")
             for name, layer_metrics in metrics.items():
                 if name.startswith('layer_'):
-                    print(f"  {name}:")
-                    print(f"    Mean: {layer_metrics['mean']:.3f}")
-                    print(f"    Std: {layer_metrics['std']:.3f}")
-                    print(f"    Zeros: {layer_metrics['zeros_pct']:.1f}%")
+                    self.logger.debug(f"  {name}:")
+                    self.logger.debug(f"    Mean: {layer_metrics['mean']:.3f}")
+                    self.logger.debug(f"    Std: {layer_metrics['std']:.3f}")
+                    self.logger.debug(f"    Zeros: {layer_metrics['zeros_pct']:.1f}%")
 
     def train_epoch(self, batch_size: int, batches_per_epoch: int, ring_placement_weight: float = 1.0) -> Dict:
         """Train for one epoch and return comprehensive stats."""
