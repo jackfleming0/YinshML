@@ -23,15 +23,19 @@ from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 # Setup logger
 logger = logging.getLogger(__name__)
 
+
 class GameExperience:
     """Stores game states and outcomes for training, with optimized memory usage."""
 
-    def __init__(self, max_size: int = 100000, subsample_long_games: bool = True):
+    def __init__(self, max_size: int = 100000, subsample_long_games: bool = True,
+                 enable_augmentation: bool = False, max_augmentations: int = 12):
         """Initialize GameExperience replay buffer.
 
         Args:
             max_size: Maximum number of samples to store (default: 100000, increased from 10000 for better training)
             subsample_long_games: Whether to subsample games >100 moves
+            enable_augmentation: If True, apply D6 symmetry augmentation to training data
+            max_augmentations: Maximum number of augmented samples per original (1-12)
         """
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
@@ -39,6 +43,24 @@ class GameExperience:
         self.phases = deque(maxlen=max_size)
         self.max_size = max_size  # Store for logging
         self.subsample_long_games = subsample_long_games
+
+        # Augmentation settings
+        self.enable_augmentation = enable_augmentation
+        self.max_augmentations = min(max_augmentations, 12)
+        self._augmenter = None
+        self._augmentation_stats = {'total_original': 0, 'total_augmented': 0}
+
+        if enable_augmentation:
+            try:
+                from .augmentation import YinshSymmetryAugmenter
+                self._augmenter = YinshSymmetryAugmenter(
+                    include_reflections=True,
+                    enable_stats=False  # Disable stats for production
+                )
+                logger.info(f"Augmentation enabled: up to {self.max_augmentations}x data expansion")
+            except ImportError as e:
+                logger.warning(f"Could not import augmenter: {e}. Augmentation disabled.")
+                self.enable_augmentation = False
 
         # Memory monitoring
         self._total_states_added = 0
@@ -117,19 +139,58 @@ class GameExperience:
         phases = [decode_phase(s) for s in states]
 
         # Iterate over each move/state in the completed game
+        original_count = 0
+        augmented_count = 0
+
         for idx, (state, policy, value, phase) in enumerate(zip(states, policies, values, phases)):
             # Fix #1: Use MCTS root value directly (position-specific, not game outcome)
             self.states.append(state)
-            self.move_probs.append(policy)
+            # MEMORY: Store policy as float16 to reduce buffer memory by 50%
+            policy_f16 = np.asarray(policy, dtype=np.float16)
+            self.move_probs.append(policy_f16)
             self.values.append(float(value))  # MCTS root value for this position
             self.phases.append(phase)
+            original_count += 1
+
+            # Apply augmentation if enabled
+            if self.enable_augmentation and self._augmenter is not None:
+                try:
+                    # Generate augmented samples (excluding original which was already added)
+                    augmented = self._augmenter.augment(
+                        state, policy, value, include_original=False
+                    )
+
+                    # Limit number of augmentations to save memory
+                    if len(augmented) > self.max_augmentations - 1:
+                        # Randomly sample subset
+                        indices = random.sample(range(len(augmented)), self.max_augmentations - 1)
+                        augmented = [augmented[i] for i in indices]
+
+                    # Add augmented samples with same phase
+                    for aug_state, aug_policy, aug_value in augmented:
+                        self.states.append(aug_state)
+                        # MEMORY: Store augmented policy as float16 too
+                        aug_policy_f16 = np.asarray(aug_policy, dtype=np.float16)
+                        self.move_probs.append(aug_policy_f16)
+                        self.values.append(float(aug_value))
+                        self.phases.append(phase)
+                        augmented_count += 1
+
+                except Exception as e:
+                    logger.debug(f"Augmentation failed for state {idx}: {e}")
 
             # Track total states for memory monitoring
             self._total_states_added += 1
 
+        # Update augmentation stats
+        if self.enable_augmentation:
+            self._augmentation_stats['total_original'] += original_count
+            self._augmentation_stats['total_augmented'] += augmented_count
+
         # Log information about the replay buffer (debug level to avoid spam)
+        aug_info = f", augmented={augmented_count}" if self.enable_augmentation else ""
         logger.debug(f"[Replay Buffer] Added game with scores W={final_white_score}, B={final_black_score}, "
-                     f"margin={normalized_margin:.3f}. Replay size={self.size()}")
+                     f"margin={normalized_margin:.3f}, original={original_count}{aug_info}. Replay size={self.size()}")
 
         # Periodically check memory usage
         if self._total_states_added - self._last_memory_check > self._memory_check_interval:
@@ -161,23 +222,26 @@ class GameExperience:
                     f"[Memory Monitor] Process: {memory_mb:.1f}MB, Buffer: ~{buffer_mb:.1f}MB, States: {len(self.states)}")
 
                 # If memory is getting high, force garbage collection
-                if memory_mb > 4000:  # 4GB threshold, adjust as needed
+                # NOTE: Buffer reduction disabled - was causing training plateau by destroying data
+                # The 6GB threshold was too aggressive for modern Macs with 16GB+ RAM
+                # If memory issues occur, increase max_buffer_size in config instead
+                if memory_mb > 12000:  # 12GB threshold (raised from 4GB)
                     # Memory pools handle cleanup automatically
                     pass
 
-                    # If still high after GC, reduce buffer size
-                    if memory_mb > 6000:  # 6GB threshold
+                    # Only reduce buffer in extreme cases (16GB+)
+                    if memory_mb > 16000:  # 16GB threshold (raised from 6GB)
                         current_size = len(self.states)
-                        target_size = max(1000, int(current_size * 0.7))  # Reduce by 30%
+                        target_size = max(5000, int(current_size * 0.85))  # Reduce by only 15% (was 30%)
 
                         # Create new smaller deques and keep newest data
                         start_idx = max(0, current_size - target_size)
-                        self.states = deque(list(self.states)[start_idx:], maxlen=target_size)
-                        self.move_probs = deque(list(self.move_probs)[start_idx:], maxlen=target_size)
-                        self.values = deque(list(self.values)[start_idx:], maxlen=target_size)
-                        self.phases = deque(list(self.phases)[start_idx:], maxlen=target_size)
+                        self.states = deque(list(self.states)[start_idx:], maxlen=self.max_size)
+                        self.move_probs = deque(list(self.move_probs)[start_idx:], maxlen=self.max_size)
+                        self.values = deque(list(self.values)[start_idx:], maxlen=self.max_size)
+                        self.phases = deque(list(self.phases)[start_idx:], maxlen=self.max_size)
 
-                        logger.warning(f"[Memory Manager] Reduced buffer from {current_size} to {len(self.states)} states")
+                        logger.warning(f"[Memory Manager] Reduced buffer from {current_size} to {len(self.states)} states (extreme memory pressure)")
         except Exception as e:
             logger.debug(f"[Memory Monitor] Error checking memory: {e}")
 
@@ -249,6 +313,18 @@ class GameExperience:
         """Return the current size of the replay buffer."""
         return len(self.states)
 
+    def get_augmentation_stats(self) -> Dict[str, int]:
+        """Get statistics about augmentation."""
+        return {
+            'enabled': self.enable_augmentation,
+            'max_augmentations': self.max_augmentations,
+            **self._augmentation_stats,
+            'expansion_ratio': (
+                (self._augmentation_stats['total_augmented'] + self._augmentation_stats['total_original']) /
+                max(1, self._augmentation_stats['total_original'])
+            ) if self._augmentation_stats['total_original'] > 0 else 1.0
+        }
+
     def sample_batch(
             self,
             batch_size: int,
@@ -310,7 +386,9 @@ class YinshTrainer:
                  value_loss_weights: Tuple[float, float] = (0.5, 0.5),
                  replay_buffer_path: Optional[str] = None,
                  max_buffer_size: int = 10000,
-                 discrimination_weight: float = 0.5):
+                 discrimination_weight: float = 0.5,
+                 enable_augmentation: bool = False,
+                 max_augmentations: int = 12):
         """
         Initialize the trainer.
 
@@ -325,6 +403,8 @@ class YinshTrainer:
             replay_buffer_path: Path to save/load replay buffer
             max_buffer_size: Maximum number of samples in replay buffer (default 10000 = ~100 games)
             discrimination_weight: Weight for discrimination loss term (encourages value spread)
+            enable_augmentation: If True, apply D6 symmetry augmentation to training data
+            max_augmentations: Maximum augmented samples per original (1-12, default 12)
         """
         self.state_encoder = network.state_encoder
         self.batch_size = batch_size
@@ -371,8 +451,14 @@ class YinshTrainer:
 
         # Memory optimization: Cap replay buffer size to prevent unbounded growth
         # 10,000 samples = ~100 games at 100 moves each (reasonable for training)
-        self.experience = GameExperience(max_size=max_buffer_size)
+        self.experience = GameExperience(
+            max_size=max_buffer_size,
+            enable_augmentation=enable_augmentation,
+            max_augmentations=max_augmentations
+        )
         self.logger.info(f"Replay buffer capped at {max_buffer_size:,} samples")
+        if enable_augmentation:
+            self.logger.info(f"Augmentation enabled: up to {max_augmentations}x data expansion")
         if replay_buffer_path is not None:
             from os import path as osp
             if osp.exists(replay_buffer_path):
@@ -476,6 +562,11 @@ class YinshTrainer:
         )
         self._log_value_head_metrics(value_metrics)
 
+        # MEMORY FIX: Clear value head activations after logging to prevent tensor accumulation
+        # The activation hooks store tensors in a dict that grows without bound
+        if hasattr(self.network.network, 'value_head_activations'):
+            self.network.network.value_head_activations.clear()
+
         # MEMORY FIX: Disable per-sample evaluation logging to prevent tensor accumulation
         # This loop processes 256 samples per batch × 34 batches × 4 epochs = ~35K evaluations
         # Each evaluation holds tensor references that accumulate
@@ -517,7 +608,7 @@ class YinshTrainer:
             torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
 
             self.policy_optimizer.step()
-            self.policy_scheduler.step()
+            # NOTE: Scheduler stepping moved to train_epoch() - step once per epoch, not per batch
 
         # --- Value Optimization ---
         self.value_optimizer.zero_grad()
@@ -572,6 +663,24 @@ class YinshTrainer:
                         # Compute prediction accuracy for classification
                         pred_class = torch.argmax(value_logits, dim=-1)
                         value_accuracy = (pred_class == target_class).float().mean()
+
+                        # DIAGNOSTIC FIX: Store real value head metrics for epoch summary
+                        # These persist across batches and are summarized in train_epoch
+                        if not hasattr(self, '_epoch_value_diagnostics'):
+                            self._epoch_value_diagnostics = {
+                                'mean_abs_values': [],
+                                'pred_class_counts': torch.zeros(self.network.network.num_value_classes),
+                                'target_class_counts': torch.zeros(self.network.network.num_value_classes),
+                                'batch_variances': []
+                            }
+
+                        self._epoch_value_diagnostics['mean_abs_values'].append(mean_abs_value.item())
+                        self._epoch_value_diagnostics['batch_variances'].append(batch_variance.item())
+
+                        # Accumulate class histograms
+                        for c in range(self.network.network.num_value_classes):
+                            self._epoch_value_diagnostics['pred_class_counts'][c] += (pred_class == c).sum().item()
+                            self._epoch_value_diagnostics['target_class_counts'][c] += (target_class == c).sum().item()
 
                     # Log for diagnostics
                     if not hasattr(self, '_batch_counter'):
@@ -633,7 +742,7 @@ class YinshTrainer:
             torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
 
             self.value_optimizer.step()
-            self.value_scheduler.step()
+            # NOTE: Scheduler stepping moved to train_epoch() - step once per epoch, not per batch
 
         # Debugging prints (debug level only)
         if self.current_iteration % 10 == 0 and self.logger.isEnabledFor(logging.DEBUG):
@@ -693,6 +802,11 @@ class YinshTrainer:
         # MEMORY FIX: Explicit tensor cleanup after training step
         # Move all tensors back to CPU and delete references to free GPU memory
         del states, target_probs, target_values, pred_logits, pred_values
+
+        # MEMORY FIX: Clear stored tensors to prevent accumulation
+        if hasattr(self.network.network, '_value_logits'):
+            self.network.network._value_logits = None
+
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
 
@@ -819,8 +933,16 @@ class YinshTrainer:
                     self.logger.debug(f"    Std: {layer_metrics['std']:.3f}")
                     self.logger.debug(f"    Zeros: {layer_metrics['zeros_pct']:.1f}%")
 
-    def train_epoch(self, batch_size: int, batches_per_epoch: int, ring_placement_weight: float = 1.0) -> Dict:
-        """Train for one epoch and return comprehensive stats."""
+    def train_epoch(self, batch_size: int, batches_per_epoch: int,
+                    phase_weights: Optional[Dict[str, float]] = None) -> Dict:
+        """Train for one epoch and return comprehensive stats.
+
+        Args:
+            batch_size: Number of samples per batch
+            batches_per_epoch: Number of batches to train
+            phase_weights: Optional dict mapping phase names to sampling weights
+                          e.g., {'RING_PLACEMENT': 1.0, 'MAIN_GAME': 2.0, 'RING_REMOVAL': 0.5}
+        """
         stats_accum = {
             'policy_loss': 0,
             'value_loss': 0,
@@ -850,12 +972,15 @@ class YinshTrainer:
         value_sign_matches = []
         value_variances = []  # Track variance to monitor collapse
 
-        for batch in range(batches_per_epoch):
+        # Use provided phase_weights or defaults
+        if phase_weights is None:
             phase_weights = {
-                "RING_PLACEMENT": 0.5,  # half emphasis
-                "MAIN_GAME": 2.0,  # double emphasis
-                "RING_REMOVAL": 0.5  # half emphasis
+                "RING_PLACEMENT": 1.0,
+                "MAIN_GAME": 1.0,
+                "RING_REMOVAL": 1.0
             }
+
+        for batch in range(batches_per_epoch):
             p_loss, v_loss, v_acc, move_accs = self.train_step(
                 batch_size,
                 phase_weights=phase_weights
@@ -911,7 +1036,8 @@ class YinshTrainer:
         if len(self.value_losses) > MAX_HISTORY:
             self.value_losses = self.value_losses[-MAX_HISTORY:]
 
-        # Track value head improvement
+        # Track value head improvement with LR floor to prevent collapse lock-in
+        VALUE_LR_FLOOR = 1e-4  # Minimum value LR to prevent decay to zero
         current_value_accuracy = stats_accum['value_accuracy']
         if current_value_accuracy > self.best_value_accuracy:
             self.best_value_accuracy = current_value_accuracy
@@ -919,13 +1045,17 @@ class YinshTrainer:
             self.logger.info(f"New best value accuracy: {current_value_accuracy:.2%}")
         else:
             self.value_accuracy_patience += 1
-            # If accuracy hasn't improved for several epochs, adjust learning rate
+            # If accuracy hasn't improved for several epochs, adjust learning rate (with floor)
             if self.value_accuracy_patience >= 3:
-                new_lr = self.value_optimizer.param_groups[0]['lr'] * 0.7
-                self.logger.warning(f"Value accuracy not improving for {self.value_accuracy_patience} epochs. "
-                                    f"Reducing value LR: {current_value_lr:.2e} -> {new_lr:.2e}")
-                for param_group in self.value_optimizer.param_groups:
-                    param_group['lr'] = new_lr
+                current_lr = self.value_optimizer.param_groups[0]['lr']
+                new_lr = max(current_lr * 0.7, VALUE_LR_FLOOR)
+                if new_lr < current_lr:
+                    self.logger.warning(f"Value accuracy not improving for {self.value_accuracy_patience} epochs. "
+                                        f"Reducing value LR: {current_value_lr:.2e} -> {new_lr:.2e}")
+                    for param_group in self.value_optimizer.param_groups:
+                        param_group['lr'] = new_lr
+                else:
+                    self.logger.info(f"Value LR at floor ({VALUE_LR_FLOOR:.0e}), not reducing further")
                 # Reset patience
                 self.value_accuracy_patience = 0
 
@@ -963,17 +1093,57 @@ class YinshTrainer:
             f"{'=' * 50}"
         )
 
+        # DIAGNOSTIC: Log value head class distribution histograms
+        if hasattr(self, '_epoch_value_diagnostics') and self._epoch_value_diagnostics:
+            diag = self._epoch_value_diagnostics
+            num_classes = len(diag['pred_class_counts'])
+
+            # Normalize to percentages
+            pred_total = diag['pred_class_counts'].sum().item()
+            target_total = diag['target_class_counts'].sum().item()
+
+            if pred_total > 0 and target_total > 0:
+                pred_pct = [f"{100*diag['pred_class_counts'][i].item()/pred_total:.1f}" for i in range(num_classes)]
+                target_pct = [f"{100*diag['target_class_counts'][i].item()/target_total:.1f}" for i in range(num_classes)]
+
+                # Mean confidence (mean abs value)
+                mean_conf = np.mean(diag['mean_abs_values']) if diag['mean_abs_values'] else 0.0
+
+                self.logger.info(
+                    f"[Value Diagnostics] mean_abs_value={mean_conf:.4f}\n"
+                    f"  Target class %: [{', '.join(target_pct)}] (classes 0-{num_classes-1})\n"
+                    f"  Pred class %:   [{', '.join(pred_pct)}]"
+                )
+
+            # Reset diagnostics for next epoch
+            self._epoch_value_diagnostics = {
+                'mean_abs_values': [],
+                'pred_class_counts': torch.zeros(num_classes),
+                'target_class_counts': torch.zeros(num_classes),
+                'batch_variances': []
+            }
+
+        # Step schedulers once per epoch (not per batch!)
+        # This ensures LR decay happens at a reasonable rate
+        self.policy_scheduler.step()
+        self.value_scheduler.step()
+
         return vars(metrics)
 
-    # Add this helper method to the YinshTrainer class
     def _get_current_value_confidence(self) -> float:
-        """Helper method to get the current average value head confidence."""
-        if not hasattr(self, 'value_head_activations') or not self.value_head_activations:
+        """Get the current average value head confidence from real batch data.
+
+        Returns mean(abs(pred_values)) averaged across recent batches.
+        This measures how far from 0 the value predictions are (decisiveness).
+        """
+        if not hasattr(self, '_epoch_value_diagnostics'):
             return 0.0
 
-        # Get the absolute value of predictions (confidence)
-        pred_values = self.value_head_activations.get('predictions', {}).get('mean_confidence', 0.0)
-        return float(pred_values)
+        mean_abs_values = self._epoch_value_diagnostics.get('mean_abs_values', [])
+        if not mean_abs_values:
+            return 0.0
+
+        return float(np.mean(mean_abs_values))
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save a training checkpoint."""

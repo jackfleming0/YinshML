@@ -76,6 +76,31 @@ class Node:
             return 0.0
         return self.value_sum / adjusted_visits
 
+    def clear_tree(self) -> None:
+        """Recursively break circular references to allow garbage collection.
+
+        MCTS trees have parent↔child circular references that can prevent
+        Python's garbage collector from freeing memory promptly. Call this
+        on the root node after search completes.
+        """
+        # First, recursively clear all children
+        for child in self.children.values():
+            child.clear_tree()
+
+        # Return state to pool if this node owns it
+        if self._owns_state and self._state_pool is not None and self.state is not None:
+            try:
+                self._state_pool.return_game_state(self.state)
+            except:
+                pass
+            self._owns_state = False  # Prevent double-return in __del__
+
+        # Break circular references
+        self.children.clear()
+        self.parent = None
+        self.state = None
+        self._state_pool = None  # Clear pool reference too
+
     def add_virtual_loss(self) -> None:
         """Mark this node as being evaluated (used in batched MCTS)."""
         self.virtual_losses += 1
@@ -147,7 +172,8 @@ class MCTS:
             game_state_pool: Optional GameStatePool for memory management.
         """
         self.network = network
-        self.state_encoder = StateEncoder()
+        # Use network's encoder to ensure consistent encoding (basic or enhanced)
+        self.state_encoder = network.state_encoder
         self.logger = logging.getLogger("MCTS") # Use module-level logger
 
         # Evaluation Mode Configuration
@@ -434,6 +460,8 @@ class MCTS:
             else:
                  self.logger.error(f"Invalid move index {move_idx} for move {move} from root children. Max index: {len(move_probs)-1}")
 
+        # MEMORY FIX: Break circular references in MCTS tree to allow garbage collection
+        root.clear_tree()
 
         return move_probs
 
@@ -564,6 +592,9 @@ class MCTS:
 
         # Store root value for use as training target (Fix #1)
         self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+
+        # MEMORY FIX: Break circular references in MCTS tree to allow garbage collection
+        root.clear_tree()
 
         return move_probs
 
@@ -883,7 +914,8 @@ class SelfPlay:
         self.network = network
         self.num_workers = num_workers # Use the calculated number passed in
         self.metrics_logger = metrics_logger
-        self.state_encoder = StateEncoder()
+        # Use network's encoder to ensure consistent encoding (basic or enhanced)
+        self.state_encoder = network.state_encoder
         self.logger = logging.getLogger("SelfPlay") # Use module logger
         self.current_iteration = 0 # Track current training iteration if needed
 
@@ -921,6 +953,7 @@ class SelfPlay:
             'temp_clamp_fraction': temp_clamp_fraction,
             'use_batched_mcts': use_batched_mcts,  # Add batched MCTS flag
             'mcts_batch_size': mcts_batch_size,  # Add batch size
+            'use_enhanced_encoding': getattr(self.network, 'use_enhanced_encoding', False),  # Enhanced encoding flag
         }
         # Store optional metrics instances
         self.mcts_metrics = mcts_metrics # Store the instance
@@ -929,9 +962,9 @@ class SelfPlay:
         # This MCTS instance is primarily used if play_game is called directly,
         # worker processes will create their own MCTS instances.
 
-        # Filter out batched MCTS params that don't belong in MCTS.__init__()
+        # Filter out batched MCTS params and encoding flag that don't belong in MCTS.__init__()
         mcts_init_config = {k: v for k, v in self.mcts_config.items()
-                           if k not in ['use_batched_mcts', 'mcts_batch_size']}
+                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
 
         self.mcts = MCTS(
             network=self.network,
@@ -944,6 +977,7 @@ class SelfPlay:
         self.logger.info(f"  Workers: {self.num_workers}")
         self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
         self.logger.info(f"  Batched MCTS: {'ENABLED' if self.use_batched_mcts else 'DISABLED'} (batch_size={self.mcts_batch_size})")
+        self.logger.info(f"  Enhanced Encoding: {'ENABLED (15 channels)' if self.mcts_config.get('use_enhanced_encoding', False) else 'DISABLED (6 channels)'}")
         self.logger.info(f"  MCTS Config: {self.mcts_config}")
 
 
@@ -982,6 +1016,47 @@ class SelfPlay:
                          f"late_sims={self.mcts.late_simulations}, "
                          f"switch_ply={self.mcts.switch_ply}, c_puct={self.mcts.c_puct}")
 
+        # Handle sequential generation when workers=0 (memory-optimized mode)
+        if self.num_workers <= 0:
+            self.logger.info("Running sequential game generation (workers=0, memory-optimized mode)")
+            for game_id in range(num_games):
+                try:
+                    result = play_game_worker(
+                        model_path=model_path,
+                        game_id=game_id,
+                        mcts_config=self.mcts_config,
+                    )
+                    if result is not None:
+                        states, policies, values, temp_data, game_history = result
+                        games_data.append((states, policies, values, game_history))
+                        games_completed += 1
+
+                        # Log progress
+                        if games_completed % max(1, num_games // 10) == 0 or games_completed == num_games:
+                            elapsed = time.time() - start_time
+                            rate = games_completed / elapsed if elapsed > 0 else 0
+                            self.logger.info(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
+                    else:
+                        self.logger.warning(f"Game {game_id} returned None result.")
+                except Exception as e:
+                    self.logger.error(f"Error generating game {game_id}: {e}", exc_info=True)
+
+            # Cleanup temp model file
+            if 'model_path' in locals() and os.path.exists(model_path):
+                try:
+                    os.unlink(model_path)
+                except OSError:
+                    pass
+
+            total_time = time.time() - start_time
+            final_rate = games_completed / total_time if total_time > 0 else 0
+            self.logger.info(f"\nGame generation complete:")
+            self.logger.info(f"- Games generated: {games_completed}/{num_games}")
+            self.logger.info(f"- Total time: {total_time:.1f} seconds")
+            self.logger.info(f"- Final rate: {final_rate:.2f} games/second")
+            return games_data
+
+        # Parallel generation with workers > 0
         try:
             with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
                 for game_id in range(num_games):
@@ -1097,8 +1172,10 @@ def play_game_worker(
         )
         local_tensor_pool = TensorPool(tensor_pool_config)
 
-        # Create network with tensor pool
-        network = NetworkWrapper(device=device, tensor_pool=local_tensor_pool)
+        # Create network with tensor pool (use enhanced encoding if specified)
+        use_enhanced_encoding = mcts_config.get('use_enhanced_encoding', False)
+        network = NetworkWrapper(device=device, tensor_pool=local_tensor_pool,
+                                 use_enhanced_encoding=use_enhanced_encoding)
         network.load_model(model_path)
         network.network.eval()
 
@@ -1112,7 +1189,8 @@ def play_game_worker(
         )
         local_game_state_pool = GameStatePool(pool_config)
 
-        state_encoder = StateEncoder()
+        # Use network's encoder to ensure consistent encoding (basic or enhanced)
+        state_encoder = network.state_encoder
 
         # Extract batched MCTS settings from config (with defaults)
         use_batched_mcts = mcts_config.get('use_batched_mcts', True)
@@ -1120,7 +1198,7 @@ def play_game_worker(
 
         # Remove these from mcts_config before passing to MCTS __init__
         mcts_init_config = {k: v for k, v in mcts_config.items()
-                           if k not in ['use_batched_mcts', 'mcts_batch_size']}
+                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
 
         mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_init_config)
 
@@ -1132,7 +1210,7 @@ def play_game_worker(
         # Use lists instead of deques (less overhead)
         states = []
         policies = []
-        values = []  # Fix #1: Store MCTS root values as training targets
+        players = []  # Track which player is to move at each position (for outcome perspective)
 
         # Keep minimal game history - just essentials for debugging
         game_history = []
@@ -1193,11 +1271,7 @@ def play_game_worker(
             encoded_state = state_encoder.encode_state(state).astype(np.float32)
             states.append(encoded_state)
             policies.append(move_probs)
-
-            # Fix #1: Store MCTS root value as training target (position-specific)
-            # This replaces using game outcome for all positions
-            mcts_value = mcts.last_root_value if hasattr(mcts, 'last_root_value') else 0.0
-            values.append(float(mcts_value))
+            players.append(state.current_player)  # Track player for outcome perspective
 
             # Calculate entropy for temperature adaptation
             entropy = -np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9))
@@ -1235,11 +1309,7 @@ def play_game_worker(
         # Add dummy policy for final state
         dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(state_encoder.total_moves, dtype=np.float32)
         policies.append(dummy_policy)
-
-        # Fix #1: Add value for final state (using game outcome as final value)
-        score_diff = state.white_score - state.black_score
-        final_value = np.clip(score_diff / 3.0, -1.0, 1.0)
-        values.append(float(final_value))
+        players.append(state.current_player)  # Track player for final state too
 
         # Add final game info
         game_history.append({
@@ -1249,10 +1319,21 @@ def play_game_worker(
             'black_score': state.black_score
         })
 
-        # Calculate outcome
+        # Calculate outcome from White's perspective (+1 = White wins, -1 = Black wins)
         score_diff = state.white_score - state.black_score
-        normalized_margin = np.clip(score_diff / 3.0, -1.0, 1.0)
-        outcome = float(normalized_margin)
+        outcome_white = float(np.clip(score_diff / 3.0, -1.0, 1.0))
+
+        # Backfill values for all positions based on game outcome
+        # Each position's value = outcome from that player's perspective
+        from ..game.types import Player
+        values = []
+        for player in players:
+            if player == Player.WHITE:
+                values.append(outcome_white)
+            else:
+                values.append(-outcome_white)  # Flip for Black's perspective
+
+        outcome = outcome_white  # For logging
 
         # Log final summary - minimal logging to reduce overhead
         worker_logger.info(
@@ -1271,8 +1352,8 @@ def play_game_worker(
 
         # Memory pools handle cleanup automatically
 
-        # Fix #1: Return MCTS values instead of single game outcome
-        # outcome still computed for logging but not used as training target
+        # Return outcome-based values (standard AlphaZero approach)
+        # Each position's value = game outcome from that player's perspective
         return states, policies, values, temp_data, game_history
 
     except Exception as e:
