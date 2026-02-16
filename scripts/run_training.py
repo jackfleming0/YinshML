@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,34 @@ from yinsh_ml.analysis.auto_tuner import AutoTuner
 def load_config(cfg_path: Path) -> dict:
     with open(cfg_path, 'r') as f:
         return yaml.safe_load(f) or {}
+
+
+def find_latest_checkpoint(run_dir: Path) -> tuple[Path | None, int]:
+    """Find the latest checkpoint in a run directory.
+
+    Returns:
+        Tuple of (checkpoint_path, iteration_number) or (None, 0) if not found.
+    """
+    iteration_dirs = list(run_dir.glob('iteration_*'))
+    if not iteration_dirs:
+        return None, 0
+
+    # Extract iteration numbers and sort
+    iterations = []
+    for d in iteration_dirs:
+        match = re.search(r'iteration_(\d+)', d.name)
+        if match:
+            iter_num = int(match.group(1))
+            checkpoint = d / f'checkpoint_iteration_{iter_num}.pt'
+            if checkpoint.exists():
+                iterations.append((iter_num, checkpoint))
+
+    if not iterations:
+        return None, 0
+
+    # Return the highest iteration
+    iterations.sort(key=lambda x: x[0], reverse=True)
+    return iterations[0][1], iterations[0][0]
 
 
 def select_device(device_cfg: str) -> str:
@@ -47,6 +76,7 @@ def main() -> None:
     parser.add_argument('-n', '--iterations', type=int, default=None, help='Override num_iterations')
     parser.add_argument('--save-dir', type=str, default=None, help='Override save_dir')
     parser.add_argument('--export-every', type=int, default=None, help='Override export cadence')
+    parser.add_argument('--resume', type=str, default=None, help='Resume from existing run directory (e.g., runs/20260216_094801)')
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -59,8 +89,27 @@ def main() -> None:
     device = select_device(cfg.get('device', 'auto'))
     num_iterations = args.iterations or int(cfg.get('num_iterations', 50))
 
-    base_save_dir = Path(args.save_dir or cfg.get('save_dir', 'runs'))
-    run_dir = ensure_dir(base_save_dir / time.strftime('%Y%m%d_%H%M%S'))
+    # Handle resume vs new run
+    start_iteration = 0
+    checkpoint_to_load = None
+
+    if args.resume:
+        run_dir = Path(args.resume)
+        if not run_dir.exists():
+            logger.error(f"Resume directory does not exist: {run_dir}")
+            sys.exit(1)
+        checkpoint_to_load, last_iteration = find_latest_checkpoint(run_dir)
+        if checkpoint_to_load:
+            start_iteration = last_iteration + 1
+            logger.info(f"Resuming from {run_dir}")
+            logger.info(f"  Found checkpoint: {checkpoint_to_load}")
+            logger.info(f"  Last completed iteration: {last_iteration}")
+            logger.info(f"  Will start from iteration: {start_iteration}")
+        else:
+            logger.warning(f"No checkpoints found in {run_dir}, starting from scratch")
+    else:
+        base_save_dir = Path(args.save_dir or cfg.get('save_dir', 'runs'))
+        run_dir = ensure_dir(base_save_dir / time.strftime('%Y%m%d_%H%M%S'))
 
     # Export settings
     export_cfg = cfg.get('export', {})
@@ -71,6 +120,25 @@ def main() -> None:
     sp = cfg.get('self_play', {})
     trainer_cfg = cfg.get('trainer', {})
     arena_cfg = cfg.get('arena', {})
+    phase_weights_cfg = cfg.get('phase_weights', {})
+
+    # Encoding and augmentation settings (architectural improvements)
+    encoding_cfg = cfg.get('encoding', {})
+    augmentation_cfg = cfg.get('augmentation', {})
+
+    use_enhanced_encoding = encoding_cfg.get('type', 'basic') == 'enhanced'
+    enable_augmentation = augmentation_cfg.get('enabled', False) or trainer_cfg.get('enable_augmentation', False)
+    max_augmentations = augmentation_cfg.get('max_augmentations', trainer_cfg.get('max_augmentations', 12))
+
+    if use_enhanced_encoding:
+        logger.info(f"Using ENHANCED encoding (15 channels)")
+    else:
+        logger.info(f"Using BASIC encoding (6 channels)")
+
+    if enable_augmentation:
+        logger.info(f"Augmentation ENABLED (max {max_augmentations}x expansion)")
+    else:
+        logger.info(f"Augmentation DISABLED")
 
     # Build mode_settings for supervisor
     mode_settings = {
@@ -96,12 +164,22 @@ def main() -> None:
         'batches_per_epoch': trainer_cfg.get('batches_per_epoch', 'auto'),
         'max_buffer_size': int(trainer_cfg.get('max_buffer_size', 10000)),
         'discrimination_weight': float(trainer_cfg.get('discrimination_weight', 0.5)),
+        # Augmentation settings (Phase 2 architectural improvements)
+        'enable_augmentation': enable_augmentation,
+        'max_augmentations': int(max_augmentations),
+        # Phase-weighted sampling (emphasize critical game phases)
+        'phase_weights': {
+            'RING_PLACEMENT': float(phase_weights_cfg.get('RING_PLACEMENT', 1.0)),
+            'MAIN_GAME': float(phase_weights_cfg.get('MAIN_GAME', 1.0)),
+            'RING_REMOVAL': float(phase_weights_cfg.get('RING_REMOVAL', 1.0)),
+        },
         # Arena / gating
         'promotion_threshold': float(arena_cfg.get('promotion_threshold', 0.55)),
+        'tournament_sliding_window': int(arena_cfg.get('tournament_sliding_window', 5)),
     }
 
     # Instantiate network and supervisor
-    network = NetworkWrapper(device=device)
+    network = NetworkWrapper(device=device, use_enhanced_encoding=use_enhanced_encoding)
     # Attach difficulty presets for export metadata
     network.difficulty_presets = cfg.get('difficulty_presets', {})
     supervisor = TrainingSupervisor(
@@ -116,8 +194,23 @@ def main() -> None:
     games_per_iteration = int(sp.get('games_per_iteration', 50))
     epochs_per_iteration = int(trainer_cfg.get('epochs_per_iteration', 40))  # INCREASED: from 4 to 40 for better training
 
+    # Load checkpoint if resuming
+    if checkpoint_to_load:
+        import torch
+        logger.info(f"Loading checkpoint: {checkpoint_to_load}")
+        checkpoint = torch.load(checkpoint_to_load, map_location=device)
+        network.network.load_state_dict(checkpoint['model_state_dict'])
+        # Restore optimizer state if available
+        if 'optimizer_state_dict' in checkpoint and hasattr(supervisor, 'trainer'):
+            try:
+                supervisor.trainer.policy_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                logger.info("Restored optimizer state")
+            except Exception as e:
+                logger.warning(f"Could not restore optimizer state: {e}")
+        logger.info(f"Checkpoint loaded successfully")
+
     start_time = time.time()
-    for it in range(num_iterations):
+    for it in range(start_iteration, num_iterations):
         logger.info(f'Starting iteration {it + 1}/{num_iterations}')
         summary = supervisor.train_iteration(num_games=games_per_iteration, epochs=epochs_per_iteration)
 
