@@ -389,6 +389,11 @@ When working in this codebase, **proactively improve what you encounter**:
 
 **Philosophy**: This is a long-term project. Small, consistent improvements compound over time. Every encounter with the codebase is an opportunity to make it slightly better for the next person (or your future self).
 
+### Git Commits
+
+- Do not add "Co-Authored-By" or other attribution to Claude Code in commit messages
+- Keep commit messages concise and focused on the "why" rather than the "what"
+
 ## Recent Development (heuristic_seeding branch)
 
 **Latest Changes**:
