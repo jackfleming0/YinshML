@@ -5,8 +5,17 @@ Living to-do list. Keep entries short; move completed items to the bottom.
 ## Now
 
 - [x] **Supervised pretraining**: 10 epochs on 240K Boardspace positions. Final val accuracy **28.3%** (random = 0.014%), val value MSE **0.33** (uniform = 1.0). Ran 3h 48m on MPS. Checkpoint: `models/supervised/best_supervised.pt` (137MB, 34.2M params).
-- [ ] **Self-play warm-start run** (in progress, started 2026-04-12 16:59, PID 7502). 10 iterations, 100 games each, 160 MCTS sims/move. Staged at `runs/supervised_warmstart/iteration_0/checkpoint_iteration_0.pt`. Log: `logs/selfplay_warmstart.log`. **Expected duration: ~8-10 hours overnight.**
-- [ ] **Morning-after check**: review `runs/supervised_warmstart/` for progress. Look for ELO improvements in tournament results, replay buffer fill rate, and whether val loss in trainer kept decreasing.
+
+- [x] **Large-scale pruning + consolidation** (2026-04-12) — 6 commits on branch `clean-slate`, PR #8 open against `main`: https://github.com/jackfleming0/YinshML/pull/8. Deleted `optimized_trainer`, `enhanced_mcts`, `enhanced_self_play`, 17 orphan tests, 70 stale `.md` files, `experiments/` (1.1 GB), old `runs/` subdirs (3.5→0.5 GB), 45 root-level ad-hoc scripts. Unified `use_enhanced_encoding` flag end-to-end. 716 tests collect clean (was 13 errors). Distilled findings into `RESEARCH_LOG.md`. Backup branch: `architectural-improvements`.
+
+- [x] **Morning-after check on warm-start run** — run died mid-iter 3 (buffer-at-capacity + killed ~18:38). Tournament result: supervised baseline (iter_0, ELO 1540) beat every subsequent iteration (iter_1=1460, iter_2=1474). **Self-play is regressing the supervised prior, not improving it.** Best model pointer never left iter_0.
+
+- [ ] **Diagnose warm-start regression — next session priority.** Before scaling any new experiment, figure out why self-play degrades the supervised prior. Proposed 3-arm A/B/C rig, ~2h total, 3 iterations each from `best_supervised.pt`:
+  - Arm A: heuristic_weight=0.3, buffer=50K (control — repro current result)
+  - Arm B: heuristic_weight=0.0, buffer=50K (test: is hybrid heuristic diluting the prior?)
+  - Arm C: heuristic_weight=0.3, buffer=200K (test: is buffer turnover evicting the bootstrap too fast?)
+  - Success metric: does iter_1 beat iter_0 head-to-head in any arm?
+  - Cheap pre-check: `grep -n "value_mode|classification|MSE" yinsh_ml/training/trainer.py scripts/run_supervised_pretraining.py` — if the supervised value head (MSE against outcomes) and self-play value head (classification w/ variance penalty) are different, the self-play trainer is re-training the value head from scratch every iteration. That alone could explain the regression. See RESEARCH_LOG.md "Value head architecture & loss functions" for prior evidence.
 
 ## Blocked on manual browser work
 
