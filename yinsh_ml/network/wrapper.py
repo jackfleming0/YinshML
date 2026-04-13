@@ -274,20 +274,35 @@ class NetworkWrapper:
     def load_model(self, path: str):
         """Load model with architecture adaptation."""
         try:
-            # Load checkpoint
             state_dict = torch.load(path, map_location=self.device)
 
-            # Filter out incompatible layers, keeping only matching shapes
+            # Hard-fail early on encoder mismatch: the input conv's in_channels
+            # is a load-bearing invariant. Silent filtering would leave it randomly
+            # initialized and corrupt inference.
+            input_conv_key = next(
+                (k for k in state_dict if k.endswith('conv_block.0.weight')), None
+            )
+            if input_conv_key is not None:
+                ckpt_in = state_dict[input_conv_key].shape[1]
+                expected_in = 15 if self.use_enhanced_encoding else 6
+                if ckpt_in != expected_in:
+                    raise RuntimeError(
+                        f"Encoder channel mismatch: checkpoint has {ckpt_in} input channels "
+                        f"but wrapper was constructed with use_enhanced_encoding="
+                        f"{self.use_enhanced_encoding} (expects {expected_in}). "
+                        f"Re-instantiate NetworkWrapper with the matching flag."
+                    )
+
             compatible_state_dict = {}
             model_state = self.network.state_dict()
-
             for key, param in state_dict.items():
                 if key in model_state and param.shape == model_state[key].shape:
                     compatible_state_dict[key] = param
 
-            # Load compatible weights
             self.network.load_state_dict(compatible_state_dict, strict=False)
 
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to load model: {e}")
 
@@ -298,7 +313,7 @@ class NetworkWrapper:
             self.network.eval().to('cpu')
 
             # Create example input on CPU
-            example_input = torch.randn(1, 6, 11, 11).to('cpu')
+            example_input = torch.randn(1, self._input_shape[0], 11, 11).to('cpu')
 
             # Create a traced model with named outputs using NamedTuple
             class TracedModel(torch.nn.Module):

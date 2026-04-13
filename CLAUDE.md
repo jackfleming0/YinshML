@@ -192,13 +192,18 @@ yinsh-track --help
 - **Win Condition**: First to capture 3 complete rows (5+ consecutive markers)
 - **Position Notation**: Algebraic (A-K columns, 1-11 rows)
 
-### State Encoding (6 Channels)
-1. White Rings (11×11 binary)
-2. Black Rings (11×11 binary)
-3. White Markers (11×11 binary)
-4. Black Markers (11×11 binary)
-5. Valid Moves (11×11 binary)
-6. Game Phase (11×11 scalar)
+### State Encoding (6 or 15 Channels)
+
+Two encoders live side-by-side, selected by the single `use_enhanced_encoding` flag:
+
+- **Basic (6-ch, default)** — `yinsh_ml/utils/encoding.py::StateEncoder`
+  1. White Rings / 2. Black Rings / 3. White Markers / 4. Black Markers / 5. Valid Moves / 6. Game Phase
+- **Enhanced (15-ch)** — `yinsh_ml/utils/enhanced_encoding.py::EnhancedStateEncoder` (inherits from `StateEncoder`)
+  Adds row threats, partial rows, ring mobility, center distance, ring influence, turn number, score differential.
+
+The flag plumbs end-to-end: `NetworkWrapper(use_enhanced_encoding=...)` → `YinshNetwork(input_channels=...)` → picks the encoder. In training configs it's read at `scripts/run_training.py` from `encoding.type: basic|enhanced`. In supervised pretraining, pass `--use-enhanced-encoding`. The converter honours the flag by accepting a custom `encoder=` in `GameConverter(encoder=EnhancedStateEncoder())`.
+
+`NetworkWrapper.load_model` hard-fails on channel mismatch between wrapper and checkpoint — no silent filtering. To switch channel counts, regenerate supervised data with the matching encoder and retrain.
 
 ### Heuristic Feature Set (7 Features)
 Learned from 100K+ games analysis (see `QUICK_START_GUIDE.md` for details):

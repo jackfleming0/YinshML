@@ -32,6 +32,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.network.model import YinshNetwork
 from yinsh_ml.data.converter import GameConverter
+from yinsh_ml.utils.encoding import StateEncoder
+from yinsh_ml.utils.enhanced_encoding import EnhancedStateEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,8 @@ def load_data(args) -> tuple:
         states, policies, values = GameConverter.load_training_data(args.data)
     elif args.games_dir:
         logger.info(f"Converting games from {args.games_dir}")
-        converter = GameConverter()
+        encoder = EnhancedStateEncoder() if args.use_enhanced_encoding else StateEncoder()
+        converter = GameConverter(encoder=encoder)
         pairs = converter.convert_directory(args.games_dir,
                                             min_rating=args.min_rating)
         if not pairs:
@@ -90,10 +93,11 @@ def create_model(args) -> tuple:
         )
     )
 
+    input_channels = 15 if args.use_enhanced_encoding else 6
     model = YinshNetwork(
         num_channels=256,
         num_blocks=12,
-        input_channels=6,
+        input_channels=input_channels,
     ).to(device)
 
     if args.checkpoint:
@@ -278,6 +282,9 @@ def main():
                        help='Path to checkpoint to resume from')
     parser.add_argument('--device', type=str, default=None,
                        help='Device (cuda/mps/cpu)')
+    parser.add_argument('--use-enhanced-encoding', action='store_true',
+                       help='Use 15-channel enhanced encoding (default: 6-channel basic). '
+                            'Must match the channel count of any --checkpoint loaded.')
 
     # Output options
     parser.add_argument('--output-dir', type=str, default='models/supervised',
