@@ -207,7 +207,7 @@ class OptimizedYinshTrainer:
             if osp.exists(replay_buffer_path):
                 self.experience.load_buffer(replay_buffer_path)
             else:
-                print(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
+                self.logger.info(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
     
     def _get_or_create_buffer(self, key: str, shape: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
         """Get or create a persistent buffer for loss computation."""

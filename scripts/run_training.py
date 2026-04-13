@@ -5,6 +5,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 
 import yaml
 
@@ -23,7 +24,7 @@ def load_config(cfg_path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def find_latest_checkpoint(run_dir: Path) -> tuple[Path | None, int]:
+def find_latest_checkpoint(run_dir: Path) -> Tuple[Optional[Path], int]:
     """Find the latest checkpoint in a run directory.
 
     Returns:
@@ -68,6 +69,88 @@ def select_device(device_cfg: str) -> str:
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _load_model_state_compatible(model, state_dict: dict, logger: logging.Logger) -> None:
+    """Load only shape-compatible keys so resume survives minor architecture drift."""
+    model_state = model.state_dict()
+    compatible_state = {}
+    for key, param in state_dict.items():
+        if key in model_state and hasattr(param, "shape") and param.shape == model_state[key].shape:
+            compatible_state[key] = param
+
+    if not compatible_state:
+        raise RuntimeError("Checkpoint does not contain any compatible model weights")
+
+    missing = len(model_state) - len(compatible_state)
+    logger.info(
+        f"Loaded {len(compatible_state)}/{len(model_state)} compatible tensor(s) from checkpoint "
+        f"(missing or shape-mismatched: {missing})"
+    )
+    model.load_state_dict(compatible_state, strict=False)
+
+
+def _restore_optimizer_state(supervisor, checkpoint: dict, logger: logging.Logger) -> None:
+    trainer = getattr(supervisor, "trainer", None)
+    if trainer is None:
+        return
+
+    try:
+        if "optimizer_state_dict" in checkpoint and hasattr(trainer, "policy_optimizer"):
+            trainer.policy_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            logger.info("Restored policy optimizer state (optimizer_state_dict)")
+    except Exception as exc:
+        logger.warning(f"Could not restore optimizer_state_dict: {exc}")
+
+    try:
+        if "policy_optimizer_state_dict" in checkpoint and hasattr(trainer, "policy_optimizer"):
+            trainer.policy_optimizer.load_state_dict(checkpoint["policy_optimizer_state_dict"])
+            logger.info("Restored policy optimizer state (policy_optimizer_state_dict)")
+    except Exception as exc:
+        logger.warning(f"Could not restore policy_optimizer_state_dict: {exc}")
+
+    try:
+        if "value_optimizer_state_dict" in checkpoint and hasattr(trainer, "value_optimizer"):
+            trainer.value_optimizer.load_state_dict(checkpoint["value_optimizer_state_dict"])
+            logger.info("Restored value optimizer state")
+    except Exception as exc:
+        logger.warning(f"Could not restore value_optimizer_state_dict: {exc}")
+
+    try:
+        if "policy_scheduler_state_dict" in checkpoint and hasattr(trainer, "policy_scheduler"):
+            trainer.policy_scheduler.load_state_dict(checkpoint["policy_scheduler_state_dict"])
+            logger.info("Restored policy scheduler state")
+    except Exception as exc:
+        logger.warning(f"Could not restore policy_scheduler_state_dict: {exc}")
+
+    try:
+        if "value_scheduler_state_dict" in checkpoint and hasattr(trainer, "value_scheduler"):
+            trainer.value_scheduler.load_state_dict(checkpoint["value_scheduler_state_dict"])
+            logger.info("Restored value scheduler state")
+    except Exception as exc:
+        logger.warning(f"Could not restore value_scheduler_state_dict: {exc}")
+
+
+def _load_resume_checkpoint(network: NetworkWrapper, supervisor: TrainingSupervisor, checkpoint_path: Path, device: str, logger: logging.Logger) -> None:
+    import torch
+
+    logger.info(f"Loading checkpoint: {checkpoint_path}")
+    checkpoint_obj = torch.load(checkpoint_path, map_location=device)
+
+    checkpoint_dict = checkpoint_obj if isinstance(checkpoint_obj, dict) else {}
+    if isinstance(checkpoint_obj, dict) and "model_state_dict" in checkpoint_obj and isinstance(
+        checkpoint_obj["model_state_dict"], dict
+    ):
+        model_state = checkpoint_obj["model_state_dict"]
+    elif isinstance(checkpoint_obj, dict):
+        # Supervisor checkpoints are raw state_dict objects.
+        model_state = checkpoint_obj
+    else:
+        raise RuntimeError(f"Unsupported checkpoint object type: {type(checkpoint_obj)}")
+
+    _load_model_state_compatible(network.network, model_state, logger)
+    _restore_optimizer_state(supervisor, checkpoint_dict, logger)
+    logger.info("Checkpoint loaded successfully")
 
 
 def main() -> None:
@@ -145,12 +228,15 @@ def main() -> None:
         # Self-play / MCTS
         'evaluation_mode': sp.get('evaluation_mode', 'hybrid'),  # NEW: Default to hybrid mode
         'heuristic_weight': float(sp.get('heuristic_weight', 0.7)),  # NEW: Default 70% heuristic weight
+        'num_workers': sp.get('num_workers', 'auto'),
         'late_simulations': sp.get('late_simulations'),
         'simulation_switch_ply': sp.get('simulation_switch_ply', 20),
         'c_puct': float(sp.get('c_puct', 1.0)),
         'dirichlet_alpha': float(sp.get('dirichlet_alpha', 0.3)),
         'value_weight': float(sp.get('value_weight', 1.0)),
         'max_depth': int(sp.get('max_depth', 300)),
+        'use_batched_mcts': bool(sp.get('use_batched_mcts', True)),
+        'mcts_batch_size': int(sp.get('mcts_batch_size', 32)),
         'initial_temp': float(sp.get('initial_temp', 1.0)),
         'final_temp': float(sp.get('final_temp', 0.1)),
         'annealing_steps': int(sp.get('annealing_steps', 30)),
@@ -196,18 +282,7 @@ def main() -> None:
 
     # Load checkpoint if resuming
     if checkpoint_to_load:
-        import torch
-        logger.info(f"Loading checkpoint: {checkpoint_to_load}")
-        checkpoint = torch.load(checkpoint_to_load, map_location=device)
-        network.network.load_state_dict(checkpoint['model_state_dict'])
-        # Restore optimizer state if available
-        if 'optimizer_state_dict' in checkpoint and hasattr(supervisor, 'trainer'):
-            try:
-                supervisor.trainer.policy_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                logger.info("Restored optimizer state")
-            except Exception as e:
-                logger.warning(f"Could not restore optimizer state: {e}")
-        logger.info(f"Checkpoint loaded successfully")
+        _load_resume_checkpoint(network, supervisor, checkpoint_to_load, device, logger)
 
     start_time = time.time()
     for it in range(start_iteration, num_iterations):
@@ -267,5 +342,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
-

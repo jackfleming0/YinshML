@@ -544,6 +544,7 @@ class YinshTrainer:
         states = states.to(self.device)
         target_probs = target_probs.to(self.device)
         target_values = target_values.to(self.device)
+        target_values_flat = target_values.view(-1)
 
         # Debug print every 20 iterations (debug level)
         if self.current_iteration % 20 == 0 and self.logger.isEnabledFor(logging.DEBUG):
@@ -557,7 +558,7 @@ class YinshTrainer:
         # Monitor / log value head metrics
         value_metrics = self._monitor_value_head(
             pred_values,
-            target_values,
+            target_values_flat,
             log_activations=(self.current_iteration % 10 == 0)
         )
         self._log_value_head_metrics(value_metrics)
@@ -628,8 +629,6 @@ class YinshTrainer:
                     # Convert continuous target values to discrete class labels
                     # Map target ∈ [-1, 1] to class ∈ {0, 1, 2, 3, 4, 5, 6}
                     # For 7 classes representing: {-3, -2, -1, 0, +1, +2, +3} score differences
-                    # Ensure target_values is 1D
-                    target_values_flat = target_values.view(-1) if target_values.dim() > 1 else target_values
                     target_normalized = (target_values_flat + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
                     target_class = torch.round(target_normalized).long().clamp(0, self.network.network.num_value_classes - 1)
 
@@ -696,7 +695,7 @@ class YinshTrainer:
 
             else:
                 # Legacy regression mode with MSE + variance penalty (kept for backward compatibility)
-                value_loss_mse = F.mse_loss(pred_values, target_values)
+                value_loss_mse = F.mse_loss(pred_values.view(-1), target_values_flat)
                 batch_variance = torch.var(pred_values)
                 variance_weight = 1.5
                 variance_penalty = variance_weight * torch.exp(-batch_variance * 10)
@@ -768,8 +767,8 @@ class YinshTrainer:
                     value_accuracy = 0.0
             else:
                 # For regression mode: binary accuracy (sign prediction)
-                pred_outcomes = (pred_values > 0).float()
-                true_outcomes = (target_values > 0).float()
+                pred_outcomes = (pred_values.view(-1) > 0).float()
+                true_outcomes = (target_values_flat > 0).float()
                 value_accuracy = (pred_outcomes == true_outcomes).float().mean().item()
 
             pred_moves = torch.argmax(pred_logits, dim=1)
@@ -858,6 +857,9 @@ class YinshTrainer:
                             log_activations: bool = False) -> Dict:
         """Monitor value head performance and distributions."""
         with torch.no_grad():
+            # Normalize to 1D to avoid broadcasting warnings ([B] vs [B, 1]).
+            pred_values = pred_values.view(-1)
+            target_values = target_values.view(-1)
             metrics = {}
             pre_tanh = pred_values
 

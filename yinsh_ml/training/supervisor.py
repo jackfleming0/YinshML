@@ -39,6 +39,30 @@ if not logging.getLogger().hasHandlers():
 
 
 class TrainingSupervisor:
+    """
+    Supervises the AlphaZero-style training loop: self-play → training → evaluation.
+
+    === AlphaZero-Style Continuous Training ===
+    This supervisor implements TRUE AlphaZero training:
+
+    1. NEVER reverts network weights on "bad" iterations
+    2. NEVER reverts or filters the replay buffer
+    3. Buffer uses natural FIFO eviction (oldest samples discarded when full)
+    4. Training continues on latest weights regardless of tournament results
+    5. Best model is saved for EVALUATION/COMPARISON only, not for reverting
+
+    Why no reversion?
+    - Reversion creates a closed loop where the model can't escape local optima
+    - AlphaZero's insight: more diverse training data beats careful curation
+    - Temporary ELO dips are normal and will recover with continued training
+    - The model needs to explore to find better strategies
+
+    Tournament results are used for:
+    - Monitoring training progress (ELO tracking)
+    - Saving checkpoints of promising models
+    - NOT for gating or reverting the training process
+    """
+
     def __init__(self,
                  network: NetworkWrapper,
                  save_dir: str,
@@ -126,6 +150,18 @@ class TrainingSupervisor:
         lr_schedule = self.mode_settings.get('lr_schedule', 'constant')
         warmup_steps = self.mode_settings.get('warmup_steps', 0)
 
+        # Augmentation settings (Phase 2 architectural improvements)
+        enable_augmentation = self.mode_settings.get('enable_augmentation', False)
+        max_augmentations = self.mode_settings.get('max_augmentations', 12)
+
+        # Phase-weighted sampling (emphasize critical game phases)
+        self.phase_weights = self.mode_settings.get('phase_weights', {
+            'RING_PLACEMENT': 1.0,
+            'MAIN_GAME': 1.0,
+            'RING_REMOVAL': 1.0
+        })
+        self.logger.info(f"Phase weights: {self.phase_weights}")
+
         # ==================================================================
         # 2. Instantiate Components with Extracted Parameters
         # ==================================================================
@@ -184,6 +220,9 @@ class TrainingSupervisor:
             discrimination_weight=discrimination_weight, # Pass discrimination weight from config
             max_buffer_size=max_buffer_size, # Pass buffer size from config
             replay_buffer_path=str(replay_buffer_file), # Pass path for persistence
+            # Augmentation settings (Phase 2 architectural improvements)
+            enable_augmentation=enable_augmentation,
+            max_augmentations=max_augmentations,
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,
             # lr_schedule = lr_schedule,
@@ -213,12 +252,18 @@ class TrainingSupervisor:
         self.state_encoder = StateEncoder() # Useful for decoding states if needed
         self.metrics = TrainingMetrics() # Keep for internal aggregation if used
 
+        # Tournament sliding window: only compare recent N models to keep time constant
+        # With window=5: 10 pairs × 400 games = 4000 games (constant)
+        # vs full round-robin at iter 50: 1225 pairs × 400 = 490,000 games (infeasible)
+        tournament_window = self.mode_settings.get('tournament_sliding_window', 5)
+
         self.tournament_manager = ModelTournament(
             training_dir=self.save_dir, # Tournaments evaluate models within this run's directory
             device=self.device,
-            games_per_match=self.tournament_games # Use the value passed to supervisor
+            games_per_match=self.tournament_games, # Use the value passed to supervisor
+            sliding_window_size=tournament_window
         )
-        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}")
+        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}, Window={tournament_window}")
 
 
         # --- Best Model Tracking ---
@@ -296,6 +341,20 @@ class TrainingSupervisor:
         self.logger.info(f"  TensorPool: {tensor_pool_size} initial, {tensor_pool_size * 2} max")
         self.logger.info(f"  Workers: {num_workers}")
 
+    def _log_mps_memory(self, phase_name: str = ""):
+        """Log MPS driver allocated memory for debugging memory growth.
+
+        Args:
+            phase_name: Name of the phase for logging context
+        """
+        if torch.backends.mps.is_available():
+            try:
+                driver_mem = torch.mps.driver_allocated_memory() / (1024 * 1024 * 1024)
+                current_mem = torch.mps.current_allocated_memory() / (1024 * 1024 * 1024)
+                self.logger.info(f"[MPS Memory] {phase_name}: driver={driver_mem:.2f}GB, current={current_mem:.2f}GB")
+            except Exception as e:
+                self.logger.debug(f"Could not get MPS memory stats: {e}")
+
     def _clear_memory_cache(self, phase_name: str = ""):
         """Clear PyTorch memory caches to free up memory with aggressive tensor cleanup.
 
@@ -325,16 +384,17 @@ class TrainingSupervisor:
             gc.collect()
 
         # Clear PyTorch caches based on device
+        # CRITICAL: synchronize() MUST come BEFORE empty_cache()
+        # to ensure all GPU operations complete before releasing memory
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
         elif torch.backends.mps.is_available():
-            # CRITICAL FIX: MPS does have empty_cache in PyTorch 2.0+
             try:
-                torch.mps.empty_cache()
+                torch.mps.synchronize()  # Wait for all MPS operations to complete
+                torch.mps.empty_cache()  # Now safe to release memory
             except AttributeError:
                 pass  # Fallback for older PyTorch versions
-            torch.mps.synchronize()
 
         # Final garbage collection after cache clear
         gc.collect()
@@ -459,12 +519,13 @@ class TrainingSupervisor:
         # ------------------------------------------------------------------ #
         # 1. SELF-PLAY (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
-        # Ensure self_play uses the *current* network weights (potentially reverted from previous iter)
+        # Ensure self_play uses the *current* network weights (always latest, AlphaZero-style)
         self.self_play.network = self.network
         # Pass the number of games for this iteration
         self.self_play.current_iteration = current_iteration
 
         self.logger.info(f"Generating {num_games} self-play games...")
+        self._log_mps_memory("before self-play")
         # Log MCTS parameters being used by SelfPlay for this iteration for verification
         self.logger.info(f"[SelfPlay Config] Early Sims: {self.self_play.mcts.early_simulations}, "
                          f"Late Sims: {self.self_play.mcts.late_simulations}, "
@@ -570,6 +631,7 @@ class TrainingSupervisor:
 
         # Clear memory after self-play
         self._clear_memory_cache("self-play")
+        self._log_mps_memory("after self-play")
 
         # --- Calculate stats from accumulated lightweight data ---
         avg_game_len = np.mean(game_lengths) if game_lengths else 0
@@ -651,7 +713,8 @@ class TrainingSupervisor:
 
             epoch_stats = self.trainer.train_epoch(
                 batch_size=self.trainer.batch_size,
-                batches_per_epoch=actual_batches
+                batches_per_epoch=actual_batches,
+                phase_weights=self.phase_weights
             )
 
             # Aggregate stats
@@ -692,6 +755,7 @@ class TrainingSupervisor:
 
         # Clear memory after training to prevent accumulation
         self._clear_memory_cache("training")
+        self._log_mps_memory("after training")
 
         # --- Log training metrics to experiment tracker ---
         if self.experiment_tracker and self.experiment_id:
@@ -783,6 +847,7 @@ class TrainingSupervisor:
             self.logger.warning(f"Error closing tournament workers: {e}")
 
         self._clear_memory_cache("tournament")
+        self._log_mps_memory("after tournament")
 
         # ------------------------------------------------------------------ #
         # 5. PROMOTION / REVERSION (using Wilson Gate)
@@ -829,9 +894,8 @@ class TrainingSupervisor:
             self.logger.info(
                 f"Wilson Gate Check: Wins={wins}, Total={total}, LB={self._wilson_lower_bound(wins, total):.3f}, Threshold={wilson_threshold} -> {'PROMOTE' if promote_by_wilson else 'REJECT'}")
 
-        # --- Final Promotion Decision Logic ---
+        # --- Final Promotion Decision Logic (AlphaZero-style: never revert) ---
         promote = False
-        reverted = False
         kept_current_best = (self.best_model_iteration == candidate_iteration)
 
         if promote_by_wilson:
@@ -854,20 +918,13 @@ class TrainingSupervisor:
             self.best_model_path = checkpoint_path
             if self.best_model_path.exists():
                 self.network.save_model(str(self.best_model_save_path))
-                self.logger.info(f"Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
+                self.logger.info(f"✅ NEW BEST: Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
             else:
                 self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
             self._save_best_model_state()
 
-            # CRITICAL FIX: Save replay buffer snapshot when model is promoted
-            # This allows reverting to clean buffer state if future models are rejected
-            buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl.gz"
-            buffer_size_before = self.trainer.experience.size()
-            try:
-                self.trainer.experience.save_buffer(str(buffer_snapshot_path))
-                self.logger.info(f"📸 Saved replay buffer snapshot: {buffer_size_before:,} samples → {buffer_snapshot_path.name}")
-            except Exception as e:
-                self.logger.error(f"Failed to save buffer snapshot: {e}", exc_info=True)
+            # AlphaZero-style: No buffer snapshots needed - buffer accumulates continuously (FIFO)
+            # Best model is saved for evaluation/comparison only, not for reverting
 
             # --- Log model promotion to experiment tracker ---
             if self.experiment_tracker and self.experiment_id:
@@ -888,64 +945,38 @@ class TrainingSupervisor:
             self._save_best_model_state()
 
         else:
-            self.logger.info(f"🚫 REJECTED: Candidate Iter {candidate_iteration} ({candidate_id_canon}) not promoted.")
-            if self.best_model_path and self.best_model_path.exists():
-                self.logger.info(
-                    f"Reverting network weights to previous best: {self.best_model_path.name} (Iter {self.best_model_iteration})")
-                try:
-                    self.network.load_model(str(self.best_model_path))
-                    reverted = True
-
-                    # CRITICAL FIX: Also revert replay buffer to match reverted network
-                    # This prevents training on contaminated data from rejected models
-                    buffer_snapshot_path = self.save_dir / "replay_buffer_snapshot.pkl.gz"
-                    buffer_size_before = self.trainer.experience.size()
-
-                    if buffer_snapshot_path.exists():
-                        try:
-                            self.trainer.experience.load_buffer(str(buffer_snapshot_path))
-                            buffer_size_after = self.trainer.experience.size()
-                            self.logger.info(
-                                f"🔄 Reverted replay buffer: {buffer_size_before:,} → {buffer_size_after:,} samples "
-                                f"(removed {buffer_size_before - buffer_size_after:,} contaminated samples from rejected model)")
-                        except Exception as e:
-                            self.logger.error(f"Failed to restore buffer snapshot: {e}. Buffer may contain contaminated data!", exc_info=True)
-                    else:
-                        self.logger.warning(
-                            f"⚠️ No buffer snapshot found at {buffer_snapshot_path}. "
-                            f"Cannot revert buffer - it may contain {buffer_size_before:,} samples including data from rejected model!")
-
-                except Exception as e:
-                    self.logger.error(
-                        f"Failed to revert weights from {self.best_model_path}: {e}. Network weights remain as rejected candidate.",
-                        exc_info=True)
-            else:
-                self.logger.warning(
-                    f"Cannot revert: Previous best model path invalid or not found ({self.best_model_path}). Keeping rejected candidate weights.")
+            # =================================================================
+            # ALPHAZERO-STYLE CONTINUOUS TRAINING - NO REVERSION
+            # =================================================================
+            # Key insight: AlphaZero NEVER reverts weights or buffer.
+            # - The model didn't beat best, but we CONTINUE training with current weights
+            # - This allows exploration and prevents getting stuck in local optima
+            # - Best model is just a checkpoint for evaluation, not for reverting
+            # - Temporary ELO dips are normal and will recover with more training
+            # =================================================================
+            self.logger.info(f"🔄 CONTINUING: Iter {candidate_iteration} didn't beat best (ELO {candidate_elo:.1f} vs {self.best_model_elo:.1f})")
+            self.logger.info(f"   AlphaZero-style: training continues with current weights, no reversion")
+            self.logger.info(f"   Best model (iter {self.best_model_iteration}) saved for comparison only")
 
             # Checkpoint retention: only delete immediately if using old behavior (retention_count < 0)
-            # Otherwise, the _register_checkpoint method handles retention policy
             if self.checkpoint_retention_count < 0:
-                # Old behavior: immediately delete rejected checkpoint
                 try:
                     if checkpoint_path.exists():
                         checkpoint_size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
                         checkpoint_path.unlink()
-                        self.logger.info(f"Deleted rejected checkpoint (freed {checkpoint_size_mb:.1f} MB): {checkpoint_path.name}")
+                        self.logger.info(f"Deleted non-promoted checkpoint (freed {checkpoint_size_mb:.1f} MB): {checkpoint_path.name}")
                 except Exception as e:
-                    self.logger.warning(f"Failed to delete rejected checkpoint {checkpoint_path}: {e}")
+                    self.logger.warning(f"Failed to delete checkpoint {checkpoint_path}: {e}")
             else:
-                # Retention policy is handled by _register_checkpoint
                 self.logger.debug(f"Checkpoint retention active: keeping iter {candidate_iteration} in registry")
 
             self._save_best_model_state()
 
-            # --- Log model rejection/reversion to experiment tracker ---
+            # --- Log metrics to experiment tracker ---
             if self.experiment_tracker and self.experiment_id:
                 try:
-                    iteration = current_iteration + 1  # 1-based iteration numbering
+                    iteration = current_iteration + 1
                     self._log_metric_safe('model_promoted', 0.0, iteration)
-                    self._log_metric_safe('model_reverted', 1.0 if reverted else 0.0, iteration)
                     self._log_metric_safe('candidate_elo', candidate_elo, iteration)
                     if perform_wilson_check:
                         self._log_metric_safe('wilson_wins', wins, iteration)
@@ -953,10 +984,11 @@ class TrainingSupervisor:
                         self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
                         self._log_metric_safe('wilson_passed', 0.0, iteration)
                 except Exception as e:
-                    self.logger.warning(f"Failed to log rejection metrics: {e}")
+                    self.logger.warning(f"Failed to log metrics: {e}")
 
         # Determine active network weights for clarity
-        active_iter = self.best_model_iteration if (promote or reverted or kept_current_best) else candidate_iteration
+        # AlphaZero-style: always continue with current weights (no reversion)
+        active_iter = candidate_iteration
         self.logger.info(f"Active network weights in memory correspond to iteration {active_iter}")
 
         # ------------------------------------------------------------------ #
@@ -1096,9 +1128,12 @@ class TrainingSupervisor:
         self.logger.info(f"│ TOURNAMENT")
         self.logger.info(f"│   Candidate ELO: {current_elo:.1f}, Win Rate: {tourn_win_rate:.1%}")
         self.logger.info(f"│   Best Model: Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
-        self.logger.info(f"│   Decision: {'PROMOTED ✅' if promote else 'REJECTED ❌' if not kept_current_best else 'KEPT (already best)'}")
-        if reverted:
-            self.logger.info(f"│   Reverted: Network + Buffer → Iter {self.best_model_iteration}")
+        if promote:
+            self.logger.info(f"│   Decision: ✅ NEW BEST (promoted to best model)")
+        elif kept_current_best:
+            self.logger.info(f"│   Decision: ➡️  KEPT (already best)")
+        else:
+            self.logger.info(f"│   Decision: 🔄 CONTINUE (AlphaZero-style, no reversion)")
         self.logger.info(f"│   Active Network: Iteration {active_iter}")
         self.logger.info(f"│")
         self.logger.info(f"│ TIMING")
@@ -1136,7 +1171,7 @@ class TrainingSupervisor:
             'model_selection': {
                 'best_iteration': self.best_model_iteration,
                 'best_elo': self.best_model_elo,
-                'reverted_to_best': reverted,
+                'promoted': promote,
                 'active_network_iteration': active_iter
             }
         }
@@ -1210,17 +1245,18 @@ class TrainingSupervisor:
             gc.collect()
 
         # Clear PyTorch's cache based on device
+        # CRITICAL: synchronize() MUST come BEFORE empty_cache()
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
         elif torch.backends.mps.is_available():
             # Clear MPS cache (PyTorch 2.0+)
             try:
-                torch.mps.empty_cache()
+                torch.mps.synchronize()  # Wait for all MPS operations to complete
+                torch.mps.empty_cache()  # Now safe to release memory
                 self.logger.info("Cleared MPS cache")
             except AttributeError:
                 pass  # Fallback for older PyTorch versions
-            torch.mps.synchronize()
 
         # Move model to CPU temporarily to clear GPU/MPS memory
         if hasattr(self.network, 'network') and hasattr(self.network.network, 'to'):
@@ -1235,9 +1271,11 @@ class TrainingSupervisor:
                         gc.collect()
 
                     if torch.cuda.is_available():
+                        torch.cuda.synchronize()
                         torch.cuda.empty_cache()
                     elif torch.backends.mps.is_available():
                         try:
+                            torch.mps.synchronize()
                             torch.mps.empty_cache()
                         except AttributeError:
                             pass
@@ -1252,11 +1290,13 @@ class TrainingSupervisor:
         for _ in range(3):
             gc.collect()
 
-        # Final empty_cache call
+        # Final empty_cache call with proper synchronization
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
         elif torch.backends.mps.is_available():
             try:
+                torch.mps.synchronize()
                 torch.mps.empty_cache()
             except AttributeError:
                 pass
@@ -1344,12 +1384,14 @@ class TrainingSupervisor:
                 # Save current network state
                 self.network.save_model(temp_path)
 
-                # Get device information
+                # Get device and encoding information
                 device = getattr(self.network, 'device', torch.device('cpu'))
+                use_enhanced_encoding = getattr(self.network, 'use_enhanced_encoding', False)
 
-                # Recreate network with tensor pool
+                # Recreate network with tensor pool (preserving encoding type)
                 from yinsh_ml.network.wrapper import NetworkWrapper
-                new_network = NetworkWrapper(device=device, tensor_pool=self.tensor_pool)
+                new_network = NetworkWrapper(device=device, tensor_pool=self.tensor_pool,
+                                            use_enhanced_encoding=use_enhanced_encoding)
                 new_network.load_model(temp_path)
 
                 # Replace old network
@@ -1369,6 +1411,10 @@ class TrainingSupervisor:
         """
         Trim experience buffer to maintain memory efficiency between iterations.
         This prevents unbounded memory growth across iterations.
+
+        AlphaZero-style: Buffer uses FIFO eviction naturally. This method only
+        applies additional pruning if buffer exceeds 90% capacity to prevent
+        memory bloat.
         """
         if hasattr(self.trainer, 'experience'):
             buffer_size = self.trainer.experience.size()
@@ -1427,6 +1473,24 @@ class TrainingSupervisor:
         Even with 1 worker, tensors still grew to 16K+ and workers became zombies.
         Synchronous mode is slower but has clean, predictable memory management.
         """
+        configured_workers = self.mode_settings.get('num_workers', None)
+        if configured_workers is not None:
+            if isinstance(configured_workers, str) and configured_workers.lower() == "auto":
+                pass
+            else:
+                try:
+                    configured_workers_int = int(configured_workers)
+                    if configured_workers_int >= 0:
+                        self.logger.info(f"Using configured num_workers={configured_workers_int}")
+                        return configured_workers_int
+                    self.logger.warning(
+                        f"Ignoring invalid configured num_workers={configured_workers_int}; falling back to auto logic"
+                    )
+                except Exception:
+                    self.logger.warning(
+                        f"Ignoring non-integer configured num_workers={configured_workers}; falling back to auto logic"
+                    )
+
         # CRITICAL: Use 0 workers (synchronous mode) to prevent zombie processes
         MAX_WORKERS = 0
 

@@ -80,13 +80,15 @@ class YinshNetwork(nn.Module):
     """
 
     def __init__(self, num_channels: int = 256, num_blocks: int = 12,
-                 value_mode: str = 'classification', num_value_classes: int = 7):
+                 value_mode: str = 'classification', num_value_classes: int = 7,
+                 input_channels: int = 6):
         """
         Args:
             num_channels: Number of channels in residual blocks
             num_blocks: Number of residual/attention blocks
             value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
             num_value_classes: Number of discrete outcome classes for classification mode
+            input_channels: Number of input channels (6 for basic, 15 for enhanced encoding)
         """
         super().__init__()
 
@@ -94,10 +96,11 @@ class YinshNetwork(nn.Module):
         self.total_moves = 7395
         self.value_mode = value_mode
         self.num_value_classes = num_value_classes
+        self.input_channels = input_channels  # Store for reference
 
-        # Initial convolution block
+        # Initial convolution block - now configurable input channels
         self.conv_block = nn.Sequential(
-            nn.Conv2d(6, num_channels, 3, padding=1),
+            nn.Conv2d(input_channels, num_channels, 3, padding=1),
             nn.BatchNorm2d(num_channels),
             nn.ReLU()
         )
@@ -266,14 +269,27 @@ class YinshNetwork(nn.Module):
         Forward pass through the network.
 
         Args:
-            x: Input tensor of shape (batch_size, 6, 11, 11)
-               Channels:
-                - 0: White rings
-                - 1: Black rings
-                - 2: White markers
-                - 3: Black markers
+            x: Input tensor of shape (batch_size, input_channels, 11, 11)
+
+               For basic encoding (6 channels):
+                - 0: Current player's rings
+                - 1: Opponent's rings
+                - 2: Current player's markers
+                - 3: Opponent's markers
                 - 4: Valid moves mask
                 - 5: Game phase
+
+               For enhanced encoding (15 channels):
+                - 0-3: Same as basic (rings, markers)
+                - 4-5: Row threats (current/opponent)
+                - 6-7: Partial rows (3-4 marker runs)
+                - 8: Ring mobility (normalized)
+                - 9: Center distance (static heatmap)
+                - 10: Ring influence (reachable cells)
+                - 11: Valid move destinations
+                - 12: Game phase (normalized)
+                - 13: Turn number (normalized)
+                - 14: Score differential
 
         Returns:
             Tuple of:

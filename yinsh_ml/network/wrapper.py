@@ -25,7 +25,8 @@ class NetworkWrapper:
 
     def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None,
                  tensor_pool: Optional[TensorPool] = None,
-                 value_mode: str = 'classification', num_value_classes: int = 7):
+                 value_mode: str = 'classification', num_value_classes: int = 7,
+                 use_enhanced_encoding: bool = False):
         """
         Initialize the network wrapper.
 
@@ -35,6 +36,7 @@ class NetworkWrapper:
             tensor_pool: Optional TensorPool for memory management
             value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
             num_value_classes: Number of discrete outcome classes for classification mode
+            use_enhanced_encoding: If True, use 15-channel enhanced encoding. If False, use basic 6-channel.
         """
         if device:
             self.device = torch.device(device)
@@ -44,11 +46,17 @@ class NetworkWrapper:
                     "mps" if torch.backends.mps.is_available() else "cpu"
                 )
             )
+
+        # Store encoding configuration
+        self.use_enhanced_encoding = use_enhanced_encoding
+        input_channels = 15 if use_enhanced_encoding else 6
+
         self.network = YinshNetwork(
             num_channels=256,
             num_blocks=12,
             value_mode=value_mode,
-            num_value_classes=num_value_classes
+            num_value_classes=num_value_classes,
+            input_channels=input_channels
         ).to(self.device)
 
         # Setup logging
@@ -76,13 +84,20 @@ class NetworkWrapper:
 
         self.network.eval()  # Set to evaluation mode by default
 
-        # Initialize StateEncoder
-        self.state_encoder = StateEncoder()
+        # Initialize appropriate encoder based on configuration
+        if use_enhanced_encoding:
+            from ..utils.enhanced_encoding import EnhancedStateEncoder
+            self.state_encoder = EnhancedStateEncoder()
+            self.logger.info("Using enhanced 15-channel encoding")
+        else:
+            self.state_encoder = StateEncoder()
+            self.logger.info("Using basic 6-channel encoding")
+
         # Difficulty presets can be attached by runner for CoreML metadata
         self.difficulty_presets = None
-        
-        # Cache common tensor shapes for pooling
-        self._input_shape = (6, 11, 11)  # YINSH state shape
+
+        # Cache common tensor shapes for pooling - use appropriate channel count
+        self._input_shape = (input_channels, 11, 11)  # YINSH state shape
         self._policy_size = self.state_encoder.total_moves
 
     def _acquire_input_tensor(self, batch_size: int = 1) -> torch.Tensor:
@@ -419,4 +434,64 @@ class NetworkWrapper:
         finally:
             # Always release the batch tensor
             self._release_tensor(batch_tensor)
+
+    def cleanup(self) -> None:
+        """
+        Explicitly release all resources held by this wrapper.
+
+        Call this method when you're done using the NetworkWrapper to ensure
+        all tensor pool memory is released immediately. This is particularly
+        important in tournament scenarios where many models are loaded/unloaded.
+        """
+        import gc
+
+        # Clear tensor pool if we own it
+        if self._pool_enabled and hasattr(self, 'tensor_pool') and self.tensor_pool is not None:
+            try:
+                cleared = self.tensor_pool.clear_all()
+                if cleared > 0:
+                    self.logger.debug(f"NetworkWrapper cleanup: cleared {cleared} tensors")
+            except Exception as e:
+                self.logger.warning(f"Error during tensor pool cleanup: {e}")
+
+        # CRITICAL: Synchronize MPS before moving model to ensure all GPU ops complete
+        if torch.backends.mps.is_available():
+            try:
+                torch.mps.synchronize()
+            except Exception:
+                pass
+
+        # Move model to CPU to free GPU memory
+        if self.network is not None:
+            try:
+                self.network.cpu()
+            except Exception as e:
+                self.logger.warning(f"Error moving network to CPU: {e}")
+
+        # Clear any stored tensors in the model
+        if self.network is not None:
+            try:
+                if hasattr(self.network, 'value_head_activations'):
+                    self.network.value_head_activations.clear()
+                if hasattr(self.network, '_value_logits'):
+                    self.network._value_logits = None
+            except Exception:
+                pass
+
+        # Force garbage collection
+        gc.collect()
+
+        # Clear device cache with synchronization
+        if torch.backends.mps.is_available():
+            try:
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+            except Exception:
+                pass
+        elif torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        # Second GC pass after GPU cleanup
+        gc.collect()
 
