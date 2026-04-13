@@ -10,12 +10,13 @@ Living to-do list. Keep entries short; move completed items to the bottom.
 
 - [x] **Morning-after check on warm-start run** — run died mid-iter 3 (buffer-at-capacity + killed ~18:38). Tournament result: supervised baseline (iter_0, ELO 1540) beat every subsequent iteration (iter_1=1460, iter_2=1474). **Self-play is regressing the supervised prior, not improving it.** Best model pointer never left iter_0.
 
-- [ ] **Diagnose warm-start regression — next session priority.** Before scaling any new experiment, figure out why self-play degrades the supervised prior. Proposed 3-arm A/B/C rig, ~2h total, 3 iterations each from `best_supervised.pt`:
-  - Arm A: heuristic_weight=0.3, buffer=50K (control — repro current result)
-  - Arm B: heuristic_weight=0.0, buffer=50K (test: is hybrid heuristic diluting the prior?)
-  - Arm C: heuristic_weight=0.3, buffer=200K (test: is buffer turnover evicting the bootstrap too fast?)
-  - Success metric: does iter_1 beat iter_0 head-to-head in any arm?
-  - Cheap pre-check: `grep -n "value_mode|classification|MSE" yinsh_ml/training/trainer.py scripts/run_supervised_pretraining.py` — if the supervised value head (MSE against outcomes) and self-play value head (classification w/ variance penalty) are different, the self-play trainer is re-training the value head from scratch every iteration. That alone could explain the regression. See RESEARCH_LOG.md "Value head architecture & loss functions" for prior evidence.
+- [ ] **Fix value-head form mismatch between supervised and self-play — next session priority.**
+  - **Root cause confirmed (2026-04-12 grep):** `YinshNetwork` defaults to `value_mode='classification'`. Supervised script (`run_supervised_pretraining.py:150`) trains it with **MSE on the scalar expected-value output**. Self-play trainer (`trainer.py:624,636`) sees the same checkpoint in classification mode and switches to **cross-entropy on 7-class logits + discrimination loss**. Different loss surfaces on the same weights → self-play retrains the value head from scratch on iter 1, washing out the supervised prior. This is the textbook "training/inference value-representation mismatch" called out in RESEARCH_LOG.md.
+  - **Two fixes, pick one:**
+    1. **Make supervised match self-play**: update `run_supervised_pretraining.py` to use cross-entropy against discretized outcome buckets (same 7-class target as the self-play trainer produces). Retrain the supervised checkpoint (~4h on MPS). Strictly better — all downstream code already assumes classification.
+    2. **Make self-play match supervised**: instantiate `NetworkWrapper(value_mode='regression', ...)` for the warm-start run; the trainer's regression branch (MSE + variance penalty) is closer to supervised MSE. Faster to test but leaves the codebase in the legacy regression path.
+  - **Recommended: do fix #1.** Audit `YinshTrainer._monitor_value_head`, `ValueHeadMetrics`, `num_value_classes`, and the expected-value projection (`model.py:167`) while you're in there to make sure nothing else assumes MSE-on-expected-value.
+  - **After the fix, rerun the warm-start** and check iter_0 vs iter_1 tournament — if iter_1 no longer regresses, this was the whole problem. If it still regresses, then diagnose heuristic_weight / buffer size next (the 3-arm A/B/C rig previously proposed).
 
 ## Blocked on manual browser work
 
