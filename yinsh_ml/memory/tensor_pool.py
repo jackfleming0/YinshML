@@ -506,6 +506,42 @@ class TensorPool:
             logger.info("Using CPU for tensor operations")
             return device
     
+    def clear_all(self) -> int:
+        """
+        Explicitly clear all pooled tensors and release memory.
+
+        Call this method when you're done using the TensorPool to ensure
+        all memory is released immediately rather than waiting for GC.
+
+        Returns:
+            Number of tensors cleared
+        """
+        total_cleared = 0
+        try:
+            with self._tensor_lock:
+                total_cleared = sum(len(tensors) for tensors in self._tensor_pools.values())
+                total_cleared += len(self._in_use_tensors)
+
+                # Clear all pools
+                self._tensor_pools.clear()
+                self._in_use_tensors.clear()
+                self._creation_times.clear()
+
+                # Force MPS/CUDA cache cleanup
+                if torch.backends.mps.is_available():
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass
+                elif torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                if total_cleared > 0:
+                    logger.debug(f"TensorPool clear_all: released {total_cleared} tensors")
+        except Exception as e:
+            logger.warning(f"Error during TensorPool clear_all: {e}")
+        return total_cleared
+
     def __del__(self):
         """Cleanup on destruction."""
         try:

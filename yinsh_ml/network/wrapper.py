@@ -23,8 +23,10 @@ logging.getLogger('NetworkWrapper').setLevel(logging.DEBUG)
 class NetworkWrapper:
     """Wrapper class for the YINSH neural network model."""
 
-    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None, 
-                 tensor_pool: Optional[TensorPool] = None):
+    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None,
+                 tensor_pool: Optional[TensorPool] = None,
+                 value_mode: str = 'classification', num_value_classes: int = 7,
+                 use_enhanced_encoding: bool = False):
         """
         Initialize the network wrapper.
 
@@ -32,6 +34,9 @@ class NetworkWrapper:
             model_path: Optional path to load a pre-trained model
             device: Device to use ('cuda', 'mps', or 'cpu')
             tensor_pool: Optional TensorPool for memory management
+            value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
+            num_value_classes: Number of discrete outcome classes for classification mode
+            use_enhanced_encoding: If True, use 15-channel enhanced encoding. If False, use basic 6-channel.
         """
         if device:
             self.device = torch.device(device)
@@ -41,7 +46,18 @@ class NetworkWrapper:
                     "mps" if torch.backends.mps.is_available() else "cpu"
                 )
             )
-        self.network = YinshNetwork(num_channels=256, num_blocks=12).to(self.device)
+
+        # Store encoding configuration
+        self.use_enhanced_encoding = use_enhanced_encoding
+        input_channels = 15 if use_enhanced_encoding else 6
+
+        self.network = YinshNetwork(
+            num_channels=256,
+            num_blocks=12,
+            value_mode=value_mode,
+            num_value_classes=num_value_classes,
+            input_channels=input_channels
+        ).to(self.device)
 
         # Setup logging
         self.logger = logging.getLogger("NetworkWrapper")
@@ -68,11 +84,20 @@ class NetworkWrapper:
 
         self.network.eval()  # Set to evaluation mode by default
 
-        # Initialize StateEncoder
-        self.state_encoder = StateEncoder()
-        
-        # Cache common tensor shapes for pooling
-        self._input_shape = (6, 11, 11)  # YINSH state shape
+        # Initialize appropriate encoder based on configuration
+        if use_enhanced_encoding:
+            from ..utils.enhanced_encoding import EnhancedStateEncoder
+            self.state_encoder = EnhancedStateEncoder()
+            self.logger.info("Using enhanced 15-channel encoding")
+        else:
+            self.state_encoder = StateEncoder()
+            self.logger.info("Using basic 6-channel encoding")
+
+        # Difficulty presets can be attached by runner for CoreML metadata
+        self.difficulty_presets = None
+
+        # Cache common tensor shapes for pooling - use appropriate channel count
+        self._input_shape = (input_channels, 11, 11)  # YINSH state shape
         self._policy_size = self.state_encoder.total_moves
 
     def _acquire_input_tensor(self, batch_size: int = 1) -> torch.Tensor:
@@ -145,8 +170,9 @@ class NetworkWrapper:
             # Get network predictions
             move_logits, value = self.network(state_tensor)
 
-            # Ensure value predictions are in [-1, 1]
-            value = torch.tanh(value)
+            # PHASE 1.5 FIX: Value is already tanh'd by the network (model.py:139)
+            # Don't apply tanh again - causes over-compression (tanh(tanh(x)))
+            # value = torch.tanh(value)  # REMOVED
 
             # Apply move mask using proper masking
             if move_mask is not None:
@@ -248,20 +274,35 @@ class NetworkWrapper:
     def load_model(self, path: str):
         """Load model with architecture adaptation."""
         try:
-            # Load checkpoint
             state_dict = torch.load(path, map_location=self.device)
 
-            # Filter out incompatible layers, keeping only matching shapes
+            # Hard-fail early on encoder mismatch: the input conv's in_channels
+            # is a load-bearing invariant. Silent filtering would leave it randomly
+            # initialized and corrupt inference.
+            input_conv_key = next(
+                (k for k in state_dict if k.endswith('conv_block.0.weight')), None
+            )
+            if input_conv_key is not None:
+                ckpt_in = state_dict[input_conv_key].shape[1]
+                expected_in = 15 if self.use_enhanced_encoding else 6
+                if ckpt_in != expected_in:
+                    raise RuntimeError(
+                        f"Encoder channel mismatch: checkpoint has {ckpt_in} input channels "
+                        f"but wrapper was constructed with use_enhanced_encoding="
+                        f"{self.use_enhanced_encoding} (expects {expected_in}). "
+                        f"Re-instantiate NetworkWrapper with the matching flag."
+                    )
+
             compatible_state_dict = {}
             model_state = self.network.state_dict()
-
             for key, param in state_dict.items():
                 if key in model_state and param.shape == model_state[key].shape:
                     compatible_state_dict[key] = param
 
-            # Load compatible weights
             self.network.load_state_dict(compatible_state_dict, strict=False)
 
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to load model: {e}")
 
@@ -272,7 +313,7 @@ class NetworkWrapper:
             self.network.eval().to('cpu')
 
             # Create example input on CPU
-            example_input = torch.randn(1, 6, 11, 11).to('cpu')
+            example_input = torch.randn(1, self._input_shape[0], 11, 11).to('cpu')
 
             # Create a traced model with named outputs using NamedTuple
             class TracedModel(torch.nn.Module):
@@ -302,6 +343,21 @@ class NetworkWrapper:
             )
 
             # Save the CoreML model
+            # Attach user metadata for difficulty presets if available
+            try:
+                if self.difficulty_presets:
+                    # coremltools models have user_defined_metadata
+                    md = mlmodel.user_defined_metadata or {}
+                    # Keep it compact; store as JSON string
+                    import json
+                    md.update({
+                        'yinsh_difficulty_presets': json.dumps(self.difficulty_presets)
+                    })
+                    mlmodel.user_defined_metadata = md
+            except Exception as _:
+                # Ignore metadata failures
+                pass
+
             mlmodel.save(path)
             self.logger.info(f"Model exported to CoreML format at {path}")
 
@@ -312,7 +368,7 @@ class NetworkWrapper:
             self.logger.error(f"Error exporting to CoreML: {str(e)}")
             raise
 
-    def predict_from_state(self, game_state, 
+    def predict_from_state(self, game_state,
                           move_mask: Optional[torch.Tensor] = None,
                           temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -328,18 +384,129 @@ class NetworkWrapper:
         """
         # Acquire input tensor from pool
         input_tensor = self._acquire_input_tensor(batch_size=1)
-        
+
         try:
             # Encode the state into the pooled tensor
             state_array = self.state_encoder.encode_state(game_state)
             input_tensor[0] = torch.from_numpy(state_array).float()
-            
+
             # Use the regular predict method
             result = self.predict(input_tensor, move_mask, temperature)
-            
+
             return result
-            
+
         finally:
             # Always release the input tensor
             self._release_tensor(input_tensor)
+
+    def predict_batch(self, game_states: List, temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Make predictions for multiple game states in a single forward pass.
+
+        This is the key optimization for batched MCTS - instead of evaluating
+        each leaf node individually, we collect many leaves and evaluate them
+        all at once, dramatically improving throughput.
+
+        Args:
+            game_states: List of GameState objects to encode and predict
+            temperature: Temperature for move probability scaling
+
+        Returns:
+            Tuple of (batch_move_probabilities, batch_values) where:
+                - batch_move_probabilities: tensor of shape (batch_size, num_moves)
+                - batch_values: tensor of shape (batch_size, 1)
+        """
+        if not game_states:
+            raise ValueError("Cannot predict on empty batch of game states")
+
+        batch_size = len(game_states)
+
+        # Acquire batch input tensor from pool
+        batch_tensor = self._acquire_input_tensor(batch_size=batch_size)
+
+        try:
+            # Encode all states into the batch tensor
+            for i, game_state in enumerate(game_states):
+                state_array = self.state_encoder.encode_state(game_state)
+                batch_tensor[i] = torch.from_numpy(state_array).float()
+
+            # Single batched forward pass through the network
+            self.network.eval()
+            with torch.no_grad():
+                policy_logits, values = self.network(batch_tensor)
+
+                # Ensure value predictions are in [-1, 1]
+                values = torch.tanh(values)
+
+                # Apply temperature scaling to policy logits
+                if temperature != 1.0:
+                    policy_logits = policy_logits / temperature
+
+                # Return raw policy logits and values
+                # Note: Caller should apply softmax and masking as needed
+                return policy_logits, values
+
+        finally:
+            # Always release the batch tensor
+            self._release_tensor(batch_tensor)
+
+    def cleanup(self) -> None:
+        """
+        Explicitly release all resources held by this wrapper.
+
+        Call this method when you're done using the NetworkWrapper to ensure
+        all tensor pool memory is released immediately. This is particularly
+        important in tournament scenarios where many models are loaded/unloaded.
+        """
+        import gc
+
+        # Clear tensor pool if we own it
+        if self._pool_enabled and hasattr(self, 'tensor_pool') and self.tensor_pool is not None:
+            try:
+                cleared = self.tensor_pool.clear_all()
+                if cleared > 0:
+                    self.logger.debug(f"NetworkWrapper cleanup: cleared {cleared} tensors")
+            except Exception as e:
+                self.logger.warning(f"Error during tensor pool cleanup: {e}")
+
+        # CRITICAL: Synchronize MPS before moving model to ensure all GPU ops complete
+        if torch.backends.mps.is_available():
+            try:
+                torch.mps.synchronize()
+            except Exception:
+                pass
+
+        # Move model to CPU to free GPU memory
+        if self.network is not None:
+            try:
+                self.network.cpu()
+            except Exception as e:
+                self.logger.warning(f"Error moving network to CPU: {e}")
+
+        # Clear any stored tensors in the model
+        if self.network is not None:
+            try:
+                if hasattr(self.network, 'value_head_activations'):
+                    self.network.value_head_activations.clear()
+                if hasattr(self.network, '_value_logits'):
+                    self.network._value_logits = None
+            except Exception:
+                pass
+
+        # Force garbage collection
+        gc.collect()
+
+        # Clear device cache with synchronization
+        if torch.backends.mps.is_available():
+            try:
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+            except Exception:
+                pass
+        elif torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        # Second GC pass after GPU cleanup
+        gc.collect()
 

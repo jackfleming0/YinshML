@@ -201,7 +201,8 @@ class ModelTournament:
                  training_dir: Path,
                  device: str = 'cpu',
                  games_per_match: int = 50,
-                 temperature: float = 0.1):
+                 temperature: float = 0.1,
+                 sliding_window_size: int = 5):
         """
         Initialize tournament manager.
 
@@ -210,10 +211,14 @@ class ModelTournament:
             device: Device to run models on
             games_per_match: Number of games to play per match
             temperature: Temperature for move selection
+            sliding_window_size: Max number of recent models to include in tournament.
+                                 Set to 0 for full round-robin (not recommended for long runs).
+                                 Default 5 = constant O(1) complexity: 10 pairs × 200 games = 4000 games.
         """
         self.training_dir = Path(training_dir)
         self.device = device
         self.games_per_match = games_per_match
+        self.sliding_window_size = sliding_window_size
         self.temperature = temperature
         self.latest_summary_stats: Dict[str, Dict] = {}   # NEW
         self._pair_results: Dict[Tuple[str, str], Dict[str, int]] = {}
@@ -264,11 +269,23 @@ class ModelTournament:
                     black_model: NetworkWrapper,
                     white_id: str,
                     black_id: str) -> MatchResult:
-        """Play a match (several games) between two models."""
+        """Play a match (several games) between two models.
+
+        MEMORY OPTIMIZATION: Uses tensor pools to avoid creating new MPS tensors
+        for each move. This prevents MPS driver memory from growing unbounded.
+        """
+        import gc
+        import numpy as np
+
         white_wins = 0
         black_wins = 0
         draws = 0
         total_moves = 0
+
+        # Pre-allocate reusable tensors for this match to minimize MPS allocations
+        # These stay allocated for the entire match, avoiding repeated alloc/free cycles
+        white_input_tensor = white_model._acquire_input_tensor(batch_size=1)
+        black_input_tensor = black_model._acquire_input_tensor(batch_size=1)
 
         for game_num in range(self.games_per_match):
             self.logger.debug(f"Playing game {game_num + 1}/{self.games_per_match}: "
@@ -279,21 +296,27 @@ class ModelTournament:
 
             while not game_state.is_terminal() and move_count < 500:
                 current_model = white_model if game_state.current_player == Player.WHITE else black_model
+                input_tensor = white_input_tensor if game_state.current_player == Player.WHITE else black_input_tensor
 
                 # Get valid moves
                 valid_moves = game_state.get_valid_moves()
                 if not valid_moves:
                     break
 
-                # Get model's move choice
-                state_tensor = current_model.state_encoder.encode_state(game_state)
-                state_tensor = torch.FloatTensor(state_tensor).unsqueeze(0).to(self.device)
-                move_probs, _ = current_model.predict(state_tensor)
+                # MEMORY OPTIMIZATION: Encode state into pre-allocated tensor
+                # This avoids creating a new MPS tensor for every move
+                state_array = current_model.state_encoder.encode_state(game_state)
+                input_tensor.copy_(torch.from_numpy(np.array(state_array)).unsqueeze(0))
+
+                move_probs, _ = current_model.predict(input_tensor)
 
                 # Select move
                 selected_move = current_model.select_move(
                     move_probs, valid_moves, self.temperature
                 )
+
+                # Only delete move_probs (input_tensor is reused)
+                del move_probs
 
                 # Make move
                 success = game_state.make_move(selected_move)
@@ -315,6 +338,23 @@ class ModelTournament:
                 draws += 1
 
             total_moves += move_count
+
+            # MEMORY: Clear game state after each game
+            del game_state
+
+            # MEMORY: Periodic cleanup every 20 games to prevent MPS memory accumulation
+            if (game_num + 1) % 20 == 0:
+                gc.collect()
+                if torch.backends.mps.is_available():
+                    try:
+                        torch.mps.synchronize()
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass
+
+        # Release pre-allocated tensors back to pools
+        white_model._release_tensor(white_input_tensor)
+        black_model._release_tensor(black_input_tensor)
 
         match_result = MatchResult(
             white_model=white_id,
@@ -389,67 +429,133 @@ class ModelTournament:
 
         return wins_a, total
 
+    def _clear_model_memory(self):
+        """Aggressively clear GPU/MPS memory after unloading models.
+
+        MPS (Metal) memory management is lazy and requires explicit synchronization
+        and multiple GC passes to properly release memory.
+        """
+        import gc
+        import time
+
+        # First GC pass - collect Python objects
+        gc.collect()
+
+        if torch.backends.mps.is_available():
+            try:
+                # CRITICAL: Synchronize MPS to ensure all GPU operations complete
+                # Without this, empty_cache() may not release memory that's still "in flight"
+                torch.mps.synchronize()
+
+                # Clear the MPS cache
+                torch.mps.empty_cache()
+
+                # Second GC pass after MPS sync - catches objects that were waiting on GPU
+                gc.collect()
+
+                # Small delay to let MPS memory manager catch up
+                time.sleep(0.1)
+
+                # Final cache clear
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+
+            except Exception as e:
+                self.logger.debug(f"MPS cleanup warning: {e}")
+
+        elif torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # Final GC pass
+        gc.collect()
+
     def run_full_round_robin_tournament(self, current_iteration: int):
         """
-        Run a full round-robin tournament among all iterations from 0..current_iteration.
-        This version uses a robust Glicko-1 rating system:
-          - It resets all model ratings to an initial value (1500) and RD (350) by reinitializing
-            the GlickoTracker.
-          - It records every match outcome using record_match.
-          - After all matches, it updates the ratings in a batch via update_ratings.
-        The final summary includes each model's updated Glicko rating and RD.
+        Run a round-robin tournament among recent models (sliding window).
+
+        SLIDING WINDOW: Only includes the most recent N models (controlled by
+        sliding_window_size). This keeps tournament time constant O(N²) instead
+        of growing O(n²) with total iterations.
+
+        With sliding_window_size=5: 10 pairs × 2 directions × 200 games = 4,000 games
+        (constant regardless of how many iterations have run)
+
+        Uses LAZY MODEL LOADING to prevent OOM:
+          - Models are loaded on-demand for each match pair
+          - Only 2 models are in memory at a time
+          - Memory is cleared between match pairs
+
+        Uses a robust Glicko-1 rating system:
+          - It resets all model ratings to an initial value (1500) and RD (350)
+          - It records every match outcome using record_match
+          - After all matches, it updates the ratings in a batch via update_ratings
         """
         # Create a unique tournament ID
         tournament_id = f"full_round_robin_{current_iteration}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.current_tournament_id = tournament_id
 
         # Gather all model checkpoints up to current_iteration
-        model_paths = []
+        all_model_paths = {}  # model_id -> path (dict for lazy loading)
         for i in range(current_iteration + 1):
-            # OLD PATH: Looks directly in self.training_dir
-            # ckpt = self.training_dir / f"checkpoint_iteration_{i}.pt"
-
             # NEW PATH: Looks inside the iteration subdirectory
             ckpt = self.training_dir / f"iteration_{i}" / f"checkpoint_iteration_{i}.pt"
 
             if ckpt.exists():
-                model_paths.append((i, ckpt))
+                model_id = _canon(ckpt)
+                all_model_paths[model_id] = ckpt
             else:
-                # Add a debug log to see which paths are being checked and missed
                 self.logger.debug(f"Checkpoint not found at expected path: {ckpt}")
 
-        if len(model_paths) < 2:
-            self.logger.warning(f"Skipping tournament - found only {len(model_paths)} models (need >= 2). Checked paths like: {self.training_dir / 'iteration_X' / 'checkpoint_iteration_X.pt'}")
-            # Log the paths it did find, if any
-            if model_paths:
-                 self.logger.warning(f"Found model paths: {[str(p[1]) for p in model_paths]}")
+        if len(all_model_paths) < 2:
+            self.logger.warning(f"Skipping tournament - found only {len(all_model_paths)} models (need >= 2). Checked paths like: {self.training_dir / 'iteration_X' / 'checkpoint_iteration_X.pt'}")
+            if all_model_paths:
+                 self.logger.warning(f"Found model paths: {list(all_model_paths.values())}")
             return
 
-        # Load all models into memory
-        models = {}
-        for iter_num, path in model_paths:
-            model_id = _canon(path)  # instead of f"iteration_{iter_num}"
-            models[model_id] = self._load_model(path)
+        # SLIDING WINDOW: Only keep the most recent N models
+        all_model_ids = sorted(all_model_paths.keys(), key=lambda x: int(x.split('_')[-1]))
+
+        if self.sliding_window_size > 0 and len(all_model_ids) > self.sliding_window_size:
+            # Keep only the most recent models
+            selected_ids = all_model_ids[-self.sliding_window_size:]
+            model_paths = {mid: all_model_paths[mid] for mid in selected_ids}
+            self.logger.info(f"Sliding window: selected {len(model_paths)} most recent models "
+                           f"(window={self.sliding_window_size}, total available={len(all_model_ids)})")
+        else:
+            model_paths = all_model_paths
+            if self.sliding_window_size > 0:
+                self.logger.info(f"Using all {len(model_paths)} models (below sliding window size of {self.sliding_window_size})")
+            else:
+                self.logger.info(f"Sliding window disabled, using all {len(model_paths)} models")
 
         # Reset Glicko ratings for all models by initializing a new tracker
-        self.logger.info("Resetting Glicko ratings for all models...")
+        self.logger.info("Resetting Glicko ratings for tournament models...")
         self.glicko_tracker = GlickoTracker(self.training_dir, initial_rating=1500.0, initial_rd=350.0)
-        for model_id in models.keys():
+        for model_id in model_paths.keys():
             self.glicko_tracker.add_model(model_id)
 
         # Keep track of individual match results
         round_robin_results = []
 
-        # Round-robin among all pairs
-        model_ids = sorted(models.keys(), key=lambda x: int(x.split('_')[-1]))
-        self.logger.info(f"Starting round-robin among {len(model_ids)} models.")
+        # Round-robin among selected models - LAZY LOADING
+        model_ids = sorted(model_paths.keys(), key=lambda x: int(x.split('_')[-1]))
+        num_pairs = len(model_ids) * (len(model_ids) - 1) // 2
+        total_games = num_pairs * 2 * self.games_per_match
+        self.logger.info(f"Starting round-robin among {len(model_ids)} models: "
+                        f"{num_pairs} pairs × 2 directions × {self.games_per_match} games = {total_games} games")
 
         for i in range(len(model_ids)):
             for j in range(i + 1, len(model_ids)):
                 id_i = model_ids[i]
                 id_j = model_ids[j]
-                model_i = models[id_i]
-                model_j = models[id_j]
+
+                # LAZY LOAD: Load only the two models needed for this match pair
+                self.logger.debug(f"Loading models for match: {id_i} vs {id_j}")
+                model_i = self._load_model(model_paths[id_i])
+                model_j = self._load_model(model_paths[id_j])
 
                 self.logger.info(f"Match: {id_i} vs {id_j} (i as White, j as Black)")
                 result_white = self._play_match(
@@ -479,6 +585,17 @@ class ModelTournament:
                                                  draws=result_black.draws)
                 round_robin_results.append(result_black)
 
+                # MEMORY CLEANUP: Explicitly cleanup models before deletion to prevent OOM
+                # The cleanup() method releases tensor pool memory immediately
+                if hasattr(model_i, 'cleanup'):
+                    model_i.cleanup()
+                if hasattr(model_j, 'cleanup'):
+                    model_j.cleanup()
+                del model_i
+                del model_j
+                self._clear_model_memory()
+                self.logger.debug(f"Cleared models from memory after {id_i} vs {id_j}")
+
         # After recording all matches, update the Glicko ratings in a batch
         self.glicko_tracker.update_ratings()
 
@@ -487,7 +604,7 @@ class ModelTournament:
         for model_id in summary_stats.keys():
             summary_stats[model_id]['glicko_rating'] = self.glicko_tracker.get_rating(model_id)
             summary_stats[model_id]['rd'] = self.glicko_tracker.get_rd(model_id)
-        self.latest_summary_stats = summary_stats.copy()   # NEW
+        self.latest_summary_stats = summary_stats.copy()
 
         # Save tournament results
         self.tournament_history[tournament_id] = {
@@ -510,6 +627,10 @@ class ModelTournament:
                 f"BlackWinRate: {st['black_win_rate'] * 100:.1f}%"
             )
         self.logger.info("=" * 60)
+
+        # Final memory cleanup
+        self._clear_model_memory()
+        self.logger.info("Tournament complete (lazy loading kept memory usage low)")
 
     def _aggregate_round_robin_stats(self, match_results: List[MatchResult]) -> Dict[str, Dict]:
         """

@@ -9,8 +9,19 @@
 !pyproject.toml
 !requirements.txt
 !setup.py
-!experiments/
-!experiments/**
+
+# Allowed root-level documentation
+!CLAUDE.md
+!TODO.md
+!README*.md
+!YINSH_RULES.md
+!QUICK_START_GUIDE.md
+!TRAINING_REFACTOR_PLAN.md
+!ROADMAP_TO_ALPHAZERO.md
+!ARCHITECTURAL_IMPROVEMENTS_PLAN.md
+!ANALYSIS_SUMMARY_100K_GAMES.md
+!RESEARCH_LOG.md
+
 !results/
 !logs/
 !runtime.txt
@@ -88,7 +99,9 @@ node_modules/
 *.sw?
 # OS specific
 .DS_Store
-# Task files
-tasks.json
 tasks/ .env*
 .cursor/
+
+# Task files
+# tasks.json
+# tasks/ 

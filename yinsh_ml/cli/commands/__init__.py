@@ -13,5 +13,6 @@ from . import search
 from . import tensorboard
 from . import migrate
 from . import launch
+from . import config
 
-__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search', 'tensorboard', 'migrate', 'launch'] 
+__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search', 'tensorboard', 'migrate', 'launch', 'config'] 

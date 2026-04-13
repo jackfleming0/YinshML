@@ -1,5 +1,6 @@
 # training/supervisor.py
 
+import gc
 import logging
 from pathlib import Path
 import time
@@ -38,6 +39,30 @@ if not logging.getLogger().hasHandlers():
 
 
 class TrainingSupervisor:
+    """
+    Supervises the AlphaZero-style training loop: self-play → training → evaluation.
+
+    === AlphaZero-Style Continuous Training ===
+    This supervisor implements TRUE AlphaZero training:
+
+    1. NEVER reverts network weights on "bad" iterations
+    2. NEVER reverts or filters the replay buffer
+    3. Buffer uses natural FIFO eviction (oldest samples discarded when full)
+    4. Training continues on latest weights regardless of tournament results
+    5. Best model is saved for EVALUATION/COMPARISON only, not for reverting
+
+    Why no reversion?
+    - Reversion creates a closed loop where the model can't escape local optima
+    - AlphaZero's insight: more diverse training data beats careful curation
+    - Temporary ELO dips are normal and will recover with continued training
+    - The model needs to explore to find better strategies
+
+    Tournament results are used for:
+    - Monitoring training progress (ELO tracking)
+    - Saving checkpoints of promising models
+    - NOT for gating or reverting the training process
+    """
+
     def __init__(self,
                  network: NetworkWrapper,
                  save_dir: str,
@@ -119,15 +144,39 @@ class TrainingSupervisor:
         trainer_l2_reg = self.mode_settings.get('l2_reg', 0.0)
         value_head_lr_factor = self.mode_settings.get('value_head_lr_factor', 5.0)
         value_loss_weights = self.mode_settings.get('value_loss_weights', (0.5, 0.5))
+        discrimination_weight = self.mode_settings.get('discrimination_weight', 0.5)
+        max_buffer_size = self.mode_settings.get('max_buffer_size', 10000)  # Default 10K for backward compatibility
         base_lr = self.mode_settings.get('lr', 0.001)
         lr_schedule = self.mode_settings.get('lr_schedule', 'constant')
         warmup_steps = self.mode_settings.get('warmup_steps', 0)
+
+        # Augmentation settings (Phase 2 architectural improvements)
+        enable_augmentation = self.mode_settings.get('enable_augmentation', False)
+        max_augmentations = self.mode_settings.get('max_augmentations', 12)
+
+        # Phase-weighted sampling (emphasize critical game phases)
+        self.phase_weights = self.mode_settings.get('phase_weights', {
+            'RING_PLACEMENT': 1.0,
+            'MAIN_GAME': 1.0,
+            'RING_REMOVAL': 1.0
+        })
+        self.logger.info(f"Phase weights: {self.phase_weights}")
 
         # ==================================================================
         # 2. Instantiate Components with Extracted Parameters
         # ==================================================================
 
+        # Extract evaluation mode parameters
+        evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
+        heuristic_weight = self.mode_settings.get('heuristic_weight', 0.7)
+
+        # Extract batched MCTS parameters (Phase 2.1)
+        use_batched_mcts = self.mode_settings.get('use_batched_mcts', True)
+        mcts_batch_size = self.mode_settings.get('mcts_batch_size', 32)
+
         _mcts_config_for_init = { # Use temporary name to avoid confusion
+            'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
+            'heuristic_weight': heuristic_weight,  # NEW: Heuristic weight
             'num_simulations': mcts_simulations, # Early sims from direct arg
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,
@@ -137,6 +186,8 @@ class TrainingSupervisor:
             # It should pass 'value_weight', not 'initial_value_weight'
             'value_weight': mcts_value_weight, # <<< CHANGE THIS KEY
             'max_depth': max_depth,
+            'use_batched_mcts': use_batched_mcts,  # NEW: Enable batched MCTS
+            'mcts_batch_size': mcts_batch_size,  # NEW: Batch size for leaf evaluation
             'initial_temp': initial_temp,
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,
@@ -151,8 +202,9 @@ class TrainingSupervisor:
             # metrics_logger=... , mcts_metrics=... # Add if needed
         )
 
-        self.logger.info(f"SelfPlay Initialized: Early Sims={mcts_simulations}, Late Sims={late_simulations}, Switch Ply={simulation_switch_ply}, cPUCT={c_puct}, Alpha={dirichlet_alpha}, ValueWeight={mcts_value_weight}")
-        self.logger.info(f"Temperature Initialized: Initial={initial_temp}, Final={final_temp}, Anneal Steps={annealing_steps}, Clamp Frac={temp_clamp_fraction}")
+        self.logger.info(f"SelfPlay Initialized with Evaluation Mode: {evaluation_mode} (heuristic_weight={heuristic_weight:.3f})")
+        self.logger.info(f"  MCTS: Early Sims={mcts_simulations}, Late Sims={late_simulations}, Switch Ply={simulation_switch_ply}, cPUCT={c_puct}, Alpha={dirichlet_alpha}, ValueWeight={mcts_value_weight}")
+        self.logger.info(f"  Temperature: Initial={initial_temp}, Final={final_temp}, Anneal Steps={annealing_steps}, Clamp Frac={temp_clamp_fraction}")
 
 
         # Ensure the replay buffer path is within the run's save directory
@@ -165,13 +217,22 @@ class TrainingSupervisor:
             l2_reg=trainer_l2_reg, # Pass L2 reg from config
             value_head_lr_factor=value_head_lr_factor, # Pass factor from config
             value_loss_weights=value_loss_weights, # Pass weights from config
+            discrimination_weight=discrimination_weight, # Pass discrimination weight from config
+            max_buffer_size=max_buffer_size, # Pass buffer size from config
             replay_buffer_path=str(replay_buffer_file), # Pass path for persistence
+            # Augmentation settings (Phase 2 architectural improvements)
+            enable_augmentation=enable_augmentation,
+            max_augmentations=max_augmentations,
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,
             # lr_schedule = lr_schedule,
             # warmup_steps = warmup_steps
             # metrics_logger=self.metrics_logger, # If using a shared logger instance
         )
+
+        self.logger.info(f"Trainer initialized with buffer size: {max_buffer_size:,} samples "
+                         f"({max_buffer_size/1000:.0f}K, ~{max_buffer_size/100:.0f} games at 100 moves each)")
+
         # --- Configure Trainer Optimizers/Schedulers based on mode_settings ---
         # This assumes YinshTrainer exposes methods or attributes to configure these
         # If Trainer creates optimizers in __init__, we need to pass parameters there.
@@ -191,12 +252,18 @@ class TrainingSupervisor:
         self.state_encoder = StateEncoder() # Useful for decoding states if needed
         self.metrics = TrainingMetrics() # Keep for internal aggregation if used
 
+        # Tournament sliding window: only compare recent N models to keep time constant
+        # With window=5: 10 pairs × 400 games = 4000 games (constant)
+        # vs full round-robin at iter 50: 1225 pairs × 400 = 490,000 games (infeasible)
+        tournament_window = self.mode_settings.get('tournament_sliding_window', 5)
+
         self.tournament_manager = ModelTournament(
             training_dir=self.save_dir, # Tournaments evaluate models within this run's directory
             device=self.device,
-            games_per_match=self.tournament_games # Use the value passed to supervisor
+            games_per_match=self.tournament_games, # Use the value passed to supervisor
+            sliding_window_size=tournament_window
         )
-        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}")
+        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}, Window={tournament_window}")
 
 
         # --- Best Model Tracking ---
@@ -206,6 +273,12 @@ class TrainingSupervisor:
         # Save best model directly in the run directory for simplicity
         self.best_model_save_path: Path = self.save_dir / "best_model.pt"
         self._iteration_counter: int = 0 # Initialize iteration counter
+
+        # --- Checkpoint Retention ---
+        # -1 = delete rejected (old behavior), 0 = keep all, N = keep top N by ELO
+        self.checkpoint_retention_count: int = self.mode_settings.get('checkpoint_retention_count', 5)
+        # Registry: list of (iteration, elo, path) tuples, sorted by ELO descending
+        self._checkpoint_registry: list = []
 
         # --- Experiment Tracking ---
         self.experiment_tracker = None
@@ -268,24 +341,95 @@ class TrainingSupervisor:
         self.logger.info(f"  TensorPool: {tensor_pool_size} initial, {tensor_pool_size * 2} max")
         self.logger.info(f"  Workers: {num_workers}")
 
+    def _log_mps_memory(self, phase_name: str = ""):
+        """Log MPS driver allocated memory for debugging memory growth.
+
+        Args:
+            phase_name: Name of the phase for logging context
+        """
+        if torch.backends.mps.is_available():
+            try:
+                driver_mem = torch.mps.driver_allocated_memory() / (1024 * 1024 * 1024)
+                current_mem = torch.mps.current_allocated_memory() / (1024 * 1024 * 1024)
+                self.logger.info(f"[MPS Memory] {phase_name}: driver={driver_mem:.2f}GB, current={current_mem:.2f}GB")
+            except Exception as e:
+                self.logger.debug(f"Could not get MPS memory stats: {e}")
+
+    def _clear_memory_cache(self, phase_name: str = ""):
+        """Clear PyTorch memory caches to free up memory with aggressive tensor cleanup.
+
+        Args:
+            phase_name: Name of the phase for logging (e.g., "self-play", "training", "tournament")
+        """
+        import gc
+
+        # Log memory before cleanup
+        try:
+            process = psutil.Process()
+            memory_before = process.memory_info().rss / (1024 * 1024)
+            tensor_count_before = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+        except:
+            memory_before = 0
+            tensor_count_before = 0
+
+        # CRITICAL: Clear gradients first to release tensor references
+        try:
+            if hasattr(self.network, 'network'):
+                self.network.network.zero_grad(set_to_none=True)
+        except Exception as e:
+            pass
+
+        # Run garbage collection multiple times for thorough cleanup
+        for _ in range(3):
+            gc.collect()
+
+        # Clear PyTorch caches based on device
+        # CRITICAL: synchronize() MUST come BEFORE empty_cache()
+        # to ensure all GPU operations complete before releasing memory
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            try:
+                torch.mps.synchronize()  # Wait for all MPS operations to complete
+                torch.mps.empty_cache()  # Now safe to release memory
+            except AttributeError:
+                pass  # Fallback for older PyTorch versions
+
+        # Final garbage collection after cache clear
+        gc.collect()
+
+        # Log memory after cleanup
+        try:
+            if memory_before > 0:
+                memory_after = process.memory_info().rss / (1024 * 1024)
+                memory_freed = memory_before - memory_after
+                tensor_count_after = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+                tensors_freed = tensor_count_before - tensor_count_after
+                if phase_name:
+                    self.logger.info(f"Cache cleared after {phase_name}: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
+        except:
+            if phase_name:
+                self.logger.info(f"Memory cache cleared after {phase_name}")
+
     def cleanup_memory_pools(self):
         """Clean up memory pools and release all resources."""
         self.logger.info("Cleaning up memory pools...")
-        
+
         if hasattr(self, 'game_state_pool') and self.game_state_pool is not None:
             # Log statistics before cleanup
             if hasattr(self.game_state_pool, 'get_statistics'):
                 stats = self.game_state_pool.get_statistics()
                 self.logger.info(f"GameStatePool final stats: {stats}")
             self.game_state_pool = None
-            
+
         if hasattr(self, 'tensor_pool') and self.tensor_pool is not None:
             # Log statistics before cleanup
             if hasattr(self.tensor_pool, 'get_statistics'):
                 stats = self.tensor_pool.get_statistics()
                 self.logger.info(f"TensorPool final stats: {stats}")
             self.tensor_pool = None
-            
+
         self.logger.info("Memory pools cleaned up")
 
     def set_experiment_tracker(self, tracker, experiment_id: int):
@@ -343,6 +487,31 @@ class TrainingSupervisor:
         current_iteration = self._iteration_counter
         self.logger.info(f"\n{'=' * 15} Starting Iteration {current_iteration} {'=' * 15}")
 
+        # Detailed memory diagnostics at iteration start
+        try:
+            import gc
+            self.logger.info(f"Memory Diagnostics at Iteration {current_iteration} Start:")
+            self.logger.info(f"  Process Memory: {initial_memory_mb:.1f} MB")
+            self.logger.info(f"  Python Objects: {len(gc.get_objects())} objects tracked")
+
+            # Log PyTorch tensor count and memory
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / (1024 * 1024)
+                cached = torch.cuda.memory_reserved() / (1024 * 1024)
+                self.logger.info(f"  CUDA Memory: {allocated:.1f} MB allocated, {cached:.1f} MB cached")
+            elif torch.backends.mps.is_available():
+                # MPS doesn't have detailed memory stats, but we can count tensors
+                tensor_count = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+                self.logger.info(f"  MPS Tensors: {tensor_count} tensors in memory")
+
+            # Log buffer size
+            if hasattr(self.trainer, 'experience'):
+                buffer_size = self.trainer.experience.size()
+                max_buffer = self.trainer.experience.max_size
+                self.logger.info(f"  Replay Buffer: {buffer_size:,}/{max_buffer:,} samples ({100*buffer_size/max_buffer:.1f}% full)")
+        except Exception as e:
+            self.logger.warning(f"Failed to collect memory diagnostics: {e}")
+
         # Iteration-specific directory within the main save_dir
         iteration_dir = self.save_dir / f"iteration_{current_iteration}"
         iteration_dir.mkdir(exist_ok=True, parents=True)
@@ -350,12 +519,13 @@ class TrainingSupervisor:
         # ------------------------------------------------------------------ #
         # 1. SELF-PLAY (MEMORY-OPTIMIZED)
         # ------------------------------------------------------------------ #
-        # Ensure self_play uses the *current* network weights (potentially reverted from previous iter)
+        # Ensure self_play uses the *current* network weights (always latest, AlphaZero-style)
         self.self_play.network = self.network
         # Pass the number of games for this iteration
         self.self_play.current_iteration = current_iteration
 
         self.logger.info(f"Generating {num_games} self-play games...")
+        self._log_mps_memory("before self-play")
         # Log MCTS parameters being used by SelfPlay for this iteration for verification
         self.logger.info(f"[SelfPlay Config] Early Sims: {self.self_play.mcts.early_simulations}, "
                          f"Late Sims: {self.self_play.mcts.late_simulations}, "
@@ -366,9 +536,18 @@ class TrainingSupervisor:
 
         t0 = time.time()
 
-        # MEMORY-OPTIMIZATION: Process games in batches to reduce peak memory usage
-        batch_size = min(25, num_games)  # Generate in smaller batches
-        games = []
+        # Ensure trainer uses the current network
+        self.trainer.network = self.network
+
+        # MEMORY-OPTIMIZATION: Generate and process games in batches immediately
+        # This prevents accumulation of all game data in memory
+        batch_size = min(10, num_games)
+        num_games_generated = 0
+
+        # Lightweight stats accumulators (not full game data)
+        game_lengths = []
+        outcomes = []
+        ring_mobility_list = []
 
         for batch_start in range(0, num_games, batch_size):
             batch_end = min(batch_start + batch_size, num_games)
@@ -378,7 +557,57 @@ class TrainingSupervisor:
 
             # Generate batch of games
             batch_games = self.self_play.generate_games(num_games=batch_size_actual)
-            games.extend(batch_games)
+
+            if not batch_games:
+                self.logger.warning(f"Batch {batch_start + 1}-{batch_end} returned no games")
+                continue
+
+            # IMMEDIATELY process each game in this batch and add to experience buffer
+            for game_data in batch_games:
+                states, policies, values, game_history = game_data
+                if not states or not policies or not values:
+                    self.logger.warning("Skipping empty game data.")
+                    continue
+
+                # Collect lightweight stats
+                game_lengths.append(len(states))
+                outcomes.append(np.mean(values) if isinstance(values, list) and values else 0.0)
+
+                # Calculate ring mobility from last state
+                try:
+                    if game_history and 'white_score' in game_history[-1]:
+                        # Use stored scores directly
+                        pass
+                    elif states:
+                        decoded_state = self.state_encoder.decode_state(states[-1])
+                        ring_mobility_list.append(self._calculate_ring_mobility_from_state(decoded_state))
+                except Exception as e:
+                    pass  # Skip mobility calc on error
+
+                # Add to experience buffer immediately
+                try:
+                    final_scores = (None, None)
+                    if game_history and 'white_score' in game_history[-1]:
+                        final_scores = (game_history[-1].get('white_score'), game_history[-1].get('black_score'))
+                    elif states:
+                        try:
+                            decoded_state = self.state_encoder.decode_state(states[-1])
+                            final_scores = (decoded_state.white_score, decoded_state.black_score)
+                        except:
+                            pass
+
+                    self.trainer.add_game_experience(
+                        states, policies, values,
+                        final_white_score=final_scores[0],
+                        final_black_score=final_scores[1]
+                    )
+                    num_games_generated += 1
+                except Exception as e:
+                    self.logger.error(f"Error adding game experience: {e}", exc_info=True)
+
+            # CRITICAL: Free batch memory immediately after processing
+            del batch_games
+            gc.collect()
 
             # Log progress and memory usage
             try:
@@ -389,45 +618,25 @@ class TrainingSupervisor:
             except:
                 pass
 
-            self.logger.info(f"Completed {len(games)}/{num_games} games")
+            self.logger.info(f"Completed {num_games_generated}/{num_games} games")
 
         game_time = time.time() - t0
 
-        if not games:
-            # Handle case where no games are generated (e.g., worker errors)
+        if num_games_generated == 0:
             self.logger.error("Self-play generated zero games! Skipping training and evaluation for this iteration.")
-            # Increment counter and return an empty summary or raise error
             self._iteration_counter += 1
             return {'error': 'No games generated'}
 
-        self.logger.info(f"Generated {len(games)} games in {game_time:.1f}s")
+        self.logger.info(f"Generated and processed {num_games_generated} games in {game_time:.1f}s")
 
-        # --- Basic game stats ---
-        game_lengths = [len(g[0]) for g in games if g[0]]
+        # Clear memory after self-play
+        self._clear_memory_cache("self-play")
+        self._log_mps_memory("after self-play")
+
+        # --- Calculate stats from accumulated lightweight data ---
         avg_game_len = np.mean(game_lengths) if game_lengths else 0
-
-        # MEMORY-OPTIMIZATION: Process last states more efficiently
-        last_states_decoded = []
-        for game_idx, game_data in enumerate(games):
-            try:
-                if len(game_data) >= 4 and isinstance(game_data[3], list) and game_data[3]:
-                    if 'state' in game_data[3][-1] and isinstance(game_data[3][-1]['state'], GameState):
-                        last_states_decoded.append(game_data[3][-1]['state'])
-                    elif game_data[0]:
-                        last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
-                elif game_data[0]:
-                    last_states_decoded.append(self.state_encoder.decode_state(game_data[0][-1]))
-
-                # MEMORY-OPTIMIZATION: Process every 10 games to avoid memory buildup
-                if game_idx % 10 == 9:
-                    pass  # Memory pools handle cleanup automatically
-            except Exception as e:
-                self.logger.warning(f"Error processing game {game_idx} for stats: {e}")
-
-        ring_mobility_list = [self._calculate_ring_mobility_from_state(gs) for gs in last_states_decoded]
         avg_ring_mobility = np.mean(ring_mobility_list) if ring_mobility_list else 0.0
 
-        outcomes = [g[2] for g in games]
         pseudo_wins_white = sum(1 for o in outcomes if o > 0.1)
         pseudo_wins_black = sum(1 for o in outcomes if o < -0.1)
         pseudo_draws = len(outcomes) - pseudo_wins_white - pseudo_wins_black
@@ -439,81 +648,21 @@ class TrainingSupervisor:
         # --- Log self-play metrics to experiment tracker ---
         if self.experiment_tracker and self.experiment_id:
             try:
-                iteration = current_iteration + 1  # 1-based iteration numbering
+                iteration = current_iteration + 1
                 self._log_metric_safe('selfplay_game_time', game_time, iteration)
                 self._log_metric_safe('selfplay_avg_game_length', avg_game_len, iteration)
                 self._log_metric_safe('selfplay_avg_ring_mobility', avg_ring_mobility, iteration)
                 self._log_metric_safe('selfplay_win_rate', pseudo_win_rate, iteration)
                 self._log_metric_safe('selfplay_draw_rate', pseudo_draws / len(outcomes) if outcomes else 0, iteration)
-                self._log_metric_safe('selfplay_num_games', len(games), iteration)
+                self._log_metric_safe('selfplay_num_games', num_games_generated, iteration)
             except Exception as e:
                 self.logger.warning(f"Failed to log self-play metrics: {e}")
 
-        # ------------------------------------------------------------------ #
-        # 2. ADD EXPERIENCE & TRAIN (MEMORY-OPTIMIZED)
-        # ------------------------------------------------------------------ #
-        # MEMORY-OPTIMIZATION: Clear some memory before adding experience
-        last_states_decoded = None
-        # Memory pools handle cleanup automatically
-
-        # Ensure trainer uses the current network
-        self.trainer.network = self.network
-
-        # MEMORY-OPTIMIZATION: Process games in smaller chunks to limit peak memory
-        chunk_size = 10  # Process 10 games at a time
-        total_games = len(games)
-
-        self.logger.info(f"Adding game experience in {(total_games + chunk_size - 1) // chunk_size} chunks...")
-
-        for i in range(0, total_games, chunk_size):
-            chunk = games[i:i + chunk_size]
-            chunk_end = min(i + chunk_size, total_games)
-            self.logger.info(f"Processing game chunk {i + 1}-{chunk_end} of {total_games}")
-
-            # Process each game in the chunk
-            for game_data in chunk:
-                # Unpack game data (assuming format: states, policies, outcome, history)
-                states, policies, outcome, game_history = game_data
-                if not states or not policies:
-                    self.logger.warning("Skipping empty game data.")
-                    continue
-
-                try:
-                    # Decode last state to get scores for add_game_experience
-                    if game_history and 'state' in game_history[-1]:
-                        final_state = game_history[-1]['state']
-                        if isinstance(final_state, GameState):
-                            final_scores = (final_state.white_score, final_state.black_score)
-                        else:
-                            decoded_state = self.state_encoder.decode_state(final_state)
-                            final_scores = (decoded_state.white_score, decoded_state.black_score)
-                    else:
-                        decoded_state = self.state_encoder.decode_state(states[-1])
-                        final_scores = (decoded_state.white_score, decoded_state.black_score)
-
-                    self.trainer.add_game_experience(states, policies, final_scores)
-                except Exception as e:
-                    self.logger.error(
-                        f"Error adding game experience: {e}. State/Policy lengths: {len(states)}/{len(policies)}",
-                        exc_info=True)
-
-            # MEMORY-OPTIMIZATION: Force garbage collection after each chunk
-            # Also free the chunk data itself
-            chunk = None
-            # Memory pools handle cleanup automatically
-
-            # Log memory usage after each chunk
-            try:
-                if initial_memory_mb > 0:
-                    current_memory_mb = process.memory_info().rss / (1024 * 1024)
-                    self.logger.info(
-                        f"Memory after chunk: {current_memory_mb:.1f} MB (Change: {current_memory_mb - initial_memory_mb:+.1f} MB)")
-            except:
-                pass
-
-        # MEMORY-OPTIMIZATION: Free up games data now that it's been processed
-        games = None
-        # Memory pools handle cleanup automatically
+        # Free stats accumulators
+        game_lengths = None
+        outcomes = None
+        ring_mobility_list = None
+        gc.collect()
 
         # Train the network using data in the replay buffer
         self.logger.info(f"Training network for {epochs} epochs...")
@@ -524,6 +673,19 @@ class TrainingSupervisor:
 
         # MEMORY-OPTIMIZATION: Calculate optimal batch count
         buffer_size = self.trainer.experience.size()
+
+        # DEBUG: Log buffer health before training
+        max_buffer = self.trainer.experience.max_size
+        buffer_utilization = (buffer_size / max_buffer) * 100
+        self.logger.info(f"📊 Buffer Health: {buffer_size:,}/{max_buffer:,} samples ({buffer_utilization:.1f}% full)")
+        if buffer_utilization >= 95:
+            self.logger.warning(f"⚠️ Buffer near capacity! Oldest data will be discarded. Consider increasing max_buffer_size.")
+
+        # Estimate how many games worth of data
+        avg_game_length = buffer_size / max(1, current_iteration + 1) / num_games if current_iteration >= 0 else 100
+        estimated_games = buffer_size / max(50, avg_game_length)
+        self.logger.info(f"📊 Buffer contains ~{estimated_games:.0f} games of experience "
+                         f"(avg {avg_game_length:.0f} moves/game)")
 
         for epoch in range(epochs):
             self.logger.info(f"Starting Epoch {epoch + 1}/{epochs}")
@@ -536,7 +698,14 @@ class TrainingSupervisor:
             # MEMORY-OPTIMIZATION: Use optimal batch count based on buffer size
             optimal_batches = max(10, (buffer_size // self.trainer.batch_size) // 2)
             # Use config if provided, otherwise use calculated optimal batches
-            batches_per_epoch = self.mode_settings.get('batches_per_epoch', optimal_batches)
+            cfg_batches = self.mode_settings.get('batches_per_epoch', optimal_batches)
+            if isinstance(cfg_batches, str) and cfg_batches.lower() == 'auto':
+                batches_per_epoch = optimal_batches
+            else:
+                try:
+                    batches_per_epoch = int(cfg_batches)
+                except Exception:
+                    batches_per_epoch = optimal_batches
             actual_batches = min(batches_per_epoch, optimal_batches)
 
             self.logger.info(
@@ -544,7 +713,8 @@ class TrainingSupervisor:
 
             epoch_stats = self.trainer.train_epoch(
                 batch_size=self.trainer.batch_size,
-                batches_per_epoch=actual_batches
+                batches_per_epoch=actual_batches,
+                phase_weights=self.phase_weights
             )
 
             # Aggregate stats
@@ -579,6 +749,13 @@ class TrainingSupervisor:
 
         self.logger.info(
             f"Training done in {train_time:.1f}s (Avg Policy Loss={final_pol_loss:.4f}, Avg Value Loss={final_val_loss:.4f})")
+
+        # MEMORY FIX: Clear trainer's accumulated state
+        self.trainer.clear_training_state()
+
+        # Clear memory after training to prevent accumulation
+        self._clear_memory_cache("training")
+        self._log_mps_memory("after training")
 
         # --- Log training metrics to experiment tracker ---
         if self.experiment_tracker and self.experiment_id:
@@ -660,6 +837,18 @@ class TrainingSupervisor:
             tourn_win_rate = 0.0
             tournament_stats = {}
 
+        # Clear memory after tournament to prevent accumulation
+        # CRITICAL: Tournament workers also accumulate tensors - clear them
+        try:
+            # Force close any worker pools in tournament manager
+            if hasattr(self.tournament_manager, '_close_workers'):
+                self.tournament_manager._close_workers()
+        except Exception as e:
+            self.logger.warning(f"Error closing tournament workers: {e}")
+
+        self._clear_memory_cache("tournament")
+        self._log_mps_memory("after tournament")
+
         # ------------------------------------------------------------------ #
         # 5. PROMOTION / REVERSION (using Wilson Gate)
         # ------------------------------------------------------------------ #
@@ -668,6 +857,10 @@ class TrainingSupervisor:
 
         tournament_stats = self.tournament_manager.get_model_performance(candidate_id_canon) or {}
         candidate_elo = tournament_stats.get('current_rating', self.tournament_manager.glicko_tracker.initial_rating)
+
+        # Register checkpoint for retention tracking (if using retention policy)
+        if self.checkpoint_retention_count >= 0:
+            self._register_checkpoint(candidate_iteration, candidate_elo, checkpoint_path)
 
         wins, total = 0, 0
         perform_wilson_check = False
@@ -701,9 +894,8 @@ class TrainingSupervisor:
             self.logger.info(
                 f"Wilson Gate Check: Wins={wins}, Total={total}, LB={self._wilson_lower_bound(wins, total):.3f}, Threshold={wilson_threshold} -> {'PROMOTE' if promote_by_wilson else 'REJECT'}")
 
-        # --- Final Promotion Decision Logic ---
+        # --- Final Promotion Decision Logic (AlphaZero-style: never revert) ---
         promote = False
-        reverted = False
         kept_current_best = (self.best_model_iteration == candidate_iteration)
 
         if promote_by_wilson:
@@ -726,10 +918,13 @@ class TrainingSupervisor:
             self.best_model_path = checkpoint_path
             if self.best_model_path.exists():
                 self.network.save_model(str(self.best_model_save_path))
-                self.logger.info(f"Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
+                self.logger.info(f"✅ NEW BEST: Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
             else:
                 self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
             self._save_best_model_state()
+
+            # AlphaZero-style: No buffer snapshots needed - buffer accumulates continuously (FIFO)
+            # Best model is saved for evaluation/comparison only, not for reverting
 
             # --- Log model promotion to experiment tracker ---
             if self.experiment_tracker and self.experiment_id:
@@ -750,28 +945,38 @@ class TrainingSupervisor:
             self._save_best_model_state()
 
         else:
-            self.logger.info(f"🚫 REJECTED: Candidate Iter {candidate_iteration} ({candidate_id_canon}) not promoted.")
-            if self.best_model_path and self.best_model_path.exists():
-                self.logger.info(
-                    f"Reverting network weights to previous best: {self.best_model_path.name} (Iter {self.best_model_iteration})")
+            # =================================================================
+            # ALPHAZERO-STYLE CONTINUOUS TRAINING - NO REVERSION
+            # =================================================================
+            # Key insight: AlphaZero NEVER reverts weights or buffer.
+            # - The model didn't beat best, but we CONTINUE training with current weights
+            # - This allows exploration and prevents getting stuck in local optima
+            # - Best model is just a checkpoint for evaluation, not for reverting
+            # - Temporary ELO dips are normal and will recover with more training
+            # =================================================================
+            self.logger.info(f"🔄 CONTINUING: Iter {candidate_iteration} didn't beat best (ELO {candidate_elo:.1f} vs {self.best_model_elo:.1f})")
+            self.logger.info(f"   AlphaZero-style: training continues with current weights, no reversion")
+            self.logger.info(f"   Best model (iter {self.best_model_iteration}) saved for comparison only")
+
+            # Checkpoint retention: only delete immediately if using old behavior (retention_count < 0)
+            if self.checkpoint_retention_count < 0:
                 try:
-                    self.network.load_model(str(self.best_model_path))
-                    reverted = True
+                    if checkpoint_path.exists():
+                        checkpoint_size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
+                        checkpoint_path.unlink()
+                        self.logger.info(f"Deleted non-promoted checkpoint (freed {checkpoint_size_mb:.1f} MB): {checkpoint_path.name}")
                 except Exception as e:
-                    self.logger.error(
-                        f"Failed to revert weights from {self.best_model_path}: {e}. Network weights remain as rejected candidate.",
-                        exc_info=True)
+                    self.logger.warning(f"Failed to delete checkpoint {checkpoint_path}: {e}")
             else:
-                self.logger.warning(
-                    f"Cannot revert: Previous best model path invalid or not found ({self.best_model_path}). Keeping rejected candidate weights.")
+                self.logger.debug(f"Checkpoint retention active: keeping iter {candidate_iteration} in registry")
+
             self._save_best_model_state()
 
-            # --- Log model rejection/reversion to experiment tracker ---
+            # --- Log metrics to experiment tracker ---
             if self.experiment_tracker and self.experiment_id:
                 try:
-                    iteration = current_iteration + 1  # 1-based iteration numbering
+                    iteration = current_iteration + 1
                     self._log_metric_safe('model_promoted', 0.0, iteration)
-                    self._log_metric_safe('model_reverted', 1.0 if reverted else 0.0, iteration)
                     self._log_metric_safe('candidate_elo', candidate_elo, iteration)
                     if perform_wilson_check:
                         self._log_metric_safe('wilson_wins', wins, iteration)
@@ -779,10 +984,11 @@ class TrainingSupervisor:
                         self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
                         self._log_metric_safe('wilson_passed', 0.0, iteration)
                 except Exception as e:
-                    self.logger.warning(f"Failed to log rejection metrics: {e}")
+                    self.logger.warning(f"Failed to log metrics: {e}")
 
         # Determine active network weights for clarity
-        active_iter = self.best_model_iteration if (promote or reverted or kept_current_best) else candidate_iteration
+        # AlphaZero-style: always continue with current weights (no reversion)
+        active_iter = candidate_iteration
         self.logger.info(f"Active network weights in memory correspond to iteration {active_iter}")
 
         # ------------------------------------------------------------------ #
@@ -818,11 +1024,13 @@ class TrainingSupervisor:
         )
         self._save_metrics(iteration_dir)
 
+        # Calculate total iteration time for logging and metrics
+        total_iteration_time = time.time() - t0  # Total time from start of iteration
+
         # --- Log final iteration summary metrics to experiment tracker ---
         if self.experiment_tracker and self.experiment_id:
             try:
                 iteration = current_iteration + 1  # 1-based iteration numbering
-                total_iteration_time = time.time() - t0  # Total time from start of iteration
                 self._log_metric_safe('iteration_time', total_iteration_time, iteration)
                 self._log_metric_safe('avg_game_length', avg_game_len, iteration)
                 self._log_metric_safe('avg_ring_mobility', avg_ring_mobility, iteration)
@@ -843,18 +1051,100 @@ class TrainingSupervisor:
         # --- Advance counter for the next iteration ---
         self._iteration_counter += 1
 
+        # ------------------------------------------------------------------ #
+        # COMPREHENSIVE MEMORY CLEANUP (End of Iteration)
+        # ------------------------------------------------------------------ #
+        self.logger.info("Running comprehensive memory cleanup...")
+
+        # Log memory before cleanup
+        try:
+            process = psutil.Process()
+            memory_before_cleanup = process.memory_info().rss / (1024 * 1024)
+            self.logger.info(f"Memory before cleanup: {memory_before_cleanup:.1f} MB")
+        except:
+            memory_before_cleanup = 0
+
+        # 1. Prune old experiences from buffer
         self.prune_old_experiences()
+
+        # 2. Clear PyTorch memory caches
         self.clear_pytorch_memory()
 
-        # Every 2-3 iterations, reset network objects completely
+        # 3. Clear memory pools if they exist
+        if hasattr(self, 'game_state_pool') and hasattr(self.game_state_pool, 'clear'):
+            try:
+                self.game_state_pool.clear()
+                self.logger.info("Cleared game state pool")
+            except Exception as e:
+                self.logger.warning(f"Failed to clear game state pool: {e}")
+
+        if hasattr(self, 'tensor_pool') and hasattr(self.tensor_pool, 'clear'):
+            try:
+                self.tensor_pool.clear()
+                self.logger.info("Cleared tensor pool")
+            except Exception as e:
+                self.logger.warning(f"Failed to clear tensor pool: {e}")
+
+        # 4. Reinitialize optimizers every iteration to clear momentum/Adam buffers
+        # These buffers hold tensors that accumulate over time
+        self._reinitialize_optimizers()
+
+        # 5. Worker memory management
+        # With MAX_WORKERS=1, worker tensor accumulation is minimized
+        # Additional cleanup not needed
+
+        # 6. Every 2-3 iterations, reset network objects completely to prevent leaks
         if self._iteration_counter % 3 == 0:
             self._reset_network_objects()
 
-        # MEMORY OPTIMIZATION: Prune old experiences to prevent memory growth
-        self.prune_old_experiences()  # Add this line here
+        # 7. Final comprehensive memory clear
+        self._clear_memory_cache("end-of-iteration")
+
+        # Log memory after cleanup
+        try:
+            if memory_before_cleanup > 0:
+                memory_after_cleanup = process.memory_info().rss / (1024 * 1024)
+                memory_freed_total = memory_before_cleanup - memory_after_cleanup
+                self.logger.info(f"Memory after cleanup: {memory_after_cleanup:.1f} MB (freed {memory_freed_total:.1f} MB total)")
+        except:
+            pass
 
         # ------------------------------------------------------------------ #
-        # 7. RETURN SUMMARY
+        # 7. DEBUG: Print comprehensive iteration summary
+        # ------------------------------------------------------------------ #
+        self.logger.info("\n" + "="*80)
+        self.logger.info(f"ITERATION {current_iteration} SUMMARY")
+        self.logger.info("="*80)
+        self.logger.info(f"│ SELF-PLAY")
+        self.logger.info(f"│   Games: {num_games_generated}, "
+                         f"Time: {game_time:.1f}s, Avg Length: {avg_game_len:.1f} moves")
+        self.logger.info(f"│   Pseudo W/B/D: {pseudo_wins_white}/{pseudo_wins_black}/{pseudo_draws}")
+        self.logger.info(f"│")
+        self.logger.info(f"│ TRAINING")
+        self.logger.info(f"│   Epochs: {epochs}, Time: {train_time:.1f}s")
+        self.logger.info(f"│   Final Losses: Policy={final_pol_loss:.4f}, Value={final_val_loss:.4f}")
+        self.logger.info(f"│   Buffer: {buffer_size:,}/{max_buffer:,} samples ({buffer_utilization:.1f}% full)")
+        self.logger.info(f"│")
+        self.logger.info(f"│ TOURNAMENT")
+        self.logger.info(f"│   Candidate ELO: {current_elo:.1f}, Win Rate: {tourn_win_rate:.1%}")
+        self.logger.info(f"│   Best Model: Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
+        if promote:
+            self.logger.info(f"│   Decision: ✅ NEW BEST (promoted to best model)")
+        elif kept_current_best:
+            self.logger.info(f"│   Decision: ➡️  KEPT (already best)")
+        else:
+            self.logger.info(f"│   Decision: 🔄 CONTINUE (AlphaZero-style, no reversion)")
+        self.logger.info(f"│   Active Network: Iteration {active_iter}")
+        self.logger.info(f"│")
+        self.logger.info(f"│ TIMING")
+        self.logger.info(f"│   Total: {total_iteration_time:.1f}s ({total_iteration_time/60:.1f}m)")
+        other_time = total_iteration_time - game_time - train_time
+        self.logger.info(f"│   Breakdown: SelfPlay={game_time:.0f}s, Train={train_time:.0f}s, "
+                         f"Other={other_time:.0f}s (tournament, eval, etc.)")
+        self.logger.info("="*80 + "\n")
+
+        # ------------------------------------------------------------------ #
+        # 8. RETURN SUMMARY
         # ------------------------------------------------------------------ #
         return {
             'iteration': current_iteration,
@@ -881,7 +1171,7 @@ class TrainingSupervisor:
             'model_selection': {
                 'best_iteration': self.best_model_iteration,
                 'best_elo': self.best_model_elo,
-                'reverted_to_best': reverted,
+                'promoted': promote,
                 'active_network_iteration': active_iter
             }
         }
@@ -891,22 +1181,125 @@ class TrainingSupervisor:
     # _calculate_ring_mobility_from_state (new helper), _wilson_lower_bound, _should_promote
 
     def clear_pytorch_memory(self):
-        """Clear PyTorch memory caches and force garbage collection."""
-        self.logger.info("Clearing PyTorch memory...")
+        """Clear PyTorch memory caches and force garbage collection with aggressive tensor cleanup."""
+        import gc
 
-        # Clear PyTorch's CUDA cache if using CUDA
+        self.logger.info("Clearing PyTorch memory and tensors...")
+
+        # Log memory and tensor count before cleanup
+        try:
+            process = psutil.Process()
+            memory_before = process.memory_info().rss / (1024 * 1024)
+            tensor_count_before = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+            self.logger.info(f"Before cleanup: {memory_before:.1f} MB, {tensor_count_before} tensors")
+        except:
+            memory_before = 0
+            tensor_count_before = 0
+
+        # CRITICAL: Zero out all gradients and clear optimizer state FIRST
+        # This releases tensor references that prevent empty_cache from working
+        try:
+            # Clear network gradients
+            if hasattr(self.network, 'network'):
+                self.network.network.zero_grad(set_to_none=True)
+
+            # Clear trainer optimizer state (momentum buffers, etc.)
+            if hasattr(self.trainer, 'policy_optimizer'):
+                self.trainer.policy_optimizer.zero_grad(set_to_none=True)
+                # Clear optimizer state dict to free momentum/adam buffers
+                self.trainer.policy_optimizer.state = {}
+
+            if hasattr(self.trainer, 'value_optimizer'):
+                self.trainer.value_optimizer.zero_grad(set_to_none=True)
+                self.trainer.value_optimizer.state = {}
+
+            self.logger.info("Cleared gradients and optimizer state")
+        except Exception as e:
+            self.logger.warning(f"Error clearing gradients/optimizer state: {e}")
+
+        # CRITICAL: Clear all tensor containers (del in loop doesn't work due to Python references)
+        try:
+            # Clear model's internal buffers and caches
+            if hasattr(self.network, 'network'):
+                # Clear buffers (running stats in BatchNorm, etc.)
+                for module in self.network.network.modules():
+                    if hasattr(module, '_buffers'):
+                        for key in list(module._buffers.keys()):
+                            buffer = module._buffers[key]
+                            if buffer is not None and torch.is_tensor(buffer):
+                                # Re-register as zeros to clear cached tensors
+                                module._buffers[key] = None
+
+            # Clear any cached forward/backward hooks
+            if hasattr(self.trainer, 'experience'):
+                # Clear the loss tracking lists which hold tensor references
+                self.trainer.policy_losses.clear()
+                self.trainer.value_losses.clear()
+
+            self.logger.info(f"Cleared model buffers and caches")
+        except Exception as e:
+            self.logger.warning(f"Error clearing tensor containers: {e}")
+
+        # Force garbage collection before empty_cache
+        for _ in range(3):
+            gc.collect()
+
+        # Clear PyTorch's cache based on device
+        # CRITICAL: synchronize() MUST come BEFORE empty_cache()
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            # Clear MPS cache (PyTorch 2.0+)
+            try:
+                torch.mps.synchronize()  # Wait for all MPS operations to complete
+                torch.mps.empty_cache()  # Now safe to release memory
+                self.logger.info("Cleared MPS cache")
+            except AttributeError:
+                pass  # Fallback for older PyTorch versions
 
-        # Move model to CPU temporarily to clear GPU memory
+        # Move model to CPU temporarily to clear GPU/MPS memory
         if hasattr(self.network, 'network') and hasattr(self.network.network, 'to'):
-            original_device = next(self.network.network.parameters()).device
-            if original_device.type != 'cpu':
-                self.network.network.to(torch.device('cpu'))
-                # Memory pools handle cleanup automatically
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                self.network.network.to(original_device)
+            try:
+                original_device = next(self.network.network.parameters()).device
+                if original_device.type != 'cpu':
+                    # Move to CPU
+                    self.network.network.to(torch.device('cpu'))
+
+                    # GC and clear cache while on CPU
+                    for _ in range(2):
+                        gc.collect()
+
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                    elif torch.backends.mps.is_available():
+                        try:
+                            torch.mps.synchronize()
+                            torch.mps.empty_cache()
+                        except AttributeError:
+                            pass
+
+                    # Move back to original device
+                    self.network.network.to(original_device)
+                    gc.collect()
+            except Exception as e:
+                self.logger.warning(f"Error during device transfer: {e}")
+
+        # Final aggressive garbage collection
+        for _ in range(3):
+            gc.collect()
+
+        # Final empty_cache call with proper synchronization
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            try:
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+            except AttributeError:
+                pass
 
         # Try advanced memory release techniques
         try:
@@ -919,7 +1312,65 @@ class TrainingSupervisor:
         except Exception as e:
             self.logger.warning(f"Error attempting advanced memory cleanup: {e}")
 
-        # Memory pools handle cleanup automatically
+        # Log memory and tensor count after cleanup
+        try:
+            if memory_before > 0:
+                memory_after = process.memory_info().rss / (1024 * 1024)
+                memory_freed = memory_before - memory_after
+                tensor_count_after = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
+                tensors_freed = tensor_count_before - tensor_count_after
+                self.logger.info(f"After cleanup: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
+        except:
+            pass
+
+    def _reinitialize_optimizers(self):
+        """Reinitialize optimizers to clear all state (momentum, Adam buffers, etc.)"""
+        try:
+            self.logger.info("Reinitializing optimizers to clear state...")
+
+            # Get current learning rates before reinit
+            policy_lr = self.trainer.policy_optimizer.param_groups[0]['lr']
+            value_lr = self.trainer.value_optimizer.param_groups[0]['lr']
+
+            # Separate out parameters for policy vs. value heads
+            value_params = [p for n, p in self.trainer.network.network.named_parameters()
+                            if 'value_head' in n]
+            policy_params = [p for n, p in self.trainer.network.network.named_parameters()
+                             if 'value_head' not in n]
+
+            # Recreate optimizers with current learning rates
+            import torch.optim as optim
+
+            self.trainer.policy_optimizer = optim.Adam(
+                policy_params,
+                lr=policy_lr,
+                weight_decay=1e-4
+            )
+
+            self.trainer.value_optimizer = optim.SGD(
+                value_params,
+                lr=value_lr,
+                momentum=0.9,
+                weight_decay=1e-3
+            )
+
+            # Recreate schedulers
+            self.trainer.policy_scheduler = optim.lr_scheduler.StepLR(
+                self.trainer.policy_optimizer,
+                step_size=10,
+                gamma=0.9
+            )
+
+            self.trainer.value_scheduler = optim.lr_scheduler.StepLR(
+                self.trainer.value_optimizer,
+                step_size=10,
+                gamma=0.9
+            )
+
+            self.logger.info(f"Optimizers reinitialized (policy_lr={policy_lr:.6f}, value_lr={value_lr:.6f})")
+
+        except Exception as e:
+            self.logger.error(f"Error reinitializing optimizers: {e}")
 
     def _reset_network_objects(self):
         """Recreate network objects to eliminate memory leaks."""
@@ -933,12 +1384,14 @@ class TrainingSupervisor:
                 # Save current network state
                 self.network.save_model(temp_path)
 
-                # Get device information
+                # Get device and encoding information
                 device = getattr(self.network, 'device', torch.device('cpu'))
+                use_enhanced_encoding = getattr(self.network, 'use_enhanced_encoding', False)
 
-                # Recreate network with tensor pool
+                # Recreate network with tensor pool (preserving encoding type)
                 from yinsh_ml.network.wrapper import NetworkWrapper
-                new_network = NetworkWrapper(device=device, tensor_pool=self.tensor_pool)
+                new_network = NetworkWrapper(device=device, tensor_pool=self.tensor_pool,
+                                            use_enhanced_encoding=use_enhanced_encoding)
                 new_network.load_model(temp_path)
 
                 # Replace old network
@@ -947,19 +1400,31 @@ class TrainingSupervisor:
                 self.trainer.network = self.network
 
                 os.unlink(temp_path)
+
+                # Also reinitialize optimizers after network recreation
+                self._reinitialize_optimizers()
+
         except Exception as e:
             self.logger.error(f"Error recreating network objects: {e}")
 
     def prune_old_experiences(self):
         """
         Trim experience buffer to maintain memory efficiency between iterations.
-        Add this method to your TrainingSupervisor class.
+        This prevents unbounded memory growth across iterations.
+
+        AlphaZero-style: Buffer uses FIFO eviction naturally. This method only
+        applies additional pruning if buffer exceeds 90% capacity to prevent
+        memory bloat.
         """
         if hasattr(self.trainer, 'experience'):
             buffer_size = self.trainer.experience.size()
-            keep_size = 15000  # Target size to maintain
+            max_buffer = self.trainer.experience.max_size
 
-            if buffer_size > 20000:  # Only prune if significantly over target
+            # Only prune if buffer is at 90% capacity to prevent memory bloat
+            prune_threshold = int(max_buffer * 0.9)
+            keep_size = int(max_buffer * 0.75)  # Keep 75% of max capacity
+
+            if buffer_size > prune_threshold:  # Only prune if near capacity
                 # We need to add a prune method to the GameExperience class first
                 if not hasattr(self.trainer.experience, 'prune_oldest'):
                     # Add the prune method dynamically if it doesn't exist
@@ -1001,7 +1466,34 @@ class TrainingSupervisor:
                     pass
 
     def _compute_num_workers(self) -> int:
-        """Calculate optimal number of workers based on CPU cores."""
+        """Calculate optimal number of workers based on CPU cores.
+
+        MEMORY OPTIMIZATION: Set to 0 workers (synchronous mode) to prevent zombie worker processes.
+        ProcessPoolExecutor workers never properly terminate and accumulate as zombies eating 1-2GB each.
+        Even with 1 worker, tensors still grew to 16K+ and workers became zombies.
+        Synchronous mode is slower but has clean, predictable memory management.
+        """
+        configured_workers = self.mode_settings.get('num_workers', None)
+        if configured_workers is not None:
+            if isinstance(configured_workers, str) and configured_workers.lower() == "auto":
+                pass
+            else:
+                try:
+                    configured_workers_int = int(configured_workers)
+                    if configured_workers_int >= 0:
+                        self.logger.info(f"Using configured num_workers={configured_workers_int}")
+                        return configured_workers_int
+                    self.logger.warning(
+                        f"Ignoring invalid configured num_workers={configured_workers_int}; falling back to auto logic"
+                    )
+                except Exception:
+                    self.logger.warning(
+                        f"Ignoring non-integer configured num_workers={configured_workers}; falling back to auto logic"
+                    )
+
+        # CRITICAL: Use 0 workers (synchronous mode) to prevent zombie processes
+        MAX_WORKERS = 0
+
         # Use platform detection for Apple Silicon
         if platform.system() == "Darwin" and platform.processor() == "arm":
             # Suggest slightly fewer than physical cores for M-series to leave room for system/GPU
@@ -1009,7 +1501,8 @@ class TrainingSupervisor:
             # M1/M2 often have 8 or 10 cores (e.g., 4+4 or 8+2 performance/efficiency)
             # Let's be conservative, maybe leave 2-3 cores free.
             optimal_workers = max(1, physical_cores - 3) # Ensure at least 1 worker
-            self.logger.info(f"Apple Silicon detected. Using {optimal_workers} workers (Physical cores: {physical_cores}).")
+            optimal_workers = min(optimal_workers, MAX_WORKERS)  # Cap for memory
+            self.logger.info(f"Apple Silicon detected. Using {optimal_workers} workers (Physical cores: {physical_cores}, capped at {MAX_WORKERS} for memory).")
             return optimal_workers
 
         # Original logic for other platforms (Linux/Windows, Intel/AMD)
@@ -1023,7 +1516,10 @@ class TrainingSupervisor:
         else:
             optimal_workers = max(4, physical_cores - 1 if physical_cores else logical_cores -1) # Use physical if available
 
-        self.logger.info(f"CPU Info: Logical={logical_cores}, Physical={physical_cores}. Using {optimal_workers} workers.")
+        # MEMORY OPTIMIZATION: Cap at MAX_WORKERS to prevent OOM
+        optimal_workers = min(optimal_workers, MAX_WORKERS)
+
+        self.logger.info(f"CPU Info: Logical={logical_cores}, Physical={physical_cores}. Using {optimal_workers} workers (capped at {MAX_WORKERS} for memory).")
         return optimal_workers
 
     def _load_best_model_state(self):
@@ -1090,6 +1586,58 @@ class TrainingSupervisor:
         self.best_model_path = None
         self._iteration_counter = 0 # Reset counter too
         self.logger.info("Reset best model tracking state.")
+
+    def _register_checkpoint(self, iteration: int, elo: float, checkpoint_path: Path):
+        """
+        Register a checkpoint and apply retention policy.
+
+        Args:
+            iteration: The iteration number
+            elo: The ELO rating for this checkpoint
+            checkpoint_path: Path to the checkpoint file
+        """
+        # Add to registry
+        self._checkpoint_registry.append({
+            'iteration': iteration,
+            'elo': elo,
+            'path': checkpoint_path
+        })
+
+        # Sort by ELO descending
+        self._checkpoint_registry.sort(key=lambda x: x['elo'], reverse=True)
+
+        # Apply retention policy
+        if self.checkpoint_retention_count == 0:
+            # Keep all checkpoints
+            self.logger.debug(f"Checkpoint retention: keeping all ({len(self._checkpoint_registry)} checkpoints)")
+            return
+        elif self.checkpoint_retention_count < 0:
+            # Old behavior: handled elsewhere (delete rejected immediately)
+            return
+
+        # Keep top N checkpoints, delete the rest
+        if len(self._checkpoint_registry) > self.checkpoint_retention_count:
+            to_delete = self._checkpoint_registry[self.checkpoint_retention_count:]
+            self._checkpoint_registry = self._checkpoint_registry[:self.checkpoint_retention_count]
+
+            for entry in to_delete:
+                path = entry['path']
+                if path.exists():
+                    try:
+                        size_mb = path.stat().st_size / (1024 * 1024)
+                        path.unlink()
+                        self.logger.info(
+                            f"Checkpoint retention: deleted iter {entry['iteration']} "
+                            f"(ELO {entry['elo']:.0f}, freed {size_mb:.1f} MB) - "
+                            f"outside top {self.checkpoint_retention_count}"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete checkpoint {path}: {e}")
+
+        # Log current retention status
+        if self._checkpoint_registry:
+            elos = [f"{e['iteration']}:{e['elo']:.0f}" for e in self._checkpoint_registry]
+            self.logger.debug(f"Checkpoint retention: keeping {len(self._checkpoint_registry)} checkpoints: {', '.join(elos)}")
 
     def _save_metrics(self, iteration_dir: Path) -> None:
         """Save training metrics for the completed iteration."""

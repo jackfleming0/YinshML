@@ -79,15 +79,28 @@ class YinshNetwork(nn.Module):
     - Value head (position evaluation)
     """
 
-    def __init__(self, num_channels: int = 256, num_blocks: int = 12):  # mar_19 raised from 128/8
+    def __init__(self, num_channels: int = 256, num_blocks: int = 12,
+                 value_mode: str = 'classification', num_value_classes: int = 7,
+                 input_channels: int = 6):
+        """
+        Args:
+            num_channels: Number of channels in residual blocks
+            num_blocks: Number of residual/attention blocks
+            value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
+            num_value_classes: Number of discrete outcome classes for classification mode
+            input_channels: Number of input channels (6 for basic, 15 for enhanced encoding)
+        """
         super().__init__()
 
         # Fixed output size
         self.total_moves = 7395
+        self.value_mode = value_mode
+        self.num_value_classes = num_value_classes
+        self.input_channels = input_channels  # Store for reference
 
-        # Initial convolution block
+        # Initial convolution block - now configurable input channels
         self.conv_block = nn.Sequential(
-            nn.Conv2d(6, num_channels, 3, padding=1),
+            nn.Conv2d(input_channels, num_channels, 3, padding=1),
             nn.BatchNorm2d(num_channels),
             nn.ReLU()
         )
@@ -113,31 +126,70 @@ class YinshNetwork(nn.Module):
             # No activation here - we want raw logits
         )
 
-        # Replace the current value_head definition with this enhanced version
-        self.value_head_activations = {}  # Keep this line
+        # Value head activations for diagnostics
+        self.value_head_activations = {}
 
-        # Enhanced value head architecture with more capacity and regularization
-        self.value_head = nn.Sequential(
-            nn.Conv2d(num_channels, 64, 3, padding=1),  # Spatial features
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1),  # Additional conv layer
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(64 * 11 * 11, 512),  # Significantly larger linear layer
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.4),  # Strong dropout
-            nn.Linear(512, 256),
-            nn.LayerNorm(256),  # Layer norm for stability
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1),
-            nn.Tanh()
-        )
+        # Build value head based on mode
+        if value_mode == 'classification':
+            # Classification-based value head (AlphaZero approach)
+            # Outputs logits for discrete outcome classes
+            self.value_head = nn.Sequential(
+                nn.Conv2d(num_channels, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(64 * 11 * 11, 512),
+                nn.BatchNorm1d(512),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(512, 256),
+                nn.LayerNorm(256),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(256, num_value_classes)  # Output logits for each class
+                # No activation - we want raw logits for cross-entropy
+            )
+
+            # Outcome values for computing expected value from probabilities
+            # For 7 classes: score differences {-3, -2, -1, 0, +1, +2, +3}
+            # Normalized to [-1, 1] range
+            if num_value_classes == 7:
+                self.outcome_values = nn.Parameter(
+                    torch.tensor([-1.0, -0.667, -0.333, 0.0, 0.333, 0.667, 1.0]),
+                    requires_grad=False
+                )
+            else:
+                # For other numbers of classes, evenly space between -1 and 1
+                self.outcome_values = nn.Parameter(
+                    torch.linspace(-1.0, 1.0, num_value_classes),
+                    requires_grad=False
+                )
+        else:
+            # Legacy regression mode (for backward compatibility)
+            self.value_head = nn.Sequential(
+                nn.Conv2d(num_channels, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(64 * 11 * 11, 512),
+                nn.BatchNorm1d(512),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(512, 256),
+                nn.LayerNorm(256),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Linear(128, 1),
+                nn.Tanh()
+            )
 
         # Add this right after defining the value_head
         # Initialize the value head with better weights
@@ -217,19 +269,32 @@ class YinshNetwork(nn.Module):
         Forward pass through the network.
 
         Args:
-            x: Input tensor of shape (batch_size, 6, 11, 11)
-               Channels:
-                - 0: White rings
-                - 1: Black rings
-                - 2: White markers
-                - 3: Black markers
+            x: Input tensor of shape (batch_size, input_channels, 11, 11)
+
+               For basic encoding (6 channels):
+                - 0: Current player's rings
+                - 1: Opponent's rings
+                - 2: Current player's markers
+                - 3: Opponent's markers
                 - 4: Valid moves mask
                 - 5: Game phase
+
+               For enhanced encoding (15 channels):
+                - 0-3: Same as basic (rings, markers)
+                - 4-5: Row threats (current/opponent)
+                - 6-7: Partial rows (3-4 marker runs)
+                - 8: Ring mobility (normalized)
+                - 9: Center distance (static heatmap)
+                - 10: Ring influence (reachable cells)
+                - 11: Valid move destinations
+                - 12: Game phase (normalized)
+                - 13: Turn number (normalized)
+                - 14: Score differential
 
         Returns:
             Tuple of:
             - move_probabilities: Shape (batch_size, total_moves)
-            - value: Shape (batch_size, 1)
+            - value: Shape (batch_size,) for classification mode or (batch_size, 1) for regression
         """
         # Initial convolution
         x = self.conv_block(x)
@@ -244,8 +309,21 @@ class YinshNetwork(nn.Module):
         # Policy head
         policy = self.policy_head(x)
 
-        # Simplified value head: directly use the shared trunk features
-        value = self.value_head(x)
+        # Value head - behavior depends on mode
+        value_output = self.value_head(x)
+
+        if self.value_mode == 'classification':
+            # value_output is logits of shape (batch_size, num_classes)
+            # Compute expected value from probability distribution
+            probs = F.softmax(value_output, dim=-1)  # (batch_size, num_classes)
+            value = (probs * self.outcome_values).sum(dim=-1)  # (batch_size,)
+
+            # Store logits for training (trainer needs them for cross-entropy)
+            # This is a bit of a hack but avoids changing the interface significantly
+            self._value_logits = value_output
+        else:
+            # Regression mode - value is already the final output
+            value = value_output.squeeze(-1)  # (batch_size,)
 
         return policy, value
 

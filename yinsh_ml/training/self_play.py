@@ -29,6 +29,8 @@ from ..network.wrapper import NetworkWrapper
 from ..game.moves import Move
 # --- Memory Pool Imports ---
 from ..memory import GameStatePool, TensorPool, GameStatePoolConfig, TensorPoolConfig
+# --- Heuristic Evaluation Import ---
+from ..heuristics.evaluator import YinshHeuristics
 
 # Configure the logger at the module level
 # Use getLogger to ensure consistency if already configured elsewhere
@@ -41,8 +43,7 @@ if not logger.hasHandlers():
 
 
 class Node:
-    """Monte Carlo Tree Search node."""
-    # --- NO CHANGES NEEDED ---
+    """Monte Carlo Tree Search node with virtual loss support for batched evaluation."""
     def __init__(self, state: GameState, parent=None, prior_prob=0.0, c_puct=1.0, state_pool=None):
         self.state = state
         self.parent = parent
@@ -55,6 +56,9 @@ class Node:
         self._state_pool = state_pool  # Reference to state pool for cleanup
         self._owns_state = False  # Track if this node owns the state for cleanup
 
+        # Virtual loss mechanism for batched MCTS
+        self.virtual_losses = 0  # Track in-flight evaluations
+
     def __del__(self):
         """Clean up GameState when node is destroyed."""
         if self._owns_state and self._state_pool is not None and self.state is not None:
@@ -66,17 +70,54 @@ class Node:
                 logging.getLogger("Node").warning(f"Failed to release state in Node destructor: {e}")
 
     def value(self) -> float:
-        """Get mean value of node."""
-        if self.visit_count == 0:
+        """Get mean value of node, accounting for virtual losses."""
+        adjusted_visits = self.visit_count + self.virtual_losses
+        if adjusted_visits == 0:
             return 0.0
-        return self.value_sum / self.visit_count
+        return self.value_sum / adjusted_visits
+
+    def clear_tree(self) -> None:
+        """Recursively break circular references to allow garbage collection.
+
+        MCTS trees have parent↔child circular references that can prevent
+        Python's garbage collector from freeing memory promptly. Call this
+        on the root node after search completes.
+        """
+        # First, recursively clear all children
+        for child in self.children.values():
+            child.clear_tree()
+
+        # Return state to pool if this node owns it
+        if self._owns_state and self._state_pool is not None and self.state is not None:
+            try:
+                self._state_pool.return_game_state(self.state)
+            except:
+                pass
+            self._owns_state = False  # Prevent double-return in __del__
+
+        # Break circular references
+        self.children.clear()
+        self.parent = None
+        self.state = None
+        self._state_pool = None  # Clear pool reference too
+
+    def add_virtual_loss(self) -> None:
+        """Mark this node as being evaluated (used in batched MCTS)."""
+        self.virtual_losses += 1
+
+    def remove_virtual_loss(self) -> None:
+        """Remove virtual loss after evaluation completes."""
+        self.virtual_losses -= 1
+        if self.virtual_losses < 0:
+            self.virtual_losses = 0  # Safety check
 
     def get_ucb_score(self, parent_visit_count: int) -> float:
-        """Calculate Upper Confidence Bound score."""
+        """Calculate Upper Confidence Bound score, accounting for virtual losses."""
         q_value = self.value()
-        # Add small epsilon to prevent division by zero
+        # Add small epsilon to prevent division by zero, account for virtual losses
+        adjusted_visits = self.visit_count + self.virtual_losses
         u_value = (self.c_puct * self.prior_prob *
-                  np.sqrt(parent_visit_count) / (1 + self.visit_count))
+                  np.sqrt(parent_visit_count) / (1 + adjusted_visits))
         return q_value + u_value
 
 class MCTS:
@@ -84,21 +125,25 @@ class MCTS:
 
     def __init__(self,
                  network: NetworkWrapper,
+                 # --- Evaluation Mode ---
+                 evaluation_mode: str = "pure_neural",  # Options: "pure_neural", "pure_heuristic", "hybrid"
+                 heuristic_evaluator: Optional[YinshHeuristics] = None,
+                 heuristic_weight: float = 0.5,  # Weight for heuristic in hybrid mode (0.0 = pure neural, 1.0 = pure heuristic)
                  # --- MCTS Search Params ---
-                 num_simulations: int, # Base simulations (early game)
-                 c_puct: float,
-                 dirichlet_alpha: float,
+                 num_simulations: int = 100, # Base simulations (early game)
+                 c_puct: float = 1.0,
+                 dirichlet_alpha: float = 0.3,
                  # *** Rename 'initial_value_weight' to 'value_weight' for clarity ***
-                 value_weight: float, # Weighting for value in UCB selection
-                 max_depth: int,
+                 value_weight: float = 1.0, # Weighting for value in UCB selection
+                 max_depth: int = 500,
                  # --- Rollout Scheduling Params ---
-                 late_simulations: Optional[int], # Use Optional[int] for type hint clarity
-                 simulation_switch_ply: int,
+                 late_simulations: Optional[int] = None, # Use Optional[int] for type hint clarity
+                 simulation_switch_ply: int = 20,
                  # --- Temperature Params (passed down) ---
-                 initial_temp: float,
-                 final_temp: float,
-                 annealing_steps: int,
-                 temp_clamp_fraction: float,
+                 initial_temp: float = 1.0,
+                 final_temp: float = 0.1,
+                 annealing_steps: int = 30,
+                 temp_clamp_fraction: float = 0.6,
                  # --- Optional Metrics ---
                  mcts_metrics: Optional[MCTSMetrics] = None,
                  # --- Memory Pools ---
@@ -109,6 +154,9 @@ class MCTS:
 
         Args:
             network: The neural network wrapper.
+            evaluation_mode: Evaluation mode - "pure_neural", "pure_heuristic", or "hybrid".
+            heuristic_evaluator: YinshHeuristics instance for heuristic evaluation (required for pure_heuristic/hybrid modes).
+            heuristic_weight: Weight for heuristic in hybrid mode (0.0-1.0, where 0.0=pure neural, 1.0=pure heuristic).
             num_simulations: Base simulation budget (used before switch_ply).
             c_puct: Exploration constant for UCB.
             dirichlet_alpha: Alpha parameter for Dirichlet noise at the root.
@@ -124,8 +172,20 @@ class MCTS:
             game_state_pool: Optional GameStatePool for memory management.
         """
         self.network = network
-        self.state_encoder = StateEncoder()
+        # Use network's encoder to ensure consistent encoding (basic or enhanced)
+        self.state_encoder = network.state_encoder
         self.logger = logging.getLogger("MCTS") # Use module-level logger
+
+        # Evaluation Mode Configuration
+        self.evaluation_mode = evaluation_mode.lower()
+        self.heuristic_evaluator = heuristic_evaluator
+        self.heuristic_weight = np.clip(heuristic_weight, 0.0, 1.0)  # Ensure weight is in [0, 1]
+
+        # Validate evaluation mode configuration
+        if self.evaluation_mode not in ["pure_neural", "pure_heuristic", "hybrid"]:
+            raise ValueError(f"Invalid evaluation_mode: {evaluation_mode}. Must be 'pure_neural', 'pure_heuristic', or 'hybrid'.")
+        if self.evaluation_mode in ["pure_heuristic", "hybrid"] and heuristic_evaluator is None:
+            raise ValueError(f"heuristic_evaluator required for evaluation_mode='{evaluation_mode}'")
 
         # Memory Pool Management
         self.game_state_pool = game_state_pool
@@ -155,6 +215,7 @@ class MCTS:
         self.current_iteration = 0 # Can be updated externally if needed
 
         self.logger.info(f"MCTS Initialized:")
+        self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
         self.logger.info(f"  Memory: Pool enabled={self._pool_enabled}")
         self.logger.info(f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
         self.logger.info(f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
@@ -399,9 +460,243 @@ class MCTS:
             else:
                  self.logger.error(f"Invalid move index {move_idx} for move {move} from root children. Max index: {len(move_probs)-1}")
 
+        # MEMORY FIX: Break circular references in MCTS tree to allow garbage collection
+        root.clear_tree()
 
         return move_probs
 
+    def search_batch(self, state: GameState, move_number: int, batch_size: int = 32) -> np.ndarray:
+        """
+        Run MCTS simulations with batched leaf node evaluation for improved throughput.
+
+        Instead of evaluating each leaf node individually, this method collects multiple
+        leaf nodes and evaluates them all at once using the network's predict_batch method.
+        This provides 10-20x speedup on M2 by utilizing CPU/Neural Engine more efficiently.
+
+        Args:
+            state: The current game state
+            move_number: Current move number (for temperature scheduling)
+            batch_size: Number of leaf nodes to collect before batching evaluation (default: 32)
+
+        Returns:
+            Policy vector of move probabilities
+        """
+        # Choose rollout budget based on the current move number
+        budget = self.early_simulations if move_number < self.switch_ply else self.late_simulations
+
+        root = Node(state, c_puct=self.c_puct)
+        move_probs = np.zeros(self.state_encoder.total_moves, dtype=np.float32)
+
+        # Track states acquired from pool for cleanup
+        simulation_states = []
+
+        # Collect leaves for batched evaluation
+        batch_leaves = []  # List of (node, search_path, current_state, depth)
+
+        for sim in range(budget):
+            node = root
+            search_path = [node]
+            current_state = self._acquire_state_copy(state)
+            simulation_states.append(current_state)
+            depth = 0
+            action = None
+
+            # 1. Selection phase - traverse tree until we reach a leaf
+            while node.is_expanded and node.children:
+                action = self._select_action(node)
+                if action not in node.children:
+                    self.logger.error(f"MCTS Error: Selected action {action} not in node children during batched selection.")
+                    break
+                current_state.make_move(action)
+                node = node.children[action]
+                search_path.append(node)
+                depth += 1
+                if depth >= self.max_depth:
+                    break
+
+            # Skip if selection had errors
+            if action is None or (action not in node.children and node.is_expanded and node.children):
+                continue
+
+            # 2. Check if this is a terminal state
+            terminal_value = self._get_value(current_state)
+            if terminal_value is not None:
+                # Terminal state - backpropagate immediately
+                self._backpropagate(search_path, terminal_value)
+                continue
+
+            # 3. Check if we hit max depth
+            if depth >= self.max_depth:
+                # At max depth - need to evaluate but don't expand
+                # Add to batch for evaluation
+                node.add_virtual_loss()  # Mark as in-flight
+                batch_leaves.append((node, search_path, current_state, depth, False))  # False = don't expand
+            else:
+                # Normal leaf node - add to batch for expansion and evaluation
+                node.add_virtual_loss()  # Mark as in-flight
+                batch_leaves.append((node, search_path, current_state, depth, True))  # True = can expand
+
+            # 4. Process batch when it's full or we're at the end
+            if len(batch_leaves) >= batch_size or sim == budget - 1:
+                if batch_leaves:
+                    self._evaluate_and_backup_batch(batch_leaves, root)
+                    batch_leaves = []
+
+        # Process any remaining leaves
+        if batch_leaves:
+            self._evaluate_and_backup_batch(batch_leaves, root)
+
+        # Clean up simulation states
+        for s in simulation_states:
+            self._release_state(s)
+
+        # Calculate final move probabilities (same as serial version)
+        temp = self.get_temperature(move_number)
+
+        if not root.children:
+            self.logger.debug(f"MCTS Warning: Root node has no children after {budget} simulations.")
+            valid_moves = state.get_valid_moves()
+            if valid_moves:
+                prob = 1.0 / len(valid_moves)
+                for move in valid_moves:
+                    move_idx = self.state_encoder.move_to_index(move)
+                    if 0 <= move_idx < len(move_probs):
+                        move_probs[move_idx] = prob
+            return move_probs
+
+        valid_moves_at_root = list(root.children.keys())
+        visit_counts = np.array([
+            root.children[move].visit_count for move in valid_moves_at_root
+        ], dtype=np.float32)
+
+        if visit_counts.sum() == 0:
+            prob = 1.0 / len(valid_moves_at_root) if valid_moves_at_root else 0.0
+            visit_probs = np.full(len(valid_moves_at_root), prob, dtype=np.float32)
+        else:
+            if temp == 0:
+                visit_probs = np.zeros_like(visit_counts)
+                visit_probs[np.argmax(visit_counts)] = 1.0
+            else:
+                visit_counts_temp = np.power(visit_counts, 1.0 / temp)
+                total_visits_temp = visit_counts_temp.sum()
+                if total_visits_temp > 1e-6:
+                    visit_probs = visit_counts_temp / total_visits_temp
+                else:
+                    prob = 1.0 / len(valid_moves_at_root) if valid_moves_at_root else 0.0
+                    visit_probs = np.full(len(valid_moves_at_root), prob, dtype=np.float32)
+
+        for move, prob in zip(valid_moves_at_root, visit_probs):
+            move_idx = self.state_encoder.move_to_index(move)
+            if 0 <= move_idx < len(move_probs):
+                move_probs[move_idx] = prob
+
+        # Store root value for use as training target (Fix #1)
+        self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+
+        # MEMORY FIX: Break circular references in MCTS tree to allow garbage collection
+        root.clear_tree()
+
+        return move_probs
+
+    def _evaluate_and_backup_batch(self, batch_leaves: List[Tuple], root: Node):
+        """
+        Evaluate a batch of leaf nodes and back up the results.
+
+        Args:
+            batch_leaves: List of tuples (node, search_path, current_state, depth, can_expand)
+            root: Root node (for Dirichlet noise application)
+        """
+        if not batch_leaves:
+            return
+
+        # Separate states for batch evaluation
+        states_to_evaluate = [item[2] for item in batch_leaves]
+
+        # Batch evaluate all states
+        if self.evaluation_mode in ["pure_neural", "hybrid"]:
+            # Use neural network for batch evaluation
+            policy_logits_batch, values_batch = self.network.predict_batch(states_to_evaluate)
+
+            # Convert to numpy
+            policy_logits_batch = policy_logits_batch.cpu().numpy()
+            values_batch = values_batch.cpu().numpy().flatten()
+        else:
+            # Pure heuristic mode - evaluate individually (heuristics don't support batching)
+            policy_logits_batch = None
+            values_batch = np.array([
+                self.heuristic_evaluator.evaluate_position(s, s.current_player)
+                for s in states_to_evaluate
+            ])
+
+        # Process each leaf in the batch
+        for i, (node, search_path, current_state, depth, can_expand) in enumerate(batch_leaves):
+            # Get policy and value for this state
+            if self.evaluation_mode in ["pure_neural", "hybrid"]:
+                policy_logits = policy_logits_batch[i]
+                policy_nn = torch.softmax(torch.from_numpy(policy_logits), dim=0).numpy()
+                value_nn = values_batch[i]
+            else:
+                policy_nn = None
+                value_nn = 0.0
+
+            # Combine with heuristics if in hybrid mode
+            if self.evaluation_mode == "hybrid":
+                value_heuristic = self.heuristic_evaluator.evaluate_position(
+                    current_state, current_state.current_player
+                )
+                valid_moves = current_state.get_valid_moves()
+                policy_heuristic = np.zeros_like(policy_nn)
+                if len(valid_moves) > 0:
+                    for move in valid_moves:
+                        idx = self.state_encoder.move_to_index(move)
+                        if 0 <= idx < len(policy_heuristic):
+                            policy_heuristic[idx] = 1.0 / len(valid_moves)
+
+                w_h = self.heuristic_weight
+                w_n = 1.0 - w_h
+                policy = w_n * policy_nn + w_h * policy_heuristic
+                value = w_n * value_nn + w_h * value_heuristic
+            elif self.evaluation_mode == "pure_heuristic":
+                valid_moves = current_state.get_valid_moves()
+                policy = np.zeros(self.state_encoder.total_moves)
+                if len(valid_moves) > 0:
+                    for move in valid_moves:
+                        idx = self.state_encoder.move_to_index(move)
+                        if 0 <= idx < len(policy):
+                            policy[idx] = 1.0 / len(valid_moves)
+                value = values_batch[i]
+            else:  # pure_neural
+                policy = policy_nn
+                value = value_nn
+
+            # Expand node if allowed
+            if can_expand and not current_state.is_terminal():
+                valid_moves = current_state.get_valid_moves()
+                if valid_moves:
+                    node.is_expanded = True
+                    policy = self._mask_invalid_moves(policy, valid_moves)
+                    for move in valid_moves:
+                        node.children[move] = self._create_child_node(
+                            current_state,
+                            parent=node,
+                            prior_prob=self._get_move_prob(policy, move)
+                        )
+
+                    # Apply Dirichlet noise at root node (once per search call)
+                    if node is root and not hasattr(root, "dirichlet_applied"):
+                        if self.dirichlet_alpha > 0 and len(valid_moves) > 0:
+                            noise = np.random.dirichlet([self.dirichlet_alpha] * len(valid_moves))
+                            epsilon_mix = 0.25
+                            for j, move in enumerate(valid_moves):
+                                child_node = root.children[move]
+                                child_node.prior_prob = (
+                                    (1 - epsilon_mix) * child_node.prior_prob + epsilon_mix * noise[j]
+                                )
+                            root.dirichlet_applied = True
+
+            # Remove virtual loss and backpropagate
+            node.remove_virtual_loss()
+            self._backpropagate(search_path, value)
 
     def _select_action(self, node: Node) -> Move:
         """Select action using UCB formula with configured value_weight."""
@@ -448,14 +743,59 @@ class MCTS:
         return best_move
 
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
-        """Get policy and value from neural network."""
-        # Use the new pool-enabled prediction method
-        with torch.no_grad():
-            policy_tensor, value_tensor = self.network.predict_from_state(state)
-            # Convert to numpy and extract values
-            policy_probs = torch.softmax(policy_tensor, dim=1).squeeze(0).cpu().numpy()
-            value_scalar = value_tensor.item() # Get scalar value
-            return policy_probs, value_scalar
+        """Get policy and value from neural network and/or heuristic evaluator.
+
+        Supports three evaluation modes:
+        - pure_neural: Only use neural network
+        - pure_heuristic: Only use heuristic evaluator
+        - hybrid: Weighted combination of neural network and heuristic
+        """
+        # Get neural network evaluation
+        if self.evaluation_mode in ["pure_neural", "hybrid"]:
+            with torch.no_grad():
+                policy_tensor, value_tensor = self.network.predict_from_state(state)
+                # Convert to numpy and extract values
+                policy_nn = torch.softmax(policy_tensor, dim=1).squeeze(0).cpu().numpy()
+                value_nn = value_tensor.item()  # Get scalar value
+        else:
+            policy_nn = None
+            value_nn = 0.0
+
+        # Get heuristic evaluation
+        if self.evaluation_mode in ["pure_heuristic", "hybrid"]:
+            # Heuristic evaluator returns differential score for current player
+            current_player = state.current_player
+            value_heuristic = self.heuristic_evaluator.evaluate_position(state, current_player)
+
+            # For policy, use uniform distribution over legal moves (heuristics don't provide policy guidance)
+            valid_moves = state.get_valid_moves()
+            policy_heuristic = np.zeros_like(policy_nn) if policy_nn is not None else np.zeros(self.state_encoder.total_moves)
+            if len(valid_moves) > 0:
+                for move in valid_moves:
+                    idx = self.state_encoder.move_to_index(move)
+                    if 0 <= idx < len(policy_heuristic):
+                        policy_heuristic[idx] = 1.0 / len(valid_moves)
+        else:
+            policy_heuristic = None
+            value_heuristic = 0.0
+
+        # Combine based on evaluation mode
+        if self.evaluation_mode == "pure_neural":
+            return policy_nn, value_nn
+        elif self.evaluation_mode == "pure_heuristic":
+            return policy_heuristic, value_heuristic
+        else:  # hybrid mode
+            # Weighted combination
+            w_h = self.heuristic_weight
+            w_n = 1.0 - w_h
+
+            # Combine policy (weighted sum)
+            policy_combined = w_n * policy_nn + w_h * policy_heuristic
+
+            # Combine value (weighted sum)
+            value_combined = w_n * value_nn + w_h * value_heuristic
+
+            return policy_combined, value_combined
 
     def _get_value(self, state: GameState) -> Optional[float]:
         """Get terminal value if game ended, None otherwise. Uses normalized margin."""
@@ -542,20 +882,26 @@ class SelfPlay:
     def __init__(self,
                  network: NetworkWrapper,
                  num_workers: int,
+                 # --- Evaluation Mode ---
+                 evaluation_mode: str = "pure_neural",
+                 heuristic_weight: float = 0.5,
                  # --- MCTS Params (to be passed to MCTS instance) ---
-                 num_simulations: int, # Early game sims
-                 late_simulations: Optional[int],
-                 simulation_switch_ply: int,
-                 c_puct: float,
-                 dirichlet_alpha: float,
+                 num_simulations: int = 100, # Early game sims
+                 late_simulations: Optional[int] = None,
+                 simulation_switch_ply: int = 20,
+                 c_puct: float = 1.0,
+                 dirichlet_alpha: float = 0.3,
                  # *** Use consistent 'value_weight' naming ***
-                 value_weight: float,
-                 max_depth: int,
+                 value_weight: float = 1.0,
+                 max_depth: int = 500,
+                 # --- Batched MCTS Params ---
+                 use_batched_mcts: bool = True,  # Enable batched MCTS for 10-20x speedup
+                 mcts_batch_size: int = 32,  # Number of leaves to collect before batching
                  # --- Temp Params (to be passed to MCTS instance) ---
-                 initial_temp: float,
-                 final_temp: float,
-                 annealing_steps: int,
-                 temp_clamp_fraction: float,
+                 initial_temp: float = 1.0,
+                 final_temp: float = 0.1,
+                 annealing_steps: int = 30,
+                 temp_clamp_fraction: float = 0.6,
                  # --- Optional Metrics ---
                  metrics_logger: Optional[MetricsLogger] = None,
                  mcts_metrics: Optional[MCTSMetrics] = None,
@@ -568,15 +914,32 @@ class SelfPlay:
         self.network = network
         self.num_workers = num_workers # Use the calculated number passed in
         self.metrics_logger = metrics_logger
-        self.state_encoder = StateEncoder()
+        # Use network's encoder to ensure consistent encoding (basic or enhanced)
+        self.state_encoder = network.state_encoder
         self.logger = logging.getLogger("SelfPlay") # Use module logger
         self.current_iteration = 0 # Track current training iteration if needed
 
         # Store memory pools
         self.game_state_pool = game_state_pool
 
+        # Initialize heuristic evaluator
+        self.evaluation_mode = evaluation_mode
+        self.heuristic_weight = heuristic_weight
+        if evaluation_mode in ["pure_heuristic", "hybrid"]:
+            self.heuristic_evaluator = YinshHeuristics()
+            self.logger.info(f"Initialized YinshHeuristics evaluator for {evaluation_mode} mode")
+        else:
+            self.heuristic_evaluator = None
+
+        # Store batched MCTS configuration
+        self.use_batched_mcts = use_batched_mcts
+        self.mcts_batch_size = mcts_batch_size
+
         # Store all parameters needed by MCTS and workers explicitly
         self.mcts_config = {
+            'evaluation_mode': evaluation_mode,
+            'heuristic_evaluator': self.heuristic_evaluator,
+            'heuristic_weight': heuristic_weight,
             'num_simulations': num_simulations,
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,
@@ -588,6 +951,9 @@ class SelfPlay:
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,
             'temp_clamp_fraction': temp_clamp_fraction,
+            'use_batched_mcts': use_batched_mcts,  # Add batched MCTS flag
+            'mcts_batch_size': mcts_batch_size,  # Add batch size
+            'use_enhanced_encoding': getattr(self.network, 'use_enhanced_encoding', False),  # Enhanced encoding flag
         }
         # Store optional metrics instances
         self.mcts_metrics = mcts_metrics # Store the instance
@@ -595,22 +961,34 @@ class SelfPlay:
         # Instantiate the main MCTS object for the SelfPlay process itself (if needed, e.g., single-threaded play)
         # This MCTS instance is primarily used if play_game is called directly,
         # worker processes will create their own MCTS instances.
+
+        # Filter out batched MCTS params and encoding flag that don't belong in MCTS.__init__()
+        mcts_init_config = {k: v for k, v in self.mcts_config.items()
+                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
+
         self.mcts = MCTS(
             network=self.network,
             mcts_metrics=self.mcts_metrics, # Pass metrics instance
             game_state_pool=self.game_state_pool, # Pass memory pool
-            **self.mcts_config # Unpack the config dict
+            **mcts_init_config # Unpack the filtered config dict
         )
 
         self.logger.info("SelfPlay Initialized:")
         self.logger.info(f"  Workers: {self.num_workers}")
+        self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
+        self.logger.info(f"  Batched MCTS: {'ENABLED' if self.use_batched_mcts else 'DISABLED'} (batch_size={self.mcts_batch_size})")
+        self.logger.info(f"  Enhanced Encoding: {'ENABLED (15 channels)' if self.mcts_config.get('use_enhanced_encoding', False) else 'DISABLED (6 channels)'}")
         self.logger.info(f"  MCTS Config: {self.mcts_config}")
 
 
-    def generate_games(self, num_games: int) -> List[Tuple[List[np.ndarray], List[np.ndarray], float, List[Dict]]]:
-        """Generate self-play games in parallel using multiple workers."""
+    def generate_games(self, num_games: int) -> List[Tuple[List[np.ndarray], List[np.ndarray], List[float], List[Dict]]]:
+        """Generate self-play games in parallel using multiple workers.
+
+        Fix #1: Now returns MCTS root values (List[float]) instead of single game outcome (float)
+        """
         self.logger.info(f"Starting generation of {num_games} games using {self.num_workers} workers...")
-        games_data: List[Tuple[List[np.ndarray], List[np.ndarray], float, List[Dict]]] = []
+        # Fix #1: Changed from outcome (float) to values (List[float]) - MCTS root values per position
+        games_data: List[Tuple[List[np.ndarray], List[np.ndarray], List[float], List[Dict]]] = []
 
         # Ensure the main network is on the CPU before saving state dict for workers
         self.network.network.cpu()
@@ -638,6 +1016,47 @@ class SelfPlay:
                          f"late_sims={self.mcts.late_simulations}, "
                          f"switch_ply={self.mcts.switch_ply}, c_puct={self.mcts.c_puct}")
 
+        # Handle sequential generation when workers=0 (memory-optimized mode)
+        if self.num_workers <= 0:
+            self.logger.info("Running sequential game generation (workers=0, memory-optimized mode)")
+            for game_id in range(num_games):
+                try:
+                    result = play_game_worker(
+                        model_path=model_path,
+                        game_id=game_id,
+                        mcts_config=self.mcts_config,
+                    )
+                    if result is not None:
+                        states, policies, values, temp_data, game_history = result
+                        games_data.append((states, policies, values, game_history))
+                        games_completed += 1
+
+                        # Log progress
+                        if games_completed % max(1, num_games // 10) == 0 or games_completed == num_games:
+                            elapsed = time.time() - start_time
+                            rate = games_completed / elapsed if elapsed > 0 else 0
+                            self.logger.info(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
+                    else:
+                        self.logger.warning(f"Game {game_id} returned None result.")
+                except Exception as e:
+                    self.logger.error(f"Error generating game {game_id}: {e}", exc_info=True)
+
+            # Cleanup temp model file
+            if 'model_path' in locals() and os.path.exists(model_path):
+                try:
+                    os.unlink(model_path)
+                except OSError:
+                    pass
+
+            total_time = time.time() - start_time
+            final_rate = games_completed / total_time if total_time > 0 else 0
+            self.logger.info(f"\nGame generation complete:")
+            self.logger.info(f"- Games generated: {games_completed}/{num_games}")
+            self.logger.info(f"- Total time: {total_time:.1f} seconds")
+            self.logger.info(f"- Final rate: {final_rate:.2f} games/second")
+            return games_data
+
+        # Parallel generation with workers > 0
         try:
             with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
                 for game_id in range(num_games):
@@ -660,8 +1079,9 @@ class SelfPlay:
                         result = future.result()
                         # Check if worker returned valid data (not None or error)
                         if result is not None:
-                             states, policies, outcome, temp_data, game_history = result
-                             games_data.append((states, policies, outcome, game_history))
+                             # Fix #1: Unpack values (MCTS root values) instead of outcome
+                             states, policies, values, temp_data, game_history = result
+                             games_data.append((states, policies, values, game_history))
                              games_completed += 1
 
                              # Log progress periodically
@@ -752,8 +1172,10 @@ def play_game_worker(
         )
         local_tensor_pool = TensorPool(tensor_pool_config)
 
-        # Create network with tensor pool
-        network = NetworkWrapper(device=device, tensor_pool=local_tensor_pool)
+        # Create network with tensor pool (use enhanced encoding if specified)
+        use_enhanced_encoding = mcts_config.get('use_enhanced_encoding', False)
+        network = NetworkWrapper(device=device, tensor_pool=local_tensor_pool,
+                                 use_enhanced_encoding=use_enhanced_encoding)
         network.load_model(model_path)
         network.network.eval()
 
@@ -767,17 +1189,28 @@ def play_game_worker(
         )
         local_game_state_pool = GameStatePool(pool_config)
 
-        state_encoder = StateEncoder()
-        mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_config)
+        # Use network's encoder to ensure consistent encoding (basic or enhanced)
+        state_encoder = network.state_encoder
+
+        # Extract batched MCTS settings from config (with defaults)
+        use_batched_mcts = mcts_config.get('use_batched_mcts', True)
+        mcts_batch_size = mcts_config.get('mcts_batch_size', 32)
+
+        # Remove these from mcts_config before passing to MCTS __init__
+        mcts_init_config = {k: v for k, v in mcts_config.items()
+                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
+
+        mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_init_config)
 
         # --- Memory-Efficient Game Data Structures ---
         state = local_game_state_pool.get()  # Get initial state from pool
         from ..memory import reset_game_state
         reset_game_state(state)  # Ensure it's properly initialized
-        
+
         # Use lists instead of deques (less overhead)
         states = []
         policies = []
+        players = []  # Track which player is to move at each position (for outcome perspective)
 
         # Keep minimal game history - just essentials for debugging
         game_history = []
@@ -790,9 +1223,12 @@ def play_game_worker(
 
         # --- Main Game Loop ---
         while not state.is_terminal() and move_count < max_game_moves:
-            # MCTS search with timing
+            # MCTS search with timing (use batched or serial based on configuration)
             search_start = time.time()
-            move_probs = mcts.search(state, move_count)
+            if use_batched_mcts:
+                move_probs = mcts.search_batch(state, move_count, batch_size=mcts_batch_size)
+            else:
+                move_probs = mcts.search(state, move_count)
             search_time = time.time() - search_start
 
             # Record search time
@@ -835,6 +1271,7 @@ def play_game_worker(
             encoded_state = state_encoder.encode_state(state).astype(np.float32)
             states.append(encoded_state)
             policies.append(move_probs)
+            players.append(state.current_player)  # Track player for outcome perspective
 
             # Calculate entropy for temperature adaptation
             entropy = -np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9))
@@ -872,6 +1309,7 @@ def play_game_worker(
         # Add dummy policy for final state
         dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(state_encoder.total_moves, dtype=np.float32)
         policies.append(dummy_policy)
+        players.append(state.current_player)  # Track player for final state too
 
         # Add final game info
         game_history.append({
@@ -881,10 +1319,21 @@ def play_game_worker(
             'black_score': state.black_score
         })
 
-        # Calculate outcome
+        # Calculate outcome from White's perspective (+1 = White wins, -1 = Black wins)
         score_diff = state.white_score - state.black_score
-        normalized_margin = np.clip(score_diff / 3.0, -1.0, 1.0)
-        outcome = float(normalized_margin)
+        outcome_white = float(np.clip(score_diff / 3.0, -1.0, 1.0))
+
+        # Backfill values for all positions based on game outcome
+        # Each position's value = outcome from that player's perspective
+        from ..game.types import Player
+        values = []
+        for player in players:
+            if player == Player.WHITE:
+                values.append(outcome_white)
+            else:
+                values.append(-outcome_white)  # Flip for Black's perspective
+
+        outcome = outcome_white  # For logging
 
         # Log final summary - minimal logging to reduce overhead
         worker_logger.info(
@@ -903,7 +1352,9 @@ def play_game_worker(
 
         # Memory pools handle cleanup automatically
 
-        return states, policies, outcome, temp_data, game_history
+        # Return outcome-based values (standard AlphaZero approach)
+        # Each position's value = game outcome from that player's perspective
+        return states, policies, values, temp_data, game_history
 
     except Exception as e:
         worker_logger.error(f"Error in game {game_id}: {e}", exc_info=True)

@@ -1,0 +1,48 @@
+======================================================================
+BATCH EVALUATION PERFORMANCE REPORT
+======================================================================
+
+THROUGHPUT SUMMARY
+----------------------------------------------------------------------
+Batch    1:  0.98x speedup,    45507 eval/s, 0.0220 ms/eval
+Batch    5:  0.84x speedup,    39154 eval/s, 0.0255 ms/eval
+Batch   10:  0.92x speedup,    43682 eval/s, 0.0229 ms/eval
+Batch   25:  0.95x speedup,    45313 eval/s, 0.0221 ms/eval
+Batch   50:  0.96x speedup,    47470 eval/s, 0.0211 ms/eval
+Batch  100:  0.97x speedup,    47235 eval/s, 0.0212 ms/eval
+Batch  250:  0.93x speedup,    45942 eval/s, 0.0218 ms/eval
+Batch  500:  0.89x speedup,    43654 eval/s, 0.0229 ms/eval
+Batch 1000:  0.77x speedup,    38239 eval/s, 0.0262 ms/eval
+
+MEMORY SUMMARY
+----------------------------------------------------------------------
+Batch    1:   0.00 MB peak,   1.27 KB/position
+Batch    5:   0.00 MB peak,   0.93 KB/position
+Batch   10:   0.01 MB peak,   0.67 KB/position
+Batch   25:   0.02 MB peak,   0.65 KB/position
+Batch   50:   0.03 MB peak,   0.65 KB/position
+Batch  100:   0.07 MB peak,   0.67 KB/position
+Batch  250:   0.17 MB peak,   0.70 KB/position
+Batch  500:   0.36 MB peak,   0.73 KB/position
+Batch 1000:   0.73 MB peak,   0.75 KB/position
+
+CORRECTNESS SUMMARY
+----------------------------------------------------------------------
+Status: ✅ PASS
+Total tests: 97050
+Errors: 0
+Max error: 0.00e+00
+
+RECOMMENDATIONS
+----------------------------------------------------------------------
+Best throughput: Batch size 50 (47470 eval/s)
+Best speedup: Batch size 1 (0.98x)
+Recommended: Batch size 50
+
+Use Cases:
+  - Small Batches: Use batch sizes 10-50 for interactive applications
+  - Medium Batches: Use batch size 50 for balanced performance
+  - Large Batches: Use batch sizes 100-500 for batch processing workloads
+  - Very Large Batches: Use batch sizes 500-1000 for maximum throughput
+
+======================================================================
