@@ -18,6 +18,7 @@ from yinsh_ml.training.augmentation import (
 from yinsh_ml.utils.encoding import StateEncoder
 from yinsh_ml.game.game_state import GameState
 from yinsh_ml.game.constants import Player, PieceType, Position
+from yinsh_ml.game.types import Move, MoveType, GamePhase
 
 
 class TestAugmenterBasics:
@@ -103,9 +104,10 @@ class TestIdentityTransform:
 
     def test_identity_policy_unchanged(self, augmenter):
         """Test that identity transform returns identical policy."""
+        state = np.zeros((6, 11, 11), dtype=np.float32)
         policy = np.random.rand(7395).astype(np.float32)
         policy /= policy.sum()  # Normalize
-        transformed = augmenter._transform_policy(policy, 0)
+        transformed = augmenter._transform_policy(state, policy, 0)
         assert np.array_equal(transformed, policy), "Identity transform should not change policy"
 
 
@@ -216,24 +218,25 @@ class TestPolicyTransforms:
         return YinshSymmetryAugmenter(include_reflections=True)
 
     def test_policy_sum_preserved(self, augmenter):
-        """Test that policy sums are preserved (approximately) after transform."""
+        """After drop-and-renormalize, any surviving mass is normalized to sum 1.0."""
+        state = np.zeros((6, 11, 11), dtype=np.float32)  # RING_PLACEMENT, all empty
         policy = np.random.rand(7395).astype(np.float32)
         policy /= policy.sum()
 
         for transform_id in range(1, 12):
-            transformed = augmenter._transform_policy(policy, transform_id)
+            transformed = augmenter._transform_policy(state, policy, transform_id)
 
-            # Sum should be 1.0 (or close to it)
             transformed_sum = transformed.sum()
-            assert abs(transformed_sum - 1.0) < 0.1 or transformed_sum < 0.1, \
+            assert abs(transformed_sum - 1.0) < 1e-5 or transformed_sum < 1e-6, \
                 f"Transform {transform_id}: policy sum = {transformed_sum}"
 
     def test_zero_policy_stays_zero(self, augmenter):
-        """Test that zero policy stays zero."""
+        """Zero policy stays zero — no mass to redistribute."""
+        state = np.zeros((6, 11, 11), dtype=np.float32)  # RING_PLACEMENT, all empty
         policy = np.zeros(7395, dtype=np.float32)
 
         for transform_id in range(12):
-            transformed = augmenter._transform_policy(policy, transform_id)
+            transformed = augmenter._transform_policy(state, policy, transform_id)
             assert np.allclose(transformed, 0), \
                 f"Transform {transform_id} created non-zero values from zero policy"
 
@@ -415,6 +418,223 @@ class TestEdgeCases:
         for aug_state, _, _ in results:
             assert aug_state[0, 5, 5] == 1.0, \
                 "Center piece should remain at center under all transforms"
+
+
+class TestPolicyGeometricCorrectness:
+    """Verify the transformed policy points at the geometrically-correct move in
+    the transformed state — the property the old approximation violated for all
+    non-ring-placement move types.
+
+    NOTE on transform coverage: `_transform_coord` rotates YINSH positions assuming
+    full D6 symmetry, but the actual YINSH board only has D2 symmetry (180° + two
+    reflections). Under 60°/120°/240°/300° rotations, 46/85 positions rotate off-board;
+    under the non-D2 reflections, 28-56/85 drop off. Pre-existing geometry bug, not
+    introduced here — see RESEARCH_LOG entry on the 'D6 coord math' follow-on.
+
+    These tests therefore exercise only:
+      - Transforms with full coverage: T3 (180°) and T6, T9 (true reflections — TBD below)
+      - Positions in the inner-hex subset for transforms with partial coverage
+    """
+
+    # Transforms with 100% coverage (from coverage probe): T3 (180°) only.
+    FULL_COVERAGE_TRANSFORMS = [3]
+
+    # Partial-coverage transforms still valuable for "mass lands on valid-move indices"
+    # invariants — just not full round-trips for every position.
+    ALL_NON_IDENTITY_TRANSFORMS = list(range(1, 12))
+
+    @pytest.fixture
+    def augmenter(self):
+        return YinshSymmetryAugmenter(include_reflections=True)
+
+    @pytest.fixture
+    def encoder(self):
+        return StateEncoder()
+
+    def _ring_placement_state(self):
+        gs = GameState()
+        gs.phase = GamePhase.RING_PLACEMENT
+        return gs
+
+    def _main_game_state(self):
+        """MAIN_GAME with rings placed on positions inside the 180°-safe region."""
+        gs = GameState()
+        gs.phase = GamePhase.MAIN_GAME
+        for col, row in [('E', 5), ('F', 7), ('G', 5)]:
+            gs.board.place_piece(Position(col, row), PieceType.WHITE_RING)
+        for col, row in [('E', 8), ('F', 4), ('G', 8)]:
+            gs.board.place_piece(Position(col, row), PieceType.BLACK_RING)
+        gs.current_player = Player.WHITE
+        gs.rings_placed = {Player.WHITE: 5, Player.BLACK: 5}
+        return gs
+
+    def _ring_removal_state(self):
+        """RING_REMOVAL with WHITE to remove. Ring counts honor decode_state's
+        heuristic `current=WHITE iff white_rings <= black_rings`, which in side-
+        normalized encoding means the *current player's rings* (ch0) must not
+        outnumber the opponent's (ch1) after decoding."""
+        gs = GameState()
+        gs.phase = GamePhase.RING_REMOVAL
+        gs.current_player = Player.WHITE
+        gs.board.place_piece(Position('E', 5), PieceType.WHITE_RING)
+        for col, row in [('F', 6), ('G', 7)]:
+            gs.board.place_piece(Position(col, row), PieceType.BLACK_RING)
+        gs.rings_placed = {Player.WHITE: 5, Player.BLACK: 5}
+        return gs
+
+    def test_place_ring_round_trip_180(self, augmenter, encoder):
+        """PLACE_RING under 180° rotation: exact round-trip for every valid position."""
+        gs = self._ring_placement_state()
+        state = encoder.encode_state(gs)
+        valid_moves = gs.get_valid_moves()
+        tid = 3  # 180°
+
+        for move in valid_moves:
+            policy = np.zeros(7395, dtype=np.float32)
+            policy[encoder.move_to_index(move)] = 1.0
+            aug_policy = augmenter._transform_policy(state, policy, tid)
+
+            expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
+            assert expected_move is not None, f"180° should cover all positions; {move.source} failed"
+            expected_idx = encoder.move_to_index(expected_move)
+            assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
+                f"Mass missing at expected idx for source={move.source}"
+
+    def test_move_ring_round_trip_180(self, augmenter, encoder):
+        """MOVE_RING under 180°: the hashed source/dest path — the exact case the old
+        approximation got wrong."""
+        gs = self._main_game_state()
+        state = encoder.encode_state(gs)
+        valid_moves = gs.get_valid_moves()
+        assert valid_moves, "main-game state should have ring moves"
+        tid = 3
+
+        for move in valid_moves[:10]:
+            policy = np.zeros(7395, dtype=np.float32)
+            policy[encoder.move_to_index(move)] = 1.0
+            aug_policy = augmenter._transform_policy(state, policy, tid)
+
+            expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
+            assert expected_move is not None
+            expected_idx = encoder.move_to_index(expected_move)
+            assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
+                f"MOVE_RING {move.source}→{move.destination}: mass not at expected idx"
+
+    def test_remove_ring_round_trip_180(self, augmenter, encoder):
+        """REMOVE_RING under 180°: previously returned old_idx unchanged."""
+        gs = self._ring_removal_state()
+        state = encoder.encode_state(gs)
+        valid_moves = gs.get_valid_moves()
+        tid = 3
+
+        for move in valid_moves:
+            policy = np.zeros(7395, dtype=np.float32)
+            policy[encoder.move_to_index(move)] = 1.0
+            aug_policy = augmenter._transform_policy(state, policy, tid)
+
+            expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
+            assert expected_move is not None
+            expected_idx = encoder.move_to_index(expected_move)
+            assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
+                f"REMOVE_RING {move.source}: mass not at expected idx"
+
+    def test_180_rotation_policy_is_self_inverse_with_manual_transformed_state(self, augmenter, encoder):
+        """Applying 180° to a policy, then applying 180° again *against the manually-
+        rotated game state*, recovers the original policy.
+
+        We bypass `_transform_state` here: it has a pre-existing bug where the phase
+        channel (uniform scalar) is only partially copied by the rotation, causing
+        decode_state to report the wrong phase after transform. That bug is out of
+        scope — this test exercises only the policy permutation."""
+        gs = self._main_game_state()
+        rotated_gs = self._rotate_game_state_180(gs)
+
+        state = encoder.encode_state(gs)
+        rotated_state = encoder.encode_state(rotated_gs)
+
+        move = gs.get_valid_moves()[0]
+        original_idx = encoder.move_to_index(move)
+        policy = np.zeros(7395, dtype=np.float32)
+        policy[original_idx] = 1.0
+
+        once_policy = augmenter._transform_policy(state, policy, 3)
+        twice_policy = augmenter._transform_policy(rotated_state, once_policy, 3)
+
+        assert np.argmax(twice_policy) == original_idx
+        assert twice_policy[original_idx] == pytest.approx(1.0, abs=1e-5)
+
+    def _rotate_game_state_180(self, gs):
+        """Manually build the 180°-rotated GameState without using `_transform_state`."""
+        rotated = GameState()
+        rotated.phase = gs.phase
+        rotated.current_player = gs.current_player
+        rotated.rings_placed = dict(gs.rings_placed)
+
+        def rot(pos):
+            # 180° in this encoding: (row, col) -> (11-1-row_idx, 11-1-col_idx)
+            # using 0-indexed grid offsets.
+            new_col_idx = 10 - (ord(pos.column) - ord('A'))
+            new_row = 12 - pos.row
+            return Position(chr(ord('A') + new_col_idx), new_row)
+
+        for piece_type in (PieceType.WHITE_RING, PieceType.BLACK_RING,
+                           PieceType.WHITE_MARKER, PieceType.BLACK_MARKER):
+            for pos in gs.board.get_pieces_positions(piece_type):
+                rotated.board.place_piece(rot(pos), piece_type)
+        return rotated
+
+    def test_invalid_indices_dropped_and_renormalized(self, augmenter, encoder):
+        """Mass at an invalid-move index is dropped; remaining mass sums to 1.0.
+
+        This codifies the drop-and-renormalize semantic the fix introduces: the
+        previous approximation retained mass at invalid-in-transformed-state indices,
+        which was the core correctness bug."""
+        gs = self._ring_placement_state()
+        state = encoder.encode_state(gs)
+        valid_move = next(m for m in gs.get_valid_moves()
+                          if m.source.column == 'F' and m.source.row == 6)
+        valid_idx = encoder.move_to_index(valid_move)
+
+        # MOVE_RING slot in policy, but phase is PLACEMENT — no valid move hashes here
+        invalid_idx = encoder.move_ring_range[0] + 7
+        assert invalid_idx != valid_idx
+
+        policy = np.zeros(7395, dtype=np.float32)
+        policy[valid_idx] = 0.6
+        policy[invalid_idx] = 0.4
+
+        aug_policy = augmenter._transform_policy(state, policy, 3)
+        assert aug_policy.sum() == pytest.approx(1.0, abs=1e-5), \
+            "After dropping invalid-index mass, valid mass must renormalize to 1.0"
+        expected_move = augmenter._transform_move(valid_move, augmenter._coord_maps[3])
+        assert aug_policy[encoder.move_to_index(expected_move)] == pytest.approx(1.0, abs=1e-5)
+
+    def test_augmented_policy_mass_on_valid_moves_only_180(self, augmenter, encoder):
+        """End-to-end invariant: after 180° rotation of both state and policy, all
+        non-zero policy mass lands at indices corresponding to valid moves in the
+        *manually-rotated* game state. We use a manually-rotated state rather than
+        `_transform_state` to sidestep its phase-channel bug (out of scope here).
+
+        Restricted to 180°: the other 11 transforms in `_coord_maps` are not true
+        symmetries of the YINSH board — pieces on non-180°-symmetric cells rotate
+        off-board, leaving the augmented state geometrically inconsistent."""
+        gs = self._main_game_state()
+        rotated_gs = self._rotate_game_state_180(gs)
+        state = encoder.encode_state(gs)
+
+        valid_moves = gs.get_valid_moves()
+        policy = np.zeros(7395, dtype=np.float32)
+        for m in valid_moves:
+            policy[encoder.move_to_index(m)] = 1.0
+        policy /= policy.sum()
+
+        aug_policy = augmenter._transform_policy(state, policy, 3)
+
+        rotated_valid_indices = {encoder.move_to_index(m) for m in rotated_gs.get_valid_moves()}
+        nonzero = set(np.nonzero(aug_policy)[0].tolist())
+        stray = nonzero - rotated_valid_indices
+        assert not stray, \
+            f"Augmented policy has mass at indices not valid in rotated state: {stray}"
 
 
 if __name__ == '__main__':

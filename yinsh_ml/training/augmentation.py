@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 
 from ..game.constants import Position, is_valid_position, VALID_POSITIONS
+from ..game.types import Move, MoveType
 from ..utils.encoding import StateEncoder
 
 logger = logging.getLogger(__name__)
@@ -74,9 +75,6 @@ class YinshSymmetryAugmenter:
         # Precompute coordinate mappings for all transforms
         self._coord_maps = self._precompute_coord_maps()
 
-        # Precompute position index mappings for policy transforms
-        self._policy_maps = self._precompute_policy_maps()
-
         logger.info(f"YinshSymmetryAugmenter initialized: {self.num_transforms} transforms "
                    f"(reflections={'enabled' if include_reflections else 'disabled'})")
 
@@ -112,32 +110,6 @@ class YinshSymmetryAugmenter:
             coord_maps.append(coord_map)
 
         return coord_maps
-
-    def _precompute_policy_maps(self) -> List[Dict[int, int]]:
-        """Precompute policy index mappings for all transforms.
-
-        The policy is a 7395-element vector. For ring movement moves (most common),
-        we need to transform both source and destination positions.
-
-        Returns:
-            List of dictionaries mapping old_policy_index -> new_policy_index
-            for each transform.
-        """
-        policy_maps = []
-
-        for transform_id in range(self.num_transforms):
-            if transform_id == 0:
-                # Identity transform - no mapping needed
-                policy_maps.append({})
-                continue
-
-            policy_map = {}
-
-            # For efficiency, we'll build the mapping lazily
-            # This is because the full policy space is large (7395 entries)
-            policy_maps.append(policy_map)
-
-        return policy_maps
 
     def _transform_coord(self, row_idx: int, col_idx: int, transform_id: int) -> Tuple[int, int]:
         """Transform a coordinate according to the specified transform.
@@ -285,12 +257,22 @@ class YinshSymmetryAugmenter:
         """
         results = []
 
+        # Decode state and enumerate valid moves *once* — they're the same across
+        # all 12 transforms of this sample. Caches valid_moves + their old_idx values
+        # so each per-transform policy build only does coord_map + re-encode work.
+        try:
+            base_moves = self._base_move_encoding(state)
+        except Exception:
+            base_moves = None
+
         start_idx = 0 if include_original else 1
 
         for transform_id in range(start_idx, self.num_transforms):
             try:
                 aug_state = self._transform_state(state, transform_id)
-                aug_policy = self._transform_policy(policy, transform_id)
+                aug_policy = self._transform_policy_with_base(
+                    policy, transform_id, base_moves
+                )
                 results.append((aug_state, aug_policy, value))
 
                 if self.enable_stats:
@@ -307,6 +289,55 @@ class YinshSymmetryAugmenter:
                 continue
 
         return results
+
+    def _base_move_encoding(self, state: np.ndarray) -> List[Tuple[Move, int]]:
+        """Decode state once, enumerate valid moves, and pair each with its old policy
+        index. Shared across all 12 transforms of a sample."""
+        game_state = self.state_encoder.decode_state(state)
+        out: List[Tuple[Move, int]] = []
+        for move in game_state.get_valid_moves():
+            try:
+                old_idx = self.state_encoder.move_to_index(move)
+            except Exception:
+                continue
+            out.append((move, old_idx))
+        return out
+
+    def _transform_policy_with_base(self,
+                                    policy: np.ndarray,
+                                    transform_id: int,
+                                    base_moves: Optional[List[Tuple[Move, int]]]
+                                    ) -> np.ndarray:
+        """Variant of _transform_policy that reuses a precomputed (move, old_idx) list."""
+        if transform_id == 0:
+            return policy.copy()
+        if base_moves is None:
+            raise ValueError("State did not decode to usable valid moves")
+
+        coord_map = self._coord_maps[transform_id]
+        transformed_policy = np.zeros_like(policy)
+        any_mapped = False
+
+        for move, old_idx in base_moves:
+            transformed = self._transform_move(move, coord_map)
+            if transformed is None:
+                continue
+            try:
+                new_idx = self.state_encoder.move_to_index(transformed)
+            except Exception:
+                continue
+            if 0 <= new_idx < len(transformed_policy):
+                transformed_policy[new_idx] += policy[old_idx]
+                any_mapped = True
+
+        if not any_mapped:
+            raise ValueError(f"No valid-move mapping for transform {transform_id}")
+
+        policy_sum = transformed_policy.sum()
+        if policy_sum > 1e-6:
+            transformed_policy /= policy_sum
+
+        return transformed_policy
 
     def _transform_state(self, state: np.ndarray, transform_id: int) -> np.ndarray:
         """Apply geometric transform to all channels of the state.
@@ -331,109 +362,127 @@ class YinshSymmetryAugmenter:
 
         return transformed
 
-    def _transform_policy(self, policy: np.ndarray, transform_id: int) -> np.ndarray:
-        """Transform policy distribution according to the geometric transform.
+    def _transform_policy(self,
+                          state: np.ndarray,
+                          policy: np.ndarray,
+                          transform_id: int) -> np.ndarray:
+        """Transform policy distribution under the geometric symmetry.
 
-        The policy is a vector over the action space. Each action involves positions
-        (ring placement, ring movement source/dest), so we need to transform both.
+        Builds a valid-move permutation by forward-encoding each valid move on the
+        original state and its geometric image. Mass at invalid indices is dropped;
+        remaining mass is renormalized to preserve distribution total.
 
-        For efficiency, we only transform non-zero policy entries.
-
-        Args:
-            policy: Policy tensor of shape (7395,) or similar
-            transform_id: Transform ID (0 = identity)
-
-        Returns:
-            Transformed policy tensor of same shape
+        Raises ValueError if the permutation cannot be built (e.g. state doesn't
+        decode), so the caller can skip this transform rather than emit a
+        mistransformed sample.
         """
         if transform_id == 0:
             return policy.copy()
 
+        permutation = self._build_index_permutation(state, transform_id)
+        if not permutation:
+            raise ValueError(
+                f"Empty permutation for transform {transform_id}; "
+                "likely terminal state or decode failure"
+            )
+
         transformed_policy = np.zeros_like(policy)
-        coord_map = self._coord_maps[transform_id]
+        for old_idx, new_idx in permutation.items():
+            if 0 <= new_idx < len(transformed_policy):
+                transformed_policy[new_idx] += policy[old_idx]
 
-        # For efficiency, only process non-zero entries
-        nonzero_indices = np.nonzero(policy)[0]
-
-        for old_idx in nonzero_indices:
-            try:
-                new_idx = self._transform_move_index(old_idx, coord_map, transform_id)
-                if new_idx is not None and 0 <= new_idx < len(transformed_policy):
-                    transformed_policy[new_idx] = policy[old_idx]
-            except Exception as e:
-                # If we can't transform this action, skip it
-                logger.debug(f"Could not transform policy index {old_idx}: {e}")
-                continue
-
-        # Re-normalize if needed
         policy_sum = transformed_policy.sum()
         if policy_sum > 1e-6:
             transformed_policy /= policy_sum
-        elif np.sum(policy) > 0:
-            # Fall back to original policy if transform failed
-            return policy.copy()
 
         return transformed_policy
 
-    def _transform_move_index(self,
-                              old_idx: int,
-                              coord_map: Dict[Tuple[int, int], Tuple[int, int]],
-                              transform_id: int) -> Optional[int]:
-        """Transform a single move index according to the coordinate map.
+    def _build_index_permutation(self,
+                                 state: np.ndarray,
+                                 transform_id: int) -> Dict[int, int]:
+        """Build {old_idx -> new_idx} by forward-encoding each valid move and its image.
 
-        Move indices are structured as:
-            - 0 to num_positions-1: Ring placement at position i
-            - ring_place_range to move_ring_range: Ring movements (hashed)
-            - etc.
-
-        Args:
-            old_idx: Original policy index
-            coord_map: Coordinate mapping for this transform
-            transform_id: Transform ID
-
-        Returns:
-            New policy index, or None if transform is invalid
+        This avoids inverting the encoder's lossy move-hash: we only encode forward,
+        which is deterministic. Only indices with a valid-move preimage are included,
+        so mass at invalid indices in the original state is dropped during the
+        transform (renormalization restores the sum).
         """
-        num_positions = self.state_encoder.num_positions
+        coord_map = self._coord_maps[transform_id]
 
-        # Ring placement moves (indices 0 to num_positions-1)
-        if old_idx < num_positions:
-            old_pos_str = self.state_encoder.index_to_position.get(old_idx)
-            if old_pos_str is None:
+        game_state = self.state_encoder.decode_state(state)
+        valid_moves = game_state.get_valid_moves()
+
+        permutation: Dict[int, int] = {}
+        for move in valid_moves:
+            try:
+                old_idx = self.state_encoder.move_to_index(move)
+            except Exception:
+                continue
+
+            transformed = self._transform_move(move, coord_map)
+            if transformed is None:
+                continue
+
+            try:
+                new_idx = self.state_encoder.move_to_index(transformed)
+            except Exception:
+                continue
+
+            permutation[old_idx] = new_idx
+
+        return permutation
+
+    def _transform_move(self,
+                        move: Move,
+                        coord_map: Dict[Tuple[int, int], Tuple[int, int]]
+                        ) -> Optional[Move]:
+        """Route every Position on a Move through the coord_map; return None if any
+        target position is off-board / off-hex."""
+        if move.type == MoveType.PLACE_RING:
+            new_source = self._transform_position(move.source, coord_map)
+            if new_source is None:
                 return None
+            return Move(type=move.type, player=move.player, source=new_source)
 
-            old_pos = Position.from_string(old_pos_str)
-            old_row_idx = old_pos.row - 1
-            old_col_idx = ord(old_pos.column) - ord('A')
-
-            if (old_row_idx, old_col_idx) not in coord_map:
+        if move.type == MoveType.MOVE_RING:
+            new_source = self._transform_position(move.source, coord_map)
+            new_dest = self._transform_position(move.destination, coord_map)
+            if new_source is None or new_dest is None:
                 return None
+            return Move(type=move.type, player=move.player,
+                        source=new_source, destination=new_dest)
 
-            new_row_idx, new_col_idx = coord_map[(old_row_idx, old_col_idx)]
-            new_col = chr(ord('A') + new_col_idx)
-            new_row = new_row_idx + 1
-            new_pos_str = f"{new_col}{new_row}"
+        if move.type == MoveType.REMOVE_RING:
+            new_source = self._transform_position(move.source, coord_map)
+            if new_source is None:
+                return None
+            return Move(type=move.type, player=move.player, source=new_source)
 
-            return self.state_encoder.position_to_index.get(new_pos_str)
+        if move.type == MoveType.REMOVE_MARKERS:
+            new_markers = []
+            for marker in (move.markers or ()):
+                m = self._transform_position(marker, coord_map)
+                if m is None:
+                    return None
+                new_markers.append(m)
+            return Move(type=move.type, player=move.player,
+                        markers=tuple(new_markers))
 
-        # Ring movement moves - these use a hash function, so we need to
-        # recompute the hash for the transformed source/destination
-        ring_place_end = self.state_encoder.ring_place_range[1]
-        move_ring_end = self.state_encoder.move_ring_range[1]
+        return None
 
-        if ring_place_end <= old_idx < move_ring_end:
-            # This is tricky because the encoder uses a hash function
-            # We'd need to reverse the hash, which isn't directly possible
-            # For now, we'll use a statistical approach: if this entry
-            # has probability, we distribute it across valid transformed moves
-
-            # Since reversing the hash is complex, we'll use a simpler approach:
-            # Keep the policy entry at the same index (approximation)
-            # This is acceptable because the policy will be masked by valid moves anyway
-            return old_idx
-
-        # For other move types (marker removal, ring removal), similar approach
-        return old_idx
+    def _transform_position(self,
+                            pos: Position,
+                            coord_map: Dict[Tuple[int, int], Tuple[int, int]]
+                            ) -> Optional[Position]:
+        """Apply the geometric transform to a Position. Returns None if the image is
+        not a valid hex-board position."""
+        row_idx = pos.row - 1
+        col_idx = ord(pos.column) - ord('A')
+        mapped = coord_map.get((row_idx, col_idx))
+        if mapped is None:
+            return None
+        new_row_idx, new_col_idx = mapped
+        return Position(chr(ord('A') + new_col_idx), new_row_idx + 1)
 
     def augment_batch(self,
                       states: List[np.ndarray],
