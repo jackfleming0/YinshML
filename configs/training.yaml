@@ -1,0 +1,84 @@
+version: 1
+
+# Hardware/runtime
+device: auto  # one of: auto, cuda, mps, cpu
+num_iterations: 50
+save_dir: runs
+
+# Self-play / MCTS
+self_play:
+  evaluation_mode: hybrid     # Options: pure_neural, pure_heuristic, hybrid
+  heuristic_weight: 0.3       # Option 1: Testing with 30% heuristic + variance penalty 1.5 (up from 0.5)
+  num_simulations: 160        # RUN B: Increased from 96 to improve self-play quality
+  late_simulations: 96        # RUN B: Increased from 64 (maintaining ~60% ratio with early sims)
+  simulation_switch_ply: 20   # switch point between early/late budgets
+  c_puct: 1.0
+  dirichlet_alpha: 0.3        # root noise
+  value_weight: 1.0           # UCB value term weight
+  max_depth: 300
+  # Batched MCTS settings (Phase 2.1 - 10-20x speedup)
+  use_batched_mcts: true      # Enable batched leaf evaluation
+  mcts_batch_size: 32         # Number of leaves to collect before batching (16-64 recommended)
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3              # Capped at 3 on macOS: RESEARCH_LOG.md L33 — saves ~4GB vs 4+ workers at ~15% time cost
+  games_per_iteration: 100    # Overnight test: 2x data diversity (memory-safe with margin)
+
+# Learner / Trainer
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5  # RUN B: Reverted to 0.5 (Run A showed 0.3 caused regression)
+  epochs_per_iteration: 4     # REDUCED: from 40 to 4 to prevent overfitting (AlphaZero equivalent)
+  batches_per_epoch: auto     # auto scales with buffer size
+  max_buffer_size: 50000      # REDUCED: from 100K to 50K for faster iteration cycles
+
+# Phase-weighted sampling (emphasize critical game phases)
+# MAIN_GAME is where most strategic decisions happen
+# RING_PLACEMENT is setup phase (moderately important)
+# RING_REMOVAL happens after runs complete (least critical to learn)
+phase_weights:
+  RING_PLACEMENT: 1.0         # Moderate emphasis (setup phase)
+  MAIN_GAME: 2.0              # Double emphasis (most critical phase)
+  RING_REMOVAL: 0.5           # Half emphasis (mechanical phase)
+
+# D6 Symmetry Augmentation (12x data expansion)
+# YINSH has hexagonal symmetry: 6 rotations + 6 reflections
+# This effectively multiplies training data for FREE
+augmentation:
+  enabled: true
+  max_augmentations: 12       # Full D6 symmetry (6 rotations + 6 reflections)
+
+# Evaluation & gating
+arena:
+  games_per_match: 50         # REDUCED: from 200 to 50 for faster tournaments
+  promotion_threshold: 0.55   # Wilson LB threshold
+  tournament_sliding_window: 3  # REDUCED: from 5 to 3 models
+                                # With N=3: 3 pairs × 100 games = 300 games (very fast)
+                                # Allows more iteration cycles per hour
+
+# Export settings
+export:
+  export_every: 5              # iterations
+  coreml_dir: models/coreml
+
+# Difficulty presets (used at inference time)
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
+

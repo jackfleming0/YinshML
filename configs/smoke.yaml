@@ -1,0 +1,31 @@
+version: 1
+device: auto
+num_iterations: 1
+save_dir: runs_smoke
+self_play:
+  num_simulations: 8
+  late_simulations: 8
+  simulation_switch_ply: 4
+  c_puct: 1.0
+  dirichlet_alpha: 0.25
+  value_weight: 1.0
+  max_depth: 100
+  initial_temp: 1.0
+  final_temp: 0.5
+  annealing_steps: 6
+  temp_clamp_fraction: 0.5
+  games_per_iteration: 2
+trainer:
+  batch_size: 64
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+arena:
+  games_per_match: 10
+  promotion_threshold: 0.55
+export:
+  export_every: 0
+  coreml_dir: models/coreml

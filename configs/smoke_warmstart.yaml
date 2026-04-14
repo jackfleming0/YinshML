@@ -1,0 +1,71 @@
+version: 1
+
+# Smoke test for warmstart diagnostic instrumentation.
+# Mirrors training.yaml with num_iterations=1 and games_per_iteration=20
+# to verify the unified [Memory] log fires at all five transitions.
+
+device: auto
+num_iterations: 1
+save_dir: runs
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  num_simulations: 160
+  late_simulations: 96
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3
+  games_per_iteration: 20
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 50000
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 12
+
+arena:
+  games_per_match: 50
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5

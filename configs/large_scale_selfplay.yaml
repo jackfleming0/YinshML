@@ -1,0 +1,68 @@
+# Large-scale self-play configuration for 100,000 games
+# Estimated runtime: 20-30 days on Mac mini
+# Estimated data: 4M-12M state-feature pairs, 5GB-20GB disk space
+
+version: 1
+
+# Hardware/runtime
+device: auto
+num_iterations: 1  # Single large run
+save_dir: large_scale_selfplay_runs
+
+# Self-play / MCTS - Optimized for large-scale data collection
+self_play:
+  num_simulations: 50         # Reduced for faster games
+  late_simulations: 25        # Reduced for faster games
+  simulation_switch_ply: 20   # Switch point between early/late budgets
+  c_puct: 1.0
+  dirichlet_alpha: 0.3        # Root noise
+  value_weight: 1.0           # UCB value term weight
+  max_depth: 200              # Reduced for faster games
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: auto           # Use all available CPU cores
+  games_per_iteration: 100000  # Target 100,000 games
+
+# Data collection settings
+data_collection:
+  target_games: 100000         # Primary target
+  min_games: 95000           # Minimum acceptable
+  max_games: 105000           # Maximum if time allows
+  batch_size: 50             # Games per batch
+  save_interval: 25          # Save every 25 games
+  progress_interval: 100     # Log progress every 100 games
+  checkpoint_interval: 500   # Create checkpoint every 500 games
+  validation_interval: 1000   # Validate data every 1000 games
+  
+# Storage settings
+storage:
+  output_dir: large_scale_selfplay_data
+  use_parquet_storage: true
+  parquet_batch_size: 100
+  compression: snappy
+  validation_enabled: false  # Disabled temporarily - validation is too strict
+  
+# Monitoring settings
+monitoring:
+  log_level: INFO
+  performance_logging: true
+  memory_monitoring: true
+  disk_space_monitoring: true
+  alert_threshold_games_per_hour: 10  # Alert if below 10 games/hour
+  alert_threshold_disk_usage: 85      # Alert if disk usage > 85% (more conservative for 100k games)
+  
+# Quality control
+quality_control:
+  min_game_length: 10        # Minimum turns per game
+  max_game_length: 300       # Maximum turns per game
+  rule_based_probability: 0.1  # 10% rule-based moves for diversity
+  random_seed: 42            # For reproducibility
+  
+# Recovery settings
+recovery:
+  checkpoint_enabled: true
+  resume_from_checkpoint: true
+  backup_interval: 1000      # Backup every 1000 games
+  max_backups: 10           # Keep last 10 backups (more for 100k games)

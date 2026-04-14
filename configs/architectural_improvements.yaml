@@ -1,0 +1,85 @@
+# Architectural Improvements Configuration
+# Phase 1: Enhanced State Encoding (15 channels)
+# Phase 2: D6 Symmetry Augmentation (up to 12x data)
+#
+# This config enables the architectural improvements for validation training.
+# Expected impact: +100 ELO from encoding, better generalization from augmentation.
+
+version: 1
+
+# Hardware/runtime
+device: auto  # one of: auto, cuda, mps, cpu
+num_iterations: 30  # Validation run - enough to see trends
+save_dir: runs/architectural_improvements
+
+# === PHASE 1: Enhanced State Encoding ===
+encoding:
+  type: enhanced  # "basic" (6 channels) or "enhanced" (15 channels)
+  num_channels: 15  # For logging/verification
+
+# === PHASE 2: Symmetry Augmentation ===
+augmentation:
+  enabled: true
+  include_reflections: true  # Full D6 symmetry (12 transforms)
+  max_augmentations: 6  # Start conservative to avoid memory issues
+
+# Self-play / MCTS
+self_play:
+  evaluation_mode: hybrid     # Options: pure_neural, pure_heuristic, hybrid
+  heuristic_weight: 0.3       # 30% heuristic guidance
+  num_simulations: 96         # early-game sims
+  late_simulations: 64        # late-game sims
+  simulation_switch_ply: 20   # switch point between early/late budgets
+  c_puct: 1.0
+  dirichlet_alpha: 0.3        # root noise
+  value_weight: 1.0           # UCB value term weight
+  max_depth: 300
+  # Batched MCTS settings (10-20x speedup)
+  use_batched_mcts: true      # Enable batched leaf evaluation
+  mcts_batch_size: 32         # Number of leaves to collect before batching
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: auto           # auto chooses based on CPU cores
+  games_per_iteration: 50     # Reduced for faster iteration during validation
+
+# Learner / Trainer
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0  # Disabled - shown to hurt performance
+  epochs_per_iteration: 4     # AlphaZero-style short training
+  batches_per_epoch: auto     # auto scales with buffer size
+  max_buffer_size: 30000      # Reduced for augmentation (6x expansion means effective ~180K)
+  # Augmentation settings (Phase 2)
+  enable_augmentation: true
+  max_augmentations: 6        # Conservative to start
+
+# Evaluation & gating
+arena:
+  games_per_match: 100        # Reduced for faster validation
+  promotion_threshold: 0.55   # Wilson LB threshold
+
+# Export settings
+export:
+  export_every: 5              # iterations
+  coreml_dir: models/coreml
+
+# Difficulty presets (used at inference time)
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5

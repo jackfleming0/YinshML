@@ -6,6 +6,9 @@
 !scripts/**
 !yinsh_ml/
 !yinsh_ml/**
+!configs/
+!configs/*.yaml
+configs/local/
 !pyproject.toml
 !requirements.txt
 !setup.py
