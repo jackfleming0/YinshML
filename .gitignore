@@ -12,7 +12,9 @@
 
 # Allowed root-level documentation
 !CLAUDE.md
-!TODO.md
+!TODO_baseline.md
+!TODO_frontier.md
+!NEXT_UP.md
 !README*.md
 !YINSH_RULES.md
 !QUICK_START_GUIDE.md

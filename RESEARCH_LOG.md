@@ -7,8 +7,10 @@ One-line durable lessons distilled from ~70 experiment-snapshot docs that were d
 - Classification value head (7-outcome cross-entropy) outperforms MSE regression by ~46% on discrimination (0.082 vs 0.056); MSE inherently minimizes variance regardless of target diversity.
 - Discrimination ceiling under MSE is ~0.056–0.059; increasing variance-penalty weight from 0.5→1.5 makes discrimination worse (diminishing/negative returns).
 - Auxiliary discrimination loss (CE − 0.5 × batch variance) prevents multi-iteration collapse; best single-iteration discrimination 0.104 vs 0.090 without it.
-- Double-tanh was a real bug: once inside `YinshNetwork.value_head`, once inside `NetworkWrapper` — compressed predictions toward 0. Keep tanh in exactly one place.
+- Double-tanh was a real bug: once inside `YinshNetwork.value_head`, once inside `NetworkWrapper` — compressed predictions toward 0. Keep tanh in exactly one place. **Resurfaced 2026-04-13** in `NetworkWrapper.predict_batch` even after the same fix landed in `predict()` — audit every leaf-eval path when fixing one, not just the path you're looking at.
 - Training/inference value-representation mismatch (train MSE+BCE, play pure MSE) breaks the correlation between training loss and playing strength; align the forms.
+- Supervised-vs-self-play value-loss mismatch washes out the warm-start: if supervised trains the value head with MSE on the scalar expected-value output while self-play trains with CE on 7-class logits, the value head is effectively retrained from scratch on iter_1 — tournament-measurable as iter_0 beating every later iteration. Align supervised to use CE on the same discretized targets (`round((v+1)/2·(K-1))`) the trainer uses.
+- `NetworkWrapper.load_model` should hard-fail on `value_mode` / `num_value_classes` mismatch (detectable via presence + shape of `outcome_values` in state_dict), mirroring the existing channel-mismatch check. Silent mode-mix loads corrupt inference without any surface symptom.
 
 ## MCTS & bootstrap
 
@@ -23,6 +25,7 @@ One-line durable lessons distilled from ~70 experiment-snapshot docs that were d
 - Self-play collapses to ~50 unique trajectories/iter if you don't diversify (temperature schedule, openings); each iteration specializes further, losing generalization.
 - Buffer size (10K vs 50K) does **not** fix diversity collapse — the issue is game-count diversity, not buffer capacity; 5× larger buffer shows identical degradation curves.
 - Buffer reversion on model rejection prevents cross-iteration contamination but is not sufficient on its own; keep reversion AND raise games/iter.
+- CE-aligned warm-start from a supervised iter-0 regresses iter 1-2 (41-44% win rate vs iter 0) before recovering at iter 3 (57.5%, promoted, +34 ELO over seed) and peaking iter 6 (63.5%, +61 ELO). Iter 1-2 is value-head readjustment from the supervised target distribution to MCTS-rooted self-play targets; it self-corrects when the 55% promotion gate prevents the regressed model from poisoning the next iter's buffer. Warm-start *does* survive self-play once value-loss form is aligned (CE on `_value_logits`); the prior "iter_0 beat iter_1+2" pattern was the value-loss form mismatch, not warm-start fragility.
 
 ## Memory & infrastructure
 
@@ -31,12 +34,16 @@ One-line durable lessons distilled from ~70 experiment-snapshot docs that were d
 - Worker count 7 in tournament caused OOM; cap at 3 saves ~4 GB and only costs ~15% iteration time.
 - MPS leak on Apple Silicon: tournament paths allocated outside the tensor pool; `torch.mps.synchronize()` before `empty_cache()` avoids orphaned allocations.
 - Tensor-pool-bypass in any tournament/eval hot path silently re-introduces leaks; always go through the pool or explicitly acquire/release.
+- Training (backprop) — not self-play — is the MPS allocator pressure source on Apple Silicon. `torch.mps.driver_allocated_memory()` inflates from ~1GB → 3-5GB during the training epoch loop and stays elevated through tournament; self-play stays at ~1GB. The proximate cause of the 2026-04-12 iter-3 OOM was the overlap of buffer-fill RSS (~1.6GB at 50K samples) + 4 concurrent `num_workers` MPS tensor-pool copies + the training-phase MPS inflation, all hitting at the self-play→training transition. Buffer cap, augmentation, and ring-buffer eviction were *not* the cause — the deque (`maxlen=N`) cannot overflow.
+- Per-iteration-boundary `[Memory]` snapshots (RSS + MPS driver/current + buffer fill on one line at every transition) are the cheapest diagnostic and caught a kill-point gap that the existing per-phase `_log_mps_memory` missed. Specifically: log just *before* the training epoch loop, not just before/after self-play and after training — the OOM lands inside the gap between "after self-play" and "starting epoch 1/N."
+- `num_workers=3` for self-play (already established for tournament) is sufficient to keep MPS+RSS in budget across 10 warm-start iterations on a Mac Mini; peak MPS driver 5.1GB, RSS no upward trend, no cross-iter leak.
 
 ## Tournament & evaluation
 
 - A 35-44% training-loss improvement can still fail the tournament gate if the value-head form (classification vs regression) differs between training and play — the gate is an alignment test, not a loss test.
 - Promotion threshold 55% win rate is load-bearing; plateau at ~48% is the signal that value discrimination is too weak for MCTS to exploit.
 - "Training loss trending down + flat ELO" was a logging bug historically (loss reported as 0.0). Check the loss-tracking pipeline before blaming the model.
+- The 55% promotion gate is doing real work, not just bookkeeping: in the CE-aligned warm-start, iter 1-2 candidates landed at 41-44% (well below threshold) so didn't promote — preventing buffer contamination that would otherwise compound the dip. Iter 3 (57.5%) and iter 6 (63.5%) both cleared cleanly. Without the gate, the regressed iter 1 weights would be the seed for iter 2, and recovery by iter 3 would not be observed.
 
 ## Heuristic evaluation (7-feature set)
 
@@ -50,9 +57,17 @@ One-line durable lessons distilled from ~70 experiment-snapshot docs that were d
 - Batch size 256 with 33-66 batches/epoch (4-17K samples) is the safe zone. 40 epochs on 4K samples caused mode collapse; 4 epochs is the upper end.
 - Training loss ↓ does NOT imply tournament ↑ unless value discrimination also improves; accuracy-on-7-classes (99.5%) can mask near-zero discrimination.
 
+## Data acquisition & scraping
+
+- BGA replay access requires **all 7** session cookies, not just `PHPSESSID` + the rotating `*idt`/`*tkt` pair. The persistent `TournoiEnLigneid` + `TournoiEnLignetk` pair (no trailing `t`) is required for session promotion; `/player` succeeds without them but `/archive` rejects with "not logged in". Export the full set from Chrome DevTools each session.
+- BGA YINSH notifications: single `type='move'` for all game actions; dispatch via the `log` template string (`places a ring`, `places a marker`, `moves a ring from`, `removes a row of markers`, `removes a ring from`). `restartUndo` pops one prior `move` notification by the same `player_id`. `REMOVE_RING` holds the board square in `locationFrom` (not `locationTo`, which is a `@N` reserve sentinel). Color: `#ffffff`=white, `#000000`=black.
+- Log-template regex dispatch needs word boundaries: `'removes a ring from'` contains the substring `'moves a ring from'` (within `re-MOVES`), so a bare substring-match routes ring-removals into the MOVE_RING branch.
+- BGA enforces a per-day replay-view cap and scraping violates their T&Cs. Rate-limit aggressively (≥8s between replay fetches), separate fetch (network, quota-bound) from parse (local, free) on disk so parser iteration never burns quota, persist seen/failed tables for graceful resume after cap-hit.
+
 ## Known limitations & open questions
 
 - Discrimination target 0.15+ has never been reached (best: 0.104 with discrimination loss — 69% of target).
 - High-confidence value predictions (|v| > 0.7) are <1% of positions; network is calibratedly cautious but may be leaving MCTS guidance on the table.
 - Pure-neural play on hybrid-trained models (30% heuristic during training, 0% at eval) has a suspected distribution gap; curriculum schedule (1.0 → 0.3 → 0.0) is hypothesized but untested.
-- Supervised warm-start with 240K Boardspace positions achieved 28.3% val-acc (random = 0.014%) — strong prior, but still unproven whether it shortens the self-play trajectory to target ELO.
+- Supervised warm-start with 240K Boardspace positions achieved 28.3% val-acc with the **old MSE value loss** (random = 0.014%); retrained 2026-04-13 with aligned CE value loss reached 29.8% val policy top-1 + 91.9% val value-class accuracy. **Resolved 2026-04-14**: 10-iter warm-start from CE iter-0 promoted iter 3 (1534, +34 ELO) and iter 6 (1561, +61 ELO), no OOM, peak MPS 5.1GB stable. The aligned warm-start *does* survive self-play.
+- Whether iter 6's +61 ELO peak from a single 10-iter run is reproducible — and whether it extends with longer training — is the next open question. Run took 6.4h on Mac Mini.

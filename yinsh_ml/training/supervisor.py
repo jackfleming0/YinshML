@@ -342,18 +342,40 @@ class TrainingSupervisor:
         self.logger.info(f"  Workers: {num_workers}")
 
     def _log_mps_memory(self, phase_name: str = ""):
-        """Log MPS driver allocated memory for debugging memory growth.
+        """Log a one-line memory snapshot: RSS + MPS driver/current + buffer size.
+
+        Consolidates process RSS, MPS allocator state, and replay-buffer size so
+        iter-over-iter growth at each transition is visible on a single line.
 
         Args:
             phase_name: Name of the phase for logging context
         """
+        parts = []
+        try:
+            rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
+            parts.append(f"rss={rss_gb:.2f}GB")
+        except Exception:
+            pass
+
         if torch.backends.mps.is_available():
             try:
-                driver_mem = torch.mps.driver_allocated_memory() / (1024 * 1024 * 1024)
-                current_mem = torch.mps.current_allocated_memory() / (1024 * 1024 * 1024)
-                self.logger.info(f"[MPS Memory] {phase_name}: driver={driver_mem:.2f}GB, current={current_mem:.2f}GB")
+                driver_mem = torch.mps.driver_allocated_memory() / (1024 ** 3)
+                current_mem = torch.mps.current_allocated_memory() / (1024 ** 3)
+                parts.append(f"mps_driver={driver_mem:.2f}GB")
+                parts.append(f"mps_current={current_mem:.2f}GB")
             except Exception as e:
                 self.logger.debug(f"Could not get MPS memory stats: {e}")
+
+        try:
+            if hasattr(self, 'trainer') and self.trainer is not None:
+                buf_size = self.trainer.experience.size()
+                buf_max = self.trainer.experience.max_size
+                parts.append(f"buffer={buf_size}/{buf_max}")
+        except Exception:
+            pass
+
+        if parts:
+            self.logger.info(f"[Memory] {phase_name}: {', '.join(parts)}")
 
     def _clear_memory_cache(self, phase_name: str = ""):
         """Clear PyTorch memory caches to free up memory with aggressive tensor cleanup.
@@ -686,6 +708,8 @@ class TrainingSupervisor:
         estimated_games = buffer_size / max(50, avg_game_length)
         self.logger.info(f"📊 Buffer contains ~{estimated_games:.0f} games of experience "
                          f"(avg {avg_game_length:.0f} moves/game)")
+
+        self._log_mps_memory("before training epoch loop")
 
         for epoch in range(epochs):
             self.logger.info(f"Starting Epoch {epoch + 1}/{epochs}")

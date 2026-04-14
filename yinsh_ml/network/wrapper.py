@@ -293,6 +293,34 @@ class NetworkWrapper:
                         f"Re-instantiate NetworkWrapper with the matching flag."
                     )
 
+            # Hard-fail on value-head mode mismatch. The state dict shape may be
+            # compatible enough to silently load (or get filtered out below), but
+            # the value-head semantics differ: classification outputs softmax over
+            # outcome classes, regression outputs a tanh'd scalar. Loading across
+            # modes corrupts inference and the trainer's loss surface.
+            ckpt_has_outcome_values = any(
+                k.endswith('outcome_values') for k in state_dict
+            )
+            ckpt_mode = 'classification' if ckpt_has_outcome_values else 'regression'
+            if ckpt_mode != self.network.value_mode:
+                raise RuntimeError(
+                    f"Value-head mode mismatch: checkpoint is {ckpt_mode} but wrapper "
+                    f"was constructed with value_mode='{self.network.value_mode}'. "
+                    f"Re-instantiate NetworkWrapper with the matching value_mode."
+                )
+            if ckpt_mode == 'classification':
+                outcome_key = next(
+                    k for k in state_dict if k.endswith('outcome_values')
+                )
+                ckpt_classes = state_dict[outcome_key].shape[0]
+                if ckpt_classes != self.network.num_value_classes:
+                    raise RuntimeError(
+                        f"num_value_classes mismatch: checkpoint has {ckpt_classes} "
+                        f"classes but wrapper was constructed with "
+                        f"num_value_classes={self.network.num_value_classes}. "
+                        f"Re-instantiate NetworkWrapper with the matching value."
+                    )
+
             compatible_state_dict = {}
             model_state = self.network.state_dict()
             for key, param in state_dict.items():
@@ -435,8 +463,10 @@ class NetworkWrapper:
             with torch.no_grad():
                 policy_logits, values = self.network(batch_tensor)
 
-                # Ensure value predictions are in [-1, 1]
-                values = torch.tanh(values)
+                # Value is already in [-1, 1] for both modes:
+                # - classification: softmax * outcome_values (model.py:319)
+                # - regression: final Tanh layer (model.py:191)
+                # Re-applying tanh here over-compresses (matches the predict() fix).
 
                 # Apply temperature scaling to policy logits
                 if temperature != 1.0:
