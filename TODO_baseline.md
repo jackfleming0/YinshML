@@ -17,9 +17,7 @@ Static menu of AZ-recipe improvements. This file is a **pool**, not a plan — p
 
 ### Tier 1 — Quick wins (infra exists, just needs wiring)
 
-- [ ] **Turn on D6 symmetry augmentation by default.** `YinshSymmetryAugmenter` (`yinsh_ml/training/augmentation.py`) is wired end-to-end through `YinshTrainer` (`trainer.py:31,48,155-178`) and configs (`scripts/run_training.py:213`) but defaults to `enable_augmentation: False`. Flip the default to `True` and enable in every live training config. 12× data multiplier for ~zero code cost. *2026-04-14: ungated — augmentation ran cleanly across the 10-iter warm-start at `num_workers=3` with no memory growth; the OOM caveat is resolved.*
 - [ ] **Subtree reuse across moves.** MCTS root is discarded after every move (`yinsh_ml/training/self_play.py:468+`, `yinsh_ml/search/mcts.py`). Reseat the new root at `old_root.children[played_move]` and reuse visits — roughly doubles effective sims-per-move. Node-pool interaction needs care. Biggest single playing-strength lever still on the table.
-- [ ] **Heuristic-weight curriculum (1.0 → 0.3 → 0.0).** Flagged in `RESEARCH_LOG.md` as "hypothesized but untested." Self-play runs at fixed `heuristic_weight=0.3` while tournament eval is pure neural — same train/eval distribution gap the research log blames for plateaus. Add per-iteration annealing in `supervisor.py` (e.g. 1.0 for iter 0, 0.5 by iter 3, 0.0 by iter 8).
 - [ ] **Promote `epsilon_mix` to config + add a move-number taper.** `yinsh_ml/search/mcts.py:473` hardcodes `epsilon_mix = 0.25`. Move to `MCTSConfig`, default 0.25, and allow a per-move-number decay (higher early, zero after move ~20) so root exploration stops injecting noise into late-game tactical positions.
 
 ### Tier 2 — Medium effort, solid ELO
@@ -32,7 +30,7 @@ Static menu of AZ-recipe improvements. This file is a **pool**, not a plan — p
 
 ### Tier 3 — Diagnostics & evaluation reliability
 
-- [ ] **Tournament CI / SE reporting + opponent pool expansion.** `supervisor.py` tournaments only play iter_N vs iter_{N-1} (plus a few recent). (a) Log Wilson 95% CI width per matchup — at 50-100 games, the 55% promotion threshold overlaps 48% non-trivially. (b) Maintain a rolling top-K Elo pool; sample opponents from it rather than only the most recent predecessor. Prevents false-positive promotions and bootstrapping off a single noisy prior.
+- [ ] **Opponent-pool expansion (tournament_sliding_window 3 → 5).** Part (a) of the original "Tournament CI / SE reporting + opponent pool expansion" item landed 2026-04-14 (per-matchup Wilson CI + SE now logged and stored under `pair_cis`; `arena.games_per_match: 50 → 100` for a real CI-width improvement). Part (b) — widening the rolling pool from 3 to 5 most-recent models — was deferred because it 3.3× arena cost (10 pairs vs 3). Re-open once the CI logs reveal whether matchups are diversity-bound.
 - [ ] **Value-head calibration + entropy logging.** `yinsh_ml/utils/value_head_metrics.py` is skeletal. Add per-move policy entropy (flag sudden collapses), 7-class value calibration curve + ECE, value-vs-outcome scatter by game phase. These distinguish "loss is dropping but discrimination is flat" (the historical failure mode) from real progress.
 - [ ] **Deterministic eval mode.** `yinsh_ml/utils/tournament.py::_play_match` has no fixed-seed path. Add a `deterministic=True` flag that pins seeds and selects greedy (argmax) moves post-search, so A/B comparisons (e.g. "cosine vs StepLR") aren't dominated by tournament noise.
 
