@@ -38,6 +38,13 @@ One-line durable lessons distilled from ~70 experiment-snapshot docs that were d
 - Per-iteration-boundary `[Memory]` snapshots (RSS + MPS driver/current + buffer fill on one line at every transition) are the cheapest diagnostic and caught a kill-point gap that the existing per-phase `_log_mps_memory` missed. Specifically: log just *before* the training epoch loop, not just before/after self-play and after training — the OOM lands inside the gap between "after self-play" and "starting epoch 1/N."
 - `num_workers=3` for self-play (already established for tournament) is sufficient to keep MPS+RSS in budget across 10 warm-start iterations on a Mac Mini; peak MPS driver 5.1GB, RSS no upward trend, no cross-iter leak.
 
+## Tournament gate statistics
+
+- The 55% Wilson gate was already in place at `supervisor.py::_wilson_lower_bound` long before this audit, but the log line only showed the lower bound. With `games_per_match: 50`, a 27/50 (54%) rejection has CI [40.4%, 67.0%] — wholly straddling the 55% threshold. The gate was making promote/reject calls on signal statistically indistinguishable from the threshold and the log gave no indication. Bumped to `games_per_match: 100` (CI half-width ~14% → ~10%, doubles arena wall-clock); still straddling near threshold but visibly tighter. Going further (200 games/match) is a sharper-CI vs iteration-throughput tradeoff — re-evaluate after the new logs are in hand.
+- Promotion log now shows wins/total + win_rate + SE + CI95=[lower, upper] + an explicit "[CI straddles threshold — rejection may be statistical noise]" flag when a rejection's CI overlaps the gate. Same data goes to `_log_metric_safe` as `wilson_upper_bound` and `wilson_standard_error` for the experiment tracker.
+- Per-pair Wilson 95% CI now logged for every round-robin matchup (and stored in `tournament_history.json` as `pair_cis`). Draws are excluded from the proportion's denominator so the rate is well-defined; total games (including draws) is reported alongside. Surfaces opponent-pool diversity gaps: if every pair has a wide CI overlapping 50%, expanding the sliding window matters more than tightening individual matchups.
+- Wilson math extracted to `yinsh_ml/utils/stats.py` (single source of truth for `wilson_bounds` + `standard_error`); supervisor + tournament both delegate. Avoids the silent-divergence trap if anyone tweaks one formula and not the other.
+
 ## Tournament & evaluation
 
 - A 35-44% training-loss improvement can still fail the tournament gate if the value-head form (classification vs regression) differs between training and play — the gate is an alignment test, not a loss test.

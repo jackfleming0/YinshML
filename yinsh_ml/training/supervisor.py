@@ -959,8 +959,17 @@ class TrainingSupervisor:
         if perform_wilson_check:
             wilson_threshold = self.mode_settings.get('promotion_threshold', 0.55)
             promote_by_wilson = self._should_promote(wins, total, threshold=wilson_threshold)
+            win_rate = (wins / total) if total > 0 else 0.0
+            lb, ub = self._wilson_bounds(wins, total)
+            se = self._standard_error(wins, total)
+            straddles = lb <= wilson_threshold <= ub
+            straddle_flag = "  [CI straddles threshold — rejection may be statistical noise]" if straddles and not promote_by_wilson else ""
             self.logger.info(
-                f"Wilson Gate Check: Wins={wins}, Total={total}, LB={self._wilson_lower_bound(wins, total):.3f}, Threshold={wilson_threshold} -> {'PROMOTE' if promote_by_wilson else 'REJECT'}")
+                f"Wilson Gate Check: wins={wins}/{total} "
+                f"(win_rate={win_rate:.3f}, SE={se:.3f}, CI95=[{lb:.3f}, {ub:.3f}], "
+                f"threshold={wilson_threshold}) -> "
+                f"{'PROMOTE' if promote_by_wilson else 'REJECT'}{straddle_flag}"
+            )
 
         # --- Final Promotion Decision Logic (AlphaZero-style: never revert) ---
         promote = False
@@ -1002,9 +1011,12 @@ class TrainingSupervisor:
                     self._log_metric_safe('best_model_elo', self.best_model_elo, iteration)
                     self._log_metric_safe('best_model_iteration', self.best_model_iteration, iteration)
                     if perform_wilson_check:
+                        lb, ub = self._wilson_bounds(wins, total)
                         self._log_metric_safe('wilson_wins', wins, iteration)
                         self._log_metric_safe('wilson_total', total, iteration)
-                        self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
+                        self._log_metric_safe('wilson_lower_bound', lb, iteration)
+                        self._log_metric_safe('wilson_upper_bound', ub, iteration)
+                        self._log_metric_safe('wilson_standard_error', self._standard_error(wins, total), iteration)
                 except Exception as e:
                     self.logger.warning(f"Failed to log promotion metrics: {e}")
 
@@ -1047,9 +1059,12 @@ class TrainingSupervisor:
                     self._log_metric_safe('model_promoted', 0.0, iteration)
                     self._log_metric_safe('candidate_elo', candidate_elo, iteration)
                     if perform_wilson_check:
+                        lb, ub = self._wilson_bounds(wins, total)
                         self._log_metric_safe('wilson_wins', wins, iteration)
                         self._log_metric_safe('wilson_total', total, iteration)
-                        self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
+                        self._log_metric_safe('wilson_lower_bound', lb, iteration)
+                        self._log_metric_safe('wilson_upper_bound', ub, iteration)
+                        self._log_metric_safe('wilson_standard_error', self._standard_error(wins, total), iteration)
                         self._log_metric_safe('wilson_passed', 0.0, iteration)
                 except Exception as e:
                     self.logger.warning(f"Failed to log metrics: {e}")
@@ -1765,19 +1780,18 @@ class TrainingSupervisor:
 
 
     @staticmethod
-    def _wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
-        """Wilson score confidence interval lower bound."""
-        if total == 0: return 0.0
-        p_hat = wins / total
-        try:
-            term_inside_sqrt = (p_hat * (1 - p_hat) / total) + (z**2 / (4 * total**2))
-            # Handle potential negative value due to floating point errors near 0 or 1
-            if term_inside_sqrt < 0:
-                 term_inside_sqrt = 0
-            lower_bound = (p_hat + z**2 / (2 * total) - z * math.sqrt(term_inside_sqrt)) / (1 + z**2 / total)
-        except ValueError: # math domain error if term_inside_sqrt is negative
-             lower_bound = 0.0 # Should be handled by the check above, but belt and suspenders
-        return max(0.0, lower_bound) # Ensure non-negative
+    def _wilson_bounds(wins: int, total: int, z: float = 1.96) -> Tuple[float, float]:
+        from ..utils.stats import wilson_bounds
+        return wilson_bounds(wins, total, z)
+
+    @classmethod
+    def _wilson_lower_bound(cls, wins: int, total: int, z: float = 1.96) -> float:
+        return cls._wilson_bounds(wins, total, z)[0]
+
+    @staticmethod
+    def _standard_error(wins: int, total: int) -> float:
+        from ..utils.stats import standard_error
+        return standard_error(wins, total)
 
 
     def _should_promote(self, wins: int, total: int,

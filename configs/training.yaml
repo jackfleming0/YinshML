@@ -63,11 +63,15 @@ augmentation:
 
 # Evaluation & gating
 arena:
-  games_per_match: 50         # REDUCED: from 200 to 50 for faster tournaments
+  games_per_match: 100        # 100 games → Wilson 95% CI half-width ~10% (was ~14% at 50).
+                              # Doubles arena wall-clock vs 50 (3 pairs × 2 dirs × 100 games
+                              # = 600 games per iter). Bumping further is a sharper-CI vs
+                              # iteration-throughput tradeoff — re-evaluate after a couple
+                              # of iters land with CI logging.
   promotion_threshold: 0.55   # Wilson LB threshold
-  tournament_sliding_window: 3  # REDUCED: from 5 to 3 models
-                                # With N=3: 3 pairs × 100 games = 300 games (very fast)
-                                # Allows more iteration cycles per hour
+  tournament_sliding_window: 3  # 3 most-recent models in the pool. Expanding to 5 would
+                                # 3.3× arena cost (10 pairs vs 3) — defer until per-pair
+                                # CI logs reveal whether we're opponent-diversity-bound.
 
 # Export settings
 export:

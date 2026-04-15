@@ -606,12 +606,16 @@ class ModelTournament:
             summary_stats[model_id]['rd'] = self.glicko_tracker.get_rd(model_id)
         self.latest_summary_stats = summary_stats.copy()
 
+        # Per-pair Wilson 95% CIs — surfaces statistical noise that the gate alone hides.
+        pair_cis = self._compute_pair_cis()
+
         # Save tournament results
         self.tournament_history[tournament_id] = {
             'iteration': current_iteration,
             'timestamp': datetime.now().isoformat(),
             'round_robin_results': [vars(r) for r in round_robin_results],
             'stats': summary_stats,
+            'pair_cis': pair_cis,
         }
         self._save_tournament_history()
 
@@ -626,11 +630,59 @@ class ModelTournament:
                 f"WhiteWinRate: {st['white_win_rate'] * 100:.1f}% | "
                 f"BlackWinRate: {st['black_win_rate'] * 100:.1f}%"
             )
+        if pair_cis:
+            self.logger.info(f"\n{'-' * 20} Per-Pair 95% CI {'-' * 20}")
+            for entry in pair_cis:
+                self.logger.info(
+                    f"{entry['model_a']} vs {entry['model_b']}: "
+                    f"{entry['wins_a']}/{entry['total']} "
+                    f"(p={entry['win_rate_a']:.3f}, SE={entry['se']:.3f}, "
+                    f"CI95=[{entry['ci_lower']:.3f}, {entry['ci_upper']:.3f}])"
+                )
         self.logger.info("=" * 60)
 
         # Final memory cleanup
         self._clear_model_memory()
         self.logger.info("Tournament complete (lazy loading kept memory usage low)")
+
+    def _compute_pair_cis(self) -> List[Dict]:
+        """Per-pair Wilson 95% CI on model_a's win rate (decisives only — draws excluded
+        from numerator and denominator so the proportion is well-defined). Returned as
+        a list ordered by iteration ascending. Empty list if no pairs were played."""
+        from .stats import wilson_bounds, standard_error
+
+        out = []
+        for (model_a, model_b), rec in self._pair_results.items():
+            wins_a = rec.get('wins_a', 0)
+            wins_b = rec.get('wins_b', 0)
+            draws = rec.get('draws', 0)
+            decisive = wins_a + wins_b
+            total = decisive + draws
+            if total == 0:
+                continue
+            lower, upper = wilson_bounds(wins_a, decisive)
+            se = standard_error(wins_a, decisive)
+            out.append({
+                'model_a': model_a,
+                'model_b': model_b,
+                'wins_a': wins_a,
+                'wins_b': wins_b,
+                'draws': draws,
+                'total': total,
+                'win_rate_a': (wins_a / decisive) if decisive > 0 else 0.0,
+                'ci_lower': lower,
+                'ci_upper': upper,
+                'se': se,
+            })
+
+        def _iter_key(model_id: str) -> int:
+            try:
+                return int(model_id.split('_')[-1])
+            except (ValueError, IndexError):
+                return -1
+
+        out.sort(key=lambda e: (_iter_key(e['model_a']), _iter_key(e['model_b'])))
+        return out
 
     def _aggregate_round_robin_stats(self, match_results: List[MatchResult]) -> Dict[str, Dict]:
         """
