@@ -1,13 +1,21 @@
-"""D6 Symmetry Augmentation for YINSH training data.
+"""D2 symmetry augmentation for YINSH training data.
 
-YINSH has hexagonal board symmetry belonging to the D6 dihedral group:
-- 6 rotations: 0°, 60°, 120°, 180°, 240°, 300°
-- 6 reflections: across 6 axes through the center
+The YINSH board has D2 (Klein 4-group) symmetry, not D6 as originally assumed.
+Column sizes [4,7,8,9,10,9,10,9,8,7,4] are symmetric under 180° rotation and
+under two axes (diagonal and anti-diagonal), but NOT under 60° rotation —
+verify: A column has 4 cells while G has 10, so a 60° rotation would need to
+map a column with 4 cells somewhere, and no such image column exists.
 
-This module provides augmentation that effectively multiplies training data
-by 12x (or 6x with rotations only), improving sample efficiency.
+The 4 true symmetries of the board:
+  T0 — identity:          (row, col) -> (row, col)
+  T1 — 180° rotation:     (row, col) -> (10-row, 10-col)
+  T2 — diagonal swap:     (row, col) -> (col, row)
+  T3 — anti-diagonal:     (row, col) -> (10-col, 10-row)
 
-Expected impact: More robust learned features, better generalization.
+All 4 cover the full 85-cell valid set (verified empirically).
+Composition law: T1 ∘ T2 = T3 (and permutations).
+
+This yields a 4× data multiplier, not the 12× previously advertised.
 """
 
 import numpy as np
@@ -32,25 +40,17 @@ class AugmentationStats:
 
 
 class YinshSymmetryAugmenter:
-    """D6 symmetry augmentation for YINSH training data.
+    """D2 symmetry augmentation for YINSH training data.
 
-    Hexagonal board symmetry provides up to 12 equivalent views of each position:
-    - 6 rotations (60° increments)
-    - 6 reflections (across 6 axes through center)
+    The board's Klein 4-group symmetry {identity, 180°, diag, anti-diag} is the
+    largest group that maps the 85-cell valid-position set to itself. Applies the
+    geometric transform to state channels and builds a correct valid-move-based
+    permutation for the policy (see _transform_policy_with_base).
 
-    For training, we can generate all 12 variants from each (state, policy, value)
-    tuple, effectively multiplying our training data.
-
-    IMPORTANT: The policy must be transformed correctly when the state is transformed.
-    The value remains unchanged since the position evaluation is invariant to rotation/reflection.
+    Value is invariant under these symmetries, so it passes through unchanged.
     """
 
-    # YINSH board has ~85 valid positions on 11x11 grid
     BOARD_SIZE = 11
-
-    # Board center (approximately F6, using 0-indexed coordinates)
-    CENTER_COL = 5  # F = index 5
-    CENTER_ROW = 5  # Row 6 = index 5 (0-indexed)
 
     def __init__(self,
                  include_reflections: bool = True,
@@ -59,8 +59,8 @@ class YinshSymmetryAugmenter:
         """Initialize the augmenter.
 
         Args:
-            include_reflections: If True, include 6 reflections (total 12 transforms).
-                                 If False, only 6 rotations (6 transforms).
+            include_reflections: If True, include the 2 reflections (total 4 transforms
+                incl. identity + 180°). If False, C2 only: {identity, 180°}.
             state_encoder: Optional StateEncoder for policy transforms.
             enable_stats: If True, collect statistics for debugging.
         """
@@ -69,173 +69,42 @@ class YinshSymmetryAugmenter:
         self.enable_stats = enable_stats
         self._stats = AugmentationStats() if enable_stats else None
 
-        # Total number of transforms
-        self.num_transforms = 12 if include_reflections else 6
+        self.num_transforms = 4 if include_reflections else 2
 
-        # Precompute coordinate mappings for all transforms
         self._coord_maps = self._precompute_coord_maps()
 
         logger.info(f"YinshSymmetryAugmenter initialized: {self.num_transforms} transforms "
                    f"(reflections={'enabled' if include_reflections else 'disabled'})")
 
+    # Transform IDs (index into _coord_maps):
+    #   0 — identity
+    #   1 — 180° rotation
+    #   2 — diagonal swap     (axis row = col)
+    #   3 — anti-diagonal     (axis row + col = 10)
+    # With include_reflections=False, only 0 and 1 are used.
+    _TRANSFORMS = (
+        lambda r, c: (r, c),
+        lambda r, c: (10 - r, 10 - c),
+        lambda r, c: (c, r),
+        lambda r, c: (10 - c, 10 - r),
+    )
+
     def _precompute_coord_maps(self) -> List[Dict[Tuple[int, int], Tuple[int, int]]]:
-        """Precompute coordinate mappings for all transforms.
-
-        Returns:
-            List of dictionaries, one per transform ID, mapping
-            (row, col) -> (new_row, new_col) for valid board positions.
-        """
+        """Precompute (row_idx, col_idx) -> (new_row_idx, new_col_idx) for every valid
+        board position, for each of the D2 transforms."""
         coord_maps = []
-
-        for transform_id in range(self.num_transforms):
-            coord_map = {}
+        for tid in range(self.num_transforms):
+            transform = self._TRANSFORMS[tid]
+            coord_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
             for col_idx in range(self.BOARD_SIZE):
                 for row_idx in range(self.BOARD_SIZE):
-                    col = chr(ord('A') + col_idx)
-                    row = row_idx + 1
-                    pos = Position(col, row)
-
-                    if is_valid_position(pos):
-                        new_row_idx, new_col_idx = self._transform_coord(
-                            row_idx, col_idx, transform_id
-                        )
-                        # Only store if the transformed position is also valid
-                        if 0 <= new_row_idx < self.BOARD_SIZE and 0 <= new_col_idx < self.BOARD_SIZE:
-                            new_col = chr(ord('A') + new_col_idx)
-                            new_row = new_row_idx + 1
-                            new_pos = Position(new_col, new_row)
-                            if is_valid_position(new_pos):
-                                coord_map[(row_idx, col_idx)] = (new_row_idx, new_col_idx)
-
+                    pos = Position(chr(ord('A') + col_idx), row_idx + 1)
+                    if not is_valid_position(pos):
+                        continue
+                    new_row_idx, new_col_idx = transform(row_idx, col_idx)
+                    coord_map[(row_idx, col_idx)] = (new_row_idx, new_col_idx)
             coord_maps.append(coord_map)
-
         return coord_maps
-
-    def _transform_coord(self, row_idx: int, col_idx: int, transform_id: int) -> Tuple[int, int]:
-        """Transform a coordinate according to the specified transform.
-
-        Transform IDs:
-            0: Identity
-            1: 60° rotation
-            2: 120° rotation
-            3: 180° rotation
-            4: 240° rotation
-            5: 300° rotation
-            6-11: Reflections (if enabled)
-
-        For hexagonal boards, we use cube coordinates for rotations:
-        - Convert (row, col) to cube (x, y, z) where x + y + z = 0
-        - Rotate in cube space
-        - Convert back
-
-        Args:
-            row_idx: 0-indexed row
-            col_idx: 0-indexed column
-            transform_id: Transform ID (0-11)
-
-        Returns:
-            Tuple of (new_row_idx, new_col_idx)
-        """
-        if transform_id == 0:
-            return row_idx, col_idx
-
-        # Convert to centered coordinates
-        dx = col_idx - self.CENTER_COL
-        dy = row_idx - self.CENTER_ROW
-
-        # For YINSH's board layout, we use axial coordinates
-        # and apply rotation/reflection matrices
-
-        if transform_id < 6:
-            # Rotations
-            new_dx, new_dy = self._rotate_axial(dx, dy, transform_id)
-        else:
-            # Reflections (transform_id 6-11)
-            reflection_axis = transform_id - 6
-            new_dx, new_dy = self._reflect_axial(dx, dy, reflection_axis)
-
-        # Convert back to grid coordinates
-        new_col_idx = new_dx + self.CENTER_COL
-        new_row_idx = new_dy + self.CENTER_ROW
-
-        return new_row_idx, new_col_idx
-
-    def _rotate_axial(self, dx: int, dy: int, rotation_id: int) -> Tuple[int, int]:
-        """Rotate a point around the center by (rotation_id * 60) degrees.
-
-        Uses the standard 60° rotation matrices for hexagonal grids.
-        For axial coordinates with flat-top hexagons:
-            60° CW: (x, y) -> (-y, x+y)
-            60° CCW: (x, y) -> (x+y, -x)
-
-        We'll use CCW rotations (more conventional).
-
-        Args:
-            dx: x offset from center
-            dy: y offset from center
-            rotation_id: 1-5 for 60°, 120°, 180°, 240°, 300° CCW
-
-        Returns:
-            Tuple of (new_dx, new_dy)
-        """
-        # Apply rotation multiple times
-        x, y = dx, dy
-        for _ in range(rotation_id):
-            # 60° counter-clockwise rotation in axial coordinates
-            # For YINSH's grid layout, we need to account for the skewed axes
-            # Standard hex rotation: (q, r) -> (-r, q+r)
-            new_x = -y
-            new_y = x + y
-            x, y = new_x, new_y
-
-        return x, y
-
-    def _reflect_axial(self, dx: int, dy: int, axis: int) -> Tuple[int, int]:
-        """Reflect a point across one of 6 axes through the center.
-
-        Axes:
-            0: Horizontal (y axis)
-            1: 30° from horizontal
-            2: 60° from horizontal
-            3: Vertical (x axis)
-            4: 120° from horizontal
-            5: 150° from horizontal
-
-        Args:
-            dx: x offset from center
-            dy: y offset from center
-            axis: Reflection axis (0-5)
-
-        Returns:
-            Tuple of (new_dx, new_dy)
-        """
-        if axis == 0:
-            # Reflect across horizontal (flip y)
-            return dx, -dy
-        elif axis == 1:
-            # Reflect across 30° axis
-            # Rotate to horizontal, flip, rotate back
-            rx, ry = self._rotate_axial(dx, dy, 1)  # Rotate 60° to align
-            rx, ry = rx, -ry  # Flip
-            return self._rotate_axial(rx, ry, 5)  # Rotate back (300° = -60°)
-        elif axis == 2:
-            # Reflect across 60° axis
-            rx, ry = self._rotate_axial(dx, dy, 2)
-            rx, ry = rx, -ry
-            return self._rotate_axial(rx, ry, 4)
-        elif axis == 3:
-            # Reflect across vertical (flip x)
-            return -dx, dy
-        elif axis == 4:
-            # Reflect across 120° axis
-            rx, ry = self._rotate_axial(dx, dy, 3)
-            rx, ry = rx, -ry
-            return self._rotate_axial(rx, ry, 3)
-        else:  # axis == 5
-            # Reflect across 150° axis
-            rx, ry = self._rotate_axial(dx, dy, 4)
-            rx, ry = rx, -ry
-            return self._rotate_axial(rx, ry, 2)
 
     def augment(self,
                 state: np.ndarray,
@@ -277,7 +146,8 @@ class YinshSymmetryAugmenter:
 
                 if self.enable_stats:
                     self._stats.total_augmentations += 1
-                    if transform_id < 6:
+                    # In D2: T1 is a rotation, T2/T3 are reflections.
+                    if transform_id == 1:
                         self._stats.rotations_applied += 1
                     else:
                         self._stats.reflections_applied += 1
@@ -342,20 +212,20 @@ class YinshSymmetryAugmenter:
     def _transform_state(self, state: np.ndarray, transform_id: int) -> np.ndarray:
         """Apply geometric transform to all channels of the state.
 
-        Args:
-            state: State tensor of shape (C, 11, 11)
-            transform_id: Transform ID (0 = identity)
-
-        Returns:
-            Transformed state tensor of same shape
+        The coord_map covers the 85 valid board positions. The remaining 36 cells
+        of the 11×11 grid are *off-board* — they never hold pieces, but the encoder
+        uses them for channels that are spatially-uniform (e.g. the phase channel
+        broadcasts a scalar to every cell). We start from `state.copy()` so those
+        off-board cells retain their source value; the coord_map writes then
+        overwrite the 85 on-board cells with the rotated values.
         """
         if transform_id == 0:
             return state.copy()
 
-        num_channels = state.shape[0]
-        transformed = np.zeros_like(state)
+        transformed = state.copy()
         coord_map = self._coord_maps[transform_id]
 
+        num_channels = state.shape[0]
         for (old_row, old_col), (new_row, new_col) in coord_map.items():
             for c in range(num_channels):
                 transformed[c, new_row, new_col] = state[c, old_row, old_col]
@@ -543,40 +413,15 @@ class YinshSymmetryAugmenter:
 def verify_transform_round_trip(augmenter: YinshSymmetryAugmenter,
                                 state: np.ndarray,
                                 transform_id: int) -> bool:
-    """Verify that a transform and its inverse produce the original state.
+    """Verify that applying a D2 transform twice recovers the original state.
 
-    For rotation by k*60°, the inverse is rotation by (6-k)*60°.
-    For reflections, each is its own inverse.
-
-    Args:
-        augmenter: The augmenter to test
-        state: A state tensor
-        transform_id: The transform to test
-
-    Returns:
-        True if round-trip produces original (within tolerance)
+    Every element of the Klein 4-group has order 2, so each transform is its
+    own inverse.
     """
     if transform_id == 0:
-        return True  # Identity is trivially its own inverse
-
-    # Apply forward transform
+        return True
     forward = augmenter._transform_state(state, transform_id)
-
-    # Compute inverse transform ID
-    if transform_id < 6:
-        # Rotation inverse: k -> 6-k (mod 6), but 0 is identity
-        # So 1->5, 2->4, 3->3, 4->2, 5->1
-        inverse_id = (6 - transform_id) % 6
-        if inverse_id == 0:
-            inverse_id = 6  # This shouldn't happen for 1-5
-    else:
-        # Reflections are self-inverse
-        inverse_id = transform_id
-
-    # Apply inverse transform
-    roundtrip = augmenter._transform_state(forward, inverse_id)
-
-    # Check if roundtrip matches original (within tolerance for valid positions)
+    roundtrip = augmenter._transform_state(forward, transform_id)
     return np.allclose(state, roundtrip, atol=1e-6)
 
 

@@ -52,7 +52,7 @@ phase_weights:
 # This effectively multiplies training data for FREE
 augmentation:
   enabled: true
-  max_augmentations: 12       # Full D6 symmetry (6 rotations + 6 reflections)
+  max_augmentations: 4        # D2 Klein 4-group: identity + 180° + 2 reflections
 
 # Evaluation & gating
 arena:

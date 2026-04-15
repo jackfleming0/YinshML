@@ -1,11 +1,12 @@
-"""Unit tests for D6 Symmetry Augmentation.
+"""Unit tests for D2 symmetry augmentation.
 
-Tests verify:
-1. Correct number of transforms (6 or 12)
-2. State transform preserves non-zero structure
-3. Policy transforms correctly
-4. Round-trip transforms return to original
-5. Batch augmentation works correctly
+Transform IDs (see YinshSymmetryAugmenter._TRANSFORMS):
+  0 — identity
+  1 — 180° rotation
+  2 — diagonal swap
+  3 — anti-diagonal swap
+
+Each covers all 85 valid cells; all are order-2 and compose as the Klein 4-group.
 """
 
 import pytest
@@ -49,26 +50,24 @@ class TestAugmenterBasics:
         return policy
 
     def test_num_transforms_with_reflections(self, augmenter_with_reflections):
-        """Test that we have 12 transforms with reflections enabled."""
-        assert augmenter_with_reflections.num_transforms == 12
+        """D2 group: identity + 180° + 2 reflections = 4 transforms."""
+        assert augmenter_with_reflections.num_transforms == 4
 
     def test_num_transforms_rotations_only(self, augmenter_rotations_only):
-        """Test that we have 6 transforms without reflections."""
-        assert augmenter_rotations_only.num_transforms == 6
+        """C2 subgroup (rotations only): identity + 180° = 2 transforms."""
+        assert augmenter_rotations_only.num_transforms == 2
 
     def test_augment_returns_correct_count(self, augmenter_with_reflections, simple_state, simple_policy):
-        """Test that augment returns correct number of samples."""
         results = augmenter_with_reflections.augment(
             simple_state, simple_policy, 0.5, include_original=True
         )
-        assert len(results) == 12, f"Expected 12 augmentations, got {len(results)}"
+        assert len(results) == 4
 
     def test_augment_without_original(self, augmenter_with_reflections, simple_state, simple_policy):
-        """Test augment without including original."""
         results = augmenter_with_reflections.augment(
             simple_state, simple_policy, 0.5, include_original=False
         )
-        assert len(results) == 11, f"Expected 11 augmentations (excluding original), got {len(results)}"
+        assert len(results) == 3
 
     def test_augmented_shapes_match(self, augmenter_with_reflections, simple_state, simple_policy):
         """Test that augmented states and policies have correct shapes."""
@@ -111,103 +110,96 @@ class TestIdentityTransform:
         assert np.array_equal(transformed, policy), "Identity transform should not change policy"
 
 
-class TestRotationTransforms:
-    """Test rotation transforms (0-5)."""
+class TestD2GroupStructure:
+    """All 4 D2 elements are order-2; together they form the Klein 4-group."""
 
     @pytest.fixture
     def augmenter(self):
-        return YinshSymmetryAugmenter(include_reflections=False)
+        return YinshSymmetryAugmenter(include_reflections=True)
 
-    def test_rotation_preserves_nonzero_count(self, augmenter):
-        """Test that rotation preserves the number of non-zero elements."""
-        # Create state with some pieces
+    def test_every_transform_covers_all_85_cells(self, augmenter):
+        """Every D2 transform must map the 85-cell valid set to itself."""
+        for tid in range(augmenter.num_transforms):
+            assert len(augmenter._coord_maps[tid]) == 85, \
+                f"Transform {tid} covers {len(augmenter._coord_maps[tid])} cells (expected 85)"
+
+    def test_every_transform_is_self_inverse(self, augmenter):
+        """D2 has exponent 2: applying any transform twice is identity."""
         state = np.zeros((6, 11, 11), dtype=np.float32)
-        state[0, 5, 5] = 1.0
+        state[0, 5, 5] = 1.0   # center — invariant under all
         state[0, 4, 4] = 1.0
         state[2, 6, 6] = 1.0
 
-        original_nonzero = np.count_nonzero(state)
+        for tid in range(1, augmenter.num_transforms):
+            once = augmenter._transform_state(state, tid)
+            twice = augmenter._transform_state(once, tid)
+            assert np.allclose(state, twice), \
+                f"Transform {tid} applied twice did not recover original state"
 
-        for rot_id in range(1, 6):
-            transformed = augmenter._transform_state(state, rot_id)
-            transformed_nonzero = np.count_nonzero(transformed)
-            # Allow some tolerance for edge cases where rotation moves pieces off-board
-            assert transformed_nonzero <= original_nonzero, \
-                f"Rotation {rot_id} increased non-zero count: {transformed_nonzero} > {original_nonzero}"
-
-    def test_180_rotation_is_self_inverse(self, augmenter):
-        """Test that 180° rotation (transform_id=3) is its own inverse."""
+    def test_180_equals_diag_composed_with_antidiag(self, augmenter):
+        """Klein 4-group law: 180° = diagonal ∘ anti-diagonal (up to sign choice)."""
         state = np.zeros((6, 11, 11), dtype=np.float32)
-        state[0, 5, 5] = 1.0  # Center
-        state[0, 4, 4] = 1.0  # Off-center
+        state[0, 2, 3] = 1.0
+        state[0, 7, 8] = 1.0
 
-        # Apply 180° twice
-        rotated_once = augmenter._transform_state(state, 3)
-        rotated_twice = augmenter._transform_state(rotated_once, 3)
-
-        # Should return to original
-        assert np.allclose(state, rotated_twice), "180° rotation applied twice should return to original"
-
-    def test_six_rotations_cycle(self, augmenter):
-        """Test that applying 60° rotation 6 times returns to original."""
-        state = np.zeros((6, 11, 11), dtype=np.float32)
-        state[0, 5, 5] = 1.0  # Center (should be invariant)
-
-        current = state.copy()
-        for _ in range(6):
-            current = augmenter._transform_state(current, 1)
-
-        # After 6 rotations of 60°, should return to original
-        # Note: due to discrete grid, this may not be exact for off-center positions
-        center_value = current[0, 5, 5]
-        assert center_value == 1.0, "Center should remain at center after 6 rotations"
-
-
-class TestReflectionTransforms:
-    """Test reflection transforms (6-11)."""
-
-    @pytest.fixture
-    def augmenter(self):
-        return YinshSymmetryAugmenter(include_reflections=True)
-
-    def test_reflection_is_self_inverse(self, augmenter):
-        """Test that each reflection applied twice returns to original."""
-        state = np.zeros((6, 11, 11), dtype=np.float32)
-        state[0, 5, 5] = 1.0  # Center
-
-        for ref_id in range(6, 12):
-            reflected_once = augmenter._transform_state(state, ref_id)
-            reflected_twice = augmenter._transform_state(reflected_once, ref_id)
-
-            # Should return to original (at least for center)
-            assert reflected_twice[0, 5, 5] == 1.0, \
-                f"Reflection {ref_id} applied twice should preserve center"
+        via_180 = augmenter._transform_state(state, 1)
+        via_composition = augmenter._transform_state(
+            augmenter._transform_state(state, 2), 3
+        )
+        assert np.allclose(via_180, via_composition), \
+            "T1 should equal T2 ∘ T3 (Klein 4-group closure)"
 
 
 class TestCoordinateTransforms:
-    """Test low-level coordinate transformation functions."""
+    """Verify the D2 coord maps put center + edge positions where expected."""
 
     @pytest.fixture
     def augmenter(self):
         return YinshSymmetryAugmenter(include_reflections=True)
 
-    def test_center_is_invariant_under_rotation(self, augmenter):
-        """Test that center coordinates are invariant under rotation."""
-        center_row, center_col = 5, 5
+    def test_center_is_invariant_under_every_transform(self, augmenter):
+        """(5, 5) is fixed under all 4 D2 transforms."""
+        for tid in range(augmenter.num_transforms):
+            assert augmenter._coord_maps[tid][(5, 5)] == (5, 5), \
+                f"Transform {tid} moved center"
 
-        for rot_id in range(1, 6):
-            new_row, new_col = augmenter._transform_coord(center_row, center_col, rot_id)
-            assert (new_row, new_col) == (5, 5), \
-                f"Rotation {rot_id} moved center from (5,5) to ({new_row},{new_col})"
+    def test_180_maps_corner_to_opposite_corner(self, augmenter):
+        """A2 (row_idx=1, col_idx=0) must round-trip to K10 (row_idx=9, col_idx=10)."""
+        assert augmenter._coord_maps[1][(1, 0)] == (9, 10)
+        assert augmenter._coord_maps[1][(9, 10)] == (1, 0)
 
-    def test_center_is_invariant_under_reflection(self, augmenter):
-        """Test that center coordinates are invariant under reflection."""
-        center_row, center_col = 5, 5
+    def test_diagonal_swap_swaps_axes(self, augmenter):
+        """Diagonal: (r, c) -> (c, r). A2 → B1."""
+        assert augmenter._coord_maps[2][(1, 0)] == (0, 1)
 
-        for ref_id in range(6, 12):
-            new_row, new_col = augmenter._transform_coord(center_row, center_col, ref_id)
-            assert (new_row, new_col) == (5, 5), \
-                f"Reflection {ref_id} moved center from (5,5) to ({new_row},{new_col})"
+
+class TestPhaseChannelPreservation:
+    """Regression test for the previous _transform_state phase-channel bug:
+    encode_state fills channel 5 uniformly across all 121 cells, but the old
+    _transform_state zeroed the 36 off-board cells, shrinking the channel mean
+    and causing decode_state to report the wrong GamePhase after any rotation."""
+
+    @pytest.fixture
+    def augmenter(self):
+        return YinshSymmetryAugmenter(include_reflections=True)
+
+    @pytest.fixture
+    def encoder(self):
+        return StateEncoder()
+
+    @pytest.mark.parametrize("phase", list(GamePhase))
+    def test_decoded_phase_preserved_under_every_transform(self, augmenter, encoder, phase):
+        gs = GameState()
+        gs.phase = phase
+        gs.current_player = Player.WHITE
+        gs.board.place_piece(Position('F', 6), PieceType.WHITE_RING)
+        state = encoder.encode_state(gs)
+
+        for tid in range(augmenter.num_transforms):
+            transformed = augmenter._transform_state(state, tid)
+            decoded = encoder.decode_state(transformed)
+            assert decoded.phase == phase, \
+                f"T{tid}: decoded phase {decoded.phase} != original {phase}"
 
 
 class TestPolicyTransforms:
@@ -223,7 +215,7 @@ class TestPolicyTransforms:
         policy = np.random.rand(7395).astype(np.float32)
         policy /= policy.sum()
 
-        for transform_id in range(1, 12):
+        for transform_id in range(1, augmenter.num_transforms):
             transformed = augmenter._transform_policy(state, policy, transform_id)
 
             transformed_sum = transformed.sum()
@@ -235,7 +227,7 @@ class TestPolicyTransforms:
         state = np.zeros((6, 11, 11), dtype=np.float32)  # RING_PLACEMENT, all empty
         policy = np.zeros(7395, dtype=np.float32)
 
-        for transform_id in range(12):
+        for transform_id in range(augmenter.num_transforms):
             transformed = augmenter._transform_policy(state, policy, transform_id)
             assert np.allclose(transformed, 0), \
                 f"Transform {transform_id} created non-zero values from zero policy"
@@ -249,7 +241,7 @@ class TestBatchAugmentation:
         return YinshSymmetryAugmenter(include_reflections=True)
 
     def test_batch_augment_correct_count(self, augmenter):
-        """Test that batch augmentation produces correct number of samples."""
+        """Batch augmentation emits num_transforms samples per original."""
         states = [np.zeros((6, 11, 11), dtype=np.float32) for _ in range(3)]
         policies = [np.zeros(7395, dtype=np.float32) for _ in range(3)]
         policies[0][0] = 1.0
@@ -261,10 +253,8 @@ class TestBatchAugmentation:
             states, policies, values
         )
 
-        # 3 original + 3 * 11 augmented = 36
-        expected_count = 3 * 12
-        assert len(aug_states) == expected_count, \
-            f"Expected {expected_count} samples, got {len(aug_states)}"
+        expected_count = 3 * augmenter.num_transforms
+        assert len(aug_states) == expected_count
         assert len(aug_policies) == expected_count
         assert len(aug_values) == expected_count
 
@@ -335,15 +325,14 @@ class TestRoundTripVerification:
         state = np.random.rand(6, 11, 11).astype(np.float32)
         assert verify_transform_round_trip(augmenter, state, 0)
 
-    def test_rotation_round_trips(self, augmenter):
-        """Test that all rotations pass round-trip test for center-only state."""
-        # Use a state with only center piece (guaranteed to be invariant under rotation)
+    def test_all_transforms_round_trip(self, augmenter):
+        """Center-only state is invariant under every D2 transform and round-trips."""
         state = np.zeros((6, 11, 11), dtype=np.float32)
         state[0, 5, 5] = 1.0
 
-        for rot_id in range(1, 6):
-            result = verify_transform_round_trip(augmenter, state, rot_id)
-            assert result, f"Rotation {rot_id} failed round-trip test"
+        for tid in range(1, augmenter.num_transforms):
+            result = verify_transform_round_trip(augmenter, state, tid)
+            assert result, f"Transform {tid} failed round-trip test"
 
 
 class TestRealGameState:
@@ -378,7 +367,7 @@ class TestRealGameState:
         # Augment
         results = augmenter.augment(encoded, policy, 0.5)
 
-        assert len(results) == 12, f"Expected 12 augmentations, got {len(results)}"
+        assert len(results) == augmenter.num_transforms
 
         # Verify shapes
         for aug_state, aug_policy, aug_value in results:
@@ -400,7 +389,7 @@ class TestEdgeCases:
 
         results = augmenter.augment(state, policy, 0.0)
 
-        assert len(results) == 12
+        assert len(results) == augmenter.num_transforms
         for aug_state, aug_policy, _ in results:
             assert np.allclose(aug_state, 0)
             assert np.allclose(aug_policy, 0)
@@ -422,26 +411,9 @@ class TestEdgeCases:
 
 class TestPolicyGeometricCorrectness:
     """Verify the transformed policy points at the geometrically-correct move in
-    the transformed state — the property the old approximation violated for all
-    non-ring-placement move types.
+    the transformed state, across all 3 non-identity D2 transforms."""
 
-    NOTE on transform coverage: `_transform_coord` rotates YINSH positions assuming
-    full D6 symmetry, but the actual YINSH board only has D2 symmetry (180° + two
-    reflections). Under 60°/120°/240°/300° rotations, 46/85 positions rotate off-board;
-    under the non-D2 reflections, 28-56/85 drop off. Pre-existing geometry bug, not
-    introduced here — see RESEARCH_LOG entry on the 'D6 coord math' follow-on.
-
-    These tests therefore exercise only:
-      - Transforms with full coverage: T3 (180°) and T6, T9 (true reflections — TBD below)
-      - Positions in the inner-hex subset for transforms with partial coverage
-    """
-
-    # Transforms with 100% coverage (from coverage probe): T3 (180°) only.
-    FULL_COVERAGE_TRANSFORMS = [3]
-
-    # Partial-coverage transforms still valuable for "mass lands on valid-move indices"
-    # invariants — just not full round-trips for every position.
-    ALL_NON_IDENTITY_TRANSFORMS = list(range(1, 12))
+    NON_IDENTITY_TRANSFORMS = (1, 2, 3)  # 180°, diag, anti-diag
 
     @pytest.fixture
     def augmenter(self):
@@ -482,100 +454,19 @@ class TestPolicyGeometricCorrectness:
         gs.rings_placed = {Player.WHITE: 5, Player.BLACK: 5}
         return gs
 
-    def test_place_ring_round_trip_180(self, augmenter, encoder):
-        """PLACE_RING under 180° rotation: exact round-trip for every valid position."""
-        gs = self._ring_placement_state()
-        state = encoder.encode_state(gs)
-        valid_moves = gs.get_valid_moves()
-        tid = 3  # 180°
-
-        for move in valid_moves:
-            policy = np.zeros(7395, dtype=np.float32)
-            policy[encoder.move_to_index(move)] = 1.0
-            aug_policy = augmenter._transform_policy(state, policy, tid)
-
-            expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
-            assert expected_move is not None, f"180° should cover all positions; {move.source} failed"
-            expected_idx = encoder.move_to_index(expected_move)
-            assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
-                f"Mass missing at expected idx for source={move.source}"
-
-    def test_move_ring_round_trip_180(self, augmenter, encoder):
-        """MOVE_RING under 180°: the hashed source/dest path — the exact case the old
-        approximation got wrong."""
-        gs = self._main_game_state()
-        state = encoder.encode_state(gs)
-        valid_moves = gs.get_valid_moves()
-        assert valid_moves, "main-game state should have ring moves"
-        tid = 3
-
-        for move in valid_moves[:10]:
-            policy = np.zeros(7395, dtype=np.float32)
-            policy[encoder.move_to_index(move)] = 1.0
-            aug_policy = augmenter._transform_policy(state, policy, tid)
-
-            expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
-            assert expected_move is not None
-            expected_idx = encoder.move_to_index(expected_move)
-            assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
-                f"MOVE_RING {move.source}→{move.destination}: mass not at expected idx"
-
-    def test_remove_ring_round_trip_180(self, augmenter, encoder):
-        """REMOVE_RING under 180°: previously returned old_idx unchanged."""
-        gs = self._ring_removal_state()
-        state = encoder.encode_state(gs)
-        valid_moves = gs.get_valid_moves()
-        tid = 3
-
-        for move in valid_moves:
-            policy = np.zeros(7395, dtype=np.float32)
-            policy[encoder.move_to_index(move)] = 1.0
-            aug_policy = augmenter._transform_policy(state, policy, tid)
-
-            expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
-            assert expected_move is not None
-            expected_idx = encoder.move_to_index(expected_move)
-            assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
-                f"REMOVE_RING {move.source}: mass not at expected idx"
-
-    def test_180_rotation_policy_is_self_inverse_with_manual_transformed_state(self, augmenter, encoder):
-        """Applying 180° to a policy, then applying 180° again *against the manually-
-        rotated game state*, recovers the original policy.
-
-        We bypass `_transform_state` here: it has a pre-existing bug where the phase
-        channel (uniform scalar) is only partially copied by the rotation, causing
-        decode_state to report the wrong phase after transform. That bug is out of
-        scope — this test exercises only the policy permutation."""
-        gs = self._main_game_state()
-        rotated_gs = self._rotate_game_state_180(gs)
-
-        state = encoder.encode_state(gs)
-        rotated_state = encoder.encode_state(rotated_gs)
-
-        move = gs.get_valid_moves()[0]
-        original_idx = encoder.move_to_index(move)
-        policy = np.zeros(7395, dtype=np.float32)
-        policy[original_idx] = 1.0
-
-        once_policy = augmenter._transform_policy(state, policy, 3)
-        twice_policy = augmenter._transform_policy(rotated_state, once_policy, 3)
-
-        assert np.argmax(twice_policy) == original_idx
-        assert twice_policy[original_idx] == pytest.approx(1.0, abs=1e-5)
-
-    def _rotate_game_state_180(self, gs):
-        """Manually build the 180°-rotated GameState without using `_transform_state`."""
+    def _apply_coord_transform_to_gs(self, gs, coord_map):
+        """Manually rebuild a GameState by routing every piece position through the
+        coord_map — used to cross-check the augmented state."""
         rotated = GameState()
         rotated.phase = gs.phase
         rotated.current_player = gs.current_player
         rotated.rings_placed = dict(gs.rings_placed)
 
         def rot(pos):
-            # 180° in this encoding: (row, col) -> (11-1-row_idx, 11-1-col_idx)
-            # using 0-indexed grid offsets.
-            new_col_idx = 10 - (ord(pos.column) - ord('A'))
-            new_row = 12 - pos.row
-            return Position(chr(ord('A') + new_col_idx), new_row)
+            row_idx = pos.row - 1
+            col_idx = ord(pos.column) - ord('A')
+            new_row_idx, new_col_idx = coord_map[(row_idx, col_idx)]
+            return Position(chr(ord('A') + new_col_idx), new_row_idx + 1)
 
         for piece_type in (PieceType.WHITE_RING, PieceType.BLACK_RING,
                            PieceType.WHITE_MARKER, PieceType.BLACK_MARKER):
@@ -583,58 +474,120 @@ class TestPolicyGeometricCorrectness:
                 rotated.board.place_piece(rot(pos), piece_type)
         return rotated
 
-    def test_invalid_indices_dropped_and_renormalized(self, augmenter, encoder):
-        """Mass at an invalid-move index is dropped; remaining mass sums to 1.0.
+    def test_place_ring_round_trip_all_d2(self, augmenter, encoder):
+        """PLACE_RING under every D2 transform: exact round-trip for every valid position."""
+        gs = self._ring_placement_state()
+        state = encoder.encode_state(gs)
+        valid_moves = gs.get_valid_moves()
 
-        This codifies the drop-and-renormalize semantic the fix introduces: the
-        previous approximation retained mass at invalid-in-transformed-state indices,
-        which was the core correctness bug."""
+        for tid in self.NON_IDENTITY_TRANSFORMS:
+            for move in valid_moves:
+                policy = np.zeros(7395, dtype=np.float32)
+                policy[encoder.move_to_index(move)] = 1.0
+                aug_policy = augmenter._transform_policy(state, policy, tid)
+
+                expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
+                assert expected_move is not None
+                expected_idx = encoder.move_to_index(expected_move)
+                assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
+                    f"T{tid}: PLACE_RING {move.source} mass not at expected idx"
+
+    def test_move_ring_round_trip_all_d2(self, augmenter, encoder):
+        """MOVE_RING under every D2 transform — exercises the hashed path."""
+        gs = self._main_game_state()
+        state = encoder.encode_state(gs)
+        valid_moves = gs.get_valid_moves()
+        assert valid_moves
+
+        for tid in self.NON_IDENTITY_TRANSFORMS:
+            for move in valid_moves[:10]:
+                policy = np.zeros(7395, dtype=np.float32)
+                policy[encoder.move_to_index(move)] = 1.0
+                aug_policy = augmenter._transform_policy(state, policy, tid)
+
+                expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
+                assert expected_move is not None
+                expected_idx = encoder.move_to_index(expected_move)
+                assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
+                    f"T{tid}: MOVE_RING {move.source}→{move.destination} mass not at expected idx"
+
+    def test_remove_ring_round_trip_all_d2(self, augmenter, encoder):
+        """REMOVE_RING under every D2 transform."""
+        gs = self._ring_removal_state()
+        state = encoder.encode_state(gs)
+        valid_moves = gs.get_valid_moves()
+
+        for tid in self.NON_IDENTITY_TRANSFORMS:
+            for move in valid_moves:
+                policy = np.zeros(7395, dtype=np.float32)
+                policy[encoder.move_to_index(move)] = 1.0
+                aug_policy = augmenter._transform_policy(state, policy, tid)
+
+                expected_move = augmenter._transform_move(move, augmenter._coord_maps[tid])
+                assert expected_move is not None
+                expected_idx = encoder.move_to_index(expected_move)
+                assert aug_policy[expected_idx] == pytest.approx(1.0, abs=1e-5), \
+                    f"T{tid}: REMOVE_RING {move.source} mass not at expected idx"
+
+    def test_every_transform_is_policy_self_inverse(self, augmenter, encoder):
+        """Every D2 element has order 2: applying the same transform twice recovers
+        the original policy, given the correctly-rotated intermediate state."""
+        gs = self._main_game_state()
+        state = encoder.encode_state(gs)
+        move = gs.get_valid_moves()[0]
+        original_idx = encoder.move_to_index(move)
+        policy = np.zeros(7395, dtype=np.float32)
+        policy[original_idx] = 1.0
+
+        for tid in self.NON_IDENTITY_TRANSFORMS:
+            rotated_gs = self._apply_coord_transform_to_gs(gs, augmenter._coord_maps[tid])
+            rotated_state = encoder.encode_state(rotated_gs)
+
+            once_policy = augmenter._transform_policy(state, policy, tid)
+            twice_policy = augmenter._transform_policy(rotated_state, once_policy, tid)
+            assert np.argmax(twice_policy) == original_idx, \
+                f"T{tid} applied twice did not recover policy peak"
+            assert twice_policy[original_idx] == pytest.approx(1.0, abs=1e-5)
+
+    def test_invalid_indices_dropped_and_renormalized(self, augmenter, encoder):
+        """Mass at an invalid-move index is dropped; remaining mass renormalizes to 1.0."""
         gs = self._ring_placement_state()
         state = encoder.encode_state(gs)
         valid_move = next(m for m in gs.get_valid_moves()
                           if m.source.column == 'F' and m.source.row == 6)
         valid_idx = encoder.move_to_index(valid_move)
 
-        # MOVE_RING slot in policy, but phase is PLACEMENT — no valid move hashes here
-        invalid_idx = encoder.move_ring_range[0] + 7
+        invalid_idx = encoder.move_ring_range[0] + 7  # MOVE_RING slot under PLACEMENT phase
         assert invalid_idx != valid_idx
 
         policy = np.zeros(7395, dtype=np.float32)
         policy[valid_idx] = 0.6
         policy[invalid_idx] = 0.4
 
-        aug_policy = augmenter._transform_policy(state, policy, 3)
-        assert aug_policy.sum() == pytest.approx(1.0, abs=1e-5), \
-            "After dropping invalid-index mass, valid mass must renormalize to 1.0"
-        expected_move = augmenter._transform_move(valid_move, augmenter._coord_maps[3])
+        aug_policy = augmenter._transform_policy(state, policy, 1)
+        assert aug_policy.sum() == pytest.approx(1.0, abs=1e-5)
+        expected_move = augmenter._transform_move(valid_move, augmenter._coord_maps[1])
         assert aug_policy[encoder.move_to_index(expected_move)] == pytest.approx(1.0, abs=1e-5)
 
-    def test_augmented_policy_mass_on_valid_moves_only_180(self, augmenter, encoder):
-        """End-to-end invariant: after 180° rotation of both state and policy, all
-        non-zero policy mass lands at indices corresponding to valid moves in the
-        *manually-rotated* game state. We use a manually-rotated state rather than
-        `_transform_state` to sidestep its phase-channel bug (out of scope here).
-
-        Restricted to 180°: the other 11 transforms in `_coord_maps` are not true
-        symmetries of the YINSH board — pieces on non-180°-symmetric cells rotate
-        off-board, leaving the augmented state geometrically inconsistent."""
+    def test_augmented_policy_mass_on_valid_moves_only_all_d2(self, augmenter, encoder):
+        """Mass lands only at indices valid in the transformed state, for every D2 transform."""
         gs = self._main_game_state()
-        rotated_gs = self._rotate_game_state_180(gs)
         state = encoder.encode_state(gs)
-
         valid_moves = gs.get_valid_moves()
         policy = np.zeros(7395, dtype=np.float32)
         for m in valid_moves:
             policy[encoder.move_to_index(m)] = 1.0
         policy /= policy.sum()
 
-        aug_policy = augmenter._transform_policy(state, policy, 3)
-
-        rotated_valid_indices = {encoder.move_to_index(m) for m in rotated_gs.get_valid_moves()}
-        nonzero = set(np.nonzero(aug_policy)[0].tolist())
-        stray = nonzero - rotated_valid_indices
-        assert not stray, \
-            f"Augmented policy has mass at indices not valid in rotated state: {stray}"
+        for tid in self.NON_IDENTITY_TRANSFORMS:
+            rotated_gs = self._apply_coord_transform_to_gs(gs, augmenter._coord_maps[tid])
+            aug_policy = augmenter._transform_policy(state, policy, tid)
+            rotated_valid_indices = {encoder.move_to_index(m)
+                                     for m in rotated_gs.get_valid_moves()}
+            nonzero = set(np.nonzero(aug_policy)[0].tolist())
+            stray = nonzero - rotated_valid_indices
+            assert not stray, \
+                f"T{tid}: augmented policy has mass at indices not valid in rotated state: {stray}"
 
 
 if __name__ == '__main__':

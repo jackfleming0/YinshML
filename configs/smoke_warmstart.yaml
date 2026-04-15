@@ -45,7 +45,7 @@ phase_weights:
 
 augmentation:
   enabled: true
-  max_augmentations: 12
+  max_augmentations: 4
 
 arena:
   games_per_match: 50
