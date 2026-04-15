@@ -170,6 +170,20 @@ class TrainingSupervisor:
         evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
         heuristic_weight = self.mode_settings.get('heuristic_weight', 0.7)
 
+        # Heuristic-weight curriculum (linear anneal start → end over N iterations,
+        # held at end afterwards). Defaults make this a no-op (start == end == current).
+        self._hw_start = float(self.mode_settings.get('heuristic_weight_start', heuristic_weight))
+        self._hw_end = float(self.mode_settings.get('heuristic_weight_end', heuristic_weight))
+        self._hw_anneal_iters = int(self.mode_settings.get('heuristic_weight_anneal_iterations', 0))
+        if self._hw_start != self._hw_end:
+            self.logger.info(
+                f"Heuristic curriculum: {self._hw_start:.2f} → {self._hw_end:.2f} "
+                f"linearly over {self._hw_anneal_iters} iterations"
+            )
+        # Seed SelfPlay's heuristic_weight at the iter-0 curriculum value so the
+        # first self-play batch runs with start, not the static back-compat value.
+        heuristic_weight = self._compute_heuristic_weight(0)
+
         # Extract batched MCTS parameters (Phase 2.1)
         use_batched_mcts = self.mode_settings.get('use_batched_mcts', True)
         mcts_batch_size = self.mode_settings.get('mcts_batch_size', 32)
@@ -486,6 +500,28 @@ class TrainingSupervisor:
             except Exception as e:
                 self.logger.warning(f"Failed to log metric '{metric_name}': {e}")
 
+    def _compute_heuristic_weight(self, iteration: int) -> float:
+        """Linear interpolation start → end over `anneal_iterations`, held at end after.
+
+        iteration=0 returns start; iteration>=anneal_iterations returns end.
+        anneal_iterations==0 snaps immediately to end (useful for a hard-reset config).
+        """
+        anneal = max(self._hw_anneal_iters, 0)
+        if anneal == 0:
+            return self._hw_end
+        alpha = min(max(iteration, 0) / anneal, 1.0)
+        return self._hw_start + alpha * (self._hw_end - self._hw_start)
+
+    def _apply_heuristic_curriculum(self, iteration: int) -> float:
+        """Push this iteration's curriculum weight to every surface that MCTS reads
+        from: the SelfPlay instance attr, the main MCTS object, and the mcts_config
+        dict that worker processes use to spawn per-game MCTS. Returns the new weight."""
+        hw = self._compute_heuristic_weight(iteration)
+        self.self_play.heuristic_weight = hw
+        self.self_play.mcts.heuristic_weight = hw
+        self.self_play.mcts_config['heuristic_weight'] = hw
+        return hw
+
     def train_iteration(self, num_games: int, epochs: int):
         """
         One full self-play -> training -> evaluation -> model-selection cycle.
@@ -545,6 +581,14 @@ class TrainingSupervisor:
         self.self_play.network = self.network
         # Pass the number of games for this iteration
         self.self_play.current_iteration = current_iteration
+
+        previous_hw = self.self_play.mcts.heuristic_weight
+        hw = self._apply_heuristic_curriculum(current_iteration)
+        if self._hw_start != self._hw_end:
+            self.logger.info(
+                f"[Curriculum] iter {current_iteration}: heuristic_weight "
+                f"{previous_hw:.3f} → {hw:.3f}"
+            )
 
         self.logger.info(f"Generating {num_games} self-play games...")
         self._log_mps_memory("before self-play")

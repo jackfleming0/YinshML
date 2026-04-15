@@ -228,6 +228,9 @@ def main() -> None:
         # Self-play / MCTS
         'evaluation_mode': sp.get('evaluation_mode', 'hybrid'),  # NEW: Default to hybrid mode
         'heuristic_weight': float(sp.get('heuristic_weight', 0.7)),  # NEW: Default 70% heuristic weight
+        'heuristic_weight_start': float(sp.get('heuristic_weight_start', sp.get('heuristic_weight', 0.7))),
+        'heuristic_weight_end': float(sp.get('heuristic_weight_end', sp.get('heuristic_weight', 0.7))),
+        'heuristic_weight_anneal_iterations': int(sp.get('heuristic_weight_anneal_iterations', 0)),
         'num_workers': sp.get('num_workers', 'auto'),
         'late_simulations': sp.get('late_simulations'),
         'simulation_switch_ply': sp.get('simulation_switch_ply', 20),

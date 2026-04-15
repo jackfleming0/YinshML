@@ -8,7 +8,14 @@ save_dir: runs
 # Self-play / MCTS
 self_play:
   evaluation_mode: hybrid     # Options: pure_neural, pure_heuristic, hybrid
-  heuristic_weight: 0.3       # Option 1: Testing with 30% heuristic + variance penalty 1.5 (up from 0.5)
+  heuristic_weight: 0.3       # Back-compat default; overridden by curriculum below when anneal>0
+  # Curriculum: linearly anneal heuristic_weight from start → end over N iterations,
+  # then hold at end. Dampens the iter 1-2 warm-start regression by starting self-play
+  # close to the supervised distribution (heavy heuristic) and rolling off to pure
+  # neural by the time the value head has readjusted.
+  heuristic_weight_start: 1.0
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
   num_simulations: 160        # RUN B: Increased from 96 to improve self-play quality
   late_simulations: 96        # RUN B: Increased from 64 (maintaining ~60% ratio with early sims)
   simulation_switch_ply: 20   # switch point between early/late budgets
