@@ -131,6 +131,7 @@ Zobrist hashing provides fast, deterministic hash values for game positions. See
 **Key Features:**
 - O(1) incremental updates
 - Deterministic (same position = same hash)
+- Hashes the **full position**: board layout, side-to-move, AND game phase. Two states with identical piece placement but different `current_player` or `phase` hash to different values (otherwise TT lookups would return evaluations from the wrong perspective or under the wrong legal-move set).
 - Low collision probability
 - Thread-safe for read operations
 

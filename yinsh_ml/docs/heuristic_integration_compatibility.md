@@ -42,6 +42,8 @@ The heuristic evaluator (`YinshHeuristics`) is **fully compatible** with the exi
 
 **Compatibility:** ✅ Full compatibility - all methods available
 
+**Note — `find_marker_rows` semantics (April 2026 fix):** the method now returns the **full maximal run** of contiguous same-color markers along a hex axis (length ≥ `MARKERS_FOR_ROW = 5`, up to 7 per YINSH rules), NOT a truncated 5-window. Heuristics that count "completed rows" or "near-row threats" should either `len(row) >= 5` check, or enumerate all length-5 windows via the move generator if per-window granularity is needed. Only matching-sign hex axes are considered (`DIRECTIONS` / `HEX_LINE_AXES` in `constants.py`); the old non-hex `(-1,1)` / `(1,-1)` pseudo-diagonal is no longer reported.
+
 ### 3. Player Enum ✅
 
 **Required by Heuristics:**
