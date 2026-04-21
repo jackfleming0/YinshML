@@ -15,24 +15,13 @@ Static menu of AZ-recipe improvements. This file is a **pool**, not a plan — p
 - [ ] **Expert-data validation rate** — 12% valid (3906/31896) is low. Dig into rejection reasons only if warm-start still underperforms after the CE fix is proven.
 - [ ] **BGA game selection strategy** — when we have more than a few hundred games, filter by: both players above ELO threshold, |Δelo| < 100, min 30 moves. Don't optimize this before the warm-start is proven; volume isn't the bottleneck right now.
 
-### Tier 1 — Quick wins (infra exists, just needs wiring)
+### Tier 1-3 — Shipped (see `NEXT_UP.md` Completed section for details)
 
-- [ ] **Subtree reuse across moves.** MCTS root is discarded after every move (`yinsh_ml/training/self_play.py:468+`, `yinsh_ml/search/mcts.py`). Reseat the new root at `old_root.children[played_move]` and reuse visits — roughly doubles effective sims-per-move. Node-pool interaction needs care. Biggest single playing-strength lever still on the table.
-- [ ] **Promote `epsilon_mix` to config + add a move-number taper.** `yinsh_ml/search/mcts.py:473` hardcodes `epsilon_mix = 0.25`. Move to `MCTSConfig`, default 0.25, and allow a per-move-number decay (higher early, zero after move ~20) so root exploration stops injecting noise into late-game tactical positions.
+All Tier 1, 2, and 3 polish items landed between 2026-04-14 and 2026-04-16 in sequence: subtree reuse, epsilon_mix taper, EMA shadow, cosine + warmup LR, soft value targets, FPU in PUCT, mixed-precision autocast (PyTorch 2.7.1 upgrade), deterministic eval, Wilson-CI tournament logging, value-head calibration + entropy logging, move-encoder rework.
 
-### Tier 2 — Medium effort, solid ELO
-
-- [ ] **EMA (or SWA) checkpoint for tournament eval.** Training keeps latest weights; tournament uses the same latest weights, so single-iteration loss dips leak directly into gate decisions. Add a parallel EMA copy (decay ≈ 0.999) updated in `supervisor.py` after each train step, use it for tournament play and ELO while the live net keeps training. Should reduce the 55%-promotion-threshold false-positive rate as a side effect.
-- [ ] **Cosine + warmup LR schedule.** `trainer.py:469-484` uses `StepLR(step_size=10, gamma=0.9)` for both heads (comment records a prior CyclicLR instability). `CosineAnnealingLR` with a short linear warmup (~5% of steps) is the middle ground — smoother decay, no 10×-drop cliffs. Keep the value head's 5× LR multiplier.
-- [ ] **Soft value targets (Gaussian around class).** `trainer.py:624-636` discretizes the scalar target to a hard one-hot over 7 classes before CE. Hard targets on a discretized regression problem encourage overconfidence and waste neighboring-class signal. Replace with a Gaussian smoothed distribution (σ≈0.5 class-width) — same tensor shape, directly targets the discrimination ceiling the research log keeps hitting.
-- [ ] **FPU (First-Play Urgency) in PUCT.** `yinsh_ml/search/mcts.py:105-110` scores unvisited children by prior only. Add standard KataGo-style `fpu = q_parent − fpu_reduction · sqrt(Σ visited_policy)` so early expansion prefers high-prior unseen children over low-visit explored ones. Near-zero wall-clock cost.
-- [ ] **Mixed-precision training on MPS.** `trainer.py` has no autocast. Wrap forward passes in `torch.autocast(device_type='mps'|'cuda')` — expect 20-30% training wall-clock reduction and lower RSS (helps the buffer OOM question indirectly). Sanity-check value-head CE loss scaling first.
-
-### Tier 3 — Diagnostics & evaluation reliability
+### Tier 3 — Open (deferred)
 
 - [ ] **Opponent-pool expansion (tournament_sliding_window 3 → 5).** Part (a) of the original "Tournament CI / SE reporting + opponent pool expansion" item landed 2026-04-14 (per-matchup Wilson CI + SE now logged and stored under `pair_cis`; `arena.games_per_match: 50 → 100` for a real CI-width improvement). Part (b) — widening the rolling pool from 3 to 5 most-recent models — was deferred because it 3.3× arena cost (10 pairs vs 3). Re-open once the CI logs reveal whether matchups are diversity-bound.
-- [ ] **Value-head calibration + entropy logging.** `yinsh_ml/utils/value_head_metrics.py` is skeletal. Add per-move policy entropy (flag sudden collapses), 7-class value calibration curve + ECE, value-vs-outcome scatter by game phase. These distinguish "loss is dropping but discrimination is flat" (the historical failure mode) from real progress.
-- [ ] **Deterministic eval mode.** `yinsh_ml/utils/tournament.py::_play_match` has no fixed-seed path. Add a `deterministic=True` flag that pins seeds and selects greedy (argmax) moves post-search, so A/B comparisons (e.g. "cosine vs StepLR") aren't dominated by tournament noise.
 
 ### Tier 4 — Model capacity / encoding
 

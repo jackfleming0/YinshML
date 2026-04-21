@@ -80,10 +80,83 @@ One-line durable lessons distilled from ~70 experiment-snapshot docs that were d
 - Perf: per-sample augmentation cost dropped from 27 ms to 5 ms for the original 12-transform expansion, now ~1.5 ms for the 4-transform D2 expansion. Decode_state + valid_moves factored out of the per-transform loop. ~0.3% of iteration wall-clock.
 - **Encoder move-hash problem is separate and bigger.** `((src*31 + dst) % 5848)` for 85-position src/dst yields only 2687 distinct values for 7140 legal (src,dst) pairs — 62% collision rate, 3161 slots structurally unreachable because `max(src*31 + dst) = 2688`. Multiple distinct ring moves share policy indices in MCTS training targets; the network learns coupled predictions for aliased moves. Predates augmentation; affects MCTS targeting directly. Tracked as Track A #13 in NEXT_UP.
 
+## Track A polish sprint bake-off (2026-04-15 → 2026-04-19)
+
+Twelve Tier 1-3 polish items shipped in 4 days: deterministic eval, EMA shadow, heuristic-weight curriculum, Wilson-CI tournament logging, subtree reuse (+ pre-existing MCTS expansion bug fix), FPU in PUCT, soft value targets, cosine+warmup LR, epsilon_mix taper, mixed-precision autocast (PyTorch 2.7.1 upgrade), value-head calibration+entropy logging, collision-free move encoder (7395→8390 slots). Also shipped: MCTS child-node state-copy elimination (3.5× search speedup) and `is_valid_position` frozenset cache.
+
+### MCTS expansion bug — the biggest find
+
+The `action is None or ...: continue` guard in `search()` / `search_batch()` misfired on every first simulation (root unexpanded → while-loop doesn't run → action legitimately None → skip fires). Effect: MCTS has been **silently falling back to uniform-over-valid-moves** for the entire training history — "160 sims" was zero sims. Fixed as part of subtree reuse. Side effect: per-game wall-clock jumped from ~1s to ~15 min because MCTS now does real work. This bug retroactively explains why prior runs showed limited improvement with increasing sim budgets.
+
+### Bake-off methodology
+
+Ablation-based: baseline config disables 9 Track A training features via config flags (subtree reuse, FPU, epsilon taper, soft targets, EMA, cosine LR, autocast, heuristic curriculum, deterministic eval). Move encoder rework + MCTS expansion bug fix stay in both sides — architectural, not recipe.
+
+Three rounds of bake-offs revealed scale-sensitivity confounds:
+- **v1 (5 iters, 8 sims):** 40-game first pass showed +88 ELO (noise); 100-game follow-up: 51-49, inconclusive. Models too weak at this scale for Track A features to compound.
+- **v2 (10 iters, 16 sims, all features ablated):** Baseline won 60-40 (ΔElo ≈ -70). Root cause: cosine LR schedule (designed for 200 epochs) decayed to ~2% of base by epoch 18 of a 20-epoch run — 33× lower LR than StepLR baseline. Heuristic curriculum (1.0→0.0 over 5 iters) also dropped guidance too early at this short horizon.
+- **v3 (10 iters, 16 sims, scale-sensitive features matched):** After fixing LR schedule (both StepLR) and heuristic curriculum (both constant 0.3), isolating only scale-neutral features: 96-102-2, ΔElo ≈ -10.5, CI [0.42, 0.55]. **Statistical tie.**
+
+### Indirect training metrics — clearer signal than head-to-head
+
+Even when head-to-head play is inconclusive, training diagnostics show Track A's value:
+- **ECE** (calibration): challenger 0.110 vs baseline 0.142 — **23% better** (soft value targets working as designed).
+- **Value loss**: baseline 1.61 vs challenger 1.81 — challenger's is higher, but expected: soft-target label distributions have higher entropy than one-hot, raising the CE floor. The gap doesn't mean the challenger learned *less* — it learned a *softer* distribution.
+- **Policy loss/entropy**: ~tied, confirming the effect is value-head-specific.
+
+### Lessons
+
+1. **Cosine LR and heuristic curriculum are scale-sensitive.** They need training horizons long enough for their decay curves to be well-past the "model is still learning fast" phase. At <50 epochs, StepLR is safer. At 200+ epochs, cosine should dominate.
+2. **Track A's scale-neutral features (subtree reuse, FPU, soft targets, epsilon taper, EMA) improve calibration measurably but don't move head-to-head ELO at 10-iter toy scale.** Expected: these are rate-of-improvement features that compound over many iterations of the network strengthening.
+3. **The MCTS expansion bug fix is by far the largest single contribution** — but it's baked into both bake-off sides (it's a correctness fix, not a recipe choice), so its impact doesn't show up in the A/B comparison. It will manifest as a step-change in absolute playing strength vs any historical checkpoint.
+4. **The proper full-scale bake-off (50 iters, 64+ sims) remains the gold-standard test.** The infrastructure (`scripts/run_bakeoff.py`, ablation configs, Wilson CI reporting) is proven and ready. Compute budget is the constraint (~4-8 days on Mac Mini MPS).
+
+## Track B probes (2026-04-19 → 2026-04-20)
+
+Two diagnostic probes landed to answer whether the 0.104 discrimination plateau is training-signal or representational.
+
+### §5 Search-consistency regularization — shipped
+
+Distills long-search MCTS visit distributions + root values into the network as an auxiliary loss every K training batches. `YinshTrainer._search_consistency_step` samples replay-buffer positions, runs long-search MCTS as a teacher, computes `λ_π · CE(π_long, softmax(logits)) + λ_v · MSE(v_long, v_pred)`. Off by default (`trainer.search_consistency.enabled: false`); smoke flips it on so the code path is always exercised. 16 tests; smoke-validated through 8 iterations of debugging.
+
+### §5 bugs & gotchas uncovered
+
+- **Serial `MCTS.search()` didn't expose `last_root_value`.** Only `search_batch()` set it — a silent asymmetry. Fixed by mirroring the assignment at end of `search()`. Affects any future consumer of the root value from the serial path.
+- **`BatchNorm1d` batch-size-1 train-mode trap.** The value head contains `nn.BatchNorm1d(512)` at `value_head[8]`. Calling `predict_from_state(state)` (batch_size=1) from MCTS raised `ValueError: Expected more than 1 value per channel when training` from iter 1 onwards in training runs — specifically after a `train_step` has run on the same network on MPS with bf16 autocast. Even explicit `eval()` calls on the module + individual BN layers didn't fix it (logs confirmed `.training=False` at the time of forward, yet BN still fired the check). Root cause unproven but the symptom is reproducible. **Fix**: route the probe's MCTS through `search_batch` (which evaluates leaves via `predict_batch(states)` with batch_size>1), bypassing the single-sample BN path entirely.
+- **`_reset_network_objects` network-swap hazard.** The supervisor's every-3-iters cleanup swaps `trainer.network` for a freshly-loaded wrapper (`supervisor.py:1250-1252`). A cached `_sc_mcts.network` would hold a stale reference post-swap. `_search_consistency_step` now rebinds `mcts.network = self.network` on every call. Initially suspected to be the BN1d bug but wasn't — the swap only fires at `iteration_counter % 3 == 0` and smoke (2 iters) hit the bug without triggering a swap. Still a real latent bug; rebind stays.
+
+### §8 SAE probe — shipped
+
+Trains a 256→2048 sparse autoencoder on the value head's penultimate ReLU activations (model.py:153). Identifies what concepts the network has learned vs. missed. New package `yinsh_ml/interpretability/` (`activation_capture`, `sae`, `feature_analysis`, `position_generator`); end-to-end via `scripts/run_sae_probe.py`. 13 tests.
+
+### §8 — the discrimination plateau, quantified
+
+First run landed on `runs/bakeoff_challenger/20260419_031237/iteration_9/checkpoint_iteration_9_ema.pt` (5000 positions, L1=1e-5, 50 epochs): **value range `[-0.06, +0.10]` — max |v| < 0.10.** This is the discrimination plateau showing up as a raw distribution-of-outputs statistic, independent of the classification accuracy metric that produced the 0.104 number in Track A's training diagnostics. The network is operating in ~10% of the `[-1, +1]` value space. Practical implication: the default `find_confident_errors` threshold (0.7) returns zero matches because no prediction crosses it — added `--confidence-threshold` CLI knob; at 0.05 the probe surfaces 53 confident-error positions (1.1% of buffer) for the "missing concepts" analysis.
+
+### §8 confident-error analysis (53 positions, threshold 0.05)
+
+- **Asymmetric over-optimism**: 46/53 (87%) of confident errors are "pred > 0, actual < 0" — the network thinks the position is winning but the player loses. Only 7/53 are the reverse. The network has a positive-bias failure mode, not symmetric noise.
+- **Phase distribution**: 49/53 (92%) in MAIN_GAME, 4/53 in RING_REMOVAL, 0 in RING_PLACEMENT. Placement errors don't happen because the value head defaults to ~0 there; errors appear as soon as markers start placing.
+- **Ring-count signature**: 47/53 errors have 5 rings per side (no captures yet) — the network mispredicts position quality *before any captures*, not after. This rules out "can't count rings" as the bug and points to missing *threat detection* as the likely gap.
+- **Marker diff has no signal**: range [-6, +6], mean -0.68. Being up/down on markers doesn't predict which positions get misjudged — another argument that it's not a simple feature the network is missing, but an emergent one (threat structure).
+- **Move-number range [10, 86]**: errors span the whole main game. Not a beginning-only or endgame-only failure.
+
+Synthesis: the 0.104 discrimination ceiling is not "network is appropriately uncertain" — it's **"network has learned a slightly-positive-biased value function that cannot distinguish winning from losing positions pre-capture"**. Matches the Track A finding that "completed_runs_differential" is the dominant heuristic feature (weight 0.239): the network relies on something that only exists *after* captures. §5 search-consistency is the right first probe (distillation should transfer MCTS's post-search value estimate into the pre-search network output). Branch B fallback if §5 fails: targeted threat-detection auxiliary head.
+
+### §8 SAE hyperparameter notes
+
+- `l1_coefficient=1e-3` is too aggressive for this network's low-dynamic-range activations: 1852/2048 features go dead, final sparsity 0.3% (too sparse to interpret).
+- `l1_coefficient=1e-5` → 391 active features (256 dense firing on >50% of positions, 135 sparse-but-firing), final sparsity 12.3%, reconstruction MSE 1.9e-4. Default bumped implicitly via the hyperparameter writeup; configs to be tuned once findings land.
+- Top features by "distinctiveness" all collapse on the same board archetype (5 rings each, move 10-16, MAIN_GAME, 0-2 markers) — the position-generator samples via network-policy rollouts without MCTS and almost every game passes through the early-main-game, so that regime dominates top-K activations. For genuine concept diversity in a follow-up run, the probe needs either (a) MCTS-driven generation matching the training distribution, or (b) sampling from a real training run's replay buffer.
+
+### Incidental finding
+
+- **Pre-move-encoder-rework checkpoints are unusable.** `runs/supervised_warmstart_v2/iteration_6/checkpoint_iteration_6.pt` (the +61 ELO peak) has a 7395-slot policy head; current code emits 8390 slots and `NetworkWrapper.load_model` hard-fails on the mismatch (by design, from the Track A move-encoder rework). The strongest available SAE/bake-off target on current code is the bake-off challenger's iter 9 EMA checkpoint — whose own bake-off result was a statistical tie with baseline at the toy scale.
+
 ## Known limitations & open questions
 
-- Discrimination target 0.15+ has never been reached (best: 0.104 with discrimination loss — 69% of target).
-- High-confidence value predictions (|v| > 0.7) are <1% of positions; network is calibratedly cautious but may be leaving MCTS guidance on the table.
+- Discrimination target 0.15+ has never been reached (best: 0.104 with discrimination loss — 69% of target). §5 probe is now in place to test whether long-search distillation breaks the plateau; pending full-scale run.
+- High-confidence value predictions (|v| > 0.7) are <1% of positions; network is calibratedly cautious but may be leaving MCTS guidance on the table. **Quantified 2026-04-19**: bake-off challenger iter 9 EMA produces `|v| ≤ 0.10` across 5000 sampled positions — the "calibratedly cautious" framing was understating it by ~7×.
 - Pure-neural play on hybrid-trained models (30% heuristic during training, 0% at eval) has a suspected distribution gap; curriculum schedule (1.0 → 0.3 → 0.0) is hypothesized but untested.
 - Supervised warm-start with 240K Boardspace positions achieved 28.3% val-acc with the **old MSE value loss** (random = 0.014%); retrained 2026-04-13 with aligned CE value loss reached 29.8% val policy top-1 + 91.9% val value-class accuracy. **Resolved 2026-04-14**: 10-iter warm-start from CE iter-0 promoted iter 3 (1534, +34 ELO) and iter 6 (1561, +61 ELO), no OOM, peak MPS 5.1GB stable. The aligned warm-start *does* survive self-play.
 - Whether iter 6's +61 ELO peak from a single 10-iter run is reproducible — and whether it extends with longer training — is the next open question. Run took 6.4h on Mac Mini.
