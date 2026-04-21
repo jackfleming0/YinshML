@@ -1,0 +1,106 @@
+version: 1
+
+# Track A bake-off baseline. Ablates all nine training-affecting Track A
+# polish items via their config flags, so a head-to-head against the default
+# `training.yaml` (challenger) measures the cumulative Track A contribution
+# end-to-end, starting from iter 0 of both runs.
+#
+# Not ablatable (intentionally baked into both runs):
+#   - Move encoder rework (architectural; the old 7395-slot hash isn't kept)
+#   - MCTS expansion bug fix surfaced while implementing subtree reuse
+#     (both models run with a functional search, so we're measuring what
+#     Track A adds on top of a working MCTS, not against a uniform-fallback
+#     baseline that would artificially inflate the delta)
+#   - Value-head calibration + entropy logging + Wilson CI tournament
+#     logging (always-on diagnostics, no training-signal impact)
+
+device: auto
+num_iterations: 50
+save_dir: runs/bakeoff_baseline
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  # ABLATED: heuristic-weight curriculum off — hold constant at 0.3.
+  heuristic_weight_start: 0.3
+  heuristic_weight_end: 0.3
+  heuristic_weight_anneal_iterations: 0
+  num_simulations: 160
+  late_simulations: 96
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  # ABLATED: subtree reuse off — rebuild MCTS root every move.
+  enable_subtree_reuse: false
+  # ABLATED: FPU off — unvisited children score their Q as 0, not
+  # q_parent - fpu_reduction·sqrt(Σπ_visited).
+  fpu_reduction: 0.0
+  # ABLATED: epsilon_mix taper off — constant 0.25 at every move (legacy).
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.25
+  epsilon_mix_taper_moves: 0
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3
+  games_per_iteration: 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 50000
+  # ABLATED: EMA off.
+  ema_decay: null
+  use_ema_for_eval: false
+  # ABLATED: LR schedule reverts to legacy StepLR(step_size=10, gamma=0.9).
+  lr_schedule: step
+  warmup_epochs: 0
+  # ABLATED: autocast off — run fp32 throughout.
+  enable_autocast: false
+  # ABLATED: hard one-hot CE instead of Gaussian-smoothed soft targets.
+  soft_value_target_sigma: 0.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 100
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  # ABLATED: eval_seed null — tournament play is stochastic.
+  eval_seed: null
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5

@@ -1,11 +1,15 @@
 """Tournament system for evaluating YINSH models within a training run."""
 
+import hashlib
 import logging
+import random
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import torch
 from datetime import datetime
 import json
+
+import numpy as np
 
 from ..network.wrapper import NetworkWrapper
 from ..game.game_state import GameState
@@ -13,6 +17,21 @@ from ..game.constants import Player
 from .elo_manager import EloTracker, MatchResult
 
 import math
+
+
+def derive_match_seed(base_seed: int, white_id: str, black_id: str, game_num: int) -> int:
+    """Stable per-game seed. Different orientations / game indices get different
+    seeds; same (base, white, black, game_num) always reproduces. Uses blake2b
+    rather than Python's built-in hash so it survives `PYTHONHASHSEED` randomization."""
+    h = hashlib.blake2b(digest_size=8)
+    h.update(str(base_seed).encode())
+    h.update(b"|")
+    h.update(white_id.encode())
+    h.update(b"|")
+    h.update(black_id.encode())
+    h.update(b"|")
+    h.update(str(game_num).encode())
+    return int.from_bytes(h.digest(), 'big') & 0x7FFFFFFF
 
 q = math.log(10) / 400  # constant used in Glicko formulas
 
@@ -202,7 +221,9 @@ class ModelTournament:
                  device: str = 'cpu',
                  games_per_match: int = 50,
                  temperature: float = 0.1,
-                 sliding_window_size: int = 5):
+                 sliding_window_size: int = 5,
+                 use_ema_for_eval: bool = True,
+                 eval_seed: Optional[int] = None):
         """
         Initialize tournament manager.
 
@@ -214,12 +235,27 @@ class ModelTournament:
             sliding_window_size: Max number of recent models to include in tournament.
                                  Set to 0 for full round-robin (not recommended for long runs).
                                  Default 5 = constant O(1) complexity: 10 pairs × 200 games = 4000 games.
+            use_ema_for_eval: If True and a sibling `<ckpt>_ema.pt` exists, load
+                the EMA-smoothed weights for match play. The model still keys
+                off the non-EMA path (so promotion-gate lookups and tournament
+                history remain aligned with the iteration checkpoint), but the
+                weights used in games are the smoothed ones — reducing the
+                single-iteration-noise bleed into gate decisions.
+            eval_seed: If not None, enables deterministic match play. Each game
+                seeds torch / numpy / random from a stable hash of
+                ``(eval_seed, white_id, black_id, game_num)`` so reruns with the
+                same models reproduce exactly, different (white, black)
+                orientations still diverge, and games within a match aren't
+                clones of each other. RNG state is saved and restored around
+                the seeded region so nothing leaks into callers.
         """
         self.training_dir = Path(training_dir)
         self.device = device
         self.games_per_match = games_per_match
         self.sliding_window_size = sliding_window_size
         self.temperature = temperature
+        self.use_ema_for_eval = use_ema_for_eval
+        self.eval_seed = eval_seed
         self.latest_summary_stats: Dict[str, Dict] = {}   # NEW
         self._pair_results: Dict[Tuple[str, str], Dict[str, int]] = {}
 
@@ -259,9 +295,21 @@ class ModelTournament:
             self.logger.error(f"Error saving tournament history: {e}")
 
     def _load_model(self, checkpoint_path: Path) -> NetworkWrapper:
-        """Load a model from checkpoint."""
+        """Load a model from checkpoint.
+
+        When `use_ema_for_eval` is set and a `<stem>_ema.pt` sibling exists,
+        that EMA-smoothed weight file is used for play instead of the raw
+        iteration checkpoint. The model is still keyed by the original path
+        upstream so Glicko/promotion tracking stays consistent.
+        """
+        actual_path = checkpoint_path
+        if self.use_ema_for_eval:
+            ema_path = checkpoint_path.with_name(checkpoint_path.stem + '_ema.pt')
+            if ema_path.exists():
+                actual_path = ema_path
+                self.logger.debug(f"Loading EMA weights for {checkpoint_path.name}: {ema_path}")
         model = NetworkWrapper(device=self.device)
-        model.load_model(str(checkpoint_path))
+        model.load_model(str(actual_path))
         return model
 
     def _play_match(self,
@@ -275,7 +323,6 @@ class ModelTournament:
         for each move. This prevents MPS driver memory from growing unbounded.
         """
         import gc
-        import numpy as np
 
         white_wins = 0
         black_wins = 0
@@ -290,6 +337,23 @@ class ModelTournament:
         for game_num in range(self.games_per_match):
             self.logger.debug(f"Playing game {game_num + 1}/{self.games_per_match}: "
                               f"{white_id} (White) vs {black_id} (Black)")
+
+            # Snapshot + seed RNGs per game when deterministic eval is enabled.
+            # State is restored in the finally below so tournament play doesn't
+            # leak into subsequent training / self-play RNG consumers.
+            rng_snapshot = None
+            if self.eval_seed is not None:
+                rng_snapshot = (
+                    torch.get_rng_state(),
+                    np.random.get_state(),
+                    random.getstate(),
+                )
+                game_seed = derive_match_seed(
+                    self.eval_seed, white_id, black_id, game_num
+                )
+                torch.manual_seed(game_seed)
+                np.random.seed(game_seed)
+                random.seed(game_seed)
 
             game_state = GameState()
             move_count = 0
@@ -341,6 +405,14 @@ class ModelTournament:
 
             # MEMORY: Clear game state after each game
             del game_state
+
+            # Restore RNG state snapshotted above, so tournament seeding doesn't
+            # bleed into training / self-play consumers between matches.
+            if rng_snapshot is not None:
+                torch_state, np_state, py_state = rng_snapshot
+                torch.set_rng_state(torch_state)
+                np.random.set_state(np_state)
+                random.setstate(py_state)
 
             # MEMORY: Periodic cleanup every 20 games to prevent MPS memory accumulation
             if (game_num + 1) % 20 == 0:
