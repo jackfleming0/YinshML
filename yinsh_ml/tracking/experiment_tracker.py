@@ -364,7 +364,7 @@ class AsyncLogger:
         success = final_size == 0
         
         if success:
-            logger.debug(f"AsyncLogger flush completed, processed {initial_size} items")
+            pass
         else:
             logger.warning(f"AsyncLogger flush timed out, {final_size} items remaining")
             
@@ -389,7 +389,7 @@ class AsyncLogger:
     
     def _worker_loop(self):
         """Main worker loop for processing queue items."""
-        logger.debug("AsyncLogger worker thread started")
+        pass
         
         retry_queue = []
         
@@ -415,7 +415,7 @@ class AsyncLogger:
             logger.info(f"Processing {len(retry_queue)} remaining retry items during shutdown")
             self._process_retry_queue(retry_queue, final_attempt=True)
         
-        logger.debug("AsyncLogger worker thread ended")
+        pass
     
     def _process_batch_from_queue(self) -> int:
         """Process a batch of items from the main queue."""
@@ -640,7 +640,7 @@ class ExperimentTracker:
         """
         with self._lock:
             self._config.update(kwargs)
-            logger.debug(f"Configuration updated: {kwargs}")
+            pass
     
     def get_config(self, key: str = None) -> Union[Dict[str, Any], Any]:
         """
@@ -678,7 +678,7 @@ class ExperimentTracker:
         }
         
         if not self._config.get('auto_capture_git', True):
-            logger.debug("Git metadata capture disabled")
+            pass
             return git_info
         
         try:
@@ -731,7 +731,7 @@ class ExperimentTracker:
             if result.returncode == 0:
                 git_info['timestamp'] = result.stdout.strip()
             
-            logger.debug(f"Captured git metadata: {git_info}")
+            pass
             
         except FileNotFoundError:
             logger.warning("Git command not found - git metadata unavailable")
@@ -750,7 +750,7 @@ class ExperimentTracker:
         system_info = {}
         
         if not self._config.get('auto_capture_system', True):
-            logger.debug("System metadata capture disabled")
+            pass
             return system_info
         
         try:
@@ -778,9 +778,9 @@ class ExperimentTracker:
                     'memory_available': psutil.virtual_memory().available,
                 })
             except ImportError:
-                logger.debug("psutil not available for detailed system info")
+                pass
             
-            logger.debug(f"Captured system metadata with {len(system_info)} fields")
+            pass
             
         except Exception as e:
             logger.warning(f"Failed to capture system metadata: {e}")
@@ -797,7 +797,7 @@ class ExperimentTracker:
         env_info = {}
         
         if not self._config.get('auto_capture_environment', True):
-            logger.debug("Environment metadata capture disabled")
+            pass
             return env_info
         
         try:
@@ -823,7 +823,7 @@ class ExperimentTracker:
                     installed_packages[pkg.project_name] = pkg.version
                 
                 env_info['installed_packages'] = installed_packages
-                logger.debug(f"Captured {len(installed_packages)} installed packages")
+                pass
                 
             except Exception as e:
                 logger.warning(f"Failed to capture package information: {e}")
@@ -843,7 +843,7 @@ class ExperimentTracker:
             except ImportError:
                 pass
             
-            logger.debug(f"Captured environment metadata with {len(env_info)} categories")
+            pass
             
         except Exception as e:
             logger.warning(f"Failed to capture environment metadata: {e}")
@@ -948,7 +948,7 @@ class ExperimentTracker:
                         experiment_path = path
                         break
             except Exception as e:
-                logger.debug(f"Failed to determine experiment path: {e}")
+                pass
             
             config_snapshot = self._create_configuration_snapshot(config, experiment_path)
             
@@ -1033,7 +1033,7 @@ class ExperimentTracker:
             )
             
             if self._log_async_if_enabled(entry):
-                logger.debug(f"Queued async metric {metric_name}={value} for experiment {experiment_id}")
+                pass
                 return
             else:
                 logger.warning("Failed to queue async metric, falling back to synchronous logging")
@@ -1068,7 +1068,7 @@ class ExperimentTracker:
             )
             
             if self._log_async_if_enabled(entry):
-                logger.debug(f"Queued async parameter {param_name}={value} for experiment {experiment_id}")
+                pass
                 return
             else:
                 logger.warning("Failed to queue async parameter, falling back to synchronous logging")
@@ -1145,7 +1145,7 @@ class ExperimentTracker:
                 raise ExperimentConfigurationError("Tags must be provided as a list")
             
             if not tags:
-                logger.debug("No tags to add")
+                pass
                 return
             
             # Validate all tags are strings
@@ -1198,7 +1198,7 @@ class ExperimentTracker:
                 raise ExperimentConfigurationError("Tags must be provided as a list")
             
             if not tags:
-                logger.debug("No tags to remove")
+                pass
                 return
             
             # Remove tags using database operations
@@ -1274,7 +1274,7 @@ class ExperimentTracker:
             experiment['metric_count'] = len(experiment['metrics'])
             experiment['tag_count'] = len(experiment['tags'])
             
-            logger.debug(f"Retrieved experiment {experiment_id} with {experiment['metric_count']} metrics")
+            pass
             return experiment
             
         except ExperimentConfigurationError:
@@ -1329,7 +1329,7 @@ class ExperimentTracker:
                     except:
                         pass  # Keep original if conversion fails
             
-            logger.debug(f"Retrieved {len(metrics)} records for metric '{metric_name}' in experiment {experiment_id}")
+            pass
             return metrics
             
         except (ExperimentConfigurationError, ExperimentNotFoundError):
@@ -1407,7 +1407,7 @@ class ExperimentTracker:
                         exp['metrics'] = get_experiment_metrics(exp_id)
                         exp['metric_count'] = len(exp['metrics'])
             
-            logger.debug(f"Query returned {len(experiments)} experiments")
+            pass
             return experiments
             
         except ExperimentConfigurationError:
@@ -1588,7 +1588,7 @@ class ExperimentTracker:
                 stats['std'] = 0.0
                 stats['median'] = values[0]
             
-            logger.debug(f"Calculated statistics for metric '{metric_name}' in experiment {experiment_id}")
+            pass
             return stats
             
         except (ExperimentConfigurationError, ExperimentNotFoundError):
@@ -1689,7 +1689,7 @@ class ExperimentTracker:
                 'comparison_timestamp': datetime.now().isoformat()
             }
             
-            logger.debug(f"Compared {len(experiment_ids)} experiments across {len(all_metric_names)} metrics")
+            pass
             return comparison
             
         except (ExperimentConfigurationError, ExperimentNotFoundError):
@@ -1762,7 +1762,7 @@ class ExperimentTracker:
                     'bins': min(20, len(set(values)))  # Reasonable number of bins
                 })
             
-            logger.debug(f"Prepared {plot_type} visualization data for metric '{metric_name}' in experiment {experiment_id}")
+            pass
             return plot_data
             
         except (ExperimentConfigurationError, ExperimentNotFoundError):
@@ -1896,7 +1896,7 @@ class ExperimentTracker:
                 if cursor.rowcount == 0:
                     raise ExperimentNotFoundError(f"Experiment {experiment_id} not found")
             
-            logger.debug(f"Added note to experiment {experiment_id}: {note}")
+            pass
             
         except ExperimentNotFoundError:
             raise
@@ -2084,10 +2084,10 @@ class ExperimentTracker:
             add_metric_to_experiment(experiment_id, metric_name, value, iteration, timestamp)
             
             # Log to TensorBoard if enabled
-            logger.debug(f"TensorBoard logging check: enabled={self._tensorboard_enabled}, logger_exists={self._tensorboard_logger is not None}")
+            pass
             if self._tensorboard_enabled and self._tensorboard_logger:
                 try:
-                    logger.debug(f"Calling TensorBoard log_scalar for {metric_name}={value}")
+                    pass
                     self._tensorboard_logger.log_scalar(
                         experiment_id=experiment_id,
                         metric_name=metric_name,
@@ -2095,7 +2095,7 @@ class ExperimentTracker:
                         iteration=iteration,
                         timestamp=timestamp
                     )
-                    logger.debug(f"TensorBoard log_scalar completed for {metric_name}")
+                    pass
                 except Exception as e:
                     logger.warning(f"Failed to log metric to TensorBoard: {e}")
                     import traceback
@@ -2108,7 +2108,7 @@ class ExperimentTracker:
                     exp_data['metrics_count'] += 1
                     exp_data['last_metric_time'] = timestamp.isoformat()
             
-            logger.debug(f"Logged metric {metric_name}={value} for experiment {experiment_id}")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to log metric {metric_name} for experiment {experiment_id}: {e}"
@@ -2140,7 +2140,7 @@ class ExperimentTracker:
             from .utils import add_metric_to_experiment
             add_metric_to_experiment(experiment_id, full_param_name, numeric_value, iteration=0)
             
-            logger.debug(f"Logged parameter {param_name}={value} for experiment {experiment_id}")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to log parameter {param_name} for experiment {experiment_id}: {e}"
@@ -2166,7 +2166,7 @@ class ExperimentTracker:
                 if experiment_id in self._active_experiments:
                     self._active_experiments[experiment_id]['status'] = status
             
-            logger.debug(f"Updated experiment {experiment_id} status to {status}")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to update status for experiment {experiment_id}: {e}"
@@ -2207,7 +2207,7 @@ class ExperimentTracker:
                     current_tags.update(valid_tags)
                     exp_data['tags'] = list(current_tags)
             
-            logger.debug(f"Added {len(valid_tags)} tags to experiment {experiment_id}")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to add tags for experiment {experiment_id}: {e}"
@@ -2246,7 +2246,7 @@ class ExperimentTracker:
                     current_tags.difference_update(tags)
                     exp_data['tags'] = list(current_tags)
             
-            logger.debug(f"Removed {len(tags)} tags from experiment {experiment_id}")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to remove tags for experiment {experiment_id}: {e}"
@@ -2291,7 +2291,7 @@ class ExperimentTracker:
                 if cursor.rowcount == 0:
                     raise ExperimentNotFoundError(f"Experiment {experiment_id} not found")
             
-            logger.debug(f"Added note to experiment {experiment_id}: {note}")
+            pass
             
         except ExperimentNotFoundError:
             raise

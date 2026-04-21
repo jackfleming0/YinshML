@@ -174,7 +174,7 @@ class GameState:
         # First validate the move
        #  logger.debug(f"\nBeginning move validation...")  # Debug
         if not self.is_valid_move(move):
-            logger.debug("Move validation failed")
+            pass
             return False
         # logger.debug("Move validation passed!")  # Debug
 
@@ -194,23 +194,23 @@ class GameState:
             success = self.board.move_ring(move.source, move.destination)
 
         elif move.type == MoveType.REMOVE_MARKERS:
-            logger.debug("\nProcessing marker removal:")
-            logger.debug(f"Phase: {self.phase}")
-            logger.debug(f"Number of markers: {len(move.markers if move.markers else [])}")
+            pass
+            pass
+            pass
 
             if self.phase != GamePhase.ROW_COMPLETION:
-                logger.debug("Wrong phase for marker removal")
+                pass
                 return False
 
             if not move.markers or len(move.markers) != 5:
-                logger.debug("Wrong number of markers")
+                pass
                 return False
 
             if self.board.is_valid_marker_sequence(move.markers, move.player):
                 success = self._handle_marker_removal(move)
-                logger.debug(f"Marker removal success: {success}")
+                pass
             else:
-                logger.debug("Invalid marker sequence")
+                pass
                 return False
 
         elif move.type == MoveType.REMOVE_RING:
@@ -261,34 +261,34 @@ class GameState:
 
         # Basic validation
         if move.player != self.current_player:
-            logger.debug("Wrong player")
+            pass
             return False
 
         if move.type == MoveType.PLACE_RING:
             #logger.debug("\nValidating PLACE_RING move:")  # Debug
             #logger.debug(f"1. Phase check: current={self.phase}, expected={GamePhase.RING_PLACEMENT}")  # Debug
             if self.phase != GamePhase.RING_PLACEMENT:
-                logger.debug("Not in ring placement phase")
+                pass
                 return False
 
             #ogger.debug(f"2. Source position check: {move.source}")  # Debug
             if not move.source:
-                logger.debug("No source position provided")
+                pass
                 return False
             if not is_valid_position(move.source):
-                logger.debug("Invalid source position")
+                pass
                 return False
 
             #logger.debug(f"3. Empty position check")  # Debug
             current_piece = self.board.get_piece(move.source)
             #logger.debug(f"Current piece at position: {current_piece}")  # Debug
             if current_piece is not None:
-                logger.debug("Position already occupied")
+                pass
                 return False
 
             #logger.debug(f"4. Ring count check: {self.rings_placed[move.player]}/{RINGS_PER_PLAYER}")  # Debug
             if self.rings_placed[move.player] >= RINGS_PER_PLAYER:
-                logger.debug("All rings already placed")
+                pass
                 return False
 
             # logger.debug("All validation checks passed!")  # Debug
@@ -296,42 +296,42 @@ class GameState:
 
         elif move.type == MoveType.MOVE_RING:
             if self.phase != GamePhase.MAIN_GAME:
-                logger.debug("Not in main game phase")
+                pass
                 return False
 
             # Check source has correct ring
             source_piece = self.board.get_piece(move.source)
             expected_ring = PieceType.WHITE_RING if move.player == Player.WHITE else PieceType.BLACK_RING
             if not source_piece or source_piece != expected_ring:
-                logger.debug(f"Invalid source piece: {source_piece}")
+                pass
                 return False
 
             # Check destination is empty
             if self.board.get_piece(move.destination) is not None:
-                logger.debug("Destination is occupied")
+                pass
                 return False
 
             # Use board's valid_move_positions to check if destination is valid
             valid_destinations = self.board.valid_move_positions(move.source)
             if move.destination not in valid_destinations:
-                logger.debug(f"Invalid destination: {move.destination}")
-                logger.debug(f"Valid destinations: {[str(pos) for pos in valid_destinations]}")
+                pass
+                pass
                 return False
 
             return True
 
         elif move.type == MoveType.REMOVE_MARKERS:
             if self.phase != GamePhase.ROW_COMPLETION:
-                logger.debug("Not in row completion phase")
+                pass
                 return False
             if not move.markers or len(move.markers) != 5:
-                logger.debug("Invalid number of markers")
+                pass
                 return False
             return self.board.is_valid_marker_sequence(move.markers, move.player)
 
         elif move.type == MoveType.REMOVE_RING:
             if self.phase != GamePhase.RING_REMOVAL:
-                logger.debug("Not in ring removal phase")
+                pass
                 return False
             ring_type = PieceType.WHITE_RING if move.player == Player.WHITE else PieceType.BLACK_RING
             return self.board.get_piece(move.source) == ring_type
@@ -382,25 +382,25 @@ class GameState:
         ring_type = PieceType.WHITE_RING if move.player == Player.WHITE else PieceType.BLACK_RING
         # logger.debug(f"Ring type to place: {ring_type}")  # Debug
         # logger.debug(f"Current board state before placement:")  # Debug
-        logger.debug(self.board)
+        pass
 
         if not move.source or not is_valid_position(move.source):
-            logger.debug("Invalid position")  # Debug
+            pass
             return False
 
         if self.board.get_piece(move.source) is not None:
-            logger.debug("Position already occupied")  # Debug
+            pass
             return False
 
         if self.rings_placed[move.player] >= RINGS_PER_PLAYER:
-            logger.debug("All rings already placed")  # Debug
+            pass
             return False
 
         # Place the ring
         place_success = self.board.place_piece(move.source, ring_type)
         # logger.debug(f"Place piece result: {place_success}")  # Debug
         if not place_success:
-            logger.debug("Failed to place ring")  # Debug
+            pass
             return False
 
         # Update ring count
@@ -410,11 +410,11 @@ class GameState:
 
         # Check if we need to transition to main game
         if all(count == RINGS_PER_PLAYER for count in self.rings_placed.values()):
-            logger.debug("Transitioning to main game")  # Debug
+            pass
             self.phase = GamePhase.MAIN_GAME
 
         # logger.debug(f"Final board state after placement:")  # Debug
-        logger.debug(self.board)
+        pass
         return True
 
 
@@ -431,7 +431,7 @@ class GameState:
         rather than half-applied.
         """
         if len(move.markers) != 5:
-            logger.debug(f"Wrong number of markers: {len(move.markers)}")
+            pass
             return False
 
         expected_marker = (PieceType.WHITE_MARKER if move.player == Player.WHITE
@@ -441,13 +441,13 @@ class GameState:
         for pos in move.markers:
             old_piece = self.board.get_piece(pos)
             if old_piece is None:
-                logger.debug(f"No piece at {pos}")
+                pass
                 return False
             if not old_piece.is_marker():
-                logger.debug(f"Piece at {pos} is not a marker")
+                pass
                 return False
             if old_piece != expected_marker:
-                logger.debug(f"Piece at {pos} is wrong color: {old_piece}")
+                pass
                 return False
 
         # Second pass: all validated, safe to mutate.
@@ -458,9 +458,9 @@ class GameState:
 
     def _handle_ring_removal(self, move: Move) -> bool:
         """Handle ring removal after completing a row."""
-        logger.debug("\nHandling ring removal:")
-        logger.debug(f"Player: {move.player}")
-        logger.debug(f"Position: {move.source}")
+        pass
+        pass
+        pass
 
         ring_type = (PieceType.WHITE_RING if move.player == Player.WHITE
                      else PieceType.BLACK_RING)
@@ -470,11 +470,11 @@ class GameState:
         #logger.debug(f"Found piece: {current_piece}")
 
         if current_piece != ring_type:
-            logger.debug("Invalid ring type for removal")
+            pass
             return False
 
         self.board.remove_piece(move.source)
-        logger.debug(f"Removed ring at {move.source}")
+        pass
 
         if move.player == Player.WHITE:
             self.white_score += 1
@@ -492,7 +492,7 @@ class GameState:
         # Check for game end condition
         if self.white_score >= 3 or self.black_score >= 3:
             self.phase = GamePhase.GAME_OVER
-            logger.debug(f"GAME OVER detected: White score = {self.white_score}, Black score = {self.black_score}")
+            pass
             # Clear any in-flight row-completion bookkeeping so a pool-reused
             # GameState doesn't inherit stale helpers from the previous game.
             self._move_maker = None
@@ -504,7 +504,7 @@ class GameState:
         if self.phase == GamePhase.RING_PLACEMENT:
             if all(self.rings_placed[p] == RINGS_PER_PLAYER for p in Player):
                 self.phase = GamePhase.MAIN_GAME
-                logger.debug("Transitioning from RING_PLACEMENT to MAIN_GAME")
+                pass
 
             return
 
@@ -515,16 +515,16 @@ class GameState:
 
         completed_rows = white_rows + black_rows
         if completed_rows:
-            logger.debug(f"Found completed rows: {completed_rows}")
+            pass
             for row in completed_rows:
-                logger.debug(f"Row color: {row.color}, positions: {row.positions}")
+                pass
 
         # Track phase change for player management
         starting_phase = self.phase
 
         # State transition logic
         if self.phase == GamePhase.MAIN_GAME and completed_rows:
-            logger.debug("Switching to ROW_COMPLETION phase")
+            pass
             self.phase = GamePhase.ROW_COMPLETION
             # Store who made the original move that created the rows
             if self._move_maker is None:
@@ -533,25 +533,25 @@ class GameState:
             self._set_row_completion_player(white_rows, black_rows)
 
         elif self.phase == GamePhase.ROW_COMPLETION:
-            logger.debug("Switching to RING_REMOVAL phase")
+            pass
             self.phase = GamePhase.RING_REMOVAL
             # Keep the same player for ring removal
             # No player change needed
 
         elif self.phase == GamePhase.RING_REMOVAL:
             if completed_rows:
-                logger.debug("More rows found, switching back to ROW_COMPLETION")
+                pass
                 self.phase = GamePhase.ROW_COMPLETION
                 # Determine who gets to remove the next row
                 self._set_row_completion_player(white_rows, black_rows)
             else:
                 prev_phase = self.phase
-                logger.debug("No more rows, switching back to MAIN_GAME")
+                pass
                 self.phase = GamePhase.MAIN_GAME
                 # Set current player to opponent of the original move maker
                 if self._move_maker is not None:
                     self.current_player = self._move_maker.opponent
-                    logger.debug(f"Setting current player to opponent of original move maker ({self.current_player})")
+                    pass
                     # Clear row-completion bookkeeping for next sequence
                     self._move_maker = None
                     self._prev_player = None
@@ -566,14 +566,14 @@ class GameState:
         # If we have a move maker and both colors have rows,
         # the move maker gets to go first
         if move_maker and white_rows and black_rows:
-            logger.debug(f"Both colors have rows, giving priority to move maker ({move_maker})")
+            pass
             self.current_player = move_maker
         # Otherwise fall back to original logic
         elif white_rows:
-            logger.debug("White rows found, setting current player to WHITE")
+            pass
             self.current_player = Player.WHITE
         elif black_rows:
-            logger.debug("Black rows found, setting current player to BLACK")
+            pass
             self.current_player = Player.BLACK
 
     def to_numpy_array(self) -> np.ndarray:

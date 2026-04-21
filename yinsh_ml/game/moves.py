@@ -17,61 +17,61 @@ class MoveGenerator:
 
     def get_valid_moves(board: 'Board', game_state: 'GameState') -> List[Move]:
         """Get all valid moves for the current game state."""
-        logger.debug("\nEntering get_valid_moves")
+        pass
         phase = game_state.phase
         player = game_state.current_player
 
-        logger.debug(f"Finding moves for {player} in phase {phase}")
-        logger.debug(f"Phase type: {type(phase)}")
-        logger.debug(f"Phase value: {phase.value}")
+        pass
+        pass
+        pass
 
         moves = []
         if phase.value == GamePhase.RING_PLACEMENT.value:
-            logger.debug("Getting ring placement moves")
+            pass
             moves = MoveGenerator._get_ring_placement_moves(board, player)
         elif phase.value == GamePhase.MAIN_GAME.value:
-            logger.debug("Getting ring movement moves")
+            pass
             moves = MoveGenerator._get_ring_movement_moves(board, player)
         elif phase.value == GamePhase.ROW_COMPLETION.value:
-            logger.debug("Getting marker removal moves")
+            pass
             moves = MoveGenerator._get_marker_removal_moves(board, player)
         elif phase.value == GamePhase.RING_REMOVAL.value:
-            logger.debug("Getting ring removal moves")
+            pass
             moves = MoveGenerator._get_ring_removal_moves(board, player)
 
-        logger.debug(f"Found {len(moves)} valid moves")
+        pass
         return moves
 
     @staticmethod
     def _get_ring_placement_moves(board: 'Board', player: Player) -> List[Move]:
         """Get all valid ring placement moves."""
-        logger.debug("Starting ring placement generation")
+        pass
         moves = []
         valid_count = 0
         empty_count = 0
 
-        logger.debug(f"Board state:\n{board}")
+        pass
 
         # Check each position
         for col in "ABCDEFGHIJK":
             for row in range(1, 12):
                 pos = Position(col, row)
-                logger.debug(f"\nChecking {pos}")
+                pass
                 if is_valid_position(pos):
                     valid_count += 1
-                    logger.debug(f"Valid position")
+                    pass
                     if board.is_empty(pos):
                         empty_count += 1
-                        logger.debug(f"Empty position - creating move")
+                        pass
                         moves.append(Move(
                             type=MoveType.PLACE_RING,
                             player=player,
                             source=pos
                         ))
                 else:
-                    logger.debug(f"Invalid position")
+                    pass
 
-        logger.debug(f"\nRing placement generation complete:")
+        pass
 
         return moves
 
@@ -120,7 +120,7 @@ class MoveGenerator:
         marker_type = PieceType.WHITE_MARKER if player == Player.WHITE else PieceType.BLACK_MARKER
 
         rows = board.find_marker_rows(marker_type)
-        logger.debug(f"Found {len(rows)} rows of {marker_type}")
+        pass
 
         seen_windows = set()
         for row in rows:
@@ -134,16 +134,14 @@ class MoveGenerator:
                 if key in seen_windows:
                     continue
                 seen_windows.add(key)
-                logger.debug(
-                    f"Creating move with markers: {[str(m) for m in window]}"
-                )
+                pass
                 moves.append(Move(
                     type=MoveType.REMOVE_MARKERS,
                     player=player,
                     markers=window,
                 ))
 
-        logger.debug(f"Generated {len(moves)} valid marker removal moves")
+        pass
         return moves
 
     @staticmethod

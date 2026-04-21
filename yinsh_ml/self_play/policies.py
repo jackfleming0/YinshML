@@ -59,12 +59,12 @@ class RandomMovePolicy:
         if random.random() < self.config.rule_based_probability:
             move = self._select_rule_based_move(valid_moves, game_state)
             if move is not None:
-                logger.debug(f"Selected rule-based move: {move}")
+                pass
                 return move
         
         # Fall back to random selection
         move = random.choice(valid_moves)
-        logger.debug(f"Selected random move: {move}")
+        pass
         return move
     
     def _select_rule_based_move(self, valid_moves: List[Move], game_state: GameState) -> Optional[Move]:
@@ -375,7 +375,7 @@ class HeuristicPolicy:
             # Epsilon-greedy exploration: random move with probability = randomness
             if self._rng.random() < self.config.randomness:
                 move = self._rng.choice(valid_moves)
-                logger.debug(f"Selected random move (exploration): {move}")
+                pass
             else:
                 # Get best move from heuristic agent
                 best_move = self.agent.select_move(game_state)
@@ -385,10 +385,10 @@ class HeuristicPolicy:
                     # Get heuristic scores for all moves for temperature sampling
                     scored_moves = self._score_all_moves(game_state, valid_moves, fast_evaluation=False)
                     move = self._sample_with_temperature(scored_moves)
-                    logger.debug(f"Selected move with temperature sampling: {move}")
+                    pass
                 else:
                     move = best_move
-                    logger.debug(f"Selected heuristic move: {move}")
+                    pass
         
         # Track performance
         duration = time.perf_counter() - start_time
@@ -412,7 +412,7 @@ class HeuristicPolicy:
         # Apply epsilon-greedy exploration if configured
         if self._current_epsilon > 0 and self._rng.random() < self._current_epsilon:
             move = self._rng.choice(valid_moves)
-            logger.debug(f"Selected random move (epsilon-greedy): {move}")
+            pass
             return move
         
         # Score all moves using fast evaluation
@@ -420,7 +420,7 @@ class HeuristicPolicy:
         
         # Apply temperature-based sampling with current (decayed) temperature
         move = self._sample_with_temperature(scored_moves, use_current_temp=True)
-        logger.debug(f"Selected fast heuristic move: {move}")
+        pass
         return move
     
     def _score_all_moves(self, game_state: GameState, valid_moves: List[Move], fast_evaluation: bool = False) -> List[tuple]:
@@ -578,8 +578,7 @@ class HeuristicPolicy:
         # Update decay values based on new game count
         self._update_decay()
         
-        logger.debug(f"Reset for new game (game #{self._game_count}, "
-                    f"temp={self._current_temperature:.3f}, epsilon={self._current_epsilon:.3f})")
+        pass
 
 
 @dataclass
@@ -676,7 +675,7 @@ class MCTSPolicy:
         move = self._sample_move(valid_moves, move_probs)
         
         self._move_number += 1
-        logger.debug(f"Selected MCTS move: {move}")
+        pass
         return move
     
     def _policy_to_move_probs(self, policy_vector: np.ndarray, valid_moves: List[Move]) -> Dict[Move, float]:

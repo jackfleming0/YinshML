@@ -318,18 +318,16 @@ class SelfPlayRunner:
             
             # End game recording
             winner = game_state.get_winner()
-            logger.debug(f"Game {game_id} winner: {winner.value if winner is not None else None}")
+            pass
             game_record = self.recorder.end_game(game_state, winner)
-            logger.debug(f"Game {game_id} recording completed")
+            pass
             
             if game_record:
                 # Compute quality metrics if enabled
                 if self.quality_analyzer:
                     quality_metrics = self.quality_analyzer.analyze_game(game_record)
                     self.stats.quality_metrics.append(quality_metrics)
-                    logger.debug(f"Game {game_id} quality: diversity={quality_metrics.move_diversity:.3f}, "
-                               f"coherence={quality_metrics.strategic_coherence:.3f}, "
-                               f"tactical={quality_metrics.tactical_patterns}")
+                    pass
                 
                 # Store in parquet if enabled
                 if self.data_manager:
@@ -348,8 +346,7 @@ class SelfPlayRunner:
                 if hasattr(self.policy, 'increment_game_count'):
                     self.policy.increment_game_count()
                 
-                logger.debug(f"Completed game {game_id}: {turn_count} turns, "
-                           f"{game_duration:.2f}s, winner: {winner.value if winner is not None else None}")
+                pass
             
             return game_record
             
@@ -419,7 +416,7 @@ class SelfPlayRunner:
                             self.stats.storage_efficiency_mb_per_game / estimated_uncompressed
                         )
             except Exception as e:
-                logger.debug(f"Failed to update storage metrics: {e}")
+                pass
     
     def _update_memory_metrics(self) -> None:
         """Update memory usage metrics."""
@@ -434,9 +431,9 @@ class SelfPlayRunner:
                 self.stats.peak_memory_usage_mb = current_memory_mb
                 
         except ImportError:
-            logger.debug("psutil not available for memory tracking")
+            pass
         except Exception as e:
-            logger.debug(f"Failed to update memory metrics: {e}")
+            pass
     
     def _log_progress(self) -> None:
         """Log current progress."""
@@ -500,7 +497,7 @@ class SelfPlayRunner:
             with open(state_file, 'w') as f:
                 json.dump(state_data, f, indent=2)
             
-            logger.debug(f"Saved progress to {state_file}")
+            pass
             
         except Exception as e:
             logger.error(f"Failed to save progress: {e}")

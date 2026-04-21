@@ -448,7 +448,7 @@ class AdaptiveMemoryMonitor(MemoryMonitor):
             if callback:
                 self.resource_callbacks[resource_type].append(callback)
             
-            logger.debug(f"Registered {resource_type.value} allocator")
+            pass
     
     def update_resource_usage(self, 
                             resource_type: ResourceType,

@@ -557,10 +557,7 @@ def _parse_bga_notifications(notifications: list,
                     else:
                         break
                 if removed == 0:
-                    logger.debug(
-                        f"BGA 'restarts their turn' by player {pid} found "
-                        f"no prior moves to pop"
-                    )
+                    pass
             else:
                 # Default / "takes back their last move": single-action undo.
                 for j in range(len(cleaned) - 1, -1, -1):
@@ -569,10 +566,7 @@ def _parse_bga_notifications(notifications: list,
                         del cleaned[j]
                         break
                 else:
-                    logger.debug(
-                        f"BGA restartUndo by player {pid} found no prior "
-                        f"move to pop"
-                    )
+                    pass
         # Other types (gameStateChange, confirmMove, updateReflexionTime,
         # gameEnd, simpleNode) carry no move data — handled separately.
 
@@ -586,7 +580,7 @@ def _parse_bga_notifications(notifications: list,
         pid = str(args.get('player_id', ''))
         player = color_by_pid.get(pid)
         if player is None:
-            logger.debug(f"BGA move with unknown player_id={pid}; skipping")
+            pass
             continue
 
         loc_from = args.get('locationFrom')
@@ -625,7 +619,7 @@ def _parse_bga_notifications(notifications: list,
                 moves.append({'move_type': 'REMOVE_RING',
                               'player': player, 'position': pos})
         else:
-            logger.debug(f"BGA move with unhandled log template: {log!r}")
+            pass
 
     return moves
 

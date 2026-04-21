@@ -330,8 +330,7 @@ class GitCapture:
             if self.capture_diff_summary:
                 git_info['diff_summary'] = self.get_diff_summary()
             
-            logger.debug(f"Captured git metadata: commit={git_info['commit_short']}, "
-                        f"branch={git_info['branch']}, clean={git_info['working_directory_clean']}")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to capture git metadata: {e}"
@@ -467,7 +466,7 @@ class EnvironmentCapture:
                 packages[pkg.project_name] = pkg.version
             
             self._package_cache = packages
-            logger.debug(f"Captured {len(packages)} installed packages")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to capture installed packages: {e}"
@@ -495,7 +494,7 @@ class EnvironmentCapture:
                 if value is not None and not self._is_sensitive_env_var(var):
                     env_vars[var] = value
             
-            logger.debug(f"Captured {len(env_vars)} environment variables")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to capture environment variables: {e}"
@@ -533,7 +532,7 @@ class EnvironmentCapture:
             })
             
             self._system_cache = system_info
-            logger.debug(f"Captured system information with {len(system_info)} fields")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to capture system information: {e}"
@@ -574,13 +573,13 @@ class EnvironmentCapture:
                         for i in range(torch.cuda.device_count())
                     ]
                 except Exception as e:
-                    logger.debug(f"Could not get CUDA device details: {e}")
+                    pass
             
             framework_info['torch'] = torch_info
-            logger.debug("Captured PyTorch information")
+            pass
             
         except ImportError:
-            logger.debug("PyTorch not available")
+            pass
         except Exception as e:
             error_msg = f"Failed to capture PyTorch information: {e}"
             if not self.fail_silently:
@@ -596,10 +595,10 @@ class EnvironmentCapture:
                 'gpu_devices': [device.name for device in tf.config.list_physical_devices('GPU')]
             }
             framework_info['tensorflow'] = tf_info
-            logger.debug("Captured TensorFlow information")
+            pass
             
         except ImportError:
-            logger.debug("TensorFlow not available")
+            pass
         except Exception as e:
             error_msg = f"Failed to capture TensorFlow information: {e}"
             if not self.fail_silently:
@@ -612,10 +611,10 @@ class EnvironmentCapture:
             framework_info['numpy'] = {
                 'version': np.__version__
             }
-            logger.debug("Captured NumPy information")
+            pass
             
         except ImportError:
-            logger.debug("NumPy not available")
+            pass
         except Exception as e:
             logger.warning(f"Failed to capture NumPy information: {e}")
         
@@ -650,7 +649,7 @@ class EnvironmentCapture:
             if self.capture_frameworks:
                 env_info['frameworks'] = self.get_framework_information()
             
-            logger.debug(f"Captured environment metadata with {len(env_info)} categories")
+            pass
             
         except Exception as e:
             error_msg = f"Failed to capture environment metadata: {e}"
@@ -694,7 +693,7 @@ class EnvironmentCapture:
         """
         self._package_cache = None
         self._system_cache = None
-        logger.debug("Cleared environment capture cache")
+        pass
 
 
 class DatasetFingerprinter:
@@ -867,8 +866,7 @@ class DatasetFingerprinter:
                 'sorted_for_consistency': self.sort_for_consistency
             }
             
-            logger.debug(f"Generated DataFrame fingerprint: {content_hash[:16]}... "
-                        f"(shape: {df.shape}, sampled: {sampled_df.shape})")
+            pass
             
             return metadata
             
@@ -951,10 +949,9 @@ class DatasetFingerprinter:
                         'mean_value': float(np.mean(arr)) if arr.dtype.kind in ['i', 'f'] else None
                     })
                 except Exception as stats_error:
-                    logger.debug(f"Could not compute array statistics: {stats_error}")
+                    pass
             
-            logger.debug(f"Generated numpy array fingerprint: {content_hash[:16]}... "
-                        f"(shape: {original_shape}, sampled: {len(sampled_arr)})")
+            pass
             
             return metadata
             
@@ -1013,8 +1010,7 @@ class DatasetFingerprinter:
                 'is_sample': len(df) >= self.max_sample_size
             })
             
-            logger.debug(f"Generated file fingerprint for {file_path}: "
-                        f"{fingerprint_result.get('content_hash', 'N/A')[:16]}...")
+            pass
             
             return fingerprint_result
             
@@ -1070,8 +1066,7 @@ class DatasetFingerprinter:
                 'normalized_whitespace': self.normalize_whitespace
             }
             
-            logger.debug(f"Generated dictionary fingerprint: {content_hash[:16]}... "
-                        f"({len(data)} keys)")
+            pass
             
             return metadata
             
@@ -1178,8 +1173,7 @@ class DatasetFingerprinter:
                 if shape1 != shape2:
                     comparison['differences'].append(f'Different shapes/sizes: {shape1} vs {shape2}')
             
-            logger.debug(f"Fingerprint comparison: identical={comparison['identical']}, "
-                        f"content_match={comparison['content_match']}")
+            pass
             
             return comparison
             
@@ -1305,7 +1299,7 @@ class CaptureManager:
             try:
                 git_data = self.git_capture.capture()
                 capture_data['git'] = git_data
-                logger.debug("Successfully captured git information")
+                pass
             except Exception as e:
                 if not self.fail_silently:
                     raise
@@ -1317,7 +1311,7 @@ class CaptureManager:
             try:
                 env_data = self.env_capture.capture()
                 capture_data['environment'] = env_data
-                logger.debug("Successfully captured environment information")
+                pass
             except Exception as e:
                 if not self.fail_silently:
                     raise
@@ -1329,7 +1323,7 @@ class CaptureManager:
             try:
                 dataset_data = self._capture_datasets(datasets, lightweight)
                 capture_data['datasets'] = dataset_data
-                logger.debug(f"Successfully captured {len(dataset_data)} dataset fingerprints")
+                pass
             except Exception as e:
                 if not self.fail_silently:
                     raise

@@ -568,7 +568,7 @@ class StateEncoder:
             scores recovered from the tensor. Board colours are de-normalized
             back to absolute (white/black) using the recovered current_player.
         """
-        logger.debug(f"Decoding state tensor of shape {state_tensor.shape}")
+        pass
         game_state = GameState()
 
         # Recover side-to-move from the off-board sentinel cell (A1).
@@ -611,7 +611,7 @@ class StateEncoder:
         num_phase_values = len(GamePhase)
         phase_idx = int(round(phase_value * (num_phase_values - 1)))
         phase_idx = max(0, min(num_phase_values - 1, phase_idx))
-        logger.debug(f"Phase calculation: value={phase_value:.3f}, index={phase_idx}")
+        pass
         game_state.phase = GamePhase(phase_idx)
 
         # Count rings to determine rings_placed
@@ -626,8 +626,5 @@ class StateEncoder:
         game_state.white_score = max(0, RINGS_PER_PLAYER - white_rings)
         game_state.black_score = max(0, RINGS_PER_PLAYER - black_rings)
 
-        logger.debug(f"Decoded state - Phase: {game_state.phase.name}, "
-                     f"Current player: {game_state.current_player.name}, "
-                     f"White rings: {white_rings}, Black rings: {black_rings}, "
-                     f"White score: {game_state.white_score}, Black score: {game_state.black_score}")
+        pass
         return game_state

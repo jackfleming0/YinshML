@@ -258,7 +258,7 @@ class MemoryPool(Generic[T]):
             if self._statistics:
                 self._statistics.auto_growths += 1
                 
-            logger.debug(f"Pool auto-grew from {current_size} to {len(self._pool)} objects")
+            pass
             return True
             
         return False
@@ -398,14 +398,14 @@ class MemoryPool(Generic[T]):
                 # Grow the pool
                 if self.config.factory_func:
                     self._preallocate(new_size - current_size)
-                    logger.debug(f"Pool manually resized from {current_size} to {len(self._pool)} objects")
+                    pass
             elif new_size < current_size:
                 # Shrink the pool
                 excess = current_size - new_size
                 for _ in range(excess):
                     if self._pool:
                         self._pool.popleft()
-                logger.debug(f"Pool shrunk from {current_size} to {len(self._pool)} objects")
+                pass
                         
     def grow(self) -> bool:
         """Manually grow the pool using the configured growth policy.
@@ -532,7 +532,7 @@ class MemoryPool(Generic[T]):
             self._statistics.cleanup_duration += cleanup_duration
             
             if cleanup_count > 0:
-                logger.debug(f"Cleaned up {cleanup_count} idle objects in {cleanup_duration:.3f}s")
+                pass
                 
             return cleanup_count
     
@@ -563,7 +563,7 @@ class MemoryPool(Generic[T]):
             self._statistics.timeout_removals += timeout_count
             
             if timeout_count > 0:
-                logger.debug(f"Removed {timeout_count} objects due to timeout ({timeout_seconds}s)")
+                pass
                 
             return timeout_count
             
@@ -598,7 +598,7 @@ class MemoryPool(Generic[T]):
             name=f"MemoryPool-Cleanup-{id(self)}"
         )
         self._cleanup_thread.start()
-        logger.debug("Started cleanup scheduler")
+        pass
     
     def stop_cleanup_scheduler(self):
         """Stop the background cleanup thread."""
@@ -608,7 +608,7 @@ class MemoryPool(Generic[T]):
             if self._cleanup_thread.is_alive():
                 logger.warning("Cleanup thread did not stop within timeout")
             else:
-                logger.debug("Stopped cleanup scheduler")
+                pass
         
     def check_for_leaks(self) -> dict:
         """Detect potential memory leaks by analyzing object lifecycle.

@@ -79,25 +79,25 @@ class Board:
 
     def move_ring(self, source: Position, destination: Position) -> bool:
         """Move a ring from source to destination, flipping markers in between."""
-        logger.debug(f"Moving ring from {source} to {destination}")  # Debug
+        pass
 
         # Get the ring at the source position
         ring = self.get_piece(source)
-        logger.debug(f"Found ring: {ring}")  # Debug
+        pass
         if not ring or not ring.is_ring():
-            logger.debug("No ring at source position")
+            pass
             return False
 
         # Verify destination is empty
         if self.get_piece(destination):
-            logger.debug("Destination is occupied")
+            pass
             return False
 
         # CRITICAL FIX: Validate that destination is a legal move
         valid_destinations = self.valid_move_positions(source)
         if destination not in valid_destinations:
-            logger.debug(f"Destination {destination} is not a valid move from {source}")
-            logger.debug(f"Valid destinations are: {[str(pos) for pos in valid_destinations]}")
+            pass
+            pass
             return False
 
         # Calculate directional vector
@@ -121,13 +121,13 @@ class Board:
             next_pos = Position(new_col, new_row)
 
             if not is_valid_position(next_pos):
-                logger.debug(f"Invalid position in path: {next_pos}")
+                pass
                 return False
 
             positions_between.append(next_pos)
             current = next_pos
 
-        logger.debug(f"Positions between: {positions_between}")  # Debug
+        pass
 
         # Place marker at source position
         marker_type = (PieceType.WHITE_MARKER if ring == PieceType.WHITE_RING
@@ -151,17 +151,17 @@ class Board:
 
     def valid_move_positions(self, position: Position) -> List[Position]:
         """Get valid move destinations for a ring at the given position."""
-        logger.debug(f"\nChecking valid moves for position {position}")  # Debug
+        pass
 
         if not is_valid_position(position):
-            logger.debug(f"Position {position} is not valid")  # Debug
+            pass
             return []
 
         piece = self.get_piece(position)
-        logger.debug(f"Found piece: {piece}")  # Debug
+        pass
 
         if not piece or not piece.is_ring():
-            logger.debug(f"No ring at position {position}")  # Debug
+            pass
             return []
 
         valid_positions = []
@@ -177,7 +177,7 @@ class Board:
         ]
 
         for dx, dy in directions:
-            logger.debug(f"Checking direction dx={dx}, dy={dy}")  # Debug
+            pass
             current = position
             jumped_over_marker = False
 
@@ -190,17 +190,17 @@ class Board:
 
                 # Check if position is valid
                 if not is_valid_position(next_pos):
-                    logger.debug(f"Position {next_pos} is not valid")  # Debug
+                    pass
                     break
 
                 # Check what's at the next position
                 next_piece = self.get_piece(next_pos)
-                logger.debug(f"Checking position {next_pos}, found piece: {next_piece}")  # Debug
+                pass
 
                 if next_piece:
                     if next_piece.is_ring():
                         # Can't jump over rings
-                        logger.debug(f"Found ring at {next_pos}, stopping")  # Debug
+                        pass
                         break
                     else:
                         # Can jump over markers
@@ -214,7 +214,7 @@ class Board:
 
                 current = next_pos
 
-        logger.debug(f"Found valid moves: {valid_positions}")  # Debug
+        pass
         return valid_positions
 
     def get_rings_positions(self, player: Player) -> List[Position]:
@@ -281,9 +281,9 @@ class Board:
         start points along the same axis) are deduped via a set keyed on
         the sorted full-run position tuple.
         """
-        logger.debug(f"\nLooking for rows of {marker_type}")  # Debug
+        pass
         if not marker_type.is_marker():
-            logger.debug(f"{marker_type} is not a marker type")  # Debug
+            pass
             return []
 
         unique_rows = set()  # Dedupe by sorted full-run position tuple
@@ -294,11 +294,11 @@ class Board:
             if piece == marker_type
         ]
         positions.sort(key=lambda p: (p.column, p.row))  # Sort for consistent processing
-        logger.debug(f"Found markers at positions: {positions}")  # Debug
+        pass
 
         # Check each position for potential rows
         for start_pos in positions:
-            logger.debug(f"\nChecking for rows starting at {start_pos}")  # Debug
+            pass
 
             # Check in each of the 3 hex-axis forward directions. NOTE:
             # the previous inline list included the pseudo-diagonal
@@ -323,7 +323,7 @@ class Board:
                 # Walk the full run forward from start_pos.
                 row = [start_pos]
                 current = start_pos
-                logger.debug(f"\nChecking direction dx={dx}, dy={dy} from {start_pos}")  # Debug
+                pass
 
                 while True:
                     col_idx = ord(current.column) - ord('A')
@@ -331,22 +331,22 @@ class Board:
                     new_row = current.row + dy
                     next_pos = Position(new_col, new_row)
 
-                    logger.debug(f"  Checking position {next_pos}")  # Debug
+                    pass
 
                     if not is_valid_position(next_pos):
-                        logger.debug(f"  Position {next_pos} is not valid")  # Debug
+                        pass
                         break
 
                     piece = self.get_piece(next_pos)
-                    logger.debug(f"  Found piece: {piece}")  # Debug
+                    pass
 
                     if piece != marker_type:
-                        logger.debug(f"  Not a matching marker")  # Debug
+                        pass
                         break
 
                     row.append(next_pos)
                     current = next_pos
-                    logger.debug(f"  Current row: {row}")  # Debug
+                    pass
 
                 # If we found enough consecutive markers, record the
                 # full run (5, 6, or 7 positions).
@@ -355,7 +355,7 @@ class Board:
                     pos_strings = tuple(str(p) for p in sorted_positions)
                     if pos_strings not in unique_rows:
                         unique_rows.add(pos_strings)
-                        logger.debug(f"Found new unique row: {sorted_positions}")  # Debug
+                        pass
 
         # Convert back to Row objects
         rows = [
@@ -363,7 +363,7 @@ class Board:
             for pos_tuple in unique_rows
         ]
 
-        logger.debug(f"Found {len(rows)} unique rows: {rows}")  # Debug
+        pass
         return rows
 
     def _get_marker_row(self, start: Position, marker_type: PieceType, direction: Tuple[int, int]) -> List[Position]:
@@ -411,27 +411,27 @@ class Board:
 
     def is_valid_marker_sequence(self, positions: List[Position], player: Player) -> bool:
         """Check if a sequence of markers forms a valid row for removal."""
-        logger.debug(f"\nValidating marker sequence for {player}:")
-        logger.debug(f"Positions to check: {positions}")
+        pass
+        pass
 
         # 1. Check length
         if len(positions) != 5:
-            logger.debug(f"Wrong number of positions: {len(positions)}")
+            pass
             return False
 
         # 2. Sort positions first
         sorted_positions = sorted(positions, key=lambda p: (p.column, p.row))
-        logger.debug(f"Sorted positions: {[str(pos) for pos in sorted_positions]}")
+        pass
 
         # 3. Check all positions have correct markers
         marker_type = PieceType.WHITE_MARKER if player == Player.WHITE else PieceType.BLACK_MARKER
-        logger.debug(f"Expected marker type: {marker_type}")
+        pass
 
         for pos in sorted_positions:
             piece = self.get_piece(pos)
-            logger.debug(f"Position {pos}: found piece {piece}")
+            pass
             if piece != marker_type:
-                logger.debug(f"Wrong piece type at {pos}: expected {marker_type}, found {piece}")
+                pass
                 return False
 
         # 4. Check if positions form a valid line (horizontal, vertical, or diagonal)
@@ -449,9 +449,7 @@ class Board:
         # which is NOT a line on the YINSH board in this coordinate
         # system — would be accepted as a valid row.
         if (dx, dy) not in HEX_LINE_AXES:
-            logger.debug(
-                f"Sequence direction ({dx}, {dy}) is not a valid hex axis"
-            )
+            pass
             return False
 
         # Check if all subsequent positions follow the same direction
@@ -462,28 +460,28 @@ class Board:
             curr_dy = next_pos.row - curr.row
 
             if curr_dx != dx or curr_dy != dy:
-                logger.debug(f"Positions do not form a straight line: direction changes at position {i}")
+                pass
                 return False
 
             # Check if positions are consecutive
             if abs(curr_dx) > 1 or abs(curr_dy) > 1:
-                logger.debug(f"Positions are not consecutive: gap between {curr} and {next_pos}")
+                pass
                 return False
 
-        logger.debug("Sequence is valid!")
+        pass
         return True
 
     def _is_continuous_line(self, positions: List[Position]) -> bool:
         """Check if positions form a continuous line."""
         if len(positions) < 2:
-            logger.debug("Less than 2 positions")  # Debug
+            pass
             return True
 
         # Get direction from first two positions
         pos1, pos2 = positions[:2]
         dx = ord(pos2.column) - ord(pos1.column)
         dy = pos2.row - pos1.row
-        logger.debug(f"Direction: dx={dx}, dy={dy}")  # Debug
+        pass
 
         # Check each subsequent pair follows the same direction
         for i in range(1, len(positions) - 1):
@@ -492,10 +490,10 @@ class Board:
 
             curr_dx = ord(next_pos.column) - ord(curr.column)
             curr_dy = next_pos.row - curr.row
-            logger.debug(f"Checking pair {i}: {curr}->{next_pos}, dx={curr_dx}, dy={curr_dy}")  # Debug
+            pass
 
             if curr_dx != dx or curr_dy != dy:
-                logger.debug(f"Direction mismatch at position {i}")  # Debug
+                pass
                 return False
 
         return True
@@ -546,16 +544,16 @@ class Board:
 
     def is_empty(self, pos: Position) -> bool:
         """Check if a position is empty and valid."""
-        logger.debug(f"Checking if position {pos} is empty")
+        pass
 
         # First verify position is valid
         if not is_valid_position(pos):
-            logger.debug(f"Position {pos} is not valid")
+            pass
             return False
 
         # Then check if position has a piece
         has_piece = pos in self.pieces
-        logger.debug(f"Position has piece? {has_piece}")
+        pass
 
         return not has_piece
 

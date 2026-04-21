@@ -256,14 +256,7 @@ class HeuristicAgent:
             )
 
             if self.config.debug:
-                logger.debug(
-                    "HeuristicAgent depth %d completed=%s nodes=%d duration=%.4fs best=%s",
-                    depth,
-                    depth_completed,
-                    nodes_this_depth,
-                    depth_duration,
-                    f"{depth_score:.3f}" if depth_best is not None else "N/A",
-                )
+                pass
                 if depth_duration >= self.config.slow_warning_threshold:
                     logger.warning(
                         "HeuristicAgent depth %d exceeded slow threshold (%.4fs >= %.4fs)",
@@ -277,12 +270,7 @@ class HeuristicAgent:
                 best_score = depth_score
                 last_completed_depth = depth
             elif timed_out and self.config.debug:
-                logger.debug(
-                    "HeuristicAgent depth %d aborted due to time limit (elapsed %.4fs of %.4fs).",
-                    depth,
-                    time.perf_counter() - start_time,
-                    self.config.time_limit_seconds,
-                )
+                pass
 
             if not completed_depth:
                 break
@@ -550,15 +538,9 @@ class HeuristicAgent:
         }
         if not self.config.debug:
             return
-        logger.debug(
-            "HeuristicAgent summary: depth=%d nodes=%d duration=%.4fs timed_out=%s",
-            depth_reached,
-            self._nodes_searched,
-            duration,
-            timed_out,
-        )
+        pass
         if nodes_per_second:
-            logger.debug("HeuristicAgent throughput: %.1f nodes/sec", nodes_per_second)
+            pass
 
     def _validate_config(self) -> None:
         """Ensure configuration values are within expected bounds."""

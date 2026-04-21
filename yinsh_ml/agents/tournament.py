@@ -480,7 +480,7 @@ class TournamentEvaluator:
             with open(output_file, "w") as f:
                 json.dump(data, f, indent=2)
             
-            logger.debug(f"Saved tournament results to {output_path}")
+            pass
         except Exception as e:
             logger.warning(f"Failed to save tournament results: {e}")
     

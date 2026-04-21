@@ -49,18 +49,18 @@ class RandomMovePolicy:
             logger.warning("No valid moves available")
             return None
         
-        logger.debug(f"Found {len(valid_moves)} valid moves for {game_state.current_player}")
+        pass
         
         # Decide between random and rule-based move
         if random.random() < self.config.rule_based_probability:
             move = self._select_rule_based_move(valid_moves, game_state)
             if move:
-                logger.debug(f"Selected rule-based move: {move}")
+                pass
                 return move
         
         # Fall back to random selection
         move = random.choice(valid_moves)
-        logger.debug(f"Selected random move: {move}")
+        pass
         return move
     
     def _select_rule_based_move(self, valid_moves: List[Move], game_state: GameState) -> Optional[Move]:

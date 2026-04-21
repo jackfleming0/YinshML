@@ -83,7 +83,7 @@ class ParquetDataStorage:
         self.current_batch.append(game_record)
         
         # Write batch when it reaches batch_size
-        logger.debug(f"Current batch size: {len(self.current_batch)}, target: {self.config.batch_size}")
+        pass
         if len(self.current_batch) >= self.config.batch_size:
             logger.info(f"Batch size reached, writing batch")
             self._write_batch()

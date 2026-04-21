@@ -133,7 +133,7 @@ class GameExperience:
                     values = [values[i] for i in keep_indices]  # Fix #1: Also subsample values
                     move_numbers = [move_numbers[i] for i in keep_indices]
 
-                    logger.debug(f"[Memory Opt] Reduced long game from {len(states)} → {len(keep_indices)} states")
+                    pass
 
         # Helper to decode phases from channel 5
         def decode_phase(state: np.ndarray) -> str:
@@ -201,7 +201,7 @@ class GameExperience:
                         augmented_count += 1
 
                 except Exception as e:
-                    logger.debug(f"Augmentation failed for state {idx}: {e}")
+                    pass
 
             # Track total states for memory monitoring
             self._total_states_added += 1
@@ -213,8 +213,7 @@ class GameExperience:
 
         # Log information about the replay buffer (debug level to avoid spam)
         aug_info = f", augmented={augmented_count}" if self.enable_augmentation else ""
-        logger.debug(f"[Replay Buffer] Added game with scores W={final_white_score}, B={final_black_score}, "
-                     f"margin={normalized_margin:.3f}, original={original_count}{aug_info}. Replay size={self.size()}")
+        pass
 
         # Periodically check memory usage
         if self._total_states_added - self._last_memory_check > self._memory_check_interval:
@@ -242,8 +241,7 @@ class GameExperience:
                 item_size = state_size + policy_size + 16  # Extra for values/phases
                 buffer_mb = (item_size * len(self.states)) / (1024 * 1024)
 
-                logger.debug(
-                    f"[Memory Monitor] Process: {memory_mb:.1f}MB, Buffer: ~{buffer_mb:.1f}MB, States: {len(self.states)}")
+                pass
 
                 # If memory is getting high, force garbage collection
                 # NOTE: Buffer reduction disabled - was causing training plateau by destroying data
@@ -268,7 +266,7 @@ class GameExperience:
 
                         logger.warning(f"[Memory Manager] Reduced buffer from {current_size} to {len(self.states)} states (extreme memory pressure)")
         except Exception as e:
-            logger.debug(f"[Memory Monitor] Error checking memory: {e}")
+            pass
 
     def save_buffer(self, path: str, compress: bool = True):
         """Save the replay buffer to disk with compression option."""
@@ -403,7 +401,7 @@ class GameExperience:
             phase_counts = {"RING_PLACEMENT": 0, "MAIN_GAME": 0, "RING_REMOVAL": 0}
             for idx in indices:
                 phase_counts[self.phases[idx]] += 1
-            logger.debug(f"[Batch Stats] Phase distribution: {phase_counts}")
+            pass
 
         return states, probs, values.unsqueeze(1)
 

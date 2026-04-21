@@ -110,7 +110,7 @@ class DataLoader:
         
         # Check cache first
         if use_cache and self._is_cache_valid(cache_key):
-            logger.debug("Using cached data")
+            pass
             df = self._cache[cache_key]
             metrics = LoadingMetrics(
                 total_games=len(df),
@@ -578,8 +578,7 @@ class PerformanceTracker:
     def record_loading_metrics(self, metrics: LoadingMetrics) -> None:
         """Record loading metrics."""
         self.metrics_history.append(metrics)
-        logger.debug(f"Recorded metrics: {metrics.games_per_second:.1f} games/sec, "
-                    f"{metrics.mb_per_second:.1f} MB/sec")
+        pass
     
     def get_performance_summary(self, duration_hours: float = 24) -> Dict[str, Any]:
         """Get performance summary over time period."""

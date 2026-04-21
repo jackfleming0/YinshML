@@ -311,7 +311,7 @@ def _parse_command(cmd: str, player: str) -> Optional[Dict]:
         return None
 
     # Unknown command — log and skip
-    logger.debug(f"Skipping unknown Boardspace command: {cmd!r}")
+    pass
     return None
 
 

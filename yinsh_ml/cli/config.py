@@ -71,7 +71,7 @@ class CLIConfig:
         
         for config_path in config_locations:
             if config_path.exists() and config_path.is_file():
-                logger.debug(f"Found config file: {config_path}")
+                pass
                 return str(config_path)
         
         return None
@@ -84,7 +84,7 @@ class CLIConfig:
                 with open(self._config_file, 'r') as f:
                     file_config = json.load(f)
                     self._config.update(file_config)
-                    logger.debug(f"Loaded config from {self._config_file}")
+                    pass
             except (json.JSONDecodeError, IOError) as e:
                 logger.warning(f"Failed to load config file {self._config_file}: {e}")
         
@@ -128,15 +128,15 @@ class CLIConfig:
             os.environ['YINSH_TENSORBOARD_PORT'] = str(self._config.get('tensorboard_port', 6006))
             os.environ['YINSH_TENSORBOARD_HOST'] = str(self._config.get('tensorboard_host', '0.0.0.0'))
             
-            logger.debug(f"TensorBoard environment configured:")
-            logger.debug(f"  YINSH_TENSORBOARD_LOGGING = {os.environ['YINSH_TENSORBOARD_LOGGING']}")
-            logger.debug(f"  YINSH_TENSORBOARD_LOG_DIR = {os.environ['YINSH_TENSORBOARD_LOG_DIR']}")
-            logger.debug(f"  YINSH_TENSORBOARD_PORT = {os.environ['YINSH_TENSORBOARD_PORT']}")
-            logger.debug(f"  YINSH_TENSORBOARD_HOST = {os.environ['YINSH_TENSORBOARD_HOST']}")
+            pass
+            pass
+            pass
+            pass
+            pass
         else:
             # Disable TensorBoard logging if explicitly disabled
             os.environ['YINSH_TENSORBOARD_LOGGING'] = 'false'
-            logger.debug("TensorBoard logging disabled by configuration")
+            pass
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value."""

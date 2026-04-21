@@ -138,7 +138,7 @@ def reset_game_state(game_state: GameState) -> GameState:
         game_state._last_regular_player = None
         
         reset_time = time.time() - start_time
-        logger.debug(f"GameState reset completed in {reset_time:.6f}s")
+        pass
         
         return game_state
         
@@ -315,8 +315,7 @@ class GameStatePool(MemoryPool[GameState]):
                 self._game_statistics.record_mcts_batch(count, from_pool)
                 
             allocation_time = time.time() - start_time
-            logger.debug(f"Allocated batch of {count} GameStates in {allocation_time:.6f}s "
-                        f"({from_pool} from pool, {count - from_pool} new)")
+            pass
                         
             return batch
             
@@ -342,7 +341,7 @@ class GameStatePool(MemoryPool[GameState]):
                 logger.warning(f"Failed to return GameState to pool: {e}")
                 
         return_time = time.time() - start_time
-        logger.debug(f"Returned {returned}/{len(game_states)} GameStates in {return_time:.6f}s")
+        pass
         
     def return_obj(self, obj: GameState):
         """Return a GameState object to the pool with reset and validation.
@@ -381,7 +380,7 @@ class GameStatePool(MemoryPool[GameState]):
             super().return_obj(obj)
             
             total_time = time.time() - start_time
-            logger.debug(f"GameState returned to pool in {total_time:.6f}s")
+            pass
             
         except Exception as e:
             if self._game_statistics:
