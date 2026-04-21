@@ -1,6 +1,6 @@
 version: 1
 device: auto
-num_iterations: 1
+num_iterations: 2
 save_dir: runs_smoke
 self_play:
   num_simulations: 8
@@ -15,6 +15,11 @@ self_play:
   annealing_steps: 6
   temp_clamp_fraction: 0.5
   games_per_iteration: 2
+  enable_subtree_reuse: true   # Smoke exercises the reuse code path
+  fpu_reduction: 0.25          # Exercise the FPU code path in smoke
+  epsilon_mix_start: 0.25      # Exercise the epsilon-mix taper path
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 10  # Smoke games are short — taper within 10 moves
 trainer:
   batch_size: 64
   l2_reg: 0.0
@@ -23,9 +28,31 @@ trainer:
   value_loss_weights: [0.5, 0.5]
   epochs_per_iteration: 1
   batches_per_epoch: auto
+  # Smoke: aggressive decay so a handful of batches visibly move the shadow.
+  # Production config uses 0.999; here we just want to prove the wiring.
+  ema_decay: 0.9
+  use_ema_for_eval: true
+  soft_value_target_sigma: 0.5  # Exercise soft-target CE path in smoke
+  lr_schedule: cosine           # Exercise cosine+warmup scheduler path in smoke
+  warmup_epochs: 1              # 1 warmup epoch in 2-iter × 1-epoch smoke
+  enable_autocast: true         # Exercise bf16 autocast path in smoke
+  # Track B §5 search-consistency probe — exercise the path in smoke with
+  # tiny budgets. warmup_iters=0 fires on iter 1; every_k_steps=2 makes the
+  # cadence visible in a 2-iter × 1-epoch smoke. Production config defaults
+  # to enabled=false; smoke flips it on so the wiring stays exercised.
+  search_consistency:
+    enabled: true
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 2
+    long_sims: 4
+    batch_size: 4
+    warmup_iters: 0
 arena:
   games_per_match: 10
   promotion_threshold: 0.55
+  eval_seed: 424242          # Deterministic smoke arena — makes tournament output
+                             # reproducible across smoke runs.
 export:
   export_every: 0
   coreml_dir: models/coreml

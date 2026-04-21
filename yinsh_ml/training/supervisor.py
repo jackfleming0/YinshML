@@ -146,9 +146,34 @@ class TrainingSupervisor:
         value_loss_weights = self.mode_settings.get('value_loss_weights', (0.5, 0.5))
         discrimination_weight = self.mode_settings.get('discrimination_weight', 0.5)
         max_buffer_size = self.mode_settings.get('max_buffer_size', 10000)  # Default 10K for backward compatibility
-        base_lr = self.mode_settings.get('lr', 0.001)
-        lr_schedule = self.mode_settings.get('lr_schedule', 'constant')
-        warmup_steps = self.mode_settings.get('warmup_steps', 0)
+        base_lr = float(self.mode_settings.get('lr', 1e-3))
+        # LR schedule knobs. Default cosine-with-warmup; set lr_schedule: 'step'
+        # to fall back to the legacy StepLR(step_size=10, gamma=0.9).
+        lr_schedule = self.mode_settings.get('lr_schedule', 'cosine')
+        warmup_epochs = int(self.mode_settings.get('warmup_epochs', 0))
+        total_epochs = int(self.mode_settings.get('total_epochs', 200))
+        # bf16 autocast for forward + loss. Auto-disabled on CPU.
+        enable_autocast = bool(self.mode_settings.get('enable_autocast', True))
+        # Search-consistency probe (Track B §5). Off by default; flip
+        # `enable_search_consistency: true` in trainer config to arm.
+        enable_search_consistency = bool(self.mode_settings.get('enable_search_consistency', False))
+        search_consistency_weight = float(self.mode_settings.get('search_consistency_weight', 0.1))
+        search_consistency_value_weight = float(self.mode_settings.get('search_consistency_value_weight', 1.0))
+        search_consistency_every_k_steps = int(self.mode_settings.get('search_consistency_every_k_steps', 10))
+        search_consistency_long_sims = int(self.mode_settings.get('search_consistency_long_sims', 64))
+        search_consistency_batch_size = int(self.mode_settings.get('search_consistency_batch_size', 32))
+        search_consistency_warmup_iters = int(self.mode_settings.get('search_consistency_warmup_iters', 3))
+        # EMA eval target — None disables entirely. When set, the trainer keeps
+        # a shadow copy updated after every optimizer step, and the supervisor
+        # saves a sibling `_ema.pt` checkpoint that the tournament consumes.
+        ema_decay = self.mode_settings.get('ema_decay', None)
+        # Gaussian soft value targets. σ in class-widths; 0 disables (hard CE).
+        soft_value_target_sigma = float(self.mode_settings.get('soft_value_target_sigma', 0.5))
+        self._use_ema_for_eval = bool(self.mode_settings.get('use_ema_for_eval', True))
+        # Deterministic tournament eval: when set, every match play is reproducible
+        # across runs. `None` keeps the old non-deterministic behavior.
+        _raw_eval_seed = self.mode_settings.get('eval_seed', None)
+        self._eval_seed = int(_raw_eval_seed) if _raw_eval_seed is not None else None
 
         # Augmentation settings (Phase 2 architectural improvements)
         enable_augmentation = self.mode_settings.get('enable_augmentation', False)
@@ -187,6 +212,15 @@ class TrainingSupervisor:
         # Extract batched MCTS parameters (Phase 2.1)
         use_batched_mcts = self.mode_settings.get('use_batched_mcts', True)
         mcts_batch_size = self.mode_settings.get('mcts_batch_size', 32)
+        # Subtree reuse: carry MCTS tree across moves within each self-play game
+        # (Track A polish item). Default on — disable via config for A/B testing.
+        enable_subtree_reuse = bool(self.mode_settings.get('enable_subtree_reuse', True))
+        # First-Play Urgency reduction (PUCT). 0 disables; KataGo default 0.25.
+        fpu_reduction = float(self.mode_settings.get('fpu_reduction', 0.25))
+        # Root Dirichlet noise mixing schedule (taper early-game → late-game).
+        epsilon_mix_start = float(self.mode_settings.get('epsilon_mix_start', 0.25))
+        epsilon_mix_end = float(self.mode_settings.get('epsilon_mix_end', 0.0))
+        epsilon_mix_taper_moves = int(self.mode_settings.get('epsilon_mix_taper_moves', 20))
 
         _mcts_config_for_init = { # Use temporary name to avoid confusion
             'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
@@ -206,6 +240,11 @@ class TrainingSupervisor:
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,
             'temp_clamp_fraction': temp_clamp_fraction,
+            'enable_subtree_reuse': enable_subtree_reuse,
+            'fpu_reduction': fpu_reduction,
+            'epsilon_mix_start': epsilon_mix_start,
+            'epsilon_mix_end': epsilon_mix_end,
+            'epsilon_mix_taper_moves': epsilon_mix_taper_moves,
         }
 
         self.self_play = SelfPlay(
@@ -237,6 +276,20 @@ class TrainingSupervisor:
             # Augmentation settings (Phase 2 architectural improvements)
             enable_augmentation=enable_augmentation,
             max_augmentations=max_augmentations,
+            ema_decay=ema_decay,
+            soft_value_target_sigma=soft_value_target_sigma,
+            base_lr=base_lr,
+            lr_schedule=lr_schedule,
+            warmup_epochs=warmup_epochs,
+            total_epochs=total_epochs,
+            enable_autocast=enable_autocast,
+            enable_search_consistency=enable_search_consistency,
+            search_consistency_weight=search_consistency_weight,
+            search_consistency_value_weight=search_consistency_value_weight,
+            search_consistency_every_k_steps=search_consistency_every_k_steps,
+            search_consistency_long_sims=search_consistency_long_sims,
+            search_consistency_batch_size=search_consistency_batch_size,
+            search_consistency_warmup_iters=search_consistency_warmup_iters,
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,
             # lr_schedule = lr_schedule,
@@ -247,19 +300,10 @@ class TrainingSupervisor:
         self.logger.info(f"Trainer initialized with buffer size: {max_buffer_size:,} samples "
                          f"({max_buffer_size/1000:.0f}K, ~{max_buffer_size/100:.0f} games at 100 moves each)")
 
-        # --- Configure Trainer Optimizers/Schedulers based on mode_settings ---
-        # This assumes YinshTrainer exposes methods or attributes to configure these
-        # If Trainer creates optimizers in __init__, we need to pass parameters there.
-        # Let's assume Trainer's __init__ handles this based on passed params (like base_lr, value_head_lr_factor, etc.)
-        # We already passed necessary factors/weights above. If base_lr needs explicit setting:
-        if hasattr(self.trainer, 'policy_optimizer') and hasattr(self.trainer, 'value_optimizer'):
-            self.trainer.policy_optimizer.param_groups[0]['lr'] = base_lr
-            self.trainer.value_optimizer.param_groups[0]['lr'] = base_lr * value_head_lr_factor
-            # Re-initialize schedulers if LR changes significantly or schedule type changes
-            # self.trainer.reinitialize_schedulers(lr_schedule, warmup_steps, ...) # Hypothetical method
-            self.logger.info(f"Trainer optimizers configured: Base LR={base_lr}, Value Factor={value_head_lr_factor}")
-        else:
-             self.logger.warning("Could not find optimizers on Trainer to configure LR directly. Assuming Trainer handles it internally.")
+        self.logger.info(
+            f"Trainer optimizers configured: Base LR={base_lr}, Value Factor={value_head_lr_factor}, "
+            f"Schedule={lr_schedule}, Warmup={warmup_epochs}, TotalEpochs={total_epochs}"
+        )
 
 
         # self.visualizer = TrainingVisualizer() # Keep if used
@@ -275,9 +319,20 @@ class TrainingSupervisor:
             training_dir=self.save_dir, # Tournaments evaluate models within this run's directory
             device=self.device,
             games_per_match=self.tournament_games, # Use the value passed to supervisor
-            sliding_window_size=tournament_window
+            sliding_window_size=tournament_window,
+            use_ema_for_eval=self._use_ema_for_eval,
+            eval_seed=self._eval_seed,
         )
-        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}, Window={tournament_window}")
+        ema_state = (
+            f"ema_decay={ema_decay}, use_ema_for_eval={self._use_ema_for_eval}"
+            if ema_decay is not None else "EMA disabled"
+        )
+        seed_state = (
+            f"eval_seed={self._eval_seed} (deterministic)"
+            if self._eval_seed is not None else "eval_seed=None (stochastic)"
+        )
+        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}, "
+                         f"Window={tournament_window}, {ema_state}, {seed_state}")
 
 
         # --- Best Model Tracking ---
@@ -853,6 +908,22 @@ class TrainingSupervisor:
         self.network.save_model(str(checkpoint_path))
         self.logger.info(f"Candidate checkpoint saved to {checkpoint_path}")
 
+        # Sibling EMA checkpoint for tournament eval. We swap the EMA weights
+        # into the live module only long enough to write the file, then put
+        # the live weights back — the trainer's next optimizer step needs the
+        # unsmoothed weights in place, not the EMA copy.
+        ema = getattr(self.trainer, 'ema', None)
+        if ema is not None:
+            ema_checkpoint_path = checkpoint_path.with_name(
+                checkpoint_path.stem + '_ema.pt'
+            )
+            ema.swap_into(self.network.network)
+            try:
+                self.network.save_model(str(ema_checkpoint_path))
+                self.logger.info(f"EMA checkpoint saved to {ema_checkpoint_path}")
+            finally:
+                ema.restore(self.network.network)
+
         # MEMORY-OPTIMIZATION: Check checkpoint file size
         try:
             import os
@@ -1407,13 +1478,18 @@ class TrainingSupervisor:
             pass
 
     def _reinitialize_optimizers(self):
-        """Reinitialize optimizers to clear all state (momentum, Adam buffers, etc.)"""
+        """Reinitialize optimizers to clear all state (momentum, Adam buffers, etc.).
+
+        After recreating the optimizers, we rebuild the schedulers via
+        `trainer._build_schedulers(resume_epoch=trainer._global_epoch)` so
+        cosine-annealing picks up at the correct point in its curve — without
+        this, we'd either restart cosine from iteration 0 every iter (LR never
+        actually anneals), or we'd be at whatever point StepLR happened to be
+        at (the legacy behavior, coincidentally near-correct because StepLR's
+        state was implicitly recreated at `param_groups[0]['lr']`).
+        """
         try:
             self.logger.info("Reinitializing optimizers to clear state...")
-
-            # Get current learning rates before reinit
-            policy_lr = self.trainer.policy_optimizer.param_groups[0]['lr']
-            value_lr = self.trainer.value_optimizer.param_groups[0]['lr']
 
             # Separate out parameters for policy vs. value heads
             value_params = [p for n, p in self.trainer.network.network.named_parameters()
@@ -1421,36 +1497,33 @@ class TrainingSupervisor:
             policy_params = [p for n, p in self.trainer.network.network.named_parameters()
                              if 'value_head' not in n]
 
-            # Recreate optimizers with current learning rates
+            # Recreate optimizers at base LR — `_build_schedulers` will fast-
+            # forward to the correct point of the cosine curve.
             import torch.optim as optim
 
             self.trainer.policy_optimizer = optim.Adam(
                 policy_params,
-                lr=policy_lr,
+                lr=self.trainer._base_policy_lr,
                 weight_decay=1e-4
             )
 
             self.trainer.value_optimizer = optim.SGD(
                 value_params,
-                lr=value_lr,
+                lr=self.trainer._base_value_lr,
                 momentum=0.9,
                 weight_decay=1e-3
             )
 
-            # Recreate schedulers
-            self.trainer.policy_scheduler = optim.lr_scheduler.StepLR(
-                self.trainer.policy_optimizer,
-                step_size=10,
-                gamma=0.9
-            )
+            # Rebuild schedulers and fast-forward to the current global epoch
+            # so cosine state is preserved across the reset.
+            self.trainer._build_schedulers(resume_epoch=self.trainer._global_epoch)
 
-            self.trainer.value_scheduler = optim.lr_scheduler.StepLR(
-                self.trainer.value_optimizer,
-                step_size=10,
-                gamma=0.9
+            policy_lr = self.trainer.policy_optimizer.param_groups[0]['lr']
+            value_lr = self.trainer.value_optimizer.param_groups[0]['lr']
+            self.logger.info(
+                f"Optimizers reinitialized at epoch {self.trainer._global_epoch} "
+                f"(policy_lr={policy_lr:.6f}, value_lr={value_lr:.6f})"
             )
-
-            self.logger.info(f"Optimizers reinitialized (policy_lr={policy_lr:.6f}, value_lr={value_lr:.6f})")
 
         except Exception as e:
             self.logger.error(f"Error reinitializing optimizers: {e}")

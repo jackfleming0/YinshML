@@ -240,6 +240,11 @@ def main() -> None:
         'max_depth': int(sp.get('max_depth', 300)),
         'use_batched_mcts': bool(sp.get('use_batched_mcts', True)),
         'mcts_batch_size': int(sp.get('mcts_batch_size', 32)),
+        'enable_subtree_reuse': bool(sp.get('enable_subtree_reuse', True)),
+        'fpu_reduction': float(sp.get('fpu_reduction', 0.25)),
+        'epsilon_mix_start': float(sp.get('epsilon_mix_start', 0.25)),
+        'epsilon_mix_end': float(sp.get('epsilon_mix_end', 0.0)),
+        'epsilon_mix_taper_moves': int(sp.get('epsilon_mix_taper_moves', 20)),
         'initial_temp': float(sp.get('initial_temp', 1.0)),
         'final_temp': float(sp.get('final_temp', 0.1)),
         'annealing_steps': int(sp.get('annealing_steps', 30)),
@@ -253,6 +258,60 @@ def main() -> None:
         'batches_per_epoch': trainer_cfg.get('batches_per_epoch', 'auto'),
         'max_buffer_size': int(trainer_cfg.get('max_buffer_size', 10000)),
         'discrimination_weight': float(trainer_cfg.get('discrimination_weight', 0.5)),
+        # EMA eval target. `ema_decay=None` disables the shadow entirely; set it
+        # to e.g. 0.999 to have the trainer track a smoothed copy that the
+        # tournament plays with instead of the single-step-noisy live weights.
+        'ema_decay': (float(trainer_cfg['ema_decay'])
+                      if trainer_cfg.get('ema_decay') is not None else None),
+        'use_ema_for_eval': bool(trainer_cfg.get('use_ema_for_eval', True)),
+        # Gaussian soft value targets. σ in class-widths; 0 = hard one-hot CE.
+        'soft_value_target_sigma': float(trainer_cfg.get('soft_value_target_sigma', 0.5)),
+        # LR schedule: 'cosine' (default) or 'step' for the legacy StepLR(step_size=10, gamma=0.9).
+        'lr_schedule': trainer_cfg.get('lr_schedule', 'cosine'),
+        'warmup_epochs': int(trainer_cfg.get('warmup_epochs', 0)),
+        # bf16 autocast for training forward + loss. Auto-disabled on CPU.
+        'enable_autocast': bool(trainer_cfg.get('enable_autocast', True)),
+        # Search-consistency probe (Track B §5). Off by default. Reads from a
+        # nested `trainer.search_consistency:` block when present so the YAML
+        # stays organized; falls back to flat `trainer.search_consistency_*`
+        # keys for ergonomics.
+        'enable_search_consistency': bool(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'enabled', trainer_cfg.get('enable_search_consistency', False)
+            )
+        ),
+        'search_consistency_weight': float(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'policy_weight', trainer_cfg.get('search_consistency_weight', 0.1)
+            )
+        ),
+        'search_consistency_value_weight': float(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'value_weight', trainer_cfg.get('search_consistency_value_weight', 1.0)
+            )
+        ),
+        'search_consistency_every_k_steps': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'every_k_steps', trainer_cfg.get('search_consistency_every_k_steps', 10)
+            )
+        ),
+        'search_consistency_long_sims': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'long_sims', trainer_cfg.get('search_consistency_long_sims', 64)
+            )
+        ),
+        'search_consistency_batch_size': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'batch_size', trainer_cfg.get('search_consistency_batch_size', 32)
+            )
+        ),
+        'search_consistency_warmup_iters': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'warmup_iters', trainer_cfg.get('search_consistency_warmup_iters', 3)
+            )
+        ),
+        # Cosine horizon = full training run in epochs. Scaled below when we
+        # know num_iterations × epochs_per_iteration.
         # Augmentation settings (Phase 2 architectural improvements)
         'enable_augmentation': enable_augmentation,
         'max_augmentations': int(max_augmentations),
@@ -265,7 +324,15 @@ def main() -> None:
         # Arena / gating
         'promotion_threshold': float(arena_cfg.get('promotion_threshold', 0.55)),
         'tournament_sliding_window': int(arena_cfg.get('tournament_sliding_window', 5)),
+        # Deterministic tournament seed. Leave unset (or null) for stochastic play.
+        'eval_seed': arena_cfg.get('eval_seed', None),
     }
+
+    games_per_iteration = int(sp.get('games_per_iteration', 50))
+    epochs_per_iteration = int(trainer_cfg.get('epochs_per_iteration', 40))  # INCREASED: from 4 to 40 for better training
+    # Compute the cosine horizon from the outer training loop's full epoch count
+    # so the LR curve is scaled to the run, not to a single iteration.
+    mode_settings['total_epochs'] = num_iterations * epochs_per_iteration
 
     # Instantiate network and supervisor
     network = NetworkWrapper(device=device, use_enhanced_encoding=use_enhanced_encoding)
@@ -279,9 +346,6 @@ def main() -> None:
         mcts_simulations=int(sp.get('num_simulations', 96)),
         mode_settings=mode_settings,
     )
-
-    games_per_iteration = int(sp.get('games_per_iteration', 50))
-    epochs_per_iteration = int(trainer_cfg.get('epochs_per_iteration', 40))  # INCREASED: from 4 to 40 for better training
 
     # Load checkpoint if resuming
     if checkpoint_to_load:
