@@ -104,29 +104,44 @@ class MoveGenerator:
 
     @staticmethod
     def _get_marker_removal_moves(board: 'Board', player: Player) -> List[Move]:
-        """Get all valid marker removal moves."""
+        """Get all valid marker removal moves.
+
+        Real YINSH: when a player completes a row of 5+ same-color
+        markers, they choose ANY 5 consecutive markers from that run to
+        remove. ``find_marker_rows`` now returns the full run of
+        contiguous markers along a hex axis (length 5, 6, or 7), and
+        this function enumerates every length-5 window across it.
+
+        Windows are sorted into a canonical (column, row) order before
+        deduping via a ``frozenset`` so the same 5-window reachable from
+        overlapping 6/7-runs on the same axis is only emitted once.
+        """
         moves = []
         marker_type = PieceType.WHITE_MARKER if player == Player.WHITE else PieceType.BLACK_MARKER
 
-        # Get all rows of the player's markers
         rows = board.find_marker_rows(marker_type)
         logger.debug(f"Found {len(rows)} rows of {marker_type}")
 
+        seen_windows = set()
         for row in rows:
-            if len(row.positions) >= 5:
-                # For each possible sequence of 5 consecutive markers
-                for i in range(len(row.positions) - 4):
-                    # Convert slice to tuple immediately
-                    markers = tuple(row.positions[i:i + 5])
-
-                    # Create the move with tuple of markers
-                    logger.debug(f"Creating move with markers: {[str(m) for m in markers]}")
-                    move = Move(
-                        type=MoveType.REMOVE_MARKERS,
-                        player=player,
-                        markers=markers
-                    )
-                    moves.append(move)
+            if len(row.positions) < 5:
+                continue
+            # row.positions is sorted (column, row); every 5-consecutive
+            # slice along the run is a legal REMOVE_MARKERS candidate.
+            for i in range(len(row.positions) - 4):
+                window = tuple(row.positions[i:i + 5])
+                key = frozenset(window)
+                if key in seen_windows:
+                    continue
+                seen_windows.add(key)
+                logger.debug(
+                    f"Creating move with markers: {[str(m) for m in window]}"
+                )
+                moves.append(Move(
+                    type=MoveType.REMOVE_MARKERS,
+                    player=player,
+                    markers=window,
+                ))
 
         logger.debug(f"Generated {len(moves)} valid marker removal moves")
         return moves

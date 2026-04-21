@@ -12,7 +12,9 @@ from .constants import (
     PieceType,
     is_valid_position,
     RINGS_PER_PLAYER,
-    MARKERS_FOR_ROW
+    MARKERS_FOR_ROW,
+    DIRECTIONS,
+    HEX_LINE_AXES,
 )
 
 # Setup logger
@@ -265,13 +267,26 @@ class Board:
         return markers
 
     def find_marker_rows(self, marker_type: PieceType) -> List[Row]:
-        """Find all rows of markers of the given type."""
+        """Find all maximal runs of contiguous same-color markers along a
+        hex axis whose length is >= MARKERS_FOR_ROW (5).
+
+        Real YINSH allows rows of 6 or 7 markers: a player may extend a
+        5-in-a-line with additional markers before completing the row,
+        and when the row is completed they may choose ANY 5 consecutive
+        markers from the run to remove. We therefore return the FULL run
+        here (5, 6, or 7 positions), and let the move generator
+        enumerate every length-5 window across it.
+
+        Duplicate runs (same set of positions detected from multiple
+        start points along the same axis) are deduped via a set keyed on
+        the sorted full-run position tuple.
+        """
         logger.debug(f"\nLooking for rows of {marker_type}")  # Debug
         if not marker_type.is_marker():
             logger.debug(f"{marker_type} is not a marker type")  # Debug
             return []
 
-        unique_rows = set()  # Use a set to store unique rows
+        unique_rows = set()  # Dedupe by sorted full-run position tuple
 
         # Get all positions with the marker type
         positions = [
@@ -285,22 +300,32 @@ class Board:
         for start_pos in positions:
             logger.debug(f"\nChecking for rows starting at {start_pos}")  # Debug
 
-            # Check in each direction
-            directions = [
-                (0, 1),  # Vertical (up)
-                (1, 0),  # Horizontal
-                (1, 1),  # Diagonal up-right
-                (-1, 1),  # Diagonal up-left
-            ]
+            # Check in each of the 3 hex-axis forward directions. NOTE:
+            # the previous inline list included the pseudo-diagonal
+            # (-1, 1), which is NOT a real hex axis in this (col, row)
+            # coordinate system and produced spurious "rows". See
+            # yinsh_ml/game/constants.py::DIRECTIONS for the single
+            # source of truth.
+            for dx, dy in DIRECTIONS:
+                # Only walk forward from start_pos — to avoid counting a
+                # longer run multiple times, skip this (start_pos, axis)
+                # if the previous cell in the axis is also a matching
+                # marker (i.e. start_pos is not the run's lower end).
+                prev_col_idx = ord(start_pos.column) - ord('A') - dx
+                prev_row = start_pos.row - dy
+                if 0 <= prev_col_idx < 11:
+                    prev_col = chr(ord('A') + prev_col_idx)
+                    prev_pos = Position(prev_col, prev_row)
+                    if (is_valid_position(prev_pos)
+                            and self.get_piece(prev_pos) == marker_type):
+                        continue
 
-            for dx, dy in directions:
-                # Try to build row in this direction
+                # Walk the full run forward from start_pos.
                 row = [start_pos]
                 current = start_pos
                 logger.debug(f"\nChecking direction dx={dx}, dy={dy} from {start_pos}")  # Debug
 
-                # Check up to 4 more positions in this direction
-                for i in range(MARKERS_FOR_ROW - 1):
+                while True:
                     col_idx = ord(current.column) - ord('A')
                     new_col = chr(ord('A') + col_idx + dx)
                     new_row = current.row + dy
@@ -323,11 +348,10 @@ class Board:
                     current = next_pos
                     logger.debug(f"  Current row: {row}")  # Debug
 
-                # If we found enough consecutive markers, we have a row
+                # If we found enough consecutive markers, record the
+                # full run (5, 6, or 7 positions).
                 if len(row) >= MARKERS_FOR_ROW:
-                    # Sort positions to ensure consistent order for comparison
-                    sorted_positions = sorted(row[:MARKERS_FOR_ROW], key=lambda p: (p.column, p.row))
-                    # Convert positions to strings for hashability
+                    sorted_positions = sorted(row, key=lambda p: (p.column, p.row))
                     pos_strings = tuple(str(p) for p in sorted_positions)
                     if pos_strings not in unique_rows:
                         unique_rows.add(pos_strings)
@@ -418,6 +442,17 @@ class Board:
         p1, p2 = sorted_positions[0], sorted_positions[1]
         dx = ord(p2.column) - ord(p1.column)
         dy = p2.row - p1.row
+
+        # Require the step (dx, dy) to be a unit step on a real hex
+        # axis. Previously this check only enforced collinearity, so
+        # 5 markers along the pseudo-diagonal (-1, 1) / (1, -1) —
+        # which is NOT a line on the YINSH board in this coordinate
+        # system — would be accepted as a valid row.
+        if (dx, dy) not in HEX_LINE_AXES:
+            logger.debug(
+                f"Sequence direction ({dx}, {dy}) is not a valid hex axis"
+            )
+            return False
 
         # Check if all subsequent positions follow the same direction
         for i in range(1, len(sorted_positions) - 1):
