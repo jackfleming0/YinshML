@@ -350,26 +350,31 @@ class GameState:
             return Player.WHITE
         if self.black_score >= 3:
             return Player.BLACK
-        # Stalemate: the player to move has no legal moves. They lose.
-        if self.phase != GamePhase.GAME_OVER and not self.get_valid_moves():
+        if self.is_stalemate():
             return self.current_player.opponent
         return None
 
-    def is_terminal(self) -> bool:
-        """Check if this is a terminal state.
-
-        A state is terminal when either:
-          - the phase has transitioned to GAME_OVER (score-based win), or
-          - the current player has no legal moves (stalemate loss).
-        The stalemate branch guards against training games hanging when all
-        of a player's rings are blocked.
-        """
+    def is_stalemate(self) -> bool:
+        """Check if the current player has no legal moves in a non-GAME_OVER
+        phase. Expensive (calls ``get_valid_moves``) — do not put on hot paths
+        like MCTS node evaluation. Callers that terminate games (supervisor,
+        tournament runner, get_winner) use this on demand; hot-path code uses
+        ``is_terminal``."""
         if self.phase == GamePhase.GAME_OVER:
-            return True
-        # Stalemate check: no legal moves available to the player to move.
-        if not self.get_valid_moves():
-            return True
-        return False
+            return False
+        return not self.get_valid_moves()
+
+    def is_terminal(self) -> bool:
+        """Check if this is a terminal state (phase == GAME_OVER).
+
+        **Hot path.** Kept O(1): MCTS and negamax call this per node.
+        Stalemate detection lives in ``is_stalemate`` — it calls
+        ``get_valid_moves``, which is expensive, and must not be invoked per
+        simulation. Game-ending loops should either check ``is_stalemate``
+        after each move (once per ply, not per simulation) or rely on the
+        max-depth guard plus ``get_winner`` at game termination.
+        """
+        return self.phase == GamePhase.GAME_OVER
 
     def _handle_ring_placement(self, move: Move) -> bool:
         """Handle ring placement during setup phase."""

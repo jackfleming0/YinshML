@@ -701,7 +701,7 @@ class TestStalemateDetection(unittest.TestCase):
 
         # get_valid_moves() returns [] → stalemate.
         self.assertEqual(game.get_valid_moves(), [])
-        self.assertTrue(game.is_terminal())
+        self.assertTrue(game.is_stalemate())
         self.assertEqual(game.get_winner(), Player.BLACK)
 
 
