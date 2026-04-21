@@ -129,16 +129,13 @@ def reset_game_state(game_state: GameState) -> GameState:
         # Clear move history (reuse list object)
         game_state.move_history.clear()
         
-        # Clear any temporary attributes (check __dict__ to avoid methods)
-        # Only remove instance attributes that start with underscore
-        attrs_to_remove = [attr for attr in game_state.__dict__.keys() 
-                          if attr.startswith('_') and not attr.startswith('__')]
-        for attr in attrs_to_remove:
-            try:
-                delattr(game_state, attr)
-            except (AttributeError, TypeError):
-                # Skip attributes that can't be deleted
-                pass
+        # Reset row-completion bookkeeping to the "not active" sentinel that
+        # a freshly-constructed GameState carries. These attributes are now
+        # always present (initialized to None in __init__), so we assign
+        # rather than delete.
+        game_state._move_maker = None
+        game_state._prev_player = None
+        game_state._last_regular_player = None
         
         reset_time = time.time() - start_time
         logger.debug(f"GameState reset completed in {reset_time:.6f}s")

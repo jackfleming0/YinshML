@@ -38,10 +38,11 @@ def reset_game_state(state):
     
     state.move_history.clear()
     
-    # Clean up any temporary attributes
-    for attr in ['_move_maker', '_prev_player', '_last_regular_player']:
-        if hasattr(state, attr):
-            delattr(state, attr)
+    # Reset row-completion bookkeeping to the same "not active" state a
+    # freshly-constructed GameState has (None rather than missing attr).
+    state._move_maker = None
+    state._prev_player = None
+    state._last_regular_player = None
 
 __all__ = [
     'MemoryPool',

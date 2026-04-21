@@ -124,6 +124,11 @@ class GameState:
         self.black_score = 0
         self.rings_placed = {Player.WHITE: 0, Player.BLACK: 0}
         self.move_history = []
+        # Row-completion bookkeeping. Always present (None when not active) so
+        # pool-reuse paths that call __init__ don't inherit stale markers.
+        self._move_maker: Optional[Player] = None
+        self._prev_player: Optional[Player] = None
+        self._last_regular_player: Optional[Player] = None
 
     def copy_from(self, source: 'GameState') -> None:
         """Efficiently copy state from another GameState instance.
@@ -149,12 +154,12 @@ class GameState:
         self.move_history.clear()
         self.move_history.extend(source.move_history)
         
-        # Copy any temporary attributes that might exist during row completion
-        for attr in ['_move_maker', '_prev_player', '_last_regular_player']:
-            if hasattr(source, attr):
-                setattr(self, attr, getattr(source, attr))
-            elif hasattr(self, attr):
-                delattr(self, attr)
+        # Copy row-completion bookkeeping. These are always present on a
+        # properly-initialized GameState (None when not active), so we can
+        # use plain attribute access instead of a hasattr/delattr dance.
+        self._move_maker = getattr(source, '_move_maker', None)
+        self._prev_player = getattr(source, '_prev_player', None)
+        self._last_regular_player = getattr(source, '_last_regular_player', None)
 
     def copy(self) -> 'GameState':
         """Create a deep copy of the game state."""
@@ -334,17 +339,37 @@ class GameState:
         return False
 
     def get_winner(self) -> Optional['Player']:
-        """Get the winner of the game, if any."""
+        """Get the winner of the game, if any.
+
+        Returns the winning player on a score-based terminal, or the opponent
+        of the current player on a stalemate (current player has no legal
+        moves in a non-GAME_OVER phase and therefore loses).
+        """
         from .constants import Player
         if self.white_score >= 3:
             return Player.WHITE
         if self.black_score >= 3:
             return Player.BLACK
+        # Stalemate: the player to move has no legal moves. They lose.
+        if self.phase != GamePhase.GAME_OVER and not self.get_valid_moves():
+            return self.current_player.opponent
         return None
 
     def is_terminal(self) -> bool:
-        """Check if this is a terminal state."""
-        return self.phase == GamePhase.GAME_OVER
+        """Check if this is a terminal state.
+
+        A state is terminal when either:
+          - the phase has transitioned to GAME_OVER (score-based win), or
+          - the current player has no legal moves (stalemate loss).
+        The stalemate branch guards against training games hanging when all
+        of a player's rings are blocked.
+        """
+        if self.phase == GamePhase.GAME_OVER:
+            return True
+        # Stalemate check: no legal moves available to the player to move.
+        if not self.get_valid_moves():
+            return True
+        return False
 
     def _handle_ring_placement(self, move: Move) -> bool:
         """Handle ring placement during setup phase."""
@@ -394,17 +419,20 @@ class GameState:
         return self.board.move_ring(move.source, move.destination)
 
     def _handle_marker_removal(self, move: Move) -> bool:
-        """Handle marker removal after completing a row."""
-        #logger.debug("\nHandling marker removal:")
-        #logger.debug(f"Current player: {move.player}")
-        # logger.debug(f"Current phase: {self.phase}")
+        """Handle marker removal after completing a row.
 
+        Validates ALL markers before removing any, so that a malformed move
+        (e.g. 4 valid markers + 1 empty square) leaves the board unchanged
+        rather than half-applied.
+        """
         if len(move.markers) != 5:
             logger.debug(f"Wrong number of markers: {len(move.markers)}")
             return False
 
-        # Remove the markers
-        #logger.debug("Removing markers:")
+        expected_marker = (PieceType.WHITE_MARKER if move.player == Player.WHITE
+                           else PieceType.BLACK_MARKER)
+
+        # First pass: validate every target is a same-color marker.
         for pos in move.markers:
             old_piece = self.board.get_piece(pos)
             if old_piece is None:
@@ -413,9 +441,13 @@ class GameState:
             if not old_piece.is_marker():
                 logger.debug(f"Piece at {pos} is not a marker")
                 return False
+            if old_piece != expected_marker:
+                logger.debug(f"Piece at {pos} is wrong color: {old_piece}")
+                return False
 
+        # Second pass: all validated, safe to mutate.
+        for pos in move.markers:
             self.board.remove_piece(pos)
-            #logger.debug(f"Removed {old_piece} from {pos}")
 
         return True
 
@@ -456,7 +488,11 @@ class GameState:
         if self.white_score >= 3 or self.black_score >= 3:
             self.phase = GamePhase.GAME_OVER
             logger.debug(f"GAME OVER detected: White score = {self.white_score}, Black score = {self.black_score}")
-
+            # Clear any in-flight row-completion bookkeeping so a pool-reused
+            # GameState doesn't inherit stale helpers from the previous game.
+            self._move_maker = None
+            self._prev_player = None
+            self._last_regular_player = None
             return
 
         # Handle ring placement phase
@@ -486,7 +522,7 @@ class GameState:
             logger.debug("Switching to ROW_COMPLETION phase")
             self.phase = GamePhase.ROW_COMPLETION
             # Store who made the original move that created the rows
-            if not hasattr(self, '_move_maker'):
+            if self._move_maker is None:
                 self._move_maker = self.current_player
             # Set player who gets to remove markers
             self._set_row_completion_player(white_rows, black_rows)
@@ -508,21 +544,19 @@ class GameState:
                 logger.debug("No more rows, switching back to MAIN_GAME")
                 self.phase = GamePhase.MAIN_GAME
                 # Set current player to opponent of the original move maker
-                if hasattr(self, '_move_maker'):
+                if self._move_maker is not None:
                     self.current_player = self._move_maker.opponent
                     logger.debug(f"Setting current player to opponent of original move maker ({self.current_player})")
-                    delattr(self, '_move_maker')
-
-                    # Clear any stored state for next sequence
-                    for attr in ['_prev_player', '_last_regular_player']:
-                        if hasattr(self, attr):
-                            delattr(self, attr)
+                    # Clear row-completion bookkeeping for next sequence
+                    self._move_maker = None
+                    self._prev_player = None
+                    self._last_regular_player = None
                 return  # Important: return here to prevent additional player switches
 
     def _set_row_completion_player(self, white_rows: List['Row'], black_rows: List['Row']):
         """Set the player who gets to complete the next row.
         When both players have rows, the move maker gets priority."""
-        move_maker = getattr(self, '_move_maker', None)
+        move_maker = self._move_maker
 
         # If we have a move maker and both colors have rows,
         # the move maker gets to go first
@@ -536,10 +570,6 @@ class GameState:
         elif black_rows:
             logger.debug("Black rows found, setting current player to BLACK")
             self.current_player = Player.BLACK
-
-    def _switch_player(self):
-        """Switch the current player."""
-        self.current_player = self.current_player.opponent
 
     def to_numpy_array(self) -> np.ndarray:
         """Convert game state to numpy array for ML input."""

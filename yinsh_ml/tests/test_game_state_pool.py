@@ -69,9 +69,10 @@ class TestGameStateReset(unittest.TestCase):
         self.assertEqual(len(game_state.move_history), 0)
         self.assertEqual(len(game_state.board.pieces), 0)
         
-        # Verify temporary attributes are removed
-        self.assertFalse(hasattr(game_state, '_move_maker'))
-        self.assertFalse(hasattr(game_state, '_prev_player'))
+        # Verify row-completion bookkeeping is reset to the "not active"
+        # sentinel (always-present, value None) that fresh GameStates carry.
+        self.assertIsNone(game_state._move_maker)
+        self.assertIsNone(game_state._prev_player)
         
     def test_validate_reset_game_state(self):
         """Test validation of reset GameState objects."""
