@@ -1,0 +1,41 @@
+{
+  "status": "OK",
+  "data": {
+    "players": [
+      {"id": 1, "color": "#ffffff", "name": "Alice"},
+      {"id": 2, "color": "#000000", "name": "Bob"}
+    ],
+    "logs": [
+      {"data": [
+        {"type": "move", "log": "${player_name} places a ring on ${locationTo}",
+         "args": {"player_id": "1", "locationFrom": "@0", "locationTo": "E5"}},
+        {"type": "move", "log": "${player_name} places a ring on ${locationTo}",
+         "args": {"player_id": "2", "locationFrom": "@0", "locationTo": "F5"}},
+
+        {"type": "move", "log": "${player_name} places a marker on ${locationTo}",
+         "args": {"player_id": "1", "locationFrom": "@0", "locationTo": "D4"}},
+        {"type": "move", "log": "${player_name} moves a ring from ${locationFrom} to ${locationTo}",
+         "args": {"player_id": "1", "locationFrom": "D4", "locationTo": "D6"}},
+
+        {"type": "move", "log": "${player_name} places a marker on ${locationTo}",
+         "args": {"player_id": "2", "locationFrom": "@0", "locationTo": "B2"}},
+        {"type": "move", "log": "${player_name} moves a ring from ${locationFrom} to ${locationTo}",
+         "args": {"player_id": "2", "locationFrom": "B2", "locationTo": "B4"}},
+        {"type": "move", "log": "${player_name} removes a row of markers from ${locationFrom} to ${locationTo}",
+         "args": {"player_id": "2", "locationFrom": "A1", "locationTo": "A5"}},
+        {"type": "move", "log": "${player_name} removes a ring from ${locationFrom}",
+         "args": {"player_id": "2", "locationFrom": "K11", "locationTo": "@0"}},
+
+        {"type": "restartUndo", "log": "${player_name} restarts their turn",
+         "args": {"player_id": "2", "player_name": "Bob", "currentMove": 99}},
+
+        {"type": "move", "log": "${player_name} places a marker on ${locationTo}",
+         "args": {"player_id": "2", "locationFrom": "@0", "locationTo": "C3"}},
+        {"type": "move", "log": "${player_name} moves a ring from ${locationFrom} to ${locationTo}",
+         "args": {"player_id": "2", "locationFrom": "C3", "locationTo": "C5"}},
+
+        {"type": "gameEnd", "args": {"player_id": "1"}}
+      ]}
+    ]
+  }
+}

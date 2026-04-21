@@ -42,7 +42,18 @@ logger = logging.getLogger(__name__)
 
 YINSH_GAME_ID = 2423
 BGA_BASE = "https://boardgamearena.com"
-DEFAULT_DELAY = 3.0  # Generous delay to be respectful
+# 8s default: BGA's per-account daily replay cap hits around 200 fetches; at
+# 8s/fetch one session tops out at ~200 before the day's limit anyway, and
+# the slower cadence is less likely to tickle rate-limiting heuristics.
+DEFAULT_DELAY = 8.0
+
+
+class BGACapHit(Exception):
+    """Raised when BGA returns a replay-limit error.
+
+    Separate from the catch-all error path so callers (bulk crawlers) can
+    exit cleanly on cap-hit without treating it as a per-table failure.
+    """
 
 
 class BGAScraper:
@@ -266,27 +277,35 @@ class BGAScraper:
 
         return table_ids[:max_tables]
 
-    def scrape_game(self, table_id: int) -> Optional[Dict]:
-        """Scrape a single game replay by table ID.
+    def fetch_raw(self, table_id: int) -> Optional[dict]:
+        """Fetch the raw replay JSON for a table — network side only.
 
-        Args:
-            table_id: BGA table ID.
+        Returns the decoded `/archive/logs.html` response as-is. Does no
+        parsing; callers should feed the result into `parse_raw` (or
+        persist it to disk for deferred parsing).
+
+        Raises:
+            BGACapHit: BGA rejected the request because the per-account
+                daily replay cap was exhausted. Bulk crawlers should
+                catch this and exit cleanly rather than treating it as
+                a per-table failure.
 
         Returns:
-            Standardized game dict, or None on failure.
+            Parsed JSON dict on success, or None on a per-table error
+            (missing table, transient network failure, etc.).
         """
         if not self._logged_in:
             logger.error("Must login before scraping")
             return None
 
-        # Request archive generation (prerequisite)
+        # Request archive generation (prerequisite — BGA materializes the
+        # replay lazily; the logs endpoint 404s without this first call).
         archive_url = (
             f"{BGA_BASE}/gamereview/gamereview/"
             f"requestTableArchive.html?table={table_id}"
         )
         self._fetch(archive_url)
 
-        # Fetch replay logs
         logs_url = (
             f"{BGA_BASE}/archive/archive/"
             f"logs.html?table={table_id}&translated=true"
@@ -296,16 +315,40 @@ class BGAScraper:
         if not data:
             return None
 
-        # Check for error responses
-        if isinstance(data, dict) and data.get('status') == 0:
-            error = data.get('error', '')
+        if isinstance(data, dict) and str(data.get('status')) == '0':
+            error = data.get('error', '') or ''
             if 'limit' in error.lower():
-                logger.warning(f"BGA replay limit reached: {error}")
-            else:
-                logger.warning(f"BGA error for table {table_id}: {error}")
+                raise BGACapHit(error)
+            logger.warning(f"BGA error for table {table_id}: {error}")
             return None
 
-        return self._parse_replay(data, table_id)
+        return data
+
+    @staticmethod
+    def parse_raw(raw: dict, table_id: int) -> Optional[Dict]:
+        """Parse a raw replay dict into the standardized game schema.
+
+        Pure function — no network, no class state. Safe to run offline
+        against checked-in fixtures or previously-persisted raw dumps.
+        """
+        return _parse_bga_replay(raw, table_id)
+
+    def scrape_game(self, table_id: int) -> Optional[Dict]:
+        """Fetch + parse a single game. Thin wrapper around fetch_raw/parse_raw.
+
+        Returns None on fetch failures and on cap-hit (to preserve the
+        pre-refactor contract of this method). Bulk crawlers that need
+        to distinguish cap-hit from per-table failures should call
+        `fetch_raw` directly and catch `BGACapHit`.
+        """
+        try:
+            raw = self.fetch_raw(table_id)
+        except BGACapHit as e:
+            logger.warning(f"BGA replay limit reached: {e}")
+            return None
+        if raw is None:
+            return None
+        return self.parse_raw(raw, table_id)
 
     def scrape_top_player_games(self, top_n: int = 20,
                                  max_per_player: int = 50,
@@ -340,71 +383,6 @@ class BGAScraper:
 
         logger.info(f"Scraped {len(games)} BGA YINSH games total")
         return games
-
-    def _parse_replay(self, data: dict, table_id: int) -> Optional[Dict]:
-        """Parse BGA replay log data into standardized game format.
-
-        Real BGA replay structure (discovered 2026-04-13):
-            { "status": "OK",
-              "data": {
-                "logs": [ { "data": [ <notification>, ... ] }, ... ],
-                "players": [ { "id", "color", "name", ... }, ... ]
-              }
-            }
-        Each notification has type ∈ {move, restartUndo, gameStateChange,
-        confirmMove, updateReflexionTime, gameEnd, simpleNode}; only
-        move/restartUndo/gameEnd carry game-relevant info.
-        """
-        try:
-            payload = data.get('data') if isinstance(data, dict) else None
-            if not isinstance(payload, dict):
-                logger.warning(f"Unexpected replay shape for table {table_id}")
-                return None
-
-            # Build player_id → color map from the players list. BGA encodes
-            # color as '#ffffff' (white) / '#000000' (black). The previously
-            # checked-in mapping had these inverted.
-            color_by_pid: Dict[str, str] = {}
-            players_raw = payload.get('players') or []
-            for p in players_raw:
-                if not isinstance(p, dict):
-                    continue
-                pid = str(p.get('id', ''))
-                color = (p.get('color') or '').lower().lstrip('#')
-                if color in ('ffffff', 'fff', 'white'):
-                    color_by_pid[pid] = 'white'
-                elif color in ('000000', '000', 'black'):
-                    color_by_pid[pid] = 'black'
-
-            # Flatten notifications across all log entries.
-            notifications = []
-            for entry in payload.get('logs') or []:
-                if not isinstance(entry, dict):
-                    continue
-                inner = entry.get('data')
-                if isinstance(inner, list):
-                    notifications.extend(inner)
-
-            moves = _parse_bga_notifications(notifications, color_by_pid)
-            result = _extract_bga_result(notifications, color_by_pid)
-            players = _extract_bga_players_from_payload(players_raw, color_by_pid)
-
-            if not moves:
-                logger.warning(f"No moves parsed from BGA table {table_id}")
-                return None
-
-            return {
-                'source': 'bga',
-                'game_id': f'bga_{table_id}',
-                'players': players,
-                'result': result,
-                'moves': moves,
-                'quality_tier': 'human',
-            }
-
-        except (KeyError, TypeError, IndexError) as e:
-            logger.error(f"Failed to parse BGA replay {table_id}: {e}")
-            return None
 
     def _fetch(self, url: str) -> Optional[str]:
         """Fetch URL as text with rate limiting and session cookies.
@@ -465,14 +443,91 @@ _REMOVE_ROW_PAT = re.compile(r'\bremoves a row of markers\b')
 _REMOVE_RING_PAT = re.compile(r'\bremoves a ring from\b')
 
 
+def _parse_bga_replay(data: dict, table_id: int) -> Optional[Dict]:
+    """Parse BGA replay log data into standardized game format.
+
+    Real BGA replay structure (discovered 2026-04-13):
+        { "status": "OK",
+          "data": {
+            "logs": [ { "data": [ <notification>, ... ] }, ... ],
+            "players": [ { "id", "color", "name", ... }, ... ]
+          }
+        }
+    Each notification has type ∈ {move, restartUndo, gameStateChange,
+    confirmMove, updateReflexionTime, gameEnd, simpleNode}; only
+    move/restartUndo/gameEnd carry game-relevant info.
+    """
+    try:
+        payload = data.get('data') if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            logger.warning(f"Unexpected replay shape for table {table_id}")
+            return None
+
+        # BGA encodes color as '#ffffff' (white) / '#000000' (black). The
+        # previously checked-in mapping had these inverted.
+        color_by_pid: Dict[str, str] = {}
+        players_raw = payload.get('players') or []
+        for p in players_raw:
+            if not isinstance(p, dict):
+                continue
+            pid = str(p.get('id', ''))
+            color = (p.get('color') or '').lower().lstrip('#')
+            if color in ('ffffff', 'fff', 'white'):
+                color_by_pid[pid] = 'white'
+            elif color in ('000000', '000', 'black'):
+                color_by_pid[pid] = 'black'
+
+        notifications = []
+        for entry in payload.get('logs') or []:
+            if not isinstance(entry, dict):
+                continue
+            inner = entry.get('data')
+            if isinstance(inner, list):
+                notifications.extend(inner)
+
+        moves = _parse_bga_notifications(notifications, color_by_pid)
+        result = _extract_bga_result(notifications, color_by_pid)
+        players = _extract_bga_players_from_payload(players_raw, color_by_pid)
+
+        if not moves:
+            logger.warning(f"No moves parsed from BGA table {table_id}")
+            return None
+
+        return {
+            'source': 'bga',
+            'game_id': f'bga_{table_id}',
+            'players': players,
+            'result': result,
+            'moves': moves,
+            'quality_tier': 'human',
+        }
+
+    except (KeyError, TypeError, IndexError) as e:
+        logger.error(f"Failed to parse BGA replay {table_id}: {e}")
+        return None
+
+
+_TAKES_BACK_PAT = re.compile(r'\btakes back their last move\b')
+_RESTARTS_TURN_PAT = re.compile(r'\brestarts their turn\b')
+
+
 def _parse_bga_notifications(notifications: list,
                               color_by_pid: Dict[str, str]) -> List[Dict]:
     """Parse BGA notifications into standardized moves.
 
     Three-phase pipeline:
       1. Filter to game-relevant types (move, restartUndo).
-      2. Apply restartUndo by popping the most recent `move` notification
-         from the same player_id (BGA undoes one user action at a time).
+      2. Apply restartUndo. BGA emits two undo variants and they undo
+         different amounts:
+           - "takes back their last move" — pops one trailing action by
+             the same player_id (one user click worth of state).
+           - "restarts their turn" — pops the WHOLE current player-turn,
+             i.e. every trailing `move` by the same player_id back to
+             (but not including) the opponent's most recent move. The
+             notification stream has no explicit turn delimiter that
+             survives to the cleaned list, so we use the opponent-boundary
+             heuristic; a "turn" is by definition a run of contiguous
+             same-player actions bookended by the opponent's moves.
       3. Walk the cleaned move stream and emit standardized moves. Skip
          place-marker notifications — the marker square is implicit in
          the next move-ring's locationFrom.
@@ -488,15 +543,36 @@ def _parse_bga_notifications(notifications: list,
         elif ntype == 'restartUndo':
             args = notif.get('args') or {}
             pid = str(args.get('player_id', ''))
-            for j in range(len(cleaned) - 1, -1, -1):
-                prev_args = cleaned[j].get('args') or {}
-                if str(prev_args.get('player_id', '')) == pid:
-                    del cleaned[j]
-                    break
+            log = notif.get('log', '')
+            if _RESTARTS_TURN_PAT.search(log):
+                # Pop the entire contiguous tail of the current player's
+                # actions. Stop as soon as we hit an opponent's move —
+                # that marks the start of `pid`'s current turn.
+                removed = 0
+                while cleaned:
+                    prev_args = cleaned[-1].get('args') or {}
+                    if str(prev_args.get('player_id', '')) == pid:
+                        cleaned.pop()
+                        removed += 1
+                    else:
+                        break
+                if removed == 0:
+                    logger.debug(
+                        f"BGA 'restarts their turn' by player {pid} found "
+                        f"no prior moves to pop"
+                    )
             else:
-                logger.debug(
-                    f"BGA restartUndo by player {pid} found no prior move to pop"
-                )
+                # Default / "takes back their last move": single-action undo.
+                for j in range(len(cleaned) - 1, -1, -1):
+                    prev_args = cleaned[j].get('args') or {}
+                    if str(prev_args.get('player_id', '')) == pid:
+                        del cleaned[j]
+                        break
+                else:
+                    logger.debug(
+                        f"BGA restartUndo by player {pid} found no prior "
+                        f"move to pop"
+                    )
         # Other types (gameStateChange, confirmMove, updateReflexionTime,
         # gameEnd, simpleNode) carry no move data — handled separately.
 

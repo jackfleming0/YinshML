@@ -1,0 +1,46 @@
+{
+  "status": "OK",
+  "data": {
+    "players": [
+      {"id": "100", "name": "Alice", "color": "#ffffff"},
+      {"id": "200", "name": "Bob", "color": "#000000"}
+    ],
+    "logs": [
+      {"data": [
+        {"type": "gameStateChange", "log": "", "args": {"name": "gameSetup"}}
+      ]},
+      {"data": [
+        {"type": "move", "log": "${player_name} places a ring on ${locationTo}",
+         "args": {"player_id": "100", "player_name": "Alice",
+                  "locationFrom": "@0", "locationTo": "J6"}}
+      ]},
+      {"data": [
+        {"type": "move", "log": "${player_name} places a ring on ${locationTo}",
+         "args": {"player_id": "200", "player_name": "Bob",
+                  "locationFrom": "@1", "locationTo": "K10"}}
+      ]},
+      {"data": [
+        {"type": "move", "log": "${player_name} places a marker on ${locationTo}",
+         "args": {"player_id": "100", "player_name": "Alice",
+                  "locationFrom": "@0", "locationTo": "J6"}},
+        {"type": "move", "log": "${player_name} moves a ring from ${locationFrom} to ${locationTo}",
+         "args": {"player_id": "100", "player_name": "Alice",
+                  "locationFrom": "J6", "locationTo": "J8"}}
+      ]},
+      {"data": [
+        {"type": "move", "log": "${player_name} removes a row of markers from ${locationFrom} to ${locationTo}",
+         "args": {"player_id": "100", "player_name": "Alice",
+                  "locationFrom": "E5", "locationTo": "I5"}}
+      ]},
+      {"data": [
+        {"type": "move", "log": "${player_name} removes a ring from ${locationFrom}",
+         "args": {"player_id": "100", "player_name": "Alice",
+                  "locationFrom": "J6", "locationTo": "@0"}}
+      ]},
+      {"data": [
+        {"type": "gameEnd", "log": "${player_name} has removed 3 rings",
+         "args": {"player_id": "100", "player_name": "Alice"}}
+      ]}
+    ]
+  }
+}
