@@ -321,6 +321,43 @@ class NetworkWrapper:
                         f"Re-instantiate NetworkWrapper with the matching value."
                     )
 
+            # Hard-fail on policy-head size mismatch. The final policy Linear's
+            # out_features encodes the move-index layout: different sizes mean
+            # different move→index meaning, and the silent shape-filter below
+            # would randomly-initialize the policy output, playing garbage.
+            #
+            # Known past sizes (policy-head out_features):
+            #   7395 — pre-move-encoder-rework legacy layout
+            #   8390 — post-rework, collision-free ring-movement, 1080-slot
+            #          REMOVE_MARKERS sequence hash (had 17 collisions out of
+            #          123 valid 5-in-a-row lines and an incorrect inverse
+            #          that fabricated an illegal diagonal)
+            #   7433 — current layout: collision-free REMOVE_MARKERS
+            #          (123 slots, one per valid hex 5-line). Changing the
+            #          REMOVE_MARKERS sub-layout is a BREAKING change for any
+            #          saved checkpoint — even if total_moves were identical,
+            #          the slot ↔ line mapping differs, so MCTS / policy
+            #          logits would silently route to wrong moves. This guard
+            #          fires on total-size change; any intra-size layout swap
+            #          must add a layout-version tag to the checkpoint.
+            policy_out_key = next(
+                (k for k in state_dict if k.endswith('policy_head.7.weight')), None
+            )
+            if policy_out_key is not None:
+                ckpt_policy_size = state_dict[policy_out_key].shape[0]
+                expected_policy_size = self.network.total_moves
+                if ckpt_policy_size != expected_policy_size:
+                    raise RuntimeError(
+                        f"Policy-head size mismatch: checkpoint has "
+                        f"{ckpt_policy_size} output slots but the current encoder "
+                        f"emits {expected_policy_size}. Known past sizes: 7395 "
+                        f"(pre-rework), 8390 (collision-prone REMOVE_MARKERS), "
+                        f"7433 (current, collision-free 123-slot REMOVE_MARKERS). "
+                        f"Retrain from scratch or migrate the policy head "
+                        f"explicitly — silently filtering this layer would "
+                        f"randomly re-initialize the policy output."
+                    )
+
             compatible_state_dict = {}
             model_state = self.network.state_dict()
             for key, param in state_dict.items():

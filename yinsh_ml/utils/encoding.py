@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, FrozenSet
 import logging
 
 from ..game.constants import (
@@ -7,7 +7,9 @@ from ..game.constants import (
     Player,
     PieceType,
     is_valid_position,
-    RINGS_PER_PLAYER  # Added this import
+    RINGS_PER_PLAYER,  # Added this import
+    DIRECTIONS,
+    MARKERS_FOR_ROW,
 )
 from ..game.moves import Move, MoveType
 from ..game.game_state import GameState, GamePhase
@@ -15,6 +17,75 @@ from ..game.game_state import GameState, GamePhase
 logger = logging.getLogger(__name__)
 
 logging.getLogger('StateEncoder').setLevel(logging.DEBUG)
+
+
+def _enumerate_remove_markers_lines() -> List[Tuple[Position, ...]]:
+    """Enumerate every valid 5-in-a-row line on the YINSH board.
+
+    A line is 5 consecutive valid positions along one of the 3 hex axes
+    (see game.constants.DIRECTIONS — the forward-only set of hex axes).
+    Each axis has two opposite directions; scanning forward-only from
+    every valid starting position produces each physical line exactly
+    once (since any line has a unique "smaller" endpoint under the
+    forward step).
+
+    Ordering is deterministic: (axis_index, start_col_idx, start_row).
+    """
+    lines: List[Tuple[Position, ...]] = []
+    for axis_idx, (dcol, drow) in enumerate(DIRECTIONS):
+        # Iterate starts in a deterministic order (col, then row).
+        for col_idx in range(11):
+            col = chr(ord('A') + col_idx)
+            for row in range(1, 12):
+                start = Position(col, row)
+                if not is_valid_position(start):
+                    continue
+                line: List[Position] = []
+                ok = True
+                for i in range(MARKERS_FOR_ROW):
+                    c_ord = ord(col) + dcol * i
+                    r = row + drow * i
+                    if not (ord('A') <= c_ord <= ord('K')) or not (1 <= r <= 11):
+                        ok = False
+                        break
+                    p = Position(chr(c_ord), r)
+                    if not is_valid_position(p):
+                        ok = False
+                        break
+                    line.append(p)
+                if ok and len(line) == MARKERS_FOR_ROW:
+                    lines.append(tuple(line))
+    return lines
+
+
+# Module-level precomputed mapping for REMOVE_MARKERS sub-layout.
+# Any future change to _enumerate_remove_markers_lines() output changes the
+# policy-head layout — this is a BREAKING change for any saved checkpoint
+# trained under the previous layout. See NetworkWrapper.load_model for the
+# fail-loudly guard that trips on policy-head size mismatch.
+_REMOVE_MARKERS_LINES: Tuple[Tuple[Position, ...], ...] = tuple(
+    _enumerate_remove_markers_lines()
+)
+_LINE_TO_INDEX: Dict[FrozenSet[Position], int] = {
+    frozenset(line): idx for idx, line in enumerate(_REMOVE_MARKERS_LINES)
+}
+_REMOVE_MARKERS_COUNT: int = len(_REMOVE_MARKERS_LINES)
+
+
+# Off-board cell reserved for the current-player sentinel on channel 5.
+# A1 is off the hex board (column A only has rows 2..5), so writes to
+# (row_idx=0, col_idx=0) never collide with real on-board state. This is
+# how decode_state recovers side-to-move after encode_state's side
+# normalization swapped channels 0↔1 and 2↔3.
+_CURRENT_PLAYER_ROW = 0   # row_idx for "A1"
+_CURRENT_PLAYER_COL = 0   # col_idx for "A1"
+_CURRENT_PLAYER_WHITE_SENTINEL = 0.0
+_CURRENT_PLAYER_BLACK_SENTINEL = 1.0
+# Cell we read for the phase. Must be a VALID on-board cell that is NOT
+# the current-player sentinel cell. F6 (row_idx=5, col_idx=5) is the
+# board center and always on-board.
+_PHASE_READ_ROW = 5
+_PHASE_READ_COL = 5
 
 
 class StateEncoder:
@@ -36,27 +107,53 @@ class StateEncoder:
         self.index_to_position = {v: k for k, v in self.position_to_index.items()}
         self.num_positions = len(self.position_to_index)
 
-        # Fixed total size that matches network expectation
-        self.total_moves = 7395
+        # Policy-head slot layout (total = 7433 slots):
+        #
+        #   placement:      [0,     85)    —  85 slots, one per valid position (collision-free)
+        #   ring movement:  [85,    7225)  — 7140 slots, src_idx·84 + adjusted_dst_idx (collision-free)
+        #   ring removal:   [7225,  7310)  —  85 slots (collision-free)
+        #   marker removal: [7310,  7433)  — 123 slots, one per valid 5-in-a-row line (collision-free)
+        #
+        # The ring-movement range was the big source of bugs in the legacy layout:
+        # `((src*31 + dst) % 5848)` with src/dst ∈ [0,84] only produced 2687 distinct
+        # values out of 7140 pairs (62% collision rate) and left 3161 slots structurally
+        # unreachable. Distinct moves could share the same policy slot in MCTS training
+        # targets, so the network couldn't learn to tell them apart. The new encoding
+        # `src·84 + adjusted_dst` (where adjusted_dst skips the src==dst diagonal) gives
+        # exactly 85·84 = 7140 slots, every one reachable, every (src,dst) pair unique.
+        #
+        # The REMOVE_MARKERS range was similarly broken: the legacy 1080-slot sequence
+        # hash `((hash*31 + pos_idx) % 1080)` produced 17 collisions out of 123 valid
+        # 5-in-a-row lines (2-way fan-in), and the inverse `index_to_move` fabricated a
+        # pseudo-diagonal sequence that was often illegal, causing "Could not reconstruct"
+        # errors. The new encoding enumerates the 123 hex-axis 5-lines at module load,
+        # maps each to a unique slot, and inverts cleanly back to the real line.
+        self.total_moves = 85 + 7140 + 85 + _REMOVE_MARKERS_COUNT
 
-        # Calculate ranges for all move types using similar base/range structure
         self.ring_place_base = 0
-        self.ring_place_range = (self.ring_place_base, self.num_positions)
+        self.ring_place_range = (self.ring_place_base, self.ring_place_base + self.num_positions)
 
-        # Ring movements get 80% of remaining space
-        remaining_space = self.total_moves - self.num_positions
+        # Ring movement: direct (src_idx, dst_idx) pair index with the src==dst
+        # diagonal skipped. Exactly num_positions · (num_positions - 1) slots.
         self.move_ring_base = self.ring_place_range[1]
-        self.move_ring_space = int(remaining_space * 0.8)
+        self.move_ring_space = self.num_positions * (self.num_positions - 1)
         self.move_ring_range = (self.move_ring_base, self.move_ring_base + self.move_ring_space)
 
-        # Marker removals get 15% of remaining space
-        self.remove_markers_base = self.move_ring_range[1]
-        self.remove_markers_space = int(remaining_space * 0.15)
+        # Ring removal: one slot per valid position.
+        self.remove_ring_base = self.move_ring_range[1]
+        self.remove_ring_range = (self.remove_ring_base, self.remove_ring_base + self.num_positions)
+
+        # Marker removal: one slot per valid 5-in-a-row line. Enumerated at module
+        # import in _enumerate_remove_markers_lines(); every slot is reachable and
+        # inverts back to the actual line positions (vs the legacy pseudo-diagonal).
+        self.remove_markers_base = self.remove_ring_range[1]
+        self.remove_markers_space = _REMOVE_MARKERS_COUNT
         self.remove_markers_range = (self.remove_markers_base, self.remove_markers_base + self.remove_markers_space)
 
-        # Ring removals get the rest
-        self.remove_ring_base = self.remove_markers_range[1]
-        self.remove_ring_range = (self.remove_ring_base, self.total_moves)
+        assert self.remove_markers_range[1] == self.total_moves, (
+            f"encoder layout inconsistent: last range ends at "
+            f"{self.remove_markers_range[1]}, total_moves={self.total_moves}"
+        )
 
         self.logger = logging.getLogger("StateEncoder")
         # self.logger.info(f"StateEncoder initialized with {self.total_moves} total moves:")
@@ -269,9 +366,22 @@ class StateEncoder:
                     if 0 <= col_idx < 11 and 0 <= row_idx < 11:
                         state[4, row_idx, col_idx] = 1.0
 
-            # Channel 5: Game phase only (normalized 0..1)
+            # Channel 5: Game phase (normalized 0..1) + current-player sentinel.
+            # Writing the phase uniformly first, THEN overriding the off-board
+            # A1 cell (row_idx=0, col_idx=0) with a 0/1 sentinel that records
+            # side-to-move. The decoder reads phase from an on-board cell
+            # (F6 = row 5, col 5) and the player sentinel from A1. A1 is off
+            # the hex board (col A only has rows 2..5), so this cell never
+            # carries real game content, and the D2 augmentation's coord maps
+            # only rewrite valid on-board cells — the sentinel survives every
+            # transform.
             phase_value = float(game_state.phase.value) / float(len(GamePhase) - 1)
             state[5] = phase_value
+            is_white = (game_state.current_player == Player.WHITE)
+            state[5, _CURRENT_PLAYER_ROW, _CURRENT_PLAYER_COL] = (
+                _CURRENT_PLAYER_WHITE_SENTINEL if is_white
+                else _CURRENT_PLAYER_BLACK_SENTINEL
+            )
 
         except Exception as e:
             self.logger.error(f"Error encoding state: {str(e)}")
@@ -327,15 +437,29 @@ class StateEncoder:
 
                 src_idx = self.position_to_index[src_pos]
                 dst_idx = self.position_to_index[dst_pos]
+                if src_idx == dst_idx:
+                    raise ValueError(f"Invalid ring move: src == dst ({src_pos})")
 
-                # Hash the move into our allocated space
-                move_hash = ((src_idx * 31 + dst_idx) % self.move_ring_space)
-                return self.move_ring_base + move_hash
+                # Collision-free: src_idx·(num_positions-1) + adjusted_dst_idx,
+                # where adjusted_dst skips the src==dst diagonal. Exactly 7140 slots
+                # for 85 positions. See layout comment in __init__.
+                adjusted_dst = dst_idx if dst_idx < src_idx else dst_idx - 1
+                return self.move_ring_base + src_idx * (self.num_positions - 1) + adjusted_dst
 
             elif move.type == MoveType.REMOVE_MARKERS:
-                if not move.markers or len(move.markers) != 5:
-                    raise ValueError(f"Invalid marker removal: need exactly 5 markers")
-                return self._compute_marker_sequence_hash(move.markers)
+                if not move.markers or len(move.markers) != MARKERS_FOR_ROW:
+                    raise ValueError(
+                        f"Invalid marker removal: need exactly {MARKERS_FOR_ROW} markers"
+                    )
+                key = frozenset(move.markers)
+                line_idx = _LINE_TO_INDEX.get(key)
+                if line_idx is None:
+                    raise ValueError(
+                        f"REMOVE_MARKERS positions do not form a valid "
+                        f"5-in-a-row hex-axis line: "
+                        f"{[str(m) for m in move.markers]}"
+                    )
+                return self.remove_markers_base + line_idx
 
             elif move.type == MoveType.REMOVE_RING:
                 pos_str = str(move.source)
@@ -364,53 +488,28 @@ class StateEncoder:
                             source=Position.from_string(pos))
 
             elif self.move_ring_base <= index < self.move_ring_range[1]:
-                # Ring movement - reconstruct from hash
-                # Note: The encoding uses a hash which loses information, so we can't
-                # perfectly reverse it. We need to search for a valid move that hashes to this index.
+                # Ring movement — collision-free inversion. No search loop needed:
+                # slot = src_idx · (num_positions-1) + adjusted_dst_idx, so
+                # src_idx = slot // (num_positions-1), adjusted = slot % (num_positions-1),
+                # and dst_idx = adjusted if adjusted < src_idx else adjusted + 1
+                # (unskipping the diagonal).
                 relative_idx = index - self.move_ring_base
-                
-                # Try to find a move that hashes to this index
-                # Start with a reasonable guess based on the hash structure
-                for src_idx in range(self.num_positions):
-                    for dst_idx in range(self.num_positions):
-                        if src_idx == dst_idx:
-                            continue
-                        # Check if this combination produces the target hash
-                        test_hash = ((src_idx * 31 + dst_idx) % self.move_ring_space)
-                        if test_hash == relative_idx:
-                            src_pos = Position.from_string(list(self.position_to_index.keys())[src_idx])
-                            dst_pos = Position.from_string(list(self.position_to_index.keys())[dst_idx])
-                            return Move(type=MoveType.MOVE_RING, player=player,
-                                        source=src_pos, destination=dst_pos)
-                
-                # If no exact match found (shouldn't happen), fall back to approximate
-                src_idx = (relative_idx // 31) % self.num_positions
-                dst_idx = relative_idx % self.num_positions
+                span = self.num_positions - 1
+                src_idx = relative_idx // span
+                adjusted_dst = relative_idx % span
+                dst_idx = adjusted_dst if adjusted_dst < src_idx else adjusted_dst + 1
                 src_pos = Position.from_string(list(self.position_to_index.keys())[src_idx])
                 dst_pos = Position.from_string(list(self.position_to_index.keys())[dst_idx])
                 return Move(type=MoveType.MOVE_RING, player=player,
                             source=src_pos, destination=dst_pos)
 
             elif self.remove_markers_base <= index < self.remove_markers_range[1]:
-                # For marker removal, reconstruct a valid sequence
-                relative_idx = index - self.remove_markers_base
-                base_idx = relative_idx % self.num_positions
-                base_pos = Position.from_string(list(self.position_to_index.keys())[base_idx])
-
-                # Create a diagonal sequence of 5 markers
-                markers = []
-                current_pos = base_pos
-                for i in range(5):
-                    col = chr(ord(current_pos.column) + i)
-                    row = current_pos.row + i
-                    if 'A' <= col <= 'K' and 1 <= row <= 11:
-                        markers.append(Position(col, row))
-
-                if len(markers) == 5:
-                    return Move(type=MoveType.REMOVE_MARKERS, player=player,
-                                markers=markers)
-                else:
-                    raise ValueError(f"Could not reconstruct valid marker sequence")
+                # Reverse lookup into the precomputed line table — returns the
+                # actual 5 line positions, not a fabricated diagonal.
+                line_idx = index - self.remove_markers_base
+                markers = _REMOVE_MARKERS_LINES[line_idx]
+                return Move(type=MoveType.REMOVE_MARKERS, player=player,
+                            markers=markers)
 
             elif self.remove_ring_base <= index < self.remove_ring_range[1]:
                 # Ring removal
@@ -427,62 +526,92 @@ class StateEncoder:
             raise
 
     def _compute_marker_sequence_hash(self, markers: List[Position]) -> int:
-        """Compute a deterministic hash for a sequence of marker positions."""
-        # Convert positions to tuples for consistent hashing
-        position_tuples = [(m.column, m.row) for m in markers]
-        sorted_positions = tuple(sorted(position_tuples))
+        """Deprecated — replaced by the collision-free line-table lookup.
 
-        # Compute hash based on position tuples
-        hash_val = 0
-        for col, row in sorted_positions:
-            pos_str = f"{col}{row}"
-            pos_idx = self.position_to_index.get(pos_str, 0)
-            hash_val = (hash_val * 31 + pos_idx) % self.remove_markers_space
-
-        return self.remove_markers_base + hash_val
+        Retained as a thin shim because external callers may still import it.
+        The only correct input is a valid 5-in-a-row hex line; anything else
+        raises, matching the stricter behaviour of the new encoding.
+        """
+        if not markers or len(markers) != MARKERS_FOR_ROW:
+            raise ValueError(
+                f"Invalid marker sequence: need exactly {MARKERS_FOR_ROW} markers"
+            )
+        line_idx = _LINE_TO_INDEX.get(frozenset(markers))
+        if line_idx is None:
+            raise ValueError(
+                "marker positions do not form a valid 5-in-a-row hex-axis line"
+            )
+        return self.remove_markers_base + line_idx
 
     def decode_state(self, state_tensor: np.ndarray) -> GameState:
         """
-        Convert a state tensor back into a GameState object.
+        Convert a side-normalized state tensor back into a GameState object.
+
+        The state tensor is produced by encode_state, which normalizes by
+        side-to-move so channels 0/2 are the CURRENT player's rings/markers
+        and 1/3 are the opponent's — NOT (white, black) by absolute colour.
+        Channel 5 carries a uniform phase value on every on-board cell and
+        a dedicated current-player sentinel at the off-board cell A1 (see
+        the encode_state comment on the sentinel slot).
 
         Args:
             state_tensor: numpy array of shape (6, 11, 11) containing:
-                - Channel 0: White rings
-                - Channel 1: Black rings
-                - Channel 2: White markers
-                - Channel 3: Black markers
+                - Channel 0: Current player's rings
+                - Channel 1: Opponent's rings
+                - Channel 2: Current player's markers
+                - Channel 3: Opponent's markers
                 - Channel 4: Valid moves mask
-                - Channel 5: Game phase
+                - Channel 5: Game phase (broadcast) + player sentinel at A1
 
         Returns:
-            GameState object
+            GameState object with current_player, phase, rings_placed and
+            scores recovered from the tensor. Board colours are de-normalized
+            back to absolute (white/black) using the recovered current_player.
         """
         logger.debug(f"Decoding state tensor of shape {state_tensor.shape}")
         game_state = GameState()
 
-        # Convert channel data back into board pieces
+        # Recover side-to-move from the off-board sentinel cell (A1).
+        # Before side-awareness, decode_state unconditionally labelled channel
+        # 0 as WHITE, which silently swapped colours for every BLACK-to-move
+        # state (~half of self-play samples) and poisoned augmentation, since
+        # augmentation.py::_base_move_encoding calls decode_state on every
+        # sample and enumerates valid_moves for the decoded board.
+        sentinel = float(state_tensor[5, _CURRENT_PLAYER_ROW, _CURRENT_PLAYER_COL])
+        is_white_to_move = sentinel < 0.5
+        game_state.current_player = Player.WHITE if is_white_to_move else Player.BLACK
+
+        # Channel-0/2 → current player; channel-1/3 → opponent. Route each to
+        # the correct absolute colour.
+        if is_white_to_move:
+            current_ring_type, opponent_ring_type = PieceType.WHITE_RING, PieceType.BLACK_RING
+            current_marker_type, opponent_marker_type = PieceType.WHITE_MARKER, PieceType.BLACK_MARKER
+        else:
+            current_ring_type, opponent_ring_type = PieceType.BLACK_RING, PieceType.WHITE_RING
+            current_marker_type, opponent_marker_type = PieceType.BLACK_MARKER, PieceType.WHITE_MARKER
+
         for row in range(11):
             for col in range(11):
                 pos = Position(chr(ord('A') + col), row + 1)
                 if not is_valid_position(pos):
                     continue
 
-                # Check each piece type
                 if state_tensor[0, row, col] > 0.5:
-                    game_state.board.place_piece(pos, PieceType.WHITE_RING)
+                    game_state.board.place_piece(pos, current_ring_type)
                 elif state_tensor[1, row, col] > 0.5:
-                    game_state.board.place_piece(pos, PieceType.BLACK_RING)
+                    game_state.board.place_piece(pos, opponent_ring_type)
                 elif state_tensor[2, row, col] > 0.5:
-                    game_state.board.place_piece(pos, PieceType.WHITE_MARKER)
+                    game_state.board.place_piece(pos, current_marker_type)
                 elif state_tensor[3, row, col] > 0.5:
-                    game_state.board.place_piece(pos, PieceType.BLACK_MARKER)
+                    game_state.board.place_piece(pos, opponent_marker_type)
 
-        # Determine game phase from channel 5
-        phase_value = np.mean(state_tensor[5])  # Take average since it's broadcast
-        num_phases = len(GamePhase)
-        # Ensure phase_idx is within valid range (0 to num_phases-1)
-        phase_idx = max(0, min(num_phases - 1, int(phase_value * num_phases)))
-        logger.debug(f"Phase calculation: value={phase_value:.2f}, index={phase_idx}")
+        # Read phase from a valid on-board cell (F6 is always on-board and is
+        # not the sentinel cell). Channel 5 is otherwise uniform.
+        phase_value = float(state_tensor[5, _PHASE_READ_ROW, _PHASE_READ_COL])
+        num_phase_values = len(GamePhase)
+        phase_idx = int(round(phase_value * (num_phase_values - 1)))
+        phase_idx = max(0, min(num_phase_values - 1, phase_idx))
+        logger.debug(f"Phase calculation: value={phase_value:.3f}, index={phase_idx}")
         game_state.phase = GamePhase(phase_idx)
 
         # Count rings to determine rings_placed
@@ -497,13 +626,8 @@ class StateEncoder:
         game_state.white_score = max(0, RINGS_PER_PLAYER - white_rings)
         game_state.black_score = max(0, RINGS_PER_PLAYER - black_rings)
 
-        # Determine current player (if white rings == black rings, it's white's turn)
-        if white_rings <= black_rings:
-            game_state.current_player = Player.WHITE
-        else:
-            game_state.current_player = Player.BLACK
-
         logger.debug(f"Decoded state - Phase: {game_state.phase.name}, "
+                     f"Current player: {game_state.current_player.name}, "
                      f"White rings: {white_rings}, Black rings: {black_rings}, "
                      f"White score: {game_state.white_score}, Black score: {game_state.black_score}")
         return game_state

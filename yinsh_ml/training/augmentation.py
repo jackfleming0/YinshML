@@ -116,7 +116,10 @@ class YinshSymmetryAugmenter:
 
         Args:
             state: Game state tensor of shape (C, 11, 11)
-            policy: Policy tensor of shape (7395,) or (num_moves,)
+            policy: Policy tensor of shape (total_moves,) — size comes from the
+                active StateEncoder (7433 under the current layout; historical
+                sizes: 8390 with the collision-prone 1080-slot REMOVE_MARKERS,
+                7395 pre-rework).
             value: Position value (unchanged across transforms)
             include_original: If True, include the original (transform_id=0) in output
 
@@ -434,7 +437,8 @@ def test_augmentation_basic():
     state[0, 5, 5] = 1.0  # Ring at center
     state[2, 4, 4] = 1.0  # Marker near center
 
-    policy = np.zeros(7395, dtype=np.float32)
+    from ..utils.encoding import StateEncoder as _StateEncoder
+    policy = np.zeros(_StateEncoder().total_moves, dtype=np.float32)
     policy[0] = 0.5
     policy[1] = 0.5
 
