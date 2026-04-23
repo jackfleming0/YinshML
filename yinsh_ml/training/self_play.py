@@ -6,7 +6,16 @@ import time
 from typing import List, Tuple, Optional, Dict
 from collections import defaultdict
 import logging
+import multiprocessing as _mp
 from concurrent.futures import ProcessPoolExecutor
+
+# Force 'spawn' start method for worker processes. On Linux (where cloud
+# GPU boxes run) the default is 'fork', which inherits the parent's CUDA
+# context — and CUDA can't be re-initialized in a forked child, so the
+# first worker to touch torch.cuda.* crashes. 'spawn' gives each worker a
+# clean Python process that initializes CUDA from scratch. On macOS
+# 'spawn' is already the default, so this is a no-op there.
+_SELF_PLAY_MP_CONTEXT = _mp.get_context('spawn')
 import time
 import tempfile
 import os
@@ -1260,7 +1269,10 @@ class SelfPlay:
 
         # Parallel generation with workers > 0
         try:
-            with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+            with ProcessPoolExecutor(
+                max_workers=self.num_workers,
+                mp_context=_SELF_PLAY_MP_CONTEXT,
+            ) as executor:
                 for game_id in range(num_games):
                     # Submit worker jobs, passing the *explicit* MCTS configuration
                     futures.append(
