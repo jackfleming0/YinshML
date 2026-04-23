@@ -351,6 +351,15 @@ def main() -> None:
     # Load checkpoint if resuming
     if checkpoint_to_load:
         _load_resume_checkpoint(network, supervisor, checkpoint_to_load, device, logger)
+        # Sync supervisor's internal iteration counter so the next call to
+        # train_iteration runs as `start_iteration` (not overwriting iteration_0/).
+        # Supervisor's _load_best_model_state already restores this from
+        # best_model_state.json in the common case, but we set it explicitly
+        # to guarantee correctness when that file is missing or stale.
+        try:
+            supervisor.set_resume_iteration(start_iteration)
+        except Exception as e:
+            logger.warning(f"Failed to sync supervisor iteration counter: {e}")
 
     start_time = time.time()
     last_completed_iteration = start_iteration  # tracks successful iterations for manifest_final

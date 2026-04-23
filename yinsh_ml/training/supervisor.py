@@ -1235,7 +1235,12 @@ class TrainingSupervisor:
         if promote_by_wilson:
             promote = True
             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) passed Wilson gate.")
-        elif self.best_model_iteration < 0:
+        elif self.best_model_iteration < 0 and candidate_iteration == 0:
+            # Auto-promote the very first model of a fresh run only. On a
+            # resumed run (candidate_iteration > 0) we must NOT treat the
+            # resumed iteration as "the first model" — that branch would
+            # overwrite best_model_state.json with the current (likely weaker)
+            # candidate and wipe the prior Elo baseline.
             promote = True
             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) is the first model.")
         elif candidate_elo > self.best_model_elo:
@@ -1897,13 +1902,32 @@ class TrainingSupervisor:
                 self._iteration_counter = state.get('_iteration_counter', 0) # Load counter
 
                 if best_path_str:
-                    # Ensure path is relative to the current save_dir for portability
-                    potential_path = self.save_dir / Path(best_path_str).name # Reconstruct path relative to save_dir
-                    if potential_path.exists():
-                         self.best_model_path = potential_path
-                         self.logger.info(f"Loaded best model state from {state_path}")
+                    # Interpret stored path as relative to save_dir (portable across moves).
+                    # Historically the state file was written with just the filename, so
+                    # also tolerate a bare filename by falling back to the canonical
+                    # iteration_<N>/checkpoint_iteration_<N>.pt layout when available.
+                    stored = Path(best_path_str)
+                    candidates = []
+                    if stored.is_absolute():
+                        candidates.append(stored)
                     else:
-                         self.logger.warning(f"Best model path '{potential_path}' from state file not found. Resetting tracking.")
+                        candidates.append(self.save_dir / stored)
+                    # Back-compat: legacy state files stored only the filename; try
+                    # to rebuild the iteration_N/<filename> layout from best_model_iteration.
+                    if self.best_model_iteration is not None and self.best_model_iteration >= 0:
+                        iter_dir = self.save_dir / f"iteration_{self.best_model_iteration}"
+                        candidates.append(iter_dir / stored.name)
+                    # Last-resort fallback: flat layout directly under save_dir.
+                    candidates.append(self.save_dir / stored.name)
+
+                    resolved = next((p for p in candidates if p.exists()), None)
+                    if resolved is not None:
+                         self.best_model_path = resolved
+                         self.logger.info(f"Loaded best model state from {state_path} (path={resolved})")
+                    else:
+                         self.logger.warning(
+                             f"Best model path from state file not found. Tried: {candidates}. Resetting tracking."
+                         )
                          self._reset_best_model_state() # Reset completely if path invalid
                 else:
                      self.best_model_path = None # No path stored
@@ -1948,6 +1972,29 @@ class TrainingSupervisor:
         self.best_model_path = None
         self._iteration_counter = 0 # Reset counter too
         self.logger.info("Reset best model tracking state.")
+
+    def set_resume_iteration(self, next_iteration: int) -> None:
+        """Sync the internal iteration counter to the next iteration to run.
+
+        Called from the resume entrypoint AFTER the checkpoint is loaded so
+        the first post-resume call to ``train_iteration`` runs as iteration
+        ``next_iteration`` (e.g., resuming from ``iteration_5`` → 6). This
+        prevents overwriting the iteration_0/ directory and skipping the
+        round-robin due to only one model being visible.
+
+        Safe to call unconditionally: the state-file load already restores
+        the counter in the common case; this just guarantees correctness when
+        ``best_model_state.json`` is missing or stale relative to the
+        on-disk iteration_*/ directories.
+        """
+        if next_iteration < 0:
+            raise ValueError(f"next_iteration must be >= 0, got {next_iteration}")
+        prior = self._iteration_counter
+        self._iteration_counter = int(next_iteration)
+        if prior != self._iteration_counter:
+            self.logger.info(
+                f"Resume sync: _iteration_counter {prior} → {self._iteration_counter}"
+            )
 
     def _register_checkpoint(self, iteration: int, elo: float, checkpoint_path: Path):
         """
