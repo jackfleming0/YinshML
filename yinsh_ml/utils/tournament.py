@@ -544,6 +544,254 @@ class ModelTournament:
         # Final GC pass
         gc.collect()
 
+    # ------------------------------------------------------------------ #
+    # Absolute evaluation anchor (CLOUD_TRAINING_PLAN §1.3)
+    # ------------------------------------------------------------------ #
+    # The anchor eval plays a candidate NetworkWrapper against a fixed
+    # HeuristicAgent opponent (same depth, same weights, same seed every
+    # iteration). This gives an ABSOLUTE measure of playing strength
+    # independent of the relative Elo from the round-robin, which is the
+    # only way to interpret long training trajectories — relative ratings
+    # drift with the pool, but anchor_win_rate is anchored to a fixed
+    # baseline for the life of the run.
+    #
+    # Kept as a separate call (not folded into the round-robin) so it
+    # survives any future changes to the Elo / promotion-gate logic.
+    def run_anchor_eval(
+        self,
+        candidate_network: NetworkWrapper,
+        candidate_label: str,
+        num_games: int = 40,
+        depth: int = 3,
+        seed: int = 1337,
+    ) -> Dict:
+        """Play the candidate network against a fixed HeuristicAgent baseline.
+
+        Games are split half white / half black for the candidate, using a
+        deterministic per-game seed derived from ``seed``. The baseline
+        HeuristicAgent is constructed once per call with depth ``depth``,
+        default phase-aware weights, and a fixed ``random_seed`` so its
+        tie-breaking is reproducible across iterations.
+
+        Args:
+            candidate_network: Loaded NetworkWrapper to evaluate.
+            candidate_label: Identifier for logs (e.g. ``checkpoint_iteration_7``).
+            num_games: Total games (split 50/50 between colors).
+            depth: HeuristicAgent max search depth.
+            seed: Base RNG seed used to derive per-game seeds. KEEP STABLE
+                across iterations — the whole point of the anchor is that
+                the baseline doesn't drift.
+
+        Returns:
+            Dict with keys ``games_played``, ``candidate_wins``,
+            ``anchor_wins``, ``draws``, ``win_rate`` (candidate wins /
+            games_played; draws count as 0 in numerator).
+
+            On failure (e.g. HeuristicAgent construction blows up), returns
+            a dict with ``games_played=0`` and a ``skipped_reason`` key —
+            callers should treat that as "skip, don't fail the iteration."
+        """
+        # Import here so a broken HeuristicAgent / heuristics subtree can't
+        # crash the tournament module at import time.
+        try:
+            from ..agents.heuristic_agent import HeuristicAgent, HeuristicAgentConfig
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.warning(f"Anchor eval skipped — could not import HeuristicAgent: {e}")
+            return {
+                'games_played': 0, 'candidate_wins': 0, 'anchor_wins': 0,
+                'draws': 0, 'win_rate': 0.0, 'skipped_reason': f'import: {e}',
+            }
+
+        try:
+            anchor_agent = HeuristicAgent(
+                config=HeuristicAgentConfig(
+                    max_depth=depth,
+                    min_depth=min(depth, 1),
+                    use_iterative_deepening=True,
+                    time_limit_seconds=0.0,  # no wall-clock limit — determinism wins
+                    random_tiebreak=False,   # deterministic across iterations
+                    random_seed=seed,
+                    use_transposition_table=True,
+                    zobrist_seed=f"anchor-seed-{seed}",
+                )
+            )
+        except Exception as e:
+            self.logger.warning(f"Anchor eval skipped — HeuristicAgent construction failed: {e}")
+            return {
+                'games_played': 0, 'candidate_wins': 0, 'anchor_wins': 0,
+                'draws': 0, 'win_rate': 0.0, 'skipped_reason': f'construct: {e}',
+            }
+
+        anchor_label = f"anchor_heuristic_d{depth}"
+        half = num_games // 2
+        # Fixed pairing sequence: first `half` games candidate plays White,
+        # remaining games candidate plays Black. Same order every iteration.
+        color_order = ['white'] * half + ['black'] * (num_games - half)
+
+        candidate_wins = 0
+        anchor_wins = 0
+        draws = 0
+        games_played = 0
+        total_moves = 0
+
+        # Pre-allocate a reusable input tensor for the candidate network.
+        cand_input_tensor = candidate_network._acquire_input_tensor(batch_size=1)
+
+        try:
+            for game_num, cand_color in enumerate(color_order):
+                # Deterministic per-game seed, stable across iterations, so
+                # the SAME pairing sequence is replayed every time.
+                rng_snapshot = (
+                    torch.get_rng_state(),
+                    np.random.get_state(),
+                    random.getstate(),
+                )
+                game_seed = derive_match_seed(
+                    seed, candidate_label, anchor_label, game_num
+                )
+                torch.manual_seed(game_seed)
+                np.random.seed(game_seed)
+                random.seed(game_seed)
+                # Reset anchor's internal RNG each game so identical
+                # positions produce identical moves across iterations.
+                anchor_agent._rng = random.Random(seed)
+                anchor_agent.clear_transposition_table()
+
+                game_state = GameState()
+                move_count = 0
+
+                # Map color → side
+                candidate_is_white = (cand_color == 'white')
+
+                try:
+                    while not game_state.is_terminal() and move_count < 500:
+                        valid_moves = game_state.get_valid_moves()
+                        if not valid_moves:
+                            break
+
+                        cand_to_move = (
+                            (game_state.current_player == Player.WHITE and candidate_is_white)
+                            or (game_state.current_player == Player.BLACK and not candidate_is_white)
+                        )
+
+                        if cand_to_move:
+                            state_array = candidate_network.state_encoder.encode_state(game_state)
+                            cand_input_tensor.copy_(
+                                torch.from_numpy(np.array(state_array)).unsqueeze(0)
+                            )
+                            move_probs, _ = candidate_network.predict(cand_input_tensor)
+                            # temperature=0 → argmax, fully deterministic given seeds
+                            selected_move = candidate_network.select_move(
+                                move_probs, valid_moves, temperature=0.0
+                            )
+                            del move_probs
+                        else:
+                            selected_move = anchor_agent.select_move(game_state)
+
+                        if selected_move is None:
+                            break
+                        success = game_state.make_move(selected_move)
+                        if not success:
+                            self.logger.warning(
+                                f"Anchor eval: invalid move at game {game_num} "
+                                f"move {move_count} — aborting game."
+                            )
+                            break
+                        move_count += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"Anchor eval: game {game_num} crashed ({e}); counting as draw."
+                    )
+                    winner = None
+                else:
+                    winner = game_state.get_winner()
+
+                if winner == Player.WHITE:
+                    if candidate_is_white:
+                        candidate_wins += 1
+                    else:
+                        anchor_wins += 1
+                elif winner == Player.BLACK:
+                    if candidate_is_white:
+                        anchor_wins += 1
+                    else:
+                        candidate_wins += 1
+                else:
+                    draws += 1
+
+                games_played += 1
+                total_moves += move_count
+                del game_state
+
+                # Restore outer RNG state so anchor seeding doesn't leak.
+                torch_state, np_state, py_state = rng_snapshot
+                torch.set_rng_state(torch_state)
+                np.random.set_state(np_state)
+                random.setstate(py_state)
+        finally:
+            candidate_network._release_tensor(cand_input_tensor)
+
+        win_rate = (candidate_wins / games_played) if games_played > 0 else 0.0
+        result = {
+            'games_played': games_played,
+            'candidate_wins': candidate_wins,
+            'anchor_wins': anchor_wins,
+            'draws': draws,
+            'win_rate': win_rate,
+            'depth': depth,
+            'seed': seed,
+            'avg_game_length': (total_moves / games_played) if games_played > 0 else 0.0,
+        }
+        self.logger.info(
+            f"Anchor eval: {candidate_label} vs {anchor_label} → "
+            f"W/L/D = {candidate_wins}/{anchor_wins}/{draws} "
+            f"({win_rate:.1%} win rate over {games_played} games)"
+        )
+        return result
+
+    def run_anchor_eval_batch(
+        self,
+        models: List[Tuple[str, Path]],
+        num_games: int = 40,
+        depth: int = 3,
+        seed: int = 1337,
+    ) -> Dict[str, Dict]:
+        """Run anchor eval for a list of (label, checkpoint_path) entries.
+
+        Uses lazy model loading so memory stays bounded — only one candidate
+        is resident at a time. Missing checkpoints are skipped gracefully.
+        """
+        results: Dict[str, Dict] = {}
+        for label, ckpt in models:
+            if ckpt is None:
+                continue
+            ckpt = Path(ckpt)
+            if not ckpt.exists():
+                self.logger.info(f"Anchor eval: skipping {label} — checkpoint not found at {ckpt}")
+                continue
+            try:
+                net = self._load_model(ckpt)
+            except Exception as e:
+                self.logger.warning(f"Anchor eval: failed to load {label} from {ckpt}: {e}")
+                continue
+            try:
+                results[label] = self.run_anchor_eval(
+                    candidate_network=net,
+                    candidate_label=label,
+                    num_games=num_games,
+                    depth=depth,
+                    seed=seed,
+                )
+            finally:
+                if hasattr(net, 'cleanup'):
+                    try:
+                        net.cleanup()
+                    except Exception:
+                        pass
+                del net
+                self._clear_model_memory()
+        return results
+
     def run_full_round_robin_tournament(self, current_iteration: int):
         """
         Run a round-robin tournament among recent models (sliding window).

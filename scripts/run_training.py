@@ -410,11 +410,12 @@ def main() -> None:
             logger.warning(f'Auto-tuning suggestions failed: {e}')
 
     # Training loop completed normally — write the final manifest.
-    # final_anchor_win_rate is None until CLOUD_TRAINING_PLAN §1.3 lands.
+    # final_anchor_win_rate comes from the last iteration's anchor eval
+    # (CLOUD_TRAINING_PLAN §1.3). None if anchor eval was disabled/skipped.
     try:
         supervisor.finalize_manifest(
             iterations_completed=last_completed_iteration,
-            final_anchor_win_rate=None,
+            final_anchor_win_rate=getattr(supervisor, '_latest_anchor_win_rate', None),
         )
     except Exception as e:
         logger.warning(f'finalize_manifest failed: {e}')

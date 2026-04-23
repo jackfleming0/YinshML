@@ -402,6 +402,18 @@ class TrainingSupervisor:
         # Registry: list of (iteration, elo, path) tuples, sorted by ELO descending
         self._checkpoint_registry: list = []
 
+        # --- Absolute Evaluation Anchor (CLOUD_TRAINING_PLAN §1.3) ---
+        # Fixed opponent per iteration so we can track absolute strength
+        # independent of the relative Elo pool. See
+        # ModelTournament.run_anchor_eval for details.
+        self.anchor_enabled: bool = bool(self.mode_settings.get('anchor_enabled', True))
+        self.anchor_num_games: int = int(self.mode_settings.get('anchor_num_games', 40))
+        self.anchor_depth: int = int(self.mode_settings.get('anchor_depth', 3))
+        self.anchor_seed: int = int(self.mode_settings.get('anchor_seed', 1337))
+        # Most recent candidate anchor win rate — consumed by
+        # run_training.py → finalize_manifest at the end of the run.
+        self._latest_anchor_win_rate: Optional[float] = None
+
         # --- Experiment Tracking ---
         self.experiment_tracker = None
         self.experiment_id = None
@@ -1051,6 +1063,118 @@ class TrainingSupervisor:
         self._log_mps_memory("after tournament")
 
         # ------------------------------------------------------------------ #
+        # 4b. ABSOLUTE EVALUATION ANCHOR (CLOUD_TRAINING_PLAN §1.3)
+        # ------------------------------------------------------------------ #
+        # Fixed opponent, unchanged across iterations: lets us read an
+        # absolute strength trajectory out of metrics.json without having
+        # to cross-reference the Elo tables (which are only meaningful
+        # relative to the pool and drift with it).
+        #
+        # Runs AFTER the round-robin as an independent step so any future
+        # changes to the Elo gating logic don't bleed into the anchor
+        # baseline. Failures here are always non-fatal.
+        anchor_results: Dict[str, Dict] = {}
+        candidate_anchor_win_rate: Optional[float] = None
+        if self.anchor_enabled:
+            try:
+                # Build (label, checkpoint_path) list: candidate + 2 predecessors.
+                # "prev" and "prev-prev" = preceding iteration indices by path;
+                # missing checkpoints are silently skipped by the batch runner.
+                anchor_models: List[Tuple[str, Path]] = []
+                anchor_models.append((
+                    _canon(str(checkpoint_path)),
+                    checkpoint_path,
+                ))
+                for prev_iter in (current_iteration - 1, current_iteration - 2):
+                    if prev_iter < 0:
+                        continue
+                    prev_ckpt = self.save_dir / f"iteration_{prev_iter}" / f"checkpoint_iteration_{prev_iter}.pt"
+                    anchor_models.append((
+                        _canon(str(prev_ckpt)),
+                        prev_ckpt,
+                    ))
+
+                self.logger.info(
+                    f"Running anchor eval: {len(anchor_models)} model(s) vs "
+                    f"HeuristicAgent(depth={self.anchor_depth}) x {self.anchor_num_games} games "
+                    f"(seed={self.anchor_seed})"
+                )
+                anchor_results = self.tournament_manager.run_anchor_eval_batch(
+                    models=anchor_models,
+                    num_games=self.anchor_num_games,
+                    depth=self.anchor_depth,
+                    seed=self.anchor_seed,
+                ) or {}
+
+                candidate_label = _canon(str(checkpoint_path))
+                cand_res = anchor_results.get(candidate_label)
+                if cand_res and cand_res.get('games_played', 0) > 0:
+                    candidate_anchor_win_rate = float(cand_res['win_rate'])
+                    won = int(cand_res['candidate_wins'])
+                    total = int(cand_res['games_played'])
+                    # The stdout line the plan explicitly asks for.
+                    anchor_msg = (
+                        f"ANCHOR: iter {current_iteration}, "
+                        f"{won}/{total} = {candidate_anchor_win_rate:.1%}"
+                    )
+                    self.logger.info(anchor_msg)
+                    print(anchor_msg, flush=True)
+                    self._latest_anchor_win_rate = candidate_anchor_win_rate
+                else:
+                    self.logger.warning(
+                        f"Anchor eval produced no usable result for candidate {candidate_label}"
+                    )
+
+                # Emit the other models' anchor rates for triangulation.
+                for lbl, res in anchor_results.items():
+                    if lbl == candidate_label:
+                        continue
+                    if res.get('games_played', 0) > 0:
+                        self.logger.info(
+                            f"ANCHOR (prev): {lbl} → "
+                            f"{res['candidate_wins']}/{res['games_played']} "
+                            f"= {res['win_rate']:.1%}"
+                        )
+
+                # Mirror the candidate rate into the experiment tracker so
+                # dashboards pick it up alongside tournament_* metrics.
+                if (
+                    candidate_anchor_win_rate is not None
+                    and self.experiment_tracker
+                    and self.experiment_id
+                ):
+                    try:
+                        iteration_1b = current_iteration + 1
+                        self._log_metric_safe(
+                            'anchor_win_rate', candidate_anchor_win_rate, iteration_1b
+                        )
+                        self._log_metric_safe(
+                            'anchor_games_played',
+                            int(cand_res['games_played']),
+                            iteration_1b,
+                        )
+                        self._log_metric_safe(
+                            'anchor_candidate_wins',
+                            int(cand_res['candidate_wins']),
+                            iteration_1b,
+                        )
+                        self._log_metric_safe(
+                            'anchor_draws', int(cand_res['draws']), iteration_1b
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to log anchor metrics: {e}")
+            except Exception as e:
+                self.logger.warning(
+                    f"Anchor eval failed (non-fatal): {e}", exc_info=True
+                )
+                anchor_results = {}
+                candidate_anchor_win_rate = None
+        else:
+            self.logger.info("Anchor eval disabled via mode_settings['anchor_enabled']=False")
+
+        self._clear_memory_cache("anchor")
+
+        # ------------------------------------------------------------------ #
         # 5. PROMOTION / REVERSION (using Wilson Gate)
         # ------------------------------------------------------------------ #
         candidate_iteration = current_iteration
@@ -1229,6 +1353,14 @@ class TrainingSupervisor:
             pass
 
         # Aggregate metrics for this iteration
+        extra_metrics: Dict[str, Any] = {
+            'tournament_rating': current_elo,
+            'tournament_win_rate': tourn_win_rate,
+        }
+        # anchor_win_rate is the primary signal for §1.3; always recorded
+        # (None if the anchor eval was skipped/failed) so downstream
+        # dashboards can assume the key is always present per-iteration.
+        extra_metrics['anchor_win_rate'] = candidate_anchor_win_rate
         self.metrics.add_iteration_metrics(
             avg_game_length=avg_game_len,
             avg_ring_mobility=avg_ring_mobility,
@@ -1236,10 +1368,12 @@ class TrainingSupervisor:
             draw_rate=pseudo_draws / len(outcomes) if outcomes else 0,
             policy_loss=final_pol_loss,
             value_loss=final_val_loss,
-            tournament_rating=current_elo,
-            tournament_win_rate=tourn_win_rate
+            **extra_metrics,
         )
-        self._save_metrics(iteration_dir)
+        # Store the full anchor payload (all models) alongside the
+        # iteration's metrics.json so the triangulation data is
+        # inspectable after the run without rerunning eval.
+        self._save_metrics(iteration_dir, extra_payload={'anchor_eval': anchor_results})
 
         # Calculate total iteration time for logging and metrics
         total_iteration_time = time.time() - t0  # Total time from start of iteration
@@ -1344,6 +1478,11 @@ class TrainingSupervisor:
         self.logger.info(f"│")
         self.logger.info(f"│ TOURNAMENT")
         self.logger.info(f"│   Candidate ELO: {current_elo:.1f}, Win Rate: {tourn_win_rate:.1%}")
+        if candidate_anchor_win_rate is not None:
+            self.logger.info(
+                f"│   Anchor vs HeuristicAgent(d={self.anchor_depth}): "
+                f"{candidate_anchor_win_rate:.1%}"
+            )
         self.logger.info(f"│   Best Model: Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
         if promote:
             self.logger.info(f"│   Decision: ✅ NEW BEST (promoted to best model)")
@@ -1383,6 +1522,10 @@ class TrainingSupervisor:
                     'rating': current_elo,
                     'win_rate': tourn_win_rate,
                     'raw_stats': tournament_stats
+                },
+                'anchor': {
+                    'win_rate': candidate_anchor_win_rate,
+                    'results': anchor_results,
                 }
             },
             'model_selection': {
@@ -1858,9 +2001,24 @@ class TrainingSupervisor:
             elos = [f"{e['iteration']}:{e['elo']:.0f}" for e in self._checkpoint_registry]
             self.logger.debug(f"Checkpoint retention: keeping {len(self._checkpoint_registry)} checkpoints: {', '.join(elos)}")
 
-    def _save_metrics(self, iteration_dir: Path) -> None:
-        """Save training metrics for the completed iteration."""
+    def _save_metrics(
+        self,
+        iteration_dir: Path,
+        extra_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Save training metrics for the completed iteration.
+
+        Args:
+            iteration_dir: Where to drop ``metrics.json``.
+            extra_payload: Optional dict merged into the serialized metrics
+                blob. Used e.g. to surface the full anchor-eval breakdown
+                (per-model wins/losses/draws) alongside the per-iteration
+                scalar series.
+        """
         metrics_data = self.metrics.get_latest_metrics() # Assuming method exists
+        if extra_payload:
+            for k, v in extra_payload.items():
+                metrics_data[k] = v
         metrics_data['timestamp'] = time.time()
         # Convert numpy types for JSON serialization
         serializable_data = {}
