@@ -53,6 +53,15 @@ arena:
   promotion_threshold: 0.55
   eval_seed: 424242          # Deterministic smoke arena — makes tournament output
                              # reproducible across smoke runs.
+
+# Anchor eval (CLOUD_TRAINING_PLAN §1.3). Disabled in smoke because
+# a random-init network can't end YINSH games via normal win conditions
+# — it hits the 500-move safety cap, and 4 games × 500 moves × per-move
+# MPS inference is ~15+ min of pure wall-clock even at depth=1. The
+# full-scale cloud run absorbs this in iter 1; smoke exists to validate
+# buffer / resume / manifest, not anchor throughput.
+anchor:
+  enabled: false
 export:
   export_every: 0
   coreml_dir: models/coreml

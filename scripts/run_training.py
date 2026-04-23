@@ -326,6 +326,13 @@ def main() -> None:
         'tournament_sliding_window': int(arena_cfg.get('tournament_sliding_window', 5)),
         # Deterministic tournament seed. Leave unset (or null) for stochastic play.
         'eval_seed': arena_cfg.get('eval_seed', None),
+        # Anchor eval (CLOUD_TRAINING_PLAN §1.3). Reads from a nested
+        # `anchor:` block in the YAML for organization, with sensible
+        # defaults for any run that doesn't specify one.
+        'anchor_enabled': bool((cfg.get('anchor') or {}).get('enabled', True)),
+        'anchor_num_games': int((cfg.get('anchor') or {}).get('num_games', 40)),
+        'anchor_depth': int((cfg.get('anchor') or {}).get('depth', 3)),
+        'anchor_seed': int((cfg.get('anchor') or {}).get('seed', 1337)),
     }
 
     games_per_iteration = int(sp.get('games_per_iteration', 50))
