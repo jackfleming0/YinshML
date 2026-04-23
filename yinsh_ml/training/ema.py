@@ -51,11 +51,19 @@ class EMAShadow:
 
         shadow ← decay · shadow + (1 − decay) · live for float tensors;
         non-float tensors (e.g. BN `num_batches_tracked`) are just copied.
+
+        Aligns device on the fly: the module can be moved between devices
+        (e.g. to CPU for JIT trace during CoreML export) without the
+        shadow coming along. When that happens, migrate the shadow to
+        match the live tensor's device so the in-place op doesn't fail.
         """
         for name, live in self.module.state_dict().items():
             s = self.shadow.get(name)
             if s is None:
                 continue
+            if s.device != live.device:
+                s = s.to(live.device)
+                self.shadow[name] = s
             if live.is_floating_point():
                 s.mul_(self.decay).add_(live.detach(), alpha=1.0 - self.decay)
             else:
