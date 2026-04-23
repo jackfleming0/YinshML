@@ -1206,6 +1206,8 @@ class YinshTrainer:
 
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         return (policy_loss_val, value_loss_val, value_accuracy, move_accuracies)
 

@@ -426,8 +426,9 @@ class NetworkWrapper:
             mlmodel.save(path)
             self.logger.info(f"Model exported to CoreML format at {path}")
 
-            # Move model back to MPS
-            self.network.to('mps')
+            # Move model back to its original device (CUDA / MPS / CPU).
+            # Previously hardcoded to 'mps' which crashed on CUDA boxes.
+            self.network.to(self.device)
 
         except Exception as e:
             self.logger.error(f"Error exporting to CoreML: {str(e)}")
