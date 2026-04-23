@@ -1372,8 +1372,19 @@ def play_game_worker(
     worker_logger.info(f"Starting game {game_id}")
 
     try:
-        # Initialize with CPU device for worker
-        device = torch.device('cpu')
+        # Worker device: prefer CUDA when available (cloud GPU boxes),
+        # otherwise CPU. Historically this was hardcoded to CPU because
+        # Mac+fork+MPS was unstable — with the spawn start method that's
+        # no longer a concern. Each worker gets its own CUDA context
+        # (spawn, not fork), so multiple workers share the GPU safely.
+        # Can be overridden via mcts_config['worker_device'] for debugging.
+        _worker_device_override = mcts_config.get('worker_device')
+        if _worker_device_override:
+            device = torch.device(_worker_device_override)
+        elif torch.cuda.is_available():
+            device = torch.device('cuda')
+        else:
+            device = torch.device('cpu')
 
         # Create local tensor pool for network operations
         from ..memory import TensorPool, TensorPoolConfig
