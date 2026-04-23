@@ -13,11 +13,11 @@ self_play:
   # then hold at end. Dampens the iter 1-2 warm-start regression by starting self-play
   # close to the supervised distribution (heavy heuristic) and rolling off to pure
   # neural by the time the value head has readjusted.
-  heuristic_weight_start: 1.0
+  heuristic_weight_start: 0.5    # Lowered from 1.0: hybrid_weight=1.0 means every sim does a synchronous heuristic eval, so batched MCTS can't batch any NN calls. 0.5 keeps ~half the anchor effect but lets the NN batching kick in for the promised 10-20x speedup.
   heuristic_weight_end: 0.0
   heuristic_weight_anneal_iterations: 10
-  num_simulations: 160        # RUN B: Increased from 96 to improve self-play quality
-  late_simulations: 96        # RUN B: Increased from 64 (maintaining ~60% ratio with early sims)
+  num_simulations: 96         # Reduced from RUN B 160: 160-sim + hybrid_weight=1.0 paced ~33 min/game, untenable for 50 iters. 96 is the historical baseline.
+  late_simulations: 64        # Reduced from RUN B 96 to preserve ~60% ratio with early sims.
   simulation_switch_ply: 20   # switch point between early/late budgets
   c_puct: 1.0
   dirichlet_alpha: 0.3        # root noise
@@ -48,7 +48,7 @@ self_play:
   annealing_steps: 30
   temp_clamp_fraction: 0.6
   num_workers: 3              # Capped at 3 on macOS: RESEARCH_LOG.md L33 — saves ~4GB vs 4+ workers at ~15% time cost
-  games_per_iteration: 100    # Overnight test: 2x data diversity (memory-safe with margin)
+  games_per_iteration: 50     # Halved from 100 so iterations complete in a few hours rather than ~18. Can bump back up once we have a fast baseline.
 
 # Learner / Trainer
 trainer:
