@@ -636,8 +636,14 @@ class YinshTrainer:
             self.logger.info(f"Augmentation enabled: up to {max_augmentations}x data expansion")
         if replay_buffer_path is not None:
             from os import path as osp
-            if osp.exists(replay_buffer_path):
-                self.experience.load_buffer(replay_buffer_path)
+            # save_buffer writes `.pkl.gz` when compression is on; check both forms
+            candidate = replay_buffer_path
+            if not osp.exists(candidate):
+                gz = replay_buffer_path if replay_buffer_path.endswith('.gz') else replay_buffer_path + '.gz'
+                if osp.exists(gz):
+                    candidate = gz
+            if osp.exists(candidate):
+                self.experience.load_buffer(candidate)
             else:
                 self.logger.info(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
 

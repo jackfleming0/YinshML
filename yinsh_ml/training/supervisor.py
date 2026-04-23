@@ -932,6 +932,15 @@ class TrainingSupervisor:
         except:
             pass
 
+        # Persist the replay buffer so a crash / --resume doesn't lose the
+        # 10s of thousands of self-play samples accumulated to this point.
+        # Writes replay_buffer.pkl.gz next to the run's iteration dirs; the
+        # trainer looks for it at init and loads if present.
+        try:
+            self.trainer.experience.save_buffer(str(self.save_dir / "replay_buffer.pkl"))
+        except Exception as e:
+            self.logger.warning(f"Failed to save replay buffer: {e}")
+
         # ------------------------------------------------------------------ #
         # 4. TOURNAMENT EVALUATION
         # ------------------------------------------------------------------ #
