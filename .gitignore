@@ -37,6 +37,11 @@ configs/local/
 !analysis/**
 analysis/analysis_output
 
+# analysis_output/ is a whitelist: large .png/.txt reports stay ignored,
+# but the pickled heuristic evaluator IS a runtime dep and ships in git.
+!analysis_output/
+!analysis_output/heuristic_evaluator_model.pkl
+
 
 # Python virtual environment
 .env
