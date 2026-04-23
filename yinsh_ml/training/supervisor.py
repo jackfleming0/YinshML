@@ -4,7 +4,8 @@ import gc
 import logging
 from pathlib import Path
 import time
-from typing import Optional, List, Tuple, Dict
+from datetime import datetime, timezone
+from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 import json
 import psutil, platform
@@ -22,6 +23,12 @@ from ..game.constants import Player, PieceType
 from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics # Keep if used for internal tracking
 from ..utils.tournament import ModelTournament, _canon # Import _canon if used directly
+from ..utils.manifest import (
+    build_launch_manifest,
+    build_final_manifest,
+    infer_encoder,
+    write_manifest,
+)
 # --- Memory Pool Imports ---
 from ..memory import (
     GameStatePool, TensorPool, 
@@ -72,7 +79,11 @@ class TrainingSupervisor:
                  # This defines the *early* simulation budget.
                  mcts_simulations: int = 100,
                  # --- All other config settings arrive here ---
-                 mode_settings: Optional[Dict] = None
+                 mode_settings: Optional[Dict] = None,
+                 # --- Full raw training config, for the reproducibility manifest.
+                 #     Optional so existing call sites that only pass mode_settings
+                 #     still work; run_training.py supplies the full YAML dict.
+                 full_config: Optional[Dict[str, Any]] = None,
                 ):
         """
         Supervises the full training loop, configured via direct args and mode_settings.
@@ -96,8 +107,50 @@ class TrainingSupervisor:
         if mode_settings is None:
             mode_settings = {}
         self.mode_settings = mode_settings  # <<< STORE mode_settings AS INSTANCE VARIABLE
+        self.full_config = full_config
 
         self.logger.info(f"Initializing TrainingSupervisor in '{self.save_dir}'")
+
+        # ==================================================================
+        # 0. Write per-run launch manifest (reproducibility anchor).
+        # Done early, before any heavy init, so even crashes mid-setup leave
+        # behind a trace of what was attempted. Failures here are logged but
+        # never abort training.
+        # ==================================================================
+        self._launch_manifest: Optional[Dict[str, Any]] = None
+        self._start_time = datetime.now(timezone.utc)
+        self._promotion_count: int = 0
+        try:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            # Prefer the full raw config; fall back to mode_settings so there's
+            # always SOMETHING captured, even if the caller hasn't been updated.
+            cfg_for_manifest = self.full_config if self.full_config is not None else self.mode_settings
+            encoder_name = infer_encoder(
+                cfg_for_manifest,
+                fallback_channels=getattr(self.network, "input_channels", None),
+            )
+            # total_moves is encoder-independent (REMOVE_MARKERS table is shared),
+            # so StateEncoder() is the canonical source.
+            total_moves = StateEncoder().total_moves
+            # Try to find the repo root by walking up from this file to a .git
+            # marker; fall back to cwd (which is what run_training.py uses).
+            repo_root = Path(__file__).resolve().parents[2]
+            if not (repo_root / ".git").exists():
+                repo_root = Path.cwd()
+
+            self._launch_manifest = build_launch_manifest(
+                config=cfg_for_manifest,
+                device=self.device,
+                encoder=encoder_name,
+                total_moves=total_moves,
+                repo_root=repo_root,
+                start_time=self._start_time,
+            )
+            if write_manifest(self.save_dir / "manifest.json", self._launch_manifest):
+                self.logger.info(f"Wrote launch manifest to {self.save_dir / 'manifest.json'}")
+        except Exception as exc:
+            # Catch-all: manifest write must never abort training.
+            self.logger.warning(f"FAILED to build/write launch manifest: {exc}. Training continues.")
         self.logger.info(f"Base MCTS Simulations (early game): {mcts_simulations}")
         # Log received mode_settings for debugging
         # Be careful logging sensitive info if any exists in config
@@ -1070,6 +1123,7 @@ class TrainingSupervisor:
 
         # --- Apply Decision ---
         if promote:
+            self._promotion_count += 1
             self.best_model_elo = candidate_elo
             self.best_model_iteration = candidate_iteration
             self.best_model_path = checkpoint_path
@@ -1888,3 +1942,68 @@ class TrainingSupervisor:
 
         self.logger.debug(f"Promotion Gate Check: Wins={wins}, Total={total}, Confidence={conf*100:.0f}%, Wilson LB={lb:.4f}, Threshold={threshold}")
         return lb > threshold
+
+    def finalize_manifest(
+        self,
+        *,
+        iterations_completed: int,
+        final_anchor_win_rate: Optional[float] = None,
+    ) -> bool:
+        """Write `manifest_final.json` at the end of a successful training run.
+
+        Intended to be called from the outer training loop (e.g. `run_training.py`)
+        once the final iteration completes. Pulls its fields from in-memory
+        supervisor state (best model, promotion count) plus whatever the caller
+        supplies (iterations_completed, final_anchor_win_rate — the latter is
+        None until CLOUD_TRAINING_PLAN §1.3 lands).
+
+        Returns True on success, False if anything went wrong (always non-fatal).
+        """
+        if self._launch_manifest is None:
+            # Launch manifest never got written; rebuild a minimal one so we
+            # still leave SOMETHING behind for forensics.
+            self.logger.warning(
+                "finalize_manifest called but no launch manifest in memory; "
+                "writing final manifest with best-effort metadata only."
+            )
+            try:
+                cfg_for_manifest = self.full_config if self.full_config is not None else self.mode_settings
+                encoder_name = infer_encoder(
+                    cfg_for_manifest,
+                    fallback_channels=getattr(self.network, "input_channels", None),
+                )
+                repo_root = Path(__file__).resolve().parents[2]
+                if not (repo_root / ".git").exists():
+                    repo_root = Path.cwd()
+                self._launch_manifest = build_launch_manifest(
+                    config=cfg_for_manifest,
+                    device=self.device,
+                    encoder=encoder_name,
+                    total_moves=StateEncoder().total_moves,
+                    repo_root=repo_root,
+                    start_time=self._start_time,
+                )
+            except Exception as exc:
+                self.logger.warning(f"FAILED to rebuild launch manifest in finalize: {exc}.")
+                return False
+
+        try:
+            best_path = str(self.best_model_save_path) if self.best_model_save_path and Path(self.best_model_save_path).exists() else None
+            final = build_final_manifest(
+                self._launch_manifest,
+                end_time=datetime.now(timezone.utc),
+                iterations_completed=iterations_completed,
+                final_anchor_win_rate=final_anchor_win_rate,
+                best_checkpoint_path=best_path,
+                promotion_count=self._promotion_count,
+            )
+            ok = write_manifest(self.save_dir / "manifest_final.json", final)
+            if ok:
+                self.logger.info(
+                    f"Wrote final manifest to {self.save_dir / 'manifest_final.json'} "
+                    f"(iterations={iterations_completed}, promotions={self._promotion_count})"
+                )
+            return ok
+        except Exception as exc:
+            self.logger.warning(f"FAILED to write final manifest: {exc}. Training considered complete anyway.")
+            return False

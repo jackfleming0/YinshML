@@ -345,6 +345,7 @@ def main() -> None:
         tournament_games=int(arena_cfg.get('games_per_match', 200)),
         mcts_simulations=int(sp.get('num_simulations', 96)),
         mode_settings=mode_settings,
+        full_config=cfg,
     )
 
     # Load checkpoint if resuming
@@ -352,6 +353,7 @@ def main() -> None:
         _load_resume_checkpoint(network, supervisor, checkpoint_to_load, device, logger)
 
     start_time = time.time()
+    last_completed_iteration = start_iteration  # tracks successful iterations for manifest_final
     for it in range(start_iteration, num_iterations):
         logger.info(f'Starting iteration {it + 1}/{num_iterations}')
         summary = supervisor.train_iteration(num_games=games_per_iteration, epochs=epochs_per_iteration)
@@ -370,6 +372,7 @@ def main() -> None:
 
         elapsed_h = (time.time() - start_time) / 3600.0
         logger.info(f'Iteration {it + 1} complete. Elapsed: {elapsed_h:.2f}h')
+        last_completed_iteration = it + 1  # 1-based count of completed iterations
 
         # After each iteration: snapshot current config and write tuner suggestions
         try:
@@ -405,6 +408,16 @@ def main() -> None:
                 logger.warning(f'Failed to append feedback entry: {e}')
         except Exception as e:
             logger.warning(f'Auto-tuning suggestions failed: {e}')
+
+    # Training loop completed normally — write the final manifest.
+    # final_anchor_win_rate is None until CLOUD_TRAINING_PLAN §1.3 lands.
+    try:
+        supervisor.finalize_manifest(
+            iterations_completed=last_completed_iteration,
+            final_anchor_win_rate=None,
+        )
+    except Exception as e:
+        logger.warning(f'finalize_manifest failed: {e}')
 
 
 if __name__ == '__main__':
