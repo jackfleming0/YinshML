@@ -1404,6 +1404,22 @@ def play_game_worker(
         network.load_model(model_path)
         network.network.eval()
 
+        # Loud device diagnostic — prints device of an actual network parameter
+        # so we can confirm the model is where we think it is. Uses print() not
+        # logger because the worker's logger settings are finicky.
+        import sys
+        try:
+            _p = next(network.network.parameters())
+            print(
+                f"[WORKER {game_id}] intended device={device} | "
+                f"wrapper.device={network.device} | "
+                f"param.device={_p.device} | "
+                f"cuda.is_available={torch.cuda.is_available()}",
+                flush=True, file=sys.stderr,
+            )
+        except Exception as _e:
+            print(f"[WORKER {game_id}] device diag failed: {_e}", flush=True, file=sys.stderr)
+
         # Create local memory pool for this worker
         from ..memory import GameStatePool, GameStatePoolConfig
         from ..game import GameState
