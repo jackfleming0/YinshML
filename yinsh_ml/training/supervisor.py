@@ -2,6 +2,8 @@
 
 import gc
 import logging
+import os
+import subprocess
 from pathlib import Path
 import time
 from datetime import datetime, timezone
@@ -1380,6 +1382,12 @@ class TrainingSupervisor:
         # inspectable after the run without rerunning eval.
         self._save_metrics(iteration_dir, extra_payload={'anchor_eval': anchor_results})
 
+        # Cloud-safe backup: push the run dir to SYNC_RUN_DEST after each
+        # iteration so a terminated spot instance doesn't lose everything
+        # since the last manual rsync. No-op when SYNC_RUN_DEST is unset
+        # (the common local case). Never fatal. See CLOUD_TRAINING_PLAN §1.5.
+        self._maybe_sync_run_dir()
+
         # Calculate total iteration time for logging and metrics
         total_iteration_time = time.time() - t0  # Total time from start of iteration
 
@@ -1972,6 +1980,55 @@ class TrainingSupervisor:
         self.best_model_path = None
         self._iteration_counter = 0 # Reset counter too
         self.logger.info("Reset best model tracking state.")
+
+    def _maybe_sync_run_dir(self) -> None:
+        """Shell out to scripts/sync_run.sh if SYNC_RUN_DEST is set.
+
+        No-op when the env var is missing (the local development case).
+        Failures are logged at warning level but never abort training —
+        we prefer a training run that loses a single iteration's backup
+        over a run that crashes mid-iteration because a bucket was
+        misconfigured.
+        """
+        if not os.environ.get("SYNC_RUN_DEST"):
+            return
+        # Resolve the script path relative to the repo root, walking up
+        # from this file. Falls back to cwd so an unusual layout still works.
+        script = Path(__file__).resolve().parents[2] / "scripts" / "sync_run.sh"
+        if not script.exists():
+            fallback = Path.cwd() / "scripts" / "sync_run.sh"
+            if fallback.exists():
+                script = fallback
+            else:
+                self.logger.warning(
+                    "SYNC_RUN_DEST is set but scripts/sync_run.sh is missing; skipping sync."
+                )
+                return
+        try:
+            proc = subprocess.run(
+                [str(script), str(self.save_dir)],
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 min hard cap; sync should never block the loop
+                check=False,
+            )
+            if proc.returncode == 0:
+                self.logger.info(
+                    f"[sync_run] pushed {self.save_dir.name} → SYNC_RUN_DEST"
+                )
+                if proc.stdout.strip():
+                    self.logger.debug(f"[sync_run] stdout: {proc.stdout.strip()}")
+            else:
+                self.logger.warning(
+                    f"[sync_run] exit {proc.returncode} (non-fatal). "
+                    f"stderr: {proc.stderr.strip()[:500]}"
+                )
+        except subprocess.TimeoutExpired:
+            self.logger.warning(
+                "[sync_run] timed out after 10 min; training continues."
+            )
+        except Exception as exc:
+            self.logger.warning(f"[sync_run] launch failed (non-fatal): {exc}")
 
     def set_resume_iteration(self, next_iteration: int) -> None:
         """Sync the internal iteration counter to the next iteration to run.
