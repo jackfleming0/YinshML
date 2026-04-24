@@ -62,7 +62,11 @@ augmentation:
   enabled: true
   max_augmentations: 4
 arena:
-  games_per_match: 20
+  # Smoke-only: 6 games/match means 12 tournament games on iter 2 (one
+  # pair x both colors). Tight CI (~40% width) but fine for a perf-check
+  # sanity run where we're measuring wall-clock, not gating decisions.
+  # Phase C configs use 100.
+  games_per_match: 6
   promotion_threshold: 0.55
   tournament_sliding_window: 3
   eval_seed: 20260415
