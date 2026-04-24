@@ -8,8 +8,8 @@ self_play:
   heuristic_weight_start: 0.5
   heuristic_weight_end: 0.0
   heuristic_weight_anneal_iterations: 20
-  num_simulations: 96
-  late_simulations: 64
+  num_simulations: 48
+  late_simulations: 32
   simulation_switch_ply: 20
   c_puct: 1.0
   dirichlet_alpha: 0.3
@@ -26,8 +26,8 @@ self_play:
   final_temp: 0.1
   annealing_steps: 30
   temp_clamp_fraction: 0.6
-  num_workers: 3
-  games_per_iteration: 50
+  num_workers: 6
+  games_per_iteration: 30
 trainer:
   batch_size: 256
   l2_reg: 0.0
