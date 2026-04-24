@@ -62,7 +62,7 @@ augmentation:
   enabled: true
   max_augmentations: 4
 arena:
-  games_per_match: 100
+  games_per_match: 40
   promotion_threshold: 0.55
   tournament_sliding_window: 3
   eval_seed: 20260415
@@ -84,8 +84,8 @@ difficulty_presets:
     c_puct: 1.5
 anchor:
   enabled: true
-  num_games: 20
-  depth: 3
+  num_games: 6
+  depth: 1
   seed: 1337
-  max_moves_per_game: 200
-  skip_first_n_iterations: 2
+  max_moves_per_game: 150
+  skip_first_n_iterations: 3
