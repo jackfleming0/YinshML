@@ -1,24 +1,7 @@
-# Ablation config E — lr_conservative
-#
-# Hypothesis: the default 1e-3 LR paired with 4 epochs/iter causes
-# the fit-then-drift pattern — the network overshoots the current
-# buffer's gradient before the next iter of fresh data arrives.
-# Halving LR and epochs, and doubling warmup, should slow the
-# drift without reducing total gradient signal much.
-#
-# Diff vs ablation_baseline.yaml:
-#   trainer.lr: 0.001 → 0.0005
-#   trainer.warmup_epochs: 10 → 20
-#   trainer.epochs_per_iteration: 4 → 2
-#
-# Launch: python scripts/run_training.py -c configs/ablation_lr_conservative.yaml --iterations 10
-# Output: runs_ablation/ab_lr_conservative/<timestamp>/
 version: 1
-
 device: auto
 num_iterations: 50
 save_dir: runs_ablation/ab_lr_conservative
-
 self_play:
   evaluation_mode: hybrid
   heuristic_weight: 0.3
@@ -45,21 +28,22 @@ self_play:
   temp_clamp_fraction: 0.6
   num_workers: 3
   games_per_iteration: 50
-
 trainer:
   batch_size: 256
   l2_reg: 0.0
-  lr: 0.0005               # ablation knob (baseline: 0.001)
+  lr: 0.0005
   value_head_lr_factor: 5.0
-  value_loss_weights: [0.5, 0.5]
+  value_loss_weights:
+  - 0.5
+  - 0.5
   discrimination_weight: 0.5
-  epochs_per_iteration: 2  # ablation knob (baseline: 4)
+  epochs_per_iteration: 2
   batches_per_epoch: auto
   max_buffer_size: 50000
   ema_decay: 0.999
   use_ema_for_eval: true
   lr_schedule: cosine
-  warmup_epochs: 20        # ablation knob (baseline: 10)
+  warmup_epochs: 20
   enable_autocast: true
   soft_value_target_sigma: 0.5
   search_consistency:
@@ -70,26 +54,21 @@ trainer:
     long_sims: 64
     batch_size: 32
     warmup_iters: 3
-
 phase_weights:
   RING_PLACEMENT: 1.0
   MAIN_GAME: 2.0
   RING_REMOVAL: 0.5
-
 augmentation:
   enabled: true
   max_augmentations: 4
-
 arena:
   games_per_match: 100
   promotion_threshold: 0.55
   tournament_sliding_window: 3
   eval_seed: 20260415
-
 export:
   export_every: 5
   coreml_dir: models/coreml
-
 difficulty_presets:
   easy:
     num_simulations: 50
@@ -103,3 +82,10 @@ difficulty_presets:
     num_simulations: 400
     temperature: 0.1
     c_puct: 1.5
+anchor:
+  enabled: true
+  num_games: 20
+  depth: 3
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 2

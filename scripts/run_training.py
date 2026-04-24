@@ -333,6 +333,8 @@ def main() -> None:
         'anchor_num_games': int((cfg.get('anchor') or {}).get('num_games', 40)),
         'anchor_depth': int((cfg.get('anchor') or {}).get('depth', 3)),
         'anchor_seed': int((cfg.get('anchor') or {}).get('seed', 1337)),
+        'anchor_max_moves_per_game': int((cfg.get('anchor') or {}).get('max_moves_per_game', 200)),
+        'anchor_skip_first_n_iterations': int((cfg.get('anchor') or {}).get('skip_first_n_iterations', 1)),
     }
 
     games_per_iteration = int(sp.get('games_per_iteration', 50))

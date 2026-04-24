@@ -564,6 +564,7 @@ class ModelTournament:
         num_games: int = 40,
         depth: int = 3,
         seed: int = 1337,
+        max_moves_per_game: int = 200,
     ) -> Dict:
         """Play the candidate network against a fixed HeuristicAgent baseline.
 
@@ -664,7 +665,7 @@ class ModelTournament:
                 candidate_is_white = (cand_color == 'white')
 
                 try:
-                    while not game_state.is_terminal() and move_count < 500:
+                    while not game_state.is_terminal() and move_count < max_moves_per_game:
                         valid_moves = game_state.get_valid_moves()
                         if not valid_moves:
                             break
@@ -755,6 +756,7 @@ class ModelTournament:
         num_games: int = 40,
         depth: int = 3,
         seed: int = 1337,
+        max_moves_per_game: int = 200,
     ) -> Dict[str, Dict]:
         """Run anchor eval for a list of (label, checkpoint_path) entries.
 
@@ -781,6 +783,7 @@ class ModelTournament:
                     num_games=num_games,
                     depth=depth,
                     seed=seed,
+                    max_moves_per_game=max_moves_per_game,
                 )
             finally:
                 if hasattr(net, 'cleanup'):

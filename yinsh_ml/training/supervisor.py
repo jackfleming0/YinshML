@@ -412,6 +412,15 @@ class TrainingSupervisor:
         self.anchor_num_games: int = int(self.mode_settings.get('anchor_num_games', 40))
         self.anchor_depth: int = int(self.mode_settings.get('anchor_depth', 3))
         self.anchor_seed: int = int(self.mode_settings.get('anchor_seed', 1337))
+        # Per-game move cap inside anchor eval. 500 (the previous hardcoded
+        # value) runs pathologically long on random-init networks that can't
+        # end games cheaply — Phase B smoke showed ~60min per model on iter 0.
+        # 200 matches typical anchor game length and keeps eval bounded.
+        self.anchor_max_moves_per_game: int = int(self.mode_settings.get('anchor_max_moves_per_game', 200))
+        # Skip anchor eval for the first N iterations (random-init networks
+        # give no useful anchor signal and the eval is expensive). Set to 0
+        # to anchor every iter from the start.
+        self.anchor_skip_first_n_iterations: int = int(self.mode_settings.get('anchor_skip_first_n_iterations', 1))
         # Most recent candidate anchor win rate — consumed by
         # run_training.py → finalize_manifest at the end of the run.
         self._latest_anchor_win_rate: Optional[float] = None
@@ -1077,7 +1086,19 @@ class TrainingSupervisor:
         # baseline. Failures here are always non-fatal.
         anchor_results: Dict[str, Dict] = {}
         candidate_anchor_win_rate: Optional[float] = None
-        if self.anchor_enabled:
+        # Skip anchor eval for early iterations (random-init gives no signal).
+        # `current_iteration` is 0-based, so `skip_first_n=1` skips iter 0 only.
+        anchor_skipped_early = (
+            self.anchor_enabled
+            and self.anchor_skip_first_n_iterations > 0
+            and current_iteration < self.anchor_skip_first_n_iterations
+        )
+        if anchor_skipped_early:
+            self.logger.info(
+                f"Anchor eval skipped: iter {current_iteration} < anchor_skip_first_n_iterations="
+                f"{self.anchor_skip_first_n_iterations} (random-init networks give no useful signal)"
+            )
+        if self.anchor_enabled and not anchor_skipped_early:
             try:
                 # Build (label, checkpoint_path) list: candidate + 2 predecessors.
                 # "prev" and "prev-prev" = preceding iteration indices by path;
@@ -1106,6 +1127,7 @@ class TrainingSupervisor:
                     num_games=self.anchor_num_games,
                     depth=self.anchor_depth,
                     seed=self.anchor_seed,
+                    max_moves_per_game=self.anchor_max_moves_per_game,
                 ) or {}
 
                 candidate_label = _canon(str(checkpoint_path))

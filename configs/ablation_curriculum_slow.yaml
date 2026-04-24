@@ -1,27 +1,13 @@
-# Ablation config D — curriculum_slow
-#
-# Hypothesis: the heuristic-weight anneal from 0.5 → 0.0 over 10 iters
-# pulls the training distribution off the supervised prior too fast,
-# and the value head can't keep up. Doubling the anneal window to
-# 20 iters should let the prior persist longer.
-#
-# Diff vs ablation_baseline.yaml:
-#   self_play.heuristic_weight_anneal_iterations: 10 → 20
-#
-# Launch: python scripts/run_training.py -c configs/ablation_curriculum_slow.yaml --iterations 10
-# Output: runs_ablation/ab_curriculum_slow/<timestamp>/
 version: 1
-
 device: auto
 num_iterations: 50
 save_dir: runs_ablation/ab_curriculum_slow
-
 self_play:
   evaluation_mode: hybrid
   heuristic_weight: 0.3
   heuristic_weight_start: 0.5
   heuristic_weight_end: 0.0
-  heuristic_weight_anneal_iterations: 20   # ablation knob (baseline: 10)
+  heuristic_weight_anneal_iterations: 20
   num_simulations: 96
   late_simulations: 64
   simulation_switch_ply: 20
@@ -42,13 +28,14 @@ self_play:
   temp_clamp_fraction: 0.6
   num_workers: 3
   games_per_iteration: 50
-
 trainer:
   batch_size: 256
   l2_reg: 0.0
   lr: 0.001
   value_head_lr_factor: 5.0
-  value_loss_weights: [0.5, 0.5]
+  value_loss_weights:
+  - 0.5
+  - 0.5
   discrimination_weight: 0.5
   epochs_per_iteration: 4
   batches_per_epoch: auto
@@ -67,26 +54,21 @@ trainer:
     long_sims: 64
     batch_size: 32
     warmup_iters: 3
-
 phase_weights:
   RING_PLACEMENT: 1.0
   MAIN_GAME: 2.0
   RING_REMOVAL: 0.5
-
 augmentation:
   enabled: true
   max_augmentations: 4
-
 arena:
   games_per_match: 100
   promotion_threshold: 0.55
   tournament_sliding_window: 3
   eval_seed: 20260415
-
 export:
   export_every: 5
   coreml_dir: models/coreml
-
 difficulty_presets:
   easy:
     num_simulations: 50
@@ -100,3 +82,10 @@ difficulty_presets:
     num_simulations: 400
     temperature: 0.1
     c_puct: 1.5
+anchor:
+  enabled: true
+  num_games: 20
+  depth: 3
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 2

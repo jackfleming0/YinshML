@@ -1,22 +1,7 @@
-# Ablation config B — buffer100k_epochs2
-#
-# Hypothesis: iter-3 regression is driven by overfitting on a small,
-# rapidly-stale buffer. Doubling the buffer while halving epochs
-# should reduce the fit-then-drift signature without changing the
-# amount of fresh data per iteration.
-#
-# Diff vs ablation_baseline.yaml:
-#   trainer.epochs_per_iteration: 4 → 2
-#   trainer.max_buffer_size: 50000 → 100000
-#
-# Launch: python scripts/run_training.py -c configs/ablation_buffer100k_epochs2.yaml --iterations 10
-# Output: runs_ablation/ab_buffer100k_epochs2/<timestamp>/
 version: 1
-
 device: auto
 num_iterations: 50
 save_dir: runs_ablation/ab_buffer100k_epochs2
-
 self_play:
   evaluation_mode: hybrid
   heuristic_weight: 0.3
@@ -43,17 +28,18 @@ self_play:
   temp_clamp_fraction: 0.6
   num_workers: 3
   games_per_iteration: 50
-
 trainer:
   batch_size: 256
   l2_reg: 0.0
   lr: 0.001
   value_head_lr_factor: 5.0
-  value_loss_weights: [0.5, 0.5]
+  value_loss_weights:
+  - 0.5
+  - 0.5
   discrimination_weight: 0.5
-  epochs_per_iteration: 2    # ablation knob (baseline: 4)
+  epochs_per_iteration: 2
   batches_per_epoch: auto
-  max_buffer_size: 100000    # ablation knob (baseline: 50000)
+  max_buffer_size: 100000
   ema_decay: 0.999
   use_ema_for_eval: true
   lr_schedule: cosine
@@ -68,26 +54,21 @@ trainer:
     long_sims: 64
     batch_size: 32
     warmup_iters: 3
-
 phase_weights:
   RING_PLACEMENT: 1.0
   MAIN_GAME: 2.0
   RING_REMOVAL: 0.5
-
 augmentation:
   enabled: true
   max_augmentations: 4
-
 arena:
   games_per_match: 100
   promotion_threshold: 0.55
   tournament_sliding_window: 3
   eval_seed: 20260415
-
 export:
   export_every: 5
   coreml_dir: models/coreml
-
 difficulty_presets:
   easy:
     num_simulations: 50
@@ -101,3 +82,10 @@ difficulty_presets:
     num_simulations: 400
     temperature: 0.1
     c_puct: 1.5
+anchor:
+  enabled: true
+  num_games: 20
+  depth: 3
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 2

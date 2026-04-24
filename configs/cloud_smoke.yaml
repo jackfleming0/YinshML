@@ -84,6 +84,8 @@ difficulty_presets:
     c_puct: 1.5
 anchor:
   enabled: true
-  num_games: 8
+  num_games: 4
   depth: 1
   seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
