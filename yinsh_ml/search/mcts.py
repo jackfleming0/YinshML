@@ -155,8 +155,17 @@ class MCTS:
         self.heuristic_evaluator = None
         if self.config.use_heuristic_evaluation:
             try:
-                self.heuristic_evaluator = YinshHeuristics()
-                self.logger.info("YinshHeuristics evaluator initialized successfully")
+                # MCTS already does multi-ply lookahead via simulation; the
+                # heuristic's own forced-sequence detector duplicates that
+                # work at every leaf and dominates wall-clock. Disable it
+                # here. Standalone HeuristicAgent uses the default (enabled).
+                self.heuristic_evaluator = YinshHeuristics(
+                    enable_forced_sequence_detection=False,
+                )
+                self.logger.info(
+                    "YinshHeuristics evaluator initialized "
+                    "(forced-sequence detection disabled for MCTS use)"
+                )
             except Exception as e:
                 self.logger.warning(f"Failed to initialize heuristic evaluator: {e}")
                 self.heuristic_evaluator = None

@@ -1132,8 +1132,17 @@ class SelfPlay:
         self.evaluation_mode = evaluation_mode
         self.heuristic_weight = heuristic_weight
         if evaluation_mode in ["pure_heuristic", "hybrid"]:
-            self.heuristic_evaluator = YinshHeuristics()
-            self.logger.info(f"Initialized YinshHeuristics evaluator for {evaluation_mode} mode")
+            # See yinsh_ml/search/mcts.py for the rationale: MCTS already
+            # does multi-ply lookahead via simulation; the heuristic's own
+            # forced-sequence detector duplicates that and dominates wall-
+            # clock. Disable it for MCTS-side use.
+            self.heuristic_evaluator = YinshHeuristics(
+                enable_forced_sequence_detection=False,
+            )
+            self.logger.info(
+                f"Initialized YinshHeuristics evaluator for {evaluation_mode} mode "
+                f"(forced-sequence detection disabled)"
+            )
         else:
             self.heuristic_evaluator = None
 
