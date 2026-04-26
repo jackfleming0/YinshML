@@ -596,6 +596,7 @@ class ModelTournament:
         # crash the tournament module at import time.
         try:
             from ..agents.heuristic_agent import HeuristicAgent, HeuristicAgentConfig
+            from ..heuristics import YinshHeuristics
         except Exception as e:  # pragma: no cover - defensive
             self.logger.warning(f"Anchor eval skipped — could not import HeuristicAgent: {e}")
             return {
@@ -604,6 +605,18 @@ class ModelTournament:
             }
 
         try:
+            # Anchor opponent uses the FAST heuristic (no forced-sequence
+            # detection). The anchor agent does its own alpha-beta search on
+            # top of the heuristic, so the anchor's per-move strength comes
+            # from search depth, not from the heuristic's forced-sequence
+            # mini-search. With detection ON, each anchor move was ~9-10s
+            # (60 child positions × ~159ms eval). Disabling brings each anchor
+            # move to ~30-40ms and each game from ~7 min to a few seconds.
+            # The anchor stays the same across iterations and configs, so
+            # the relative-comparison signal of the sweep is preserved.
+            fast_evaluator = YinshHeuristics(
+                enable_forced_sequence_detection=False,
+            )
             anchor_agent = HeuristicAgent(
                 config=HeuristicAgentConfig(
                     max_depth=depth,
@@ -614,7 +627,8 @@ class ModelTournament:
                     random_seed=seed,
                     use_transposition_table=True,
                     zobrist_seed=f"anchor-seed-{seed}",
-                )
+                ),
+                evaluator=fast_evaluator,
             )
         except Exception as e:
             self.logger.warning(f"Anchor eval skipped — HeuristicAgent construction failed: {e}")
