@@ -1,0 +1,122 @@
+# Phase D — Path 2: radical recipe attempt at the iter-3-4 regression.
+#
+# Phase D's original "lr_conservative-scaled-up" run regressed by iter 5
+# despite winning Phase C (which had noisy 6-game anchors). At 20-game
+# anchors the regression is unambiguous: peak 50% at iter 3-4, crashing
+# to 0-10% by iter 15-25.
+#
+# Path 2's hypothesis: every recipe in Phase C let self-play "eat the
+# prior." The regression starts when heuristic_weight has annealed enough
+# that self-play games produce mostly random/weak value targets. So:
+#
+#   - Pin heuristic_weight at 0.5 permanently (no anneal) → stable signal
+#   - Drop LR another 5× from lr_conservative (5e-4 → 1e-4) → tiny drift
+#   - 1 epoch per iter (vs 2/4) → minimum gradient pull per cycle
+#   - 20 games per iter (vs 50) → less weak-self-play poison
+#   - 200K buffer (vs 100K) → retain old, prior-flavored games longer
+#
+# Cost-bounded at 30 iters: if anchor curve doesn't stay above ~30% by
+# iter 15+, this approach also doesn't work and we accept the iter-4
+# checkpoint from runs_phase_d as the project deliverable.
+#
+# Estimated cost: ~7-10 hrs (less self-play, smaller gradients) ≈ $3-4.
+version: 1
+device: auto
+num_iterations: 30
+save_dir: runs_phase_d_path2
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.5
+  heuristic_weight_start: 0.5    # PATH 2: pinned, no anneal
+  heuristic_weight_end: 0.5      # PATH 2: pinned (was 0.0 elsewhere)
+  heuristic_weight_anneal_iterations: 0  # PATH 2: disable anneal
+  num_simulations: 96
+  late_simulations: 64
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 6
+  games_per_iteration: 20         # PATH 2: was 50 (less self-play noise)
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001                      # PATH 2: 5× smaller than lr_conservative
+  value_head_lr_factor: 5.0
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  discrimination_weight: 0.5
+  epochs_per_iteration: 1         # PATH 2: was 2 (smallest possible step)
+  batches_per_epoch: auto
+  max_buffer_size: 200000         # PATH 2: was 100K (retain priors longer)
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 10               # PATH 2: smaller LR, less warmup needed
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 80
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260415
+
+export:
+  export_every: 30                # only at the end
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
+
+anchor:
+  enabled: true
+  num_games: 20                   # 20-game CI ~±20pt — clean signal
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 2      # PATH 2: anchor from iter 2 (vs 3) to
+                                  # see if regression onset is earlier
