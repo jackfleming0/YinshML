@@ -1,25 +1,37 @@
-# Phase D — Path 2: radical recipe attempt at the iter-3-4 regression.
+# Phase D — Path 2: blast the regression with deep MCTS + lots of games.
 #
-# Phase D's original "lr_conservative-scaled-up" run regressed by iter 5
-# despite winning Phase C (which had noisy 6-game anchors). At 20-game
-# anchors the regression is unambiguous: peak 50% at iter 3-4, crashing
-# to 0-10% by iter 15-25.
+# Phase D's lr_conservative-scaled-up run regressed cleanly at 20-game
+# anchor: peak 50% at iter 3-4, crashing to 0-10% by iter 15-25. The
+# recipe knobs from Phase C don't fix the iter-3-4 regression.
 #
-# Path 2's hypothesis: every recipe in Phase C let self-play "eat the
-# prior." The regression starts when heuristic_weight has annealed enough
-# that self-play games produce mostly random/weak value targets. So:
+# Hypothesis: the regression isn't fixable by SHRINKING gradient steps.
+# It's caused by training on bad MCTS targets that come from a too-
+# shallow search. AlphaZero used 800 sims/move; we've been running 96.
+# At 96 sims, the visit distribution is dominated by the network's own
+# policy prior — so as the prior gets worse from self-play noise, the
+# MCTS targets get worse, and the network gets worse. Bootstrap death
+# spiral.
 #
-#   - Pin heuristic_weight at 0.5 permanently (no anneal) → stable signal
-#   - Drop LR another 5× from lr_conservative (5e-4 → 1e-4) → tiny drift
-#   - 1 epoch per iter (vs 2/4) → minimum gradient pull per cycle
-#   - 20 games per iter (vs 50) → less weak-self-play poison
-#   - 200K buffer (vs 100K) → retain old, prior-flavored games longer
+# Path 2 fix: deeper MCTS (good targets even from a weak network),
+# more games per iter (data diversity), pinned heuristic weight (stable
+# value signal across iterations). Compute is cheap (~$0.30/hr-effective)
+# so we throw it at the problem instead of carefully tip-toeing.
 #
-# Cost-bounded at 30 iters: if anchor curve doesn't stay above ~30% by
-# iter 15+, this approach also doesn't work and we accept the iter-4
+#   num_simulations:      96  -> 256   (2.7× deeper, MCTS dominates the prior)
+#   late_simulations:     64  -> 192
+#   games_per_iteration:  50  -> 100   (2× more diverse data per iter)
+#   max_buffer_size:    100K  -> 300K  (proportional)
+#   heuristic_weight pinned at 0.5 (no anneal) — stable signal
+#
+# Keep lr / epochs reasonable (5e-4, 2 epochs) — quality targets
+# justify normal training, not tiny steps.
+#
+# Cost-bounded at 30 iters: if anchor doesn't stay above ~40% by iter 15+,
+# this confirms the regression is structural (network architecture or
+# training-loop bug, not hyperparameters), and we ship the iter-4
 # checkpoint from runs_phase_d as the project deliverable.
 #
-# Estimated cost: ~7-10 hrs (less self-play, smaller gradients) ≈ $3-4.
+# Estimated cost on RTX 4090: ~30 min/iter × 30 iters = ~15 hrs ≈ \$5.50.
 version: 1
 device: auto
 num_iterations: 30
@@ -30,9 +42,9 @@ self_play:
   heuristic_weight: 0.5
   heuristic_weight_start: 0.5    # PATH 2: pinned, no anneal
   heuristic_weight_end: 0.5      # PATH 2: pinned (was 0.0 elsewhere)
-  heuristic_weight_anneal_iterations: 0  # PATH 2: disable anneal
-  num_simulations: 96
-  late_simulations: 64
+  heuristic_weight_anneal_iterations: 0
+  num_simulations: 256           # PATH 2: 96 -> 256 (deep MCTS targets)
+  late_simulations: 192          # PATH 2: 64 -> 192
   simulation_switch_ply: 20
   c_puct: 1.0
   dirichlet_alpha: 0.3
@@ -50,24 +62,25 @@ self_play:
   annealing_steps: 30
   temp_clamp_fraction: 0.6
   num_workers: 6
-  games_per_iteration: 20         # PATH 2: was 50 (less self-play noise)
+  games_per_iteration: 100        # PATH 2: 50 -> 100 (more data diversity)
 
 trainer:
   batch_size: 256
   l2_reg: 0.0
-  lr: 0.0001                      # PATH 2: 5× smaller than lr_conservative
+  lr: 0.0005                      # lr_conservative level — good targets
+                                  # justify normal training rate
   value_head_lr_factor: 5.0
   value_loss_weights:
   - 0.5
   - 0.5
   discrimination_weight: 0.5
-  epochs_per_iteration: 1         # PATH 2: was 2 (smallest possible step)
+  epochs_per_iteration: 2         # back up to 2 — better data, train it
   batches_per_epoch: auto
-  max_buffer_size: 200000         # PATH 2: was 100K (retain priors longer)
+  max_buffer_size: 300000         # PATH 2: 100K -> 300K
   ema_decay: 0.999
   use_ema_for_eval: true
   lr_schedule: cosine
-  warmup_epochs: 10               # PATH 2: smaller LR, less warmup needed
+  warmup_epochs: 20
   enable_autocast: true
   soft_value_target_sigma: 0.5
   search_consistency:
@@ -95,7 +108,7 @@ arena:
   eval_seed: 20260415
 
 export:
-  export_every: 30                # only at the end
+  export_every: 30
   coreml_dir: models/coreml
 
 difficulty_presets:
@@ -118,5 +131,4 @@ anchor:
   depth: 1
   seed: 1337
   max_moves_per_game: 150
-  skip_first_n_iterations: 2      # PATH 2: anchor from iter 2 (vs 3) to
-                                  # see if regression onset is earlier
+  skip_first_n_iterations: 2
