@@ -421,8 +421,16 @@ class TrainingSupervisor:
         # give no useful anchor signal and the eval is expensive). Set to 0
         # to anchor every iter from the start.
         self.anchor_skip_first_n_iterations: int = int(self.mode_settings.get('anchor_skip_first_n_iterations', 1))
+        # MCTS-vs-anchor eval. When enabled, an additional pass runs the
+        # candidate via pure-neural MCTS (subtree-reuse on, root noise off)
+        # against the same anchor opponent. Raw-policy stays as a diagnostic
+        # for the policy head in isolation; MCTS-vs-anchor is the primary
+        # strength metric since it matches deployment behavior.
+        self.anchor_mcts_enabled: bool = bool(self.mode_settings.get('anchor_mcts_enabled', False))
+        self.anchor_mcts_simulations: int = int(self.mode_settings.get('anchor_mcts_simulations', 64))
         # Most recent candidate anchor win rate — consumed by
         # run_training.py → finalize_manifest at the end of the run.
+        # Set from MCTS eval when enabled, else from raw-policy eval.
         self._latest_anchor_win_rate: Optional[float] = None
 
         # --- Experiment Tracking ---
@@ -1085,6 +1093,7 @@ class TrainingSupervisor:
         # changes to the Elo gating logic don't bleed into the anchor
         # baseline. Failures here are always non-fatal.
         anchor_results: Dict[str, Dict] = {}
+        anchor_results_mcts: Dict[str, Dict] = {}
         candidate_anchor_win_rate: Optional[float] = None
         # Skip anchor eval for early iterations (random-init gives no signal).
         # `current_iteration` is 0-based, so `skip_first_n=1` skips iter 0 only.
@@ -1120,31 +1129,68 @@ class TrainingSupervisor:
                 self.logger.info(
                     f"Running anchor eval: {len(anchor_models)} model(s) vs "
                     f"HeuristicAgent(depth={self.anchor_depth}) x {self.anchor_num_games} games "
-                    f"(seed={self.anchor_seed})"
+                    f"(seed={self.anchor_seed}, mcts={'on' if self.anchor_mcts_enabled else 'off'})"
                 )
+                candidate_label = _canon(str(checkpoint_path))
+                # Raw-policy diagnostic. Always runs — fast, isolates the
+                # policy head from search. Print result as soon as it's
+                # available so the operator sees progress before MCTS
+                # eval (which can be 5-10× slower) finishes.
                 anchor_results = self.tournament_manager.run_anchor_eval_batch(
                     models=anchor_models,
                     num_games=self.anchor_num_games,
                     depth=self.anchor_depth,
                     seed=self.anchor_seed,
                     max_moves_per_game=self.anchor_max_moves_per_game,
+                    use_mcts=False,
                 ) or {}
-
-                candidate_label = _canon(str(checkpoint_path))
                 cand_res = anchor_results.get(candidate_label)
                 if cand_res and cand_res.get('games_played', 0) > 0:
-                    candidate_anchor_win_rate = float(cand_res['win_rate'])
+                    raw_win_rate = float(cand_res['win_rate'])
                     won = int(cand_res['candidate_wins'])
                     total = int(cand_res['games_played'])
-                    # The stdout line the plan explicitly asks for.
                     anchor_msg = (
-                        f"ANCHOR: iter {current_iteration}, "
-                        f"{won}/{total} = {candidate_anchor_win_rate:.1%}"
+                        f"ANCHOR[raw]: iter {current_iteration}, "
+                        f"{won}/{total} = {raw_win_rate:.1%}"
                     )
                     self.logger.info(anchor_msg)
                     print(anchor_msg, flush=True)
+                    candidate_anchor_win_rate = raw_win_rate
+
+                # MCTS-vs-anchor (primary metric). Stored under separate
+                # labels in metrics.json so both series persist for plotting.
+                anchor_results_mcts: Dict[str, Dict] = {}
+                cand_res_mcts: Optional[Dict] = None
+                if self.anchor_mcts_enabled:
+                    anchor_results_mcts = self.tournament_manager.run_anchor_eval_batch(
+                        models=anchor_models,
+                        num_games=self.anchor_num_games,
+                        depth=self.anchor_depth,
+                        seed=self.anchor_seed,
+                        max_moves_per_game=self.anchor_max_moves_per_game,
+                        use_mcts=True,
+                        mcts_simulations=self.anchor_mcts_simulations,
+                    ) or {}
+                    cand_res_mcts = anchor_results_mcts.get(candidate_label)
+                    if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
+                        mcts_win_rate = float(cand_res_mcts['win_rate'])
+                        won_m = int(cand_res_mcts['candidate_wins'])
+                        total_m = int(cand_res_mcts['games_played'])
+                        mcts_msg = (
+                            f"ANCHOR[mcts/{self.anchor_mcts_simulations}]: iter {current_iteration}, "
+                            f"{won_m}/{total_m} = {mcts_win_rate:.1%}"
+                        )
+                        self.logger.info(mcts_msg)
+                        print(mcts_msg, flush=True)
+                        # MCTS is the primary strength metric when enabled —
+                        # downstream consumers (manifest_final, dashboards) read
+                        # `_latest_anchor_win_rate` and should see deployment-style
+                        # play strength, not raw-policy strength.
+                        candidate_anchor_win_rate = mcts_win_rate
+
+                if candidate_anchor_win_rate is not None:
                     self._latest_anchor_win_rate = candidate_anchor_win_rate
-                else:
+                elif not (cand_res and cand_res.get('games_played', 0) > 0):
                     self.logger.warning(
                         f"Anchor eval produced no usable result for candidate {candidate_label}"
                     )
@@ -1155,13 +1201,26 @@ class TrainingSupervisor:
                         continue
                     if res.get('games_played', 0) > 0:
                         self.logger.info(
-                            f"ANCHOR (prev): {lbl} → "
+                            f"ANCHOR (prev,raw): {lbl} → "
                             f"{res['candidate_wins']}/{res['games_played']} "
                             f"= {res['win_rate']:.1%}"
                         )
+                if self.anchor_mcts_enabled:
+                    for lbl, res in anchor_results_mcts.items():
+                        if lbl == candidate_label:
+                            continue
+                        if res.get('games_played', 0) > 0:
+                            self.logger.info(
+                                f"ANCHOR (prev,mcts): {lbl} → "
+                                f"{res['candidate_wins']}/{res['games_played']} "
+                                f"= {res['win_rate']:.1%}"
+                            )
 
-                # Mirror the candidate rate into the experiment tracker so
-                # dashboards pick it up alongside tournament_* metrics.
+                # Mirror the candidate rates into the experiment tracker so
+                # dashboards pick them up alongside tournament_* metrics.
+                # `anchor_win_rate` tracks the primary metric (MCTS when
+                # enabled, raw-policy otherwise); raw and MCTS are also
+                # logged under explicit suffixes so both series are available.
                 if (
                     candidate_anchor_win_rate is not None
                     and self.experiment_tracker
@@ -1172,19 +1231,29 @@ class TrainingSupervisor:
                         self._log_metric_safe(
                             'anchor_win_rate', candidate_anchor_win_rate, iteration_1b
                         )
-                        self._log_metric_safe(
-                            'anchor_games_played',
-                            int(cand_res['games_played']),
-                            iteration_1b,
-                        )
-                        self._log_metric_safe(
-                            'anchor_candidate_wins',
-                            int(cand_res['candidate_wins']),
-                            iteration_1b,
-                        )
-                        self._log_metric_safe(
-                            'anchor_draws', int(cand_res['draws']), iteration_1b
-                        )
+                        if cand_res and cand_res.get('games_played', 0) > 0:
+                            self._log_metric_safe(
+                                'anchor_win_rate_raw', float(cand_res['win_rate']), iteration_1b
+                            )
+                            self._log_metric_safe(
+                                'anchor_games_played',
+                                int(cand_res['games_played']),
+                                iteration_1b,
+                            )
+                            self._log_metric_safe(
+                                'anchor_candidate_wins',
+                                int(cand_res['candidate_wins']),
+                                iteration_1b,
+                            )
+                            self._log_metric_safe(
+                                'anchor_draws', int(cand_res['draws']), iteration_1b
+                            )
+                        if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
+                            self._log_metric_safe(
+                                'anchor_win_rate_mcts',
+                                float(cand_res_mcts['win_rate']),
+                                iteration_1b,
+                            )
                     except Exception as e:
                         self.logger.warning(f"Failed to log anchor metrics: {e}")
             except Exception as e:
@@ -1192,6 +1261,7 @@ class TrainingSupervisor:
                     f"Anchor eval failed (non-fatal): {e}", exc_info=True
                 )
                 anchor_results = {}
+                anchor_results_mcts = {}
                 candidate_anchor_win_rate = None
         else:
             self.logger.info("Anchor eval disabled via mode_settings['anchor_enabled']=False")
@@ -1401,8 +1471,12 @@ class TrainingSupervisor:
         )
         # Store the full anchor payload (all models) alongside the
         # iteration's metrics.json so the triangulation data is
-        # inspectable after the run without rerunning eval.
-        self._save_metrics(iteration_dir, extra_payload={'anchor_eval': anchor_results})
+        # inspectable after the run without rerunning eval. Both raw and
+        # MCTS variants persist under separate keys.
+        anchor_payload = {'anchor_eval': anchor_results}
+        if self.anchor_mcts_enabled:
+            anchor_payload['anchor_eval_mcts'] = anchor_results_mcts
+        self._save_metrics(iteration_dir, extra_payload=anchor_payload)
 
         # Cloud-safe backup: push the run dir to SYNC_RUN_DEST after each
         # iteration so a terminated spot instance doesn't lose everything

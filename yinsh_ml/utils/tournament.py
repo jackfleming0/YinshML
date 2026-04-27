@@ -565,6 +565,8 @@ class ModelTournament:
         depth: int = 3,
         seed: int = 1337,
         max_moves_per_game: int = 200,
+        use_mcts: bool = False,
+        mcts_simulations: int = 64,
     ) -> Dict:
         """Play the candidate network against a fixed HeuristicAgent baseline.
 
@@ -582,11 +584,19 @@ class ModelTournament:
             seed: Base RNG seed used to derive per-game seeds. KEEP STABLE
                 across iterations — the whole point of the anchor is that
                 the baseline doesn't drift.
+            use_mcts: If True, the candidate plays via pure-neural MCTS
+                instead of raw policy-head argmax. Tests how the model
+                actually plays in deployment; raw-policy mode is kept as a
+                diagnostic for the policy head in isolation.
+            mcts_simulations: Per-move sim budget when ``use_mcts=True``.
+                Subtree reuse is ON within a game; root Dirichlet noise is
+                disabled so the eval is deterministic across iterations.
 
         Returns:
             Dict with keys ``games_played``, ``candidate_wins``,
             ``anchor_wins``, ``draws``, ``win_rate`` (candidate wins /
-            games_played; draws count as 0 in numerator).
+            games_played; draws count as 0 in numerator), and ``mode``
+            (``'raw_policy'`` or ``'mcts'``).
 
             On failure (e.g. HeuristicAgent construction blows up), returns
             a dict with ``games_played=0`` and a ``skipped_reason`` key —
@@ -637,6 +647,40 @@ class ModelTournament:
                 'draws': 0, 'win_rate': 0.0, 'skipped_reason': f'construct: {e}',
             }
 
+        # Build a per-game MCTS factory when use_mcts is True. We rebuild
+        # per game (not per move) so subtree reuse benefits within a game
+        # without leaking visits across games. Pure-neural mode + zero
+        # Dirichlet noise + deterministic temp ensures the eval is
+        # reproducible game-over-game.
+        mcts_factory = None
+        if use_mcts:
+            try:
+                from ..training.self_play import MCTS as _AnchorMCTS
+
+                def _build_anchor_mcts():
+                    return _AnchorMCTS(
+                        network=candidate_network,
+                        evaluation_mode="pure_neural",
+                        heuristic_evaluator=None,
+                        num_simulations=mcts_simulations,
+                        late_simulations=mcts_simulations,
+                        simulation_switch_ply=10_000,
+                        enable_subtree_reuse=True,
+                        epsilon_mix_start=0.0,
+                        epsilon_mix_end=0.0,
+                        epsilon_mix_taper_moves=0,
+                        initial_temp=1.0,
+                        final_temp=1.0,
+                        annealing_steps=1,
+                    )
+                mcts_factory = _build_anchor_mcts
+            except Exception as e:
+                self.logger.warning(
+                    f"Anchor eval (MCTS): failed to build MCTS, falling back to raw policy: {e}"
+                )
+                use_mcts = False
+
+        mode_label = 'mcts' if use_mcts else 'raw_policy'
         anchor_label = f"anchor_heuristic_d{depth}"
         half = num_games // 2
         # Fixed pairing sequence: first `half` games candidate plays White,
@@ -672,6 +716,9 @@ class ModelTournament:
                 anchor_agent._rng = random.Random(seed)
                 anchor_agent.clear_transposition_table()
 
+                # Fresh MCTS per game so subtree reuse stays in-game only.
+                game_mcts = mcts_factory() if mcts_factory is not None else None
+
                 game_state = GameState()
                 move_count = 0
 
@@ -690,16 +737,34 @@ class ModelTournament:
                         )
 
                         if cand_to_move:
-                            state_array = candidate_network.state_encoder.encode_state(game_state)
-                            cand_input_tensor.copy_(
-                                torch.from_numpy(np.array(state_array)).unsqueeze(0)
-                            )
-                            move_probs, _ = candidate_network.predict(cand_input_tensor)
-                            # temperature=0 → argmax, fully deterministic given seeds
-                            selected_move = candidate_network.select_move(
-                                move_probs, valid_moves, temperature=0.0
-                            )
-                            del move_probs
+                            if game_mcts is not None:
+                                # MCTS path: visit-distribution → greedy argmax
+                                # over valid moves. select_move with temp=0
+                                # picks the highest-prob valid move. Use the
+                                # batched search so each move evaluates leaves
+                                # in NN batches — single-leaf search at 64+
+                                # sims is ~10× slower on MPS / CUDA.
+                                visit_probs = game_mcts.search_batch(
+                                    game_state, move_count, batch_size=32
+                                )
+                                visit_probs_t = torch.from_numpy(np.asarray(visit_probs)).to(
+                                    candidate_network.device
+                                )
+                                selected_move = candidate_network.select_move(
+                                    visit_probs_t, valid_moves, temperature=0.0
+                                )
+                                del visit_probs_t
+                            else:
+                                state_array = candidate_network.state_encoder.encode_state(game_state)
+                                cand_input_tensor.copy_(
+                                    torch.from_numpy(np.array(state_array)).unsqueeze(0)
+                                )
+                                move_probs, _ = candidate_network.predict(cand_input_tensor)
+                                # temperature=0 → argmax, fully deterministic given seeds
+                                selected_move = candidate_network.select_move(
+                                    move_probs, valid_moves, temperature=0.0
+                                )
+                                del move_probs
                         else:
                             selected_move = anchor_agent.select_move(game_state)
 
@@ -712,6 +777,10 @@ class ModelTournament:
                                 f"move {move_count} — aborting game."
                             )
                             break
+                        # Keep MCTS's cached root in sync with the game tree
+                        # so subtree-reuse benefits accrue across moves.
+                        if game_mcts is not None:
+                            game_mcts.advance_root(selected_move)
                         move_count += 1
                 except Exception as e:
                     self.logger.warning(
@@ -756,9 +825,11 @@ class ModelTournament:
             'depth': depth,
             'seed': seed,
             'avg_game_length': (total_moves / games_played) if games_played > 0 else 0.0,
+            'mode': mode_label,
+            'mcts_simulations': mcts_simulations if use_mcts else 0,
         }
         self.logger.info(
-            f"Anchor eval: {candidate_label} vs {anchor_label} → "
+            f"Anchor eval [{mode_label}]: {candidate_label} vs {anchor_label} → "
             f"W/L/D = {candidate_wins}/{anchor_wins}/{draws} "
             f"({win_rate:.1%} win rate over {games_played} games)"
         )
@@ -771,11 +842,15 @@ class ModelTournament:
         depth: int = 3,
         seed: int = 1337,
         max_moves_per_game: int = 200,
+        use_mcts: bool = False,
+        mcts_simulations: int = 64,
     ) -> Dict[str, Dict]:
         """Run anchor eval for a list of (label, checkpoint_path) entries.
 
         Uses lazy model loading so memory stays bounded — only one candidate
         is resident at a time. Missing checkpoints are skipped gracefully.
+        Set ``use_mcts=True`` to evaluate with pure-neural MCTS instead of
+        raw policy argmax.
         """
         results: Dict[str, Dict] = {}
         for label, ckpt in models:
@@ -798,6 +873,8 @@ class ModelTournament:
                     depth=depth,
                     seed=seed,
                     max_moves_per_game=max_moves_per_game,
+                    use_mcts=use_mcts,
+                    mcts_simulations=mcts_simulations,
                 )
             finally:
                 if hasattr(net, 'cleanup'):

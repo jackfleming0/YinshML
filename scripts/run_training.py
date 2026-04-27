@@ -131,26 +131,54 @@ def _restore_optimizer_state(supervisor, checkpoint: dict, logger: logging.Logge
         logger.warning(f"Could not restore value_scheduler_state_dict: {exc}")
 
 
+def _extract_model_state(checkpoint_obj, checkpoint_path: Path):
+    """Return the raw model state_dict from a checkpoint payload.
+
+    Supports both supervisor checkpoints (raw state_dict) and trainer-style
+    payloads with a ``model_state_dict`` key. Used by both the resume path
+    (which also restores optimizer/scheduler state) and the init-checkpoint
+    path (weights only).
+    """
+    if isinstance(checkpoint_obj, dict) and "model_state_dict" in checkpoint_obj and isinstance(
+        checkpoint_obj["model_state_dict"], dict
+    ):
+        return checkpoint_obj["model_state_dict"]
+    if isinstance(checkpoint_obj, dict):
+        return checkpoint_obj
+    raise RuntimeError(
+        f"Unsupported checkpoint object type at {checkpoint_path}: {type(checkpoint_obj)}"
+    )
+
+
 def _load_resume_checkpoint(network: NetworkWrapper, supervisor: TrainingSupervisor, checkpoint_path: Path, device: str, logger: logging.Logger) -> None:
     import torch
 
     logger.info(f"Loading checkpoint: {checkpoint_path}")
     checkpoint_obj = torch.load(checkpoint_path, map_location=device)
-
     checkpoint_dict = checkpoint_obj if isinstance(checkpoint_obj, dict) else {}
-    if isinstance(checkpoint_obj, dict) and "model_state_dict" in checkpoint_obj and isinstance(
-        checkpoint_obj["model_state_dict"], dict
-    ):
-        model_state = checkpoint_obj["model_state_dict"]
-    elif isinstance(checkpoint_obj, dict):
-        # Supervisor checkpoints are raw state_dict objects.
-        model_state = checkpoint_obj
-    else:
-        raise RuntimeError(f"Unsupported checkpoint object type: {type(checkpoint_obj)}")
+    model_state = _extract_model_state(checkpoint_obj, checkpoint_path)
 
     _load_model_state_compatible(network.network, model_state, logger)
     _restore_optimizer_state(supervisor, checkpoint_dict, logger)
     logger.info("Checkpoint loaded successfully")
+
+
+def _load_init_checkpoint(network: NetworkWrapper, checkpoint_path: Path, device: str, logger: logging.Logger) -> None:
+    """Warm-start a fresh run from an existing checkpoint's weights only.
+
+    Unlike ``_load_resume_checkpoint``, this skips optimizer and scheduler
+    state — the run starts at iteration 0 in a new run directory with fresh
+    Adam moments / SGD momentum and a fresh LR schedule. Use when you want
+    the network to inherit a learned prior (e.g. from supervised pretraining
+    or a prior self-play run) without inheriting its optimizer history.
+    """
+    import torch
+
+    logger.info(f"Warm-starting from init checkpoint: {checkpoint_path}")
+    checkpoint_obj = torch.load(checkpoint_path, map_location=device)
+    model_state = _extract_model_state(checkpoint_obj, checkpoint_path)
+    _load_model_state_compatible(network.network, model_state, logger)
+    logger.info("Init checkpoint weights loaded (optimizer / scheduler state skipped)")
 
 
 def main() -> None:
@@ -160,7 +188,22 @@ def main() -> None:
     parser.add_argument('--save-dir', type=str, default=None, help='Override save_dir')
     parser.add_argument('--export-every', type=int, default=None, help='Override export cadence')
     parser.add_argument('--resume', type=str, default=None, help='Resume from existing run directory (e.g., runs/20260216_094801)')
+    parser.add_argument(
+        '--init-checkpoint',
+        type=str,
+        default=None,
+        help=(
+            'Warm-start a fresh run from an existing checkpoint. Unlike --resume, '
+            'this creates a new timestamped run directory, starts at iteration 0, '
+            'and loads ONLY model weights (optimizer / scheduler state are reset). '
+            'Use for warm-starting from a supervised-pretrained or earlier-run '
+            'checkpoint. Mutually exclusive with --resume.'
+        ),
+    )
     args = parser.parse_args()
+
+    if args.resume and args.init_checkpoint:
+        parser.error("--resume and --init-checkpoint are mutually exclusive")
 
     cfg = load_config(Path(args.config))
 
@@ -172,9 +215,13 @@ def main() -> None:
     device = select_device(cfg.get('device', 'auto'))
     num_iterations = args.iterations or int(cfg.get('num_iterations', 50))
 
-    # Handle resume vs new run
+    # Handle resume vs init-checkpoint vs fresh run.
+    # `start_iteration` and `checkpoint_to_load` flow into the loader below;
+    # `init_checkpoint_to_load` (if set) goes through the weights-only path
+    # so optimizer + iteration counter reset to fresh.
     start_iteration = 0
     checkpoint_to_load = None
+    init_checkpoint_to_load: Optional[Path] = None
 
     if args.resume:
         run_dir = Path(args.resume)
@@ -193,6 +240,14 @@ def main() -> None:
     else:
         base_save_dir = Path(args.save_dir or cfg.get('save_dir', 'runs'))
         run_dir = ensure_dir(base_save_dir / time.strftime('%Y%m%d_%H%M%S'))
+
+        if args.init_checkpoint:
+            init_path = Path(args.init_checkpoint)
+            if not init_path.exists():
+                logger.error(f"--init-checkpoint path does not exist: {init_path}")
+                sys.exit(1)
+            init_checkpoint_to_load = init_path
+            logger.info(f"Warm-starting new run {run_dir} from {init_path}")
 
     # Export settings
     export_cfg = cfg.get('export', {})
@@ -335,6 +390,13 @@ def main() -> None:
         'anchor_seed': int((cfg.get('anchor') or {}).get('seed', 1337)),
         'anchor_max_moves_per_game': int((cfg.get('anchor') or {}).get('max_moves_per_game', 200)),
         'anchor_skip_first_n_iterations': int((cfg.get('anchor') or {}).get('skip_first_n_iterations', 1)),
+        # MCTS-vs-anchor (primary strength metric). Off by default to keep
+        # legacy configs unchanged; raw-policy anchor still runs and stays
+        # the diagnostic. When on, the candidate also plays the anchor with
+        # pure-neural MCTS (`mcts_simulations` per move, subtree-reuse on,
+        # root noise off) so anchor numbers reflect deployment-style play.
+        'anchor_mcts_enabled': bool((cfg.get('anchor') or {}).get('mcts_enabled', False)),
+        'anchor_mcts_simulations': int((cfg.get('anchor') or {}).get('mcts_simulations', 64)),
     }
 
     games_per_iteration = int(sp.get('games_per_iteration', 50))
@@ -369,6 +431,12 @@ def main() -> None:
             supervisor.set_resume_iteration(start_iteration)
         except Exception as e:
             logger.warning(f"Failed to sync supervisor iteration counter: {e}")
+    elif init_checkpoint_to_load is not None:
+        # Warm-start: weights only. Iteration counter stays at 0 (the new run
+        # starts fresh), and supervisor.set_resume_iteration is intentionally
+        # NOT called so iteration_0 / best_model bookkeeping behaves as a new
+        # run that just happens to inherit a learned prior.
+        _load_init_checkpoint(network, init_checkpoint_to_load, device, logger)
 
     start_time = time.time()
     last_completed_iteration = start_iteration  # tracks successful iterations for manifest_final

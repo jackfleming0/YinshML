@@ -1,18 +1,30 @@
 version: 1
 
-# Smoke test for warmstart diagnostic instrumentation.
-# Mirrors training.yaml with num_iterations=1 and games_per_iteration=20
-# to verify the unified [Memory] log fires at all five transitions.
+# 3-iter diagnostic warm-start (peer plan, 2026-04-26).
+#
+# Run with:
+#   python scripts/run_training.py \
+#       -c configs/diag_warmstart_3iter.yaml \
+#       --init-checkpoint <path-to-supervised.pt>
+#
+# Smaller-scale cousin of phase_d_warmstart.yaml: 3 iterations × 20 games to
+# quickly validate the joint-update fix + warm-start path before committing
+# to a full cloud run. games_per_iteration=20 + anchor.num_games=20 keeps
+# total wall-clock under ~30 min on a 4090. Anchor runs both raw-policy and
+# MCTS variants side-by-side so the peer's "raw vs MCTS" comparison shows up.
 
 device: auto
-num_iterations: 1
+num_iterations: 3
 save_dir: runs
 
 self_play:
   evaluation_mode: hybrid
   heuristic_weight: 0.3
-  num_simulations: 160
-  late_simulations: 96
+  heuristic_weight_start: 1.0
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
+  num_simulations: 96
+  late_simulations: 64
   simulation_switch_ply: 20
   c_puct: 1.0
   dirichlet_alpha: 0.3
@@ -20,6 +32,11 @@ self_play:
   max_depth: 300
   use_batched_mcts: true
   mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
   initial_temp: 1.0
   final_temp: 0.1
   annealing_steps: 30
@@ -37,10 +54,12 @@ trainer:
   epochs_per_iteration: 4
   batches_per_epoch: auto
   max_buffer_size: 50000
-  # Peer plan: smoke warm-start runs eval directly on the live weights so
-  # we see the joint-update fix's effect without EMA smoothing in the way.
   ema_decay: null
   use_ema_for_eval: false
+  lr_schedule: cosine
+  warmup_epochs: 2
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
 
 phase_weights:
   RING_PLACEMENT: 1.0
@@ -52,23 +71,21 @@ augmentation:
   max_augmentations: 4
 
 arena:
-  games_per_match: 50
+  games_per_match: 40
   promotion_threshold: 0.55
   tournament_sliding_window: 3
+  eval_seed: 20260426
 
 anchor:
   enabled: true
-  num_games: 4                    # Tiny CI; smoke is for instrumentation, not strength.
-  depth: 2                        # depth=3 takes >90s/game on Mac MPS against a warm-started net
-                                  # (the supervised prior produces hard mid-game positions for the
-                                  # heuristic alpha-beta to expand). Cloud Phase D recipes can keep
-                                  # depth=3 since a 4090 chews through it; on Mac, depth=2 is the
-                                  # right tradeoff for an instrumentation smoke.
+  num_games: 20
+  depth: 3
   seed: 1337
   max_moves_per_game: 200
-  skip_first_n_iterations: 0      # Warm-start has signal from iter 0; don't skip.
+  skip_first_n_iterations: 0   # We want anchor signal from iter 0 since we
+                               # warm-start from a non-random init.
   mcts_enabled: true
-  mcts_simulations: 32            # Halved from 64 since smoke is correctness-only, not strength.
+  mcts_simulations: 96
 
 export:
   export_every: 5

@@ -855,7 +855,18 @@ class YinshTrainer:
     def train_step(self,
                    batch_size: int,
                    phase_weights: Optional[Dict[str, float]] = None) -> Tuple[float, float, float, Dict]:
-        """Training step with separate policy and value optimization."""
+        """Joint policy + value training step.
+
+        One forward pass produces (pred_logits, pred_values); both losses are
+        computed and summed into `total_loss`, which backpropagates once. The
+        policy_optimizer (Adam, owns trunk + policy_head) and value_optimizer
+        (SGD, owns value_head only) both step against the joint gradient, so
+        the shared trunk learns from value supervision in addition to policy
+        supervision. Per-head clip max_norms (1.0 / 0.5) are preserved by
+        clipping the disjoint param sets independently between backward and
+        step. Two optimizers are kept (instead of one with two param groups)
+        so the existing scheduler + checkpoint state-dict code stays intact.
+        """
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0, 0.0, {'top_1_accuracy': 0.0, 'top_3_accuracy': 0.0, 'top_5_accuracy': 0.0}
 
@@ -918,9 +929,19 @@ class YinshTrainer:
         #         actual_outcome=target_values[i].detach().cpu().numpy()
         #     )
 
-        # --- Policy Optimization ---
+        # --- Joint Policy + Value Optimization ---
+        # Single forward (already computed `pred_logits`, `pred_values` above).
+        # Combined loss = policy + value so the shared trunk learns from BOTH
+        # signals. Two optimizers stay (Adam for trunk+policy, SGD for value
+        # head) to preserve per-head LR + weight-decay schedules; the joint
+        # backward routes value-loss gradient through the trunk into Adam,
+        # which is the bug fix — previously value_loss.backward() populated
+        # trunk .grad but only value_optimizer.step() ran, so the trunk only
+        # ever saw the policy signal.
         self.policy_optimizer.zero_grad()
+        self.value_optimizer.zero_grad()
         with torch.set_grad_enabled(True):
+            # ---- Policy loss ----
             with self._autocast():
                 scaled_logits = pred_logits / self.temperature
                 log_probs = F.log_softmax(scaled_logits, dim=1)
@@ -945,33 +966,13 @@ class YinshTrainer:
                 policy_probs = log_probs.exp()
                 batch_entropy = -(policy_probs * log_probs).sum(dim=1).mean()
                 self.last_policy_entropy = float(batch_entropy.item())
-            # Backward runs outside autocast — PyTorch autograd handles the
-            # dtype bookkeeping via the saved-tensor pattern.
-            policy_loss.backward()
 
-            # Clip gradients
-            policy_params = [p for n, p in self.network.network.named_parameters()
-                             if 'value_head' not in n]
-            torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
-
-            self.policy_optimizer.step()
-            if self.ema is not None:
-                self.ema.update()
-            # NOTE: Scheduler stepping moved to train_epoch() - step once per epoch, not per batch
-
-        # --- Value Optimization ---
-        self.value_optimizer.zero_grad()
-        with torch.set_grad_enabled(True):
-            # Recompute (because we did backward above). Autocast wraps the
-            # second forward + its CE loss below — the full loss computation
-            # is inside `with self._autocast():` at the top of the block.
-            with self._autocast():
-                _, pred_values = self.network.network(states)
-
-            # Classification-based value head (AlphaZero approach)
-            # Uses cross-entropy loss on discrete outcome distribution
-            # This naturally encourages confident predictions and avoids MSE's variance minimization bias
-
+            # ---- Value loss (reuses `pred_values` from the joint forward) ----
+            # Classification-based value head (AlphaZero approach).
+            # Uses cross-entropy loss on discrete outcome distribution.
+            # The CE math is fp32-promoted explicitly below for cross-device
+            # consistency, so wrapping in `_autocast()` here is unnecessary
+            # (the heavy forward already ran under autocast).
             if hasattr(self.network.network, 'value_mode') and self.network.network.value_mode == 'classification':
                 # Get the logits that were stored during forward pass
                 if hasattr(self.network.network, '_value_logits'):
@@ -1129,13 +1130,25 @@ class YinshTrainer:
             # Store variance for epoch-level tracking
             self.last_value_variance = float(batch_variance.item())
 
-            value_loss.backward()
+            # ---- Joint backward + step ----
+            # `total_loss` propagates through both heads. The trunk receives
+            # gradient contributions from both losses and is updated by Adam
+            # (via `policy_optimizer`, which owns trunk + policy_head). The
+            # value head receives only value-loss gradient (policy_loss has
+            # no path through value_head) and is updated by SGD (via
+            # `value_optimizer`). Per-head clip max_norms are preserved by
+            # clipping the disjoint param sets independently before step().
+            total_loss = policy_loss + value_loss
+            total_loss.backward()
 
-            # Clip value head gradients
+            policy_params = [p for n, p in self.network.network.named_parameters()
+                             if 'value_head' not in n]
             value_params = [p for n, p in self.network.network.named_parameters()
                             if 'value_head' in n]
+            torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
             torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
 
+            self.policy_optimizer.step()
             self.value_optimizer.step()
             if self.ema is not None:
                 self.ema.update()
