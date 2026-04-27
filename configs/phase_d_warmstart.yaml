@@ -97,13 +97,13 @@ arena:
 
 anchor:
   enabled: true
-  num_games: 40
-  depth: 3
+  num_games: 10
+  depth: 2
   seed: 1337
   max_moves_per_game: 200
   skip_first_n_iterations: 1
   mcts_enabled: true
-  mcts_simulations: 96     # Match self-play sim budget so anchor and self-play
+  mcts_simulations: 32
                            # see the same level of search; raise for stronger eval.
 
 export:
