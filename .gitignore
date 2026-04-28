@@ -28,6 +28,7 @@ configs/local/
 !RESEARCH_LOG.md
 !CLOUD_TRAINING_PLAN.md
 !REMOTE_TRAINING_INVESTIGATION.md
+!WARMSTART_PHASE_LOG.md
 
 !results/
 !logs/
