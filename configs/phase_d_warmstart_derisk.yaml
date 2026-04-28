@@ -96,9 +96,13 @@ arena:
   eval_seed: 20260428
 
 anchor:
-  enabled: true
-  num_games: 20                    # was 10 — depth=3 at n=20 → ±22pt Wilson CI
-  depth: 3                         # was 2 — depth=2 saturated at 100% across iters
+  # Disabled per WARMSTART_PHASE_LOG.md §5c — depth=3 hangs on iter_1
+  # regressed positions (alpha-beta blow-up), depth=2 saturates at 100%.
+  # Tournament round-robin is the load-bearing per-iter signal; one-shot
+  # eval vs HeuristicAgent goes at end of run.
+  enabled: false
+  num_games: 20
+  depth: 3
   seed: 1337
   max_moves_per_game: 200
   skip_first_n_iterations: 1
