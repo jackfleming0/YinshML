@@ -233,6 +233,27 @@ Launched on a fresh Vast 4090 ~13:18 UTC. Iter 1 self-play + training: 21 min �
 
 ---
 
+## 5c. Decision: anchor is dropped from training loop (2026-04-28)
+
+After two depth=3 hangs (§4b, §5b) and the depth=2 saturation seen in the iter-1-5 run, the cost/value of anchor-during-training is upside-down. Decision: **drop anchor from per-iter training, replace with a one-shot end-of-run eval.**
+
+**Rationale.** Anchor was meant to give:
+1. Absolute strength vs a fixed baseline.
+2. Cross-run comparability.
+3. The MCTS-vs-raw diagnostic from peer's plan.
+
+Of these, #3 was the load-bearing reason. We already validated the MCTS-vs-raw split in the iter-1-5 run (raw oscillates 50%/100%, MCTS pegged at 100%) — peer's hypothesis confirmed; no further per-iter anchor evidence needed. #1 and #2 can be served by a single end-of-run eval against `HeuristicAgent(depth=3)` at the deployment MCTS budget — ~30 min, one-shot, decoupled from training.
+
+**What replaces it:**
+- **During training:** tournament round-robin alone. Per-pair Wilson CI on 50 games is ±10pt — tight enough to detect iteration-over-iteration trends. Glicko aggregates pair outcomes into a single rating per checkpoint.
+- **End of training:** `scripts/eval_vs_heuristic.py` (TBD — write before Phase 4) plays the strongest-by-Glicko checkpoint against `HeuristicAgent(depth=3)` for 200 games at the "hard" deployment preset (400 MCTS sims). Reports win rate + Wilson CI. Single-pass, ~30 min, ~$0.20.
+
+**Per-iter cost win:** ~10-30 min saved per iter. Long run (30 iters) saves 5-15 hours.
+
+**Phase 3 long-run config will set `anchor.enabled: false`.** Tournament is the load-bearing per-iter metric.
+
+---
+
 ## 6. Open questions / parking lot
 
 - **Why does iter 4 win 65% vs iter 3 in tournament but iter_3 has higher Glicko?** Glicko aggregates pair outcomes and uncertainty. iter_3 also beat iter_2 strongly while iter_4 only tied with iter_2 — asymmetric pair results land iter_3 above iter_4. Probably correct behavior; flag if pattern repeats.
