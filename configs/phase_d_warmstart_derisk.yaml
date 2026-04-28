@@ -103,7 +103,7 @@ anchor:
   max_moves_per_game: 200
   skip_first_n_iterations: 1
   mcts_enabled: true
-  mcts_simulations: 64             # was 32 — matches deployment-realistic budget
+  mcts_simulations: 32
 
 export:
   export_every: 4

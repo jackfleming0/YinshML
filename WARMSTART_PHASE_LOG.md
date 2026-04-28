@@ -214,6 +214,25 @@ After Phase 1 finishes, look at `ANCHOR[mcts/64]` across iter 1-12:
 
 ---
 
+## 5b. De-risk run attempt 1 — depth=3 anchor hangs again (2026-04-28)
+
+Launched on a fresh Vast 4090 ~13:18 UTC. Iter 1 self-play + training: 21 min ✓. Iter 1 tournament: 20 min ✓ (96-4 vs warm-start, same regression as before).
+
+**Anchor at depth=3 hung again** — same pathology as 2026-04-27 (§4b): GPU 0% util, CPU 66% in alpha-beta. 62 min of zero log progress.
+
+**Root cause** (clearer now): the supervisor's anchor block evaluates `iter_N + iter_(N-1) + iter_(N-2)` regardless of `tournament_sliding_window`. So during *iter_1's* anchor phase, it loads iter_1 (the regressed network) and has it play the heuristic at depth=3. iter_1's pathological positions blow up alpha-beta. depth=3 cannot survive iter_1's position distribution, period.
+
+**Decision:** drop `anchor.depth: 3 → 2` and `mcts_simulations: 64 → 32` for this run. Tournament + Glicko give monotonic-improvement signal regardless; anchor was the saturation tiebreaker, and saturating at 100% across iters is *better* than hanging.
+
+**Three viable fixes for future depth=3 anchor (any of these unlocks the long run with usable depth=3 signal):**
+1. **Code change**: modify supervisor to anchor *only* the candidate (skip the `prev_iter` loop). One-line change in `supervisor.py:1106-1118`. Cleanest.
+2. **`anchor.skip_first_n_iterations: 4`**: with `current_iteration - 1, current_iteration - 2` lookback and `skip=4`, first anchor fires at iter 4 with batch `[iter_4, iter_3, iter_2]` — iter_1 is out of the batch. Coarse but config-only.
+3. **Two-stage recipe**: depth=2 anchor for iters 1-3 (covers the wobble window), depth=3 from iter 4 onward. Needs config-level transitions, more involved.
+
+**For long run (Phase 3) plan to use option 1.** Documented in §5 under "Long-run recipe."
+
+---
+
 ## 6. Open questions / parking lot
 
 - **Why does iter 4 win 65% vs iter 3 in tournament but iter_3 has higher Glicko?** Glicko aggregates pair outcomes and uncertainty. iter_3 also beat iter_2 strongly while iter_4 only tied with iter_2 — asymmetric pair results land iter_3 above iter_4. Probably correct behavior; flag if pattern repeats.
