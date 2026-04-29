@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""End-of-run absolute-strength eval: candidate vs HeuristicAgent.
+
+Plays N games between a candidate checkpoint and HeuristicAgent at a given
+depth, with the candidate playing via pure-neural MCTS at deployment-realistic
+budget. Reuses tournament.run_anchor_eval to keep the eval path identical to
+what the supervisor uses during training (just standalone, not wired to a
+training loop).
+
+Usage:
+    python scripts/eval_vs_heuristic.py \\
+        --checkpoint models/supervised_seed/best_supervised.pt \\
+        --num-games 100 \\
+        --depth 3 \\
+        --mcts-simulations 400 \\
+        --device cuda
+"""
+
+import argparse
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from yinsh_ml.network.wrapper import NetworkWrapper
+from yinsh_ml.utils.tournament import ModelTournament
+
+logger = logging.getLogger("eval_vs_heuristic")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=Path, required=True,
+                        help="Path to candidate checkpoint .pt")
+    parser.add_argument("--num-games", type=int, default=100,
+                        help="Total games (split half white / half black)")
+    parser.add_argument("--depth", type=int, default=3,
+                        help="HeuristicAgent search depth")
+    parser.add_argument("--mcts-simulations", type=int, default=400,
+                        help="MCTS sim budget (deployment 'hard' preset = 400)")
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--seed", type=int, default=20260429)
+    parser.add_argument("--max-moves", type=int, default=200)
+    parser.add_argument("--label", type=str, default=None,
+                        help="Display label (defaults to checkpoint stem)")
+    parser.add_argument("--output-json", type=Path, default=None)
+    parser.add_argument("--use-mcts", action="store_true", default=True,
+                        help="(default) Candidate plays via MCTS")
+    parser.add_argument("--no-mcts", dest="use_mcts", action="store_false",
+                        help="Candidate plays via raw policy argmax instead")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else (
+            "mps" if torch.backends.mps.is_available() else "cpu"
+        )
+    else:
+        device = args.device
+    logger.info(f"Device: {device}")
+
+    if not args.checkpoint.exists():
+        logger.error(f"Checkpoint not found: {args.checkpoint}")
+        sys.exit(1)
+
+    label = args.label or args.checkpoint.stem
+    logger.info(f"Loading checkpoint as '{label}': {args.checkpoint}")
+
+    net = NetworkWrapper(device=device)
+    net.load_model(str(args.checkpoint))
+
+    # Use the supervisor's tournament infra so eval path matches what training
+    # uses — just instantiated standalone here.
+    import tempfile
+    tmp_dir = Path(tempfile.mkdtemp())
+    mgr = ModelTournament(training_dir=tmp_dir, device=device, games_per_match=1)
+
+    mode = "mcts" if args.use_mcts else "raw_policy"
+    logger.info(
+        f"Eval: {label} ({mode}) vs HeuristicAgent(depth={args.depth}) × "
+        f"{args.num_games} games (mcts_sims={args.mcts_simulations if args.use_mcts else 0})"
+    )
+    t0 = time.time()
+    result = mgr.run_anchor_eval(
+        candidate_network=net,
+        candidate_label=label,
+        num_games=args.num_games,
+        depth=args.depth,
+        seed=args.seed,
+        max_moves_per_game=args.max_moves,
+        use_mcts=args.use_mcts,
+        mcts_simulations=args.mcts_simulations,
+    )
+    elapsed = time.time() - t0
+
+    games = result.get("games_played", 0)
+    wins = result.get("candidate_wins", 0)
+    losses = result.get("anchor_wins", 0)
+    draws = result.get("draws", 0)
+    rate = result.get("win_rate", 0.0)
+
+    # Wilson 95% CI
+    if games > 0:
+        import numpy as np
+        z = 1.96
+        denom = 1 + z * z / games
+        centre = (rate + z * z / (2 * games)) / denom
+        half = (z * np.sqrt(rate * (1 - rate) / games + z * z / (4 * games * games))) / denom
+        ci_lo, ci_hi = centre - half, centre + half
+    else:
+        ci_lo, ci_hi = 0.0, 1.0
+
+    print("\n" + "=" * 72)
+    print(f"Result: {label} ({mode}) vs HeuristicAgent(depth={args.depth})")
+    print("=" * 72)
+    print(f"  Games played:   {games}")
+    print(f"  Candidate wins: {wins}  ({rate:.1%})")
+    print(f"  Anchor wins:    {losses}")
+    print(f"  Draws:          {draws}")
+    print(f"  Win rate:       {rate:.3f}  CI95=[{ci_lo:.3f}, {ci_hi:.3f}]")
+    print(f"  Avg game length: {result.get('avg_game_length', 0):.1f} moves")
+    print(f"  Wall-clock:     {elapsed:.0f}s ({elapsed/max(games,1):.1f}s/game)")
+    print("=" * 72)
+
+    # Verdict line — friendly for the "intermediate player?" question.
+    if ci_lo >= 0.65:
+        verdict = "STRONG: clears 'intermediate player' bar (≥65% lower CI)."
+    elif ci_lo >= 0.55:
+        verdict = "PROMISING: beats heuristic with margin; below 65% bar."
+    elif ci_hi >= 0.5:
+        verdict = "WEAK: roughly even with heuristic; below intermediate."
+    else:
+        verdict = "FAILS: candidate consistently loses to heuristic."
+    print(f"\nVerdict: {verdict}")
+
+    if args.output_json:
+        out = {
+            "label": label,
+            "checkpoint": str(args.checkpoint),
+            "mode": mode,
+            "depth": args.depth,
+            "mcts_simulations": args.mcts_simulations if args.use_mcts else 0,
+            "num_games": games,
+            "candidate_wins": wins,
+            "anchor_wins": losses,
+            "draws": draws,
+            "win_rate": rate,
+            "ci95": [ci_lo, ci_hi],
+            "elapsed_seconds": elapsed,
+            "verdict": verdict,
+        }
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.output_json, "w") as f:
+            json.dump(out, f, indent=2)
+        logger.info(f"Wrote {args.output_json}")
+
+
+if __name__ == "__main__":
+    main()
