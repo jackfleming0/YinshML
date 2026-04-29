@@ -567,6 +567,7 @@ class ModelTournament:
         max_moves_per_game: int = 200,
         use_mcts: bool = False,
         mcts_simulations: int = 64,
+        heuristic_time_limit_seconds: float = 0.0,
     ) -> Dict:
         """Play the candidate network against a fixed HeuristicAgent baseline.
 
@@ -591,6 +592,17 @@ class ModelTournament:
             mcts_simulations: Per-move sim budget when ``use_mcts=True``.
                 Subtree reuse is ON within a game; root Dirichlet noise is
                 disabled so the eval is deterministic across iterations.
+            heuristic_time_limit_seconds: Per-move wall-clock cap on the
+                HeuristicAgent's alpha-beta search. 0.0 (default) is "no
+                limit" — preserves existing training-loop determinism.
+                Set >0 (e.g. 30.0) for offline eval at depth=3, where the
+                pathological alpha-beta blow-up on certain network-produced
+                positions (see WARMSTART_PHASE_LOG.md §4b/§5b) would
+                otherwise hang the eval indefinitely. With iterative
+                deepening on, the agent gracefully reports the deepest
+                COMPLETED depth's best move when the budget is hit, so this
+                is a liveness fix that costs only the depth on positions
+                where depth=3 wasn't reachable anyway.
 
         Returns:
             Dict with keys ``games_played``, ``candidate_wins``,
@@ -632,7 +644,12 @@ class ModelTournament:
                     max_depth=depth,
                     min_depth=min(depth, 1),
                     use_iterative_deepening=True,
-                    time_limit_seconds=0.0,  # no wall-clock limit — determinism wins
+                    # Default 0.0 = no wall-clock limit (determinism wins for
+                    # training-loop anchor eval). Offline depth=3 eval should
+                    # pass a positive value to prevent alpha-beta hangs on
+                    # pathological positions; iterative deepening guarantees
+                    # the deepest-completed-depth result is returned.
+                    time_limit_seconds=float(heuristic_time_limit_seconds),
                     random_tiebreak=False,   # deterministic across iterations
                     random_seed=seed,
                     use_transposition_table=True,

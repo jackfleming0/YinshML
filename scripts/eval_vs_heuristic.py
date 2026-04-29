@@ -46,6 +46,19 @@ def main():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=20260429)
     parser.add_argument("--max-moves", type=int, default=200)
+    parser.add_argument(
+        "--time-limit-per-move",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-move wall-clock cap (seconds) on HeuristicAgent's alpha-beta "
+            "search. 0.0 (default) = no limit. STRONGLY RECOMMENDED for "
+            "depth=3: pass --time-limit-per-move 30 to prevent indefinite "
+            "hangs on pathological network-produced positions. With iterative "
+            "deepening on, the agent returns the deepest-completed depth's "
+            "best move when the budget is hit."
+        ),
+    )
     parser.add_argument("--label", type=str, default=None,
                         help="Display label (defaults to checkpoint stem)")
     parser.add_argument("--output-json", type=Path, default=None)
@@ -87,6 +100,13 @@ def main():
         f"{args.num_games} games (mcts_sims={args.mcts_simulations if args.use_mcts else 0})"
     )
     t0 = time.time()
+    if args.depth >= 3 and args.time_limit_per_move <= 0.0:
+        logger.warning(
+            "Running depth=3 with --time-limit-per-move=0 (no cap). "
+            "Alpha-beta is known to blow up on some network-produced "
+            "positions (see WARMSTART_PHASE_LOG.md §4b/§5b). Consider "
+            "--time-limit-per-move 30."
+        )
     result = mgr.run_anchor_eval(
         candidate_network=net,
         candidate_label=label,
@@ -96,6 +116,7 @@ def main():
         max_moves_per_game=args.max_moves,
         use_mcts=args.use_mcts,
         mcts_simulations=args.mcts_simulations,
+        heuristic_time_limit_seconds=args.time_limit_per_move,
     )
     elapsed = time.time() - t0
 
