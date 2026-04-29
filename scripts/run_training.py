@@ -289,6 +289,9 @@ def main() -> None:
         'num_workers': sp.get('num_workers', 'auto'),
         'late_simulations': sp.get('late_simulations'),
         'simulation_switch_ply': sp.get('simulation_switch_ply', 20),
+        # Probabilistic fast-sim split (alphazero-general style). Default off.
+        'fast_simulations': int(sp.get('fast_simulations', 0)),
+        'fast_sim_prob': float(sp.get('fast_sim_prob', 0.0)),
         'c_puct': float(sp.get('c_puct', 1.0)),
         'dirichlet_alpha': float(sp.get('dirichlet_alpha', 0.3)),
         'value_weight': float(sp.get('value_weight', 1.0)),
@@ -300,6 +303,9 @@ def main() -> None:
         'epsilon_mix_start': float(sp.get('epsilon_mix_start', 0.25)),
         'epsilon_mix_end': float(sp.get('epsilon_mix_end', 0.0)),
         'epsilon_mix_taper_moves': int(sp.get('epsilon_mix_taper_moves', 20)),
+        # Root policy temperature: reshape root child priors before noise.
+        # 1.0 = no-op; >1 flattens (more exploration); <1 sharpens.
+        'root_policy_temp': float(sp.get('root_policy_temp', 1.0)),
         'initial_temp': float(sp.get('initial_temp', 1.0)),
         'final_temp': float(sp.get('final_temp', 0.1)),
         'annealing_steps': int(sp.get('annealing_steps', 30)),
@@ -381,6 +387,11 @@ def main() -> None:
         'tournament_sliding_window': int(arena_cfg.get('tournament_sliding_window', 5)),
         # Deterministic tournament seed. Leave unset (or null) for stochastic play.
         'eval_seed': arena_cfg.get('eval_seed', None),
+        # Gate revert (RiverNewbury-style). Default off preserves the
+        # AlphaZero-continuous-training behavior. Recommended on for
+        # warm-start runs from a strong supervised checkpoint.
+        'revert_self_play_on_gate_failure': bool(arena_cfg.get('revert_self_play_on_gate_failure', False)),
+        'reset_optimizer_on_revert': bool(arena_cfg.get('reset_optimizer_on_revert', True)),
         # Anchor eval (CLOUD_TRAINING_PLAN §1.3). Reads from a nested
         # `anchor:` block in the YAML for organization, with sensible
         # defaults for any run that doesn't specify one.

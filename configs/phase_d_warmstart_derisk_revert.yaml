@@ -1,0 +1,124 @@
+version: 1
+
+# Phase 1 (de-risk) warm-start cloud run, **with gating revert enabled.**
+#
+# Identical to phase_d_warmstart_derisk.yaml except for one block at
+# `arena:` — sets `revert_self_play_on_gate_failure: true`. Use this to A/B
+# the gating-revert fix against the original derisk recipe.
+#
+# Context: WARMSTART_PHASE_LOG.md §5d (commit 99d67b2) shows the warm-start
+# regression is caused by missing rollback on failed-gate. iter_0 sweeps
+# iter_3, iter_5, iter_9 40-0 in head-to-head. The fix is now opt-in via
+# the flag below; expectation is that with revert on, post-self-play
+# iterations should at least match iter_0 instead of strictly losing to it.
+#
+# Run with:
+#   python scripts/run_training.py \
+#       -c configs/phase_d_warmstart_derisk_revert.yaml \
+#       --init-checkpoint models/supervised_seed/best_supervised.pt
+
+device: auto
+num_iterations: 12
+save_dir: runs
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 1.0
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
+  num_simulations: 96
+  late_simulations: 64
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3
+  games_per_iteration: 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: null
+  use_ema_for_eval: false
+  lr_schedule: cosine
+  warmup_epochs: 4
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 50
+  promotion_threshold: 0.55
+  tournament_sliding_window: 2
+  eval_seed: 20260428
+  # === NEW: opt in to RiverNewbury / AlphaGo-Zero-style gating revert ===
+  # When the candidate fails the Wilson gate, reload best_model.pt weights
+  # before the next self-play iteration so iter_(N+1)'s self-play data is
+  # generated from a known-good policy rather than the rejected one.
+  # Resets optimizer momentum on revert (default behavior of the fix).
+  revert_self_play_on_gate_failure: true
+  reset_optimizer_on_revert: true
+
+anchor:
+  enabled: false
+  num_games: 20
+  depth: 3
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 1
+  mcts_enabled: true
+  mcts_simulations: 32
+
+export:
+  export_every: 4
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5

@@ -51,25 +51,34 @@ class TrainingSupervisor:
     """
     Supervises the AlphaZero-style training loop: self-play → training → evaluation.
 
-    === AlphaZero-Style Continuous Training ===
-    This supervisor implements TRUE AlphaZero training:
+    === AlphaZero-Style Continuous Training (default) ===
+    By default, this supervisor implements continuous training:
 
-    1. NEVER reverts network weights on "bad" iterations
-    2. NEVER reverts or filters the replay buffer
+    1. Does NOT revert network weights on "bad" iterations
+    2. Does NOT revert or filter the replay buffer
     3. Buffer uses natural FIFO eviction (oldest samples discarded when full)
     4. Training continues on latest weights regardless of tournament results
-    5. Best model is saved for EVALUATION/COMPARISON only, not for reverting
+    5. Best model is saved for EVALUATION/COMPARISON only
 
-    Why no reversion?
+    Why no reversion (the default rationale)?
     - Reversion creates a closed loop where the model can't escape local optima
     - AlphaZero's insight: more diverse training data beats careful curation
     - Temporary ELO dips are normal and will recover with continued training
     - The model needs to explore to find better strategies
 
+    === Opt-in Gate (RiverNewbury / AlphaGo-Zero style) ===
+    Set `arena.revert_self_play_on_gate_failure: true` to enable a model gate.
+    On a failed Wilson gate, the supervisor reloads `best_model.pt` weights
+    into self.network before the next self-play iteration. Recommended for
+    WARM-START runs from a supervised checkpoint, where the prior is strong
+    enough that "no reversion" lets self-play degrade the prior across
+    iterations (the warm-start regression failure mode). Optimizer momentum
+    is also reset by default (`reset_optimizer_on_revert: true`).
+
     Tournament results are used for:
     - Monitoring training progress (ELO tracking)
     - Saving checkpoints of promising models
-    - NOT for gating or reverting the training process
+    - Conditionally gating self-play weights (only if `revert_self_play_on_gate_failure`)
     """
 
     def __init__(self,
@@ -276,6 +285,14 @@ class TrainingSupervisor:
         epsilon_mix_start = float(self.mode_settings.get('epsilon_mix_start', 0.25))
         epsilon_mix_end = float(self.mode_settings.get('epsilon_mix_end', 0.0))
         epsilon_mix_taper_moves = int(self.mode_settings.get('epsilon_mix_taper_moves', 20))
+        # Probabilistic fast/slow sim split. Default off; opt-in via config when
+        # you want to spend less compute on the bulk of moves and concentrate
+        # search where it matters. RiverNewbury default: fast=20, prob=0.75.
+        fast_simulations = int(self.mode_settings.get('fast_simulations', 0))
+        fast_sim_prob = float(self.mode_settings.get('fast_sim_prob', 0.0))
+        # Root policy temperature: reshape root child priors before noise.
+        # alphazero-general default 1.1 (slight softening); 1.0 disables.
+        root_policy_temp = float(self.mode_settings.get('root_policy_temp', 1.0))
 
         _mcts_config_for_init = { # Use temporary name to avoid confusion
             'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
@@ -283,6 +300,8 @@ class TrainingSupervisor:
             'num_simulations': mcts_simulations, # Early sims from direct arg
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,
+            'fast_simulations': fast_simulations,
+            'fast_sim_prob': fast_sim_prob,
             'c_puct': c_puct,
             'dirichlet_alpha': dirichlet_alpha,
             # *** THIS IS THE PROBLEM LINE ***
@@ -300,6 +319,7 @@ class TrainingSupervisor:
             'epsilon_mix_start': epsilon_mix_start,
             'epsilon_mix_end': epsilon_mix_end,
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,
+            'root_policy_temp': root_policy_temp,
         }
 
         self.self_play = SelfPlay(
@@ -403,6 +423,27 @@ class TrainingSupervisor:
         self.checkpoint_retention_count: int = self.mode_settings.get('checkpoint_retention_count', 5)
         # Registry: list of (iteration, elo, path) tuples, sorted by ELO descending
         self._checkpoint_registry: list = []
+
+        # --- Gating revert behavior (RiverNewbury alphazero-general-style gate) ---
+        # When True: on a failed Wilson gate (and no Elo improvement), reload the
+        # current best_model.pt weights into self.network BEFORE the next self-play
+        # iteration runs. Self-play data for iteration N+1 will then be drawn from
+        # a known-good policy instead of the rejected one.
+        #
+        # Default False preserves the supervisor's original "AlphaZero-style
+        # continuous training, never revert" behavior — fine for from-scratch
+        # training where there is no strong prior to protect, but the wrong
+        # default for warm-start runs from a strong supervised checkpoint.
+        # Recommended: set to True for any warm-start / resumed-from-prior config.
+        self.revert_on_gate_failure: bool = bool(
+            self.mode_settings.get('revert_self_play_on_gate_failure', False)
+        )
+        # Whether to also reset optimizer momentum on revert. Almost always you
+        # want this — momentum points in the direction the rejected weights came
+        # from, which (by definition of being rejected) was bad.
+        self.reset_optimizer_on_revert: bool = bool(
+            self.mode_settings.get('reset_optimizer_on_revert', True)
+        )
 
         # --- Absolute Evaluation Anchor (CLOUD_TRAINING_PLAN §1.3) ---
         # Fixed opponent per iteration so we can track absolute strength
@@ -1383,17 +1424,55 @@ class TrainingSupervisor:
 
         else:
             # =================================================================
-            # ALPHAZERO-STYLE CONTINUOUS TRAINING - NO REVERSION
+            # FAILED-GATE BRANCH — two strategies, gated by `revert_on_gate_failure`.
             # =================================================================
-            # Key insight: AlphaZero NEVER reverts weights or buffer.
-            # - The model didn't beat best, but we CONTINUE training with current weights
-            # - This allows exploration and prevents getting stuck in local optima
-            # - Best model is just a checkpoint for evaluation, not for reverting
-            # - Temporary ELO dips are normal and will recover with more training
+            # Default (revert_on_gate_failure=False): AlphaZero-style continuous
+            # training. Keep the rejected weights and let the next iteration
+            # recover. Right answer when the prior is weak (from-scratch runs)
+            # because reverting would prevent escape from local optima.
+            #
+            # Opt-in (revert_on_gate_failure=True): RiverNewbury / AlphaGo-Zero
+            # style gate. Reload best_model.pt before the next self-play
+            # iteration so its data is generated by a known-good policy.
+            # Right answer when the prior is strong (warm-start from supervised
+            # checkpoint) because rejected weights produce bad self-play data
+            # that compounds across iterations into the warm-start regression.
             # =================================================================
-            self.logger.info(f"🔄 CONTINUING: Iter {candidate_iteration} didn't beat best (ELO {candidate_elo:.1f} vs {self.best_model_elo:.1f})")
-            self.logger.info(f"   AlphaZero-style: training continues with current weights, no reversion")
-            self.logger.info(f"   Best model (iter {self.best_model_iteration}) saved for comparison only")
+            if self.revert_on_gate_failure and self.best_model_path and self.best_model_path.exists():
+                self.logger.info(
+                    f"⏪ REVERTING: Iter {candidate_iteration} failed gate "
+                    f"(ELO {candidate_elo:.1f} vs best {self.best_model_elo:.1f}). "
+                    f"Reloading best model (iter {self.best_model_iteration}) "
+                    f"for next self-play iteration."
+                )
+                try:
+                    self.network.load_model(str(self.best_model_path))
+                    self.logger.info(f"   ✓ Loaded best weights from {self.best_model_path.name}")
+                    if self.reset_optimizer_on_revert:
+                        # Momentum was building in the direction of the rejected
+                        # weights — that direction was bad by definition (gate
+                        # failed), so resetting prevents the next training step
+                        # from immediately marching back into the rejected zone.
+                        self._reinitialize_optimizers()
+                except Exception as exc:
+                    # Don't crash the whole run on a revert failure. Fall back
+                    # to continuous-training behavior with a loud warning.
+                    self.logger.error(
+                        f"Revert failed ({exc}); continuing with rejected weights. "
+                        f"This iteration's self-play data may be poor."
+                    )
+            else:
+                if self.revert_on_gate_failure:
+                    # Flag was on but we couldn't actually revert (no best
+                    # model checkpoint yet, or it's missing on disk).
+                    self.logger.warning(
+                        f"revert_on_gate_failure=True but no usable best_model_path "
+                        f"(best_iter={self.best_model_iteration}). "
+                        f"Continuing with current weights this iteration."
+                    )
+                self.logger.info(f"🔄 CONTINUING: Iter {candidate_iteration} didn't beat best (ELO {candidate_elo:.1f} vs {self.best_model_elo:.1f})")
+                self.logger.info(f"   AlphaZero-style: training continues with current weights, no reversion")
+                self.logger.info(f"   Best model (iter {self.best_model_iteration}) saved for comparison only")
 
             # Checkpoint retention: only delete immediately if using old behavior (retention_count < 0)
             if self.checkpoint_retention_count < 0:

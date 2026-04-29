@@ -148,6 +148,12 @@ class MCTS:
                  # --- Rollout Scheduling Params ---
                  late_simulations: Optional[int] = None, # Use Optional[int] for type hint clarity
                  simulation_switch_ply: int = 20,
+                 # --- Probabilistic Fast/Slow Sim Split (RiverNewbury alphazero-general style) ---
+                 # When fast_sim_prob > 0 and fast_simulations > 0, with that probability
+                 # per move the per-move budget is replaced with `fast_simulations`. Default
+                 # off (0.0) preserves current behavior.
+                 fast_simulations: int = 0,
+                 fast_sim_prob: float = 0.0,
                  # --- Temperature Params (passed down) ---
                  initial_temp: float = 1.0,
                  final_temp: float = 0.1,
@@ -165,6 +171,11 @@ class MCTS:
                  epsilon_mix_start: float = 0.25,
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
+                 # --- Root policy temperature (alphazero-general style) ---
+                 # T > 1 flattens root prior (more exploration); T < 1 sharpens.
+                 # Applied to root child priors BEFORE Dirichlet noise mixing.
+                 # 1.0 is a no-op; default off so existing configs are unchanged.
+                 root_policy_temp: float = 1.0,
                 ):
         """
         Initialize MCTS.
@@ -246,6 +257,13 @@ class MCTS:
         self.late_simulations = late_simulations if late_simulations is not None else num_simulations
         self.switch_ply = simulation_switch_ply
 
+        # Probabilistic fast-sim split — independent of early/late switch.
+        # On each move, with `fast_sim_prob` probability the budget is replaced
+        # with `fast_simulations` (0 ⇒ disabled). Mirrors alphazero-general's
+        # `numFastSims=20, probFastSim=0.75` default.
+        self.fast_simulations = int(fast_simulations)
+        self.fast_sim_prob = float(fast_sim_prob)
+
         # Temperature Schedule Parameters (stored for get_temperature)
         self.initial_temp = initial_temp
         self.final_temp = final_temp
@@ -273,6 +291,10 @@ class MCTS:
         self.epsilon_mix_end = float(epsilon_mix_end)
         self.epsilon_mix_taper_moves = int(epsilon_mix_taper_moves)
 
+        # Root policy temperature: re-shape priors at root before noise mixing.
+        # T > 1 flattens (more exploration); T < 1 sharpens; 1.0 is no-op.
+        self.root_policy_temp = float(root_policy_temp)
+
         self.logger.info(f"MCTS Initialized:")
         self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
         self.logger.info(f"  Memory: Pool enabled={self._pool_enabled}")
@@ -283,6 +305,10 @@ class MCTS:
             f"over {self.epsilon_mix_taper_moves} moves"
         )
         self.logger.info(f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
+        if self.fast_sim_prob > 0.0 and self.fast_simulations > 0:
+            self.logger.info(
+                f"  Fast-sim split: fast={self.fast_simulations} sims with p={self.fast_sim_prob:.2f}"
+            )
         self.logger.info(f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
         self.logger.info(f"  Temperature: Initial={self.initial_temp:.2f}, Final={self.final_temp:.2f}, Steps={self.annealing_steps}, Clamp Frac={self.temp_clamp_frac:.2f}")
 
@@ -374,6 +400,12 @@ class MCTS:
         # `_apply_root_dirichlet_noise`.
         if hasattr(kept, "dirichlet_applied"):
             delattr(kept, "dirichlet_applied")
+        # Same idea for `policy_temp_applied`: this node's children had their
+        # priors set as a non-root expansion, so root-policy temperature has
+        # not yet been applied. Clear the flag so the next search() call
+        # reshapes the (now-root) child priors before the next noise mix.
+        if hasattr(kept, "policy_temp_applied"):
+            delattr(kept, "policy_temp_applied")
         self._cached_root = kept
 
     def _compute_epsilon_mix(self, move_number: int) -> float:
@@ -385,6 +417,37 @@ class MCTS:
             return self.epsilon_mix_start
         alpha = min(max(move_number, 0) / self.epsilon_mix_taper_moves, 1.0)
         return self.epsilon_mix_start + alpha * (self.epsilon_mix_end - self.epsilon_mix_start)
+
+    def _apply_root_policy_temperature(self, root: 'Node') -> None:
+        """Re-shape root child priors with temperature T = ``root_policy_temp``.
+
+        new_p_i ∝ p_i^(1/T). T > 1 flattens, T < 1 sharpens, 1.0 is a no-op.
+        Applied at the root only — interior nodes keep their NN priors verbatim.
+        Run BEFORE Dirichlet noise mixing so noise sees the reshaped distribution.
+
+        Idempotent: gates on `policy_temp_applied` so reuse of a cached root
+        (which already had temperature applied during its first expansion as
+        root) doesn't compound. Cleared by `advance_root` on subtree-reuse.
+        """
+        if self.root_policy_temp == 1.0 or not root.children:
+            return
+        if hasattr(root, "policy_temp_applied"):
+            return
+        inv_t = 1.0 / self.root_policy_temp
+        priors = np.array(
+            [child.prior_prob for child in root.children.values()],
+            dtype=np.float64,
+        )
+        # Guard against negative or NaN priors before exponentiation.
+        priors = np.clip(priors, 0.0, None)
+        reshaped = np.power(priors, inv_t)
+        total = reshaped.sum()
+        if total <= 1e-12:
+            return  # Degenerate distribution — leave priors untouched.
+        reshaped /= total
+        for i, child in enumerate(root.children.values()):
+            child.prior_prob = float(reshaped[i])
+        root.policy_temp_applied = True
 
     def _apply_root_dirichlet_noise(self, root: 'Node', move_number: int) -> None:
         """Mix fresh Dirichlet noise into an already-expanded root's child priors.
@@ -400,6 +463,9 @@ class MCTS:
         """
         if not root.is_expanded or not root.children:
             return
+        # Apply root policy temperature once per root identity (gated inside
+        # the helper). Must run BEFORE noise mixing so noise sees reshaped prior.
+        self._apply_root_policy_temperature(root)
         if self.dirichlet_alpha <= 0:
             return
         epsilon_mix = self._compute_epsilon_mix(move_number)
@@ -436,12 +502,29 @@ class MCTS:
         # self.logger.debug(f"Move: {move_number}, Anneal Steps: {self.annealing_steps}, Clamp Frac: {self.temp_clamp_frac}, Clamp Moves: {clamp_moves}, Temp: {temperature:.3f}")
         return temperature
 
+    def _get_budget(self, move_number: int) -> int:
+        """Per-move simulation budget.
+
+        Two-stage:
+        1. Pick base budget by move_number (early < switch_ply, else late).
+        2. With probability `fast_sim_prob`, replace base with `fast_simulations`.
+
+        The fast/slow split is independent of the early/late switch and exists
+        to amortize sim cost across moves (alphazero-general's `probFastSim`
+        idea — 75% of moves at 20 sims, 25% at 100).
+        """
+        base = self.early_simulations if move_number < self.switch_ply else self.late_simulations
+        if self.fast_sim_prob > 0.0 and self.fast_simulations > 0:
+            if random.random() < self.fast_sim_prob:
+                return self.fast_simulations
+        return base
+
     def search(self, state: GameState, move_number: int) -> np.ndarray:
         """
         Run MCTS simulations for the given state and move number.
         """
-        # Choose rollout budget based on the current move number
-        budget = self.early_simulations if move_number < self.switch_ply else self.late_simulations
+        # Choose rollout budget based on the current move number (+ optional fast/slow split)
+        budget = self._get_budget(move_number)
         # self.logger.debug(f"Move {move_number}, Using budget: {budget} (Early: {self.early_simulations}, Late: {self.late_simulations}, Switch: {self.switch_ply})")
 
         if self.enable_subtree_reuse and self._cached_root is not None:
@@ -517,10 +600,11 @@ class MCTS:
                                 prior_prob=self._get_move_prob(policy, move)
                             )
 
-                    # Apply Dirichlet noise at the root node ONCE per search call.
-                    # Mixing fraction tapers with move_number — early moves get
-                    # full exploration noise, late-game tactical positions get
-                    # less (or none, depending on taper config).
+                    # Apply root_policy_temperature once per root, then mix
+                    # Dirichlet noise. Both gated independently — temperature
+                    # via `policy_temp_applied`, noise via `dirichlet_applied`.
+                    if node is root:
+                        self._apply_root_policy_temperature(root)
                     if node is root and not hasattr(root, "dirichlet_applied"):
                         epsilon_mix = self._compute_epsilon_mix(move_number)
                         if self.dirichlet_alpha > 0 and len(valid_moves) > 0 and epsilon_mix > 0:
@@ -635,8 +719,8 @@ class MCTS:
         Returns:
             Policy vector of move probabilities
         """
-        # Choose rollout budget based on the current move number
-        budget = self.early_simulations if move_number < self.switch_ply else self.late_simulations
+        # Choose rollout budget based on the current move number (+ optional fast/slow split)
+        budget = self._get_budget(move_number)
 
         if self.enable_subtree_reuse and self._cached_root is not None:
             root = self._cached_root
@@ -856,9 +940,11 @@ class MCTS:
                             prior_prob=self._get_move_prob(policy, move)
                         )
 
-                    # Apply Dirichlet noise at root node (once per search call).
-                    # Mixing fraction tapers with outer-game move_number so
-                    # late-game tactical positions don't keep getting root noise.
+                    # Apply root_policy_temperature once per root, then mix
+                    # Dirichlet noise. Both gated independently — temperature
+                    # via `policy_temp_applied`, noise via `dirichlet_applied`.
+                    if node is root:
+                        self._apply_root_policy_temperature(root)
                     if node is root and not hasattr(root, "dirichlet_applied"):
                         epsilon_mix = self._compute_epsilon_mix(move_number)
                         if self.dirichlet_alpha > 0 and len(valid_moves) > 0 and epsilon_mix > 0:
@@ -1087,6 +1173,9 @@ class SelfPlay:
                  num_simulations: int = 100, # Early game sims
                  late_simulations: Optional[int] = None,
                  simulation_switch_ply: int = 20,
+                 # Probabilistic fast/slow sim split (default off)
+                 fast_simulations: int = 0,
+                 fast_sim_prob: float = 0.0,
                  c_puct: float = 1.0,
                  dirichlet_alpha: float = 0.3,
                  # *** Use consistent 'value_weight' naming ***
@@ -1113,6 +1202,7 @@ class SelfPlay:
                  epsilon_mix_start: float = 0.25,
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
+                 root_policy_temp: float = 1.0,
                 ):
         """
         Initialize SelfPlay with explicit MCTS and temperature parameters.
@@ -1158,6 +1248,8 @@ class SelfPlay:
             'num_simulations': num_simulations,
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,
+            'fast_simulations': fast_simulations,
+            'fast_sim_prob': fast_sim_prob,
             'c_puct': c_puct,
             'dirichlet_alpha': dirichlet_alpha,
             'value_weight': value_weight, # Store with consistent name
@@ -1174,6 +1266,7 @@ class SelfPlay:
             'epsilon_mix_start': epsilon_mix_start,  # Root Dirichlet mixing fraction at move 0
             'epsilon_mix_end': epsilon_mix_end,  # Root mixing fraction after taper (0 = no late-game noise)
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,  # Linear taper horizon
+            'root_policy_temp': root_policy_temp,  # Reshape root prior; >1 flattens, <1 sharpens
         }
         # Store optional metrics instances
         self.mcts_metrics = mcts_metrics # Store the instance
