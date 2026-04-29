@@ -1,0 +1,89 @@
+version: 1
+
+# Smoke test for warmstart diagnostic instrumentation.
+# Mirrors training.yaml with num_iterations=1 and games_per_iteration=20
+# to verify the unified [Memory] log fires at all five transitions.
+
+device: auto
+num_iterations: 1
+save_dir: runs
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  num_simulations: 160
+  late_simulations: 96
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3
+  games_per_iteration: 20
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 50000
+  # Peer plan: smoke warm-start runs eval directly on the live weights so
+  # we see the joint-update fix's effect without EMA smoothing in the way.
+  ema_decay: null
+  use_ema_for_eval: false
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 50
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+
+anchor:
+  enabled: true
+  num_games: 4                    # Tiny CI; smoke is for instrumentation, not strength.
+  depth: 2                        # depth=3 takes >90s/game on Mac MPS against a warm-started net
+                                  # (the supervised prior produces hard mid-game positions for the
+                                  # heuristic alpha-beta to expand). Cloud Phase D recipes can keep
+                                  # depth=3 since a 4090 chews through it; on Mac, depth=2 is the
+                                  # right tradeoff for an instrumentation smoke.
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 0      # Warm-start has signal from iter 0; don't skip.
+  mcts_enabled: true
+  mcts_simulations: 32            # Halved from 64 since smoke is correctness-only, not strength.
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5

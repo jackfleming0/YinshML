@@ -428,7 +428,7 @@ class BenchmarkSuite:
             setup_duration = time.perf_counter_ns() - setup_start
             
             # Warmup iterations
-            logger.debug(f"Running {self.warmup_iterations} warmup iterations")
+            pass
             for _ in range(self.warmup_iterations):
                 try:
                     case.run_iteration()
@@ -436,7 +436,7 @@ class BenchmarkSuite:
                     logger.warning(f"Warmup iteration failed: {e}")
             
             # Measured iterations
-            logger.debug(f"Running {self.iterations} measured iterations")
+            pass
             for i in range(self.iterations):
                 try:
                     metrics = case.run_with_monitoring()

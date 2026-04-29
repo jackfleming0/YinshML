@@ -1,11 +1,16 @@
 """Tournament system for evaluating YINSH models within a training run."""
 
+import hashlib
 import logging
+import random
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import torch
 from datetime import datetime
 import json
+
+import numpy as np
 
 from ..network.wrapper import NetworkWrapper
 from ..game.game_state import GameState
@@ -13,6 +18,21 @@ from ..game.constants import Player
 from .elo_manager import EloTracker, MatchResult
 
 import math
+
+
+def derive_match_seed(base_seed: int, white_id: str, black_id: str, game_num: int) -> int:
+    """Stable per-game seed. Different orientations / game indices get different
+    seeds; same (base, white, black, game_num) always reproduces. Uses blake2b
+    rather than Python's built-in hash so it survives `PYTHONHASHSEED` randomization."""
+    h = hashlib.blake2b(digest_size=8)
+    h.update(str(base_seed).encode())
+    h.update(b"|")
+    h.update(white_id.encode())
+    h.update(b"|")
+    h.update(black_id.encode())
+    h.update(b"|")
+    h.update(str(game_num).encode())
+    return int.from_bytes(h.digest(), 'big') & 0x7FFFFFFF
 
 q = math.log(10) / 400  # constant used in Glicko formulas
 
@@ -202,7 +222,9 @@ class ModelTournament:
                  device: str = 'cpu',
                  games_per_match: int = 50,
                  temperature: float = 0.1,
-                 sliding_window_size: int = 5):
+                 sliding_window_size: int = 5,
+                 use_ema_for_eval: bool = True,
+                 eval_seed: Optional[int] = None):
         """
         Initialize tournament manager.
 
@@ -214,12 +236,27 @@ class ModelTournament:
             sliding_window_size: Max number of recent models to include in tournament.
                                  Set to 0 for full round-robin (not recommended for long runs).
                                  Default 5 = constant O(1) complexity: 10 pairs × 200 games = 4000 games.
+            use_ema_for_eval: If True and a sibling `<ckpt>_ema.pt` exists, load
+                the EMA-smoothed weights for match play. The model still keys
+                off the non-EMA path (so promotion-gate lookups and tournament
+                history remain aligned with the iteration checkpoint), but the
+                weights used in games are the smoothed ones — reducing the
+                single-iteration-noise bleed into gate decisions.
+            eval_seed: If not None, enables deterministic match play. Each game
+                seeds torch / numpy / random from a stable hash of
+                ``(eval_seed, white_id, black_id, game_num)`` so reruns with the
+                same models reproduce exactly, different (white, black)
+                orientations still diverge, and games within a match aren't
+                clones of each other. RNG state is saved and restored around
+                the seeded region so nothing leaks into callers.
         """
         self.training_dir = Path(training_dir)
         self.device = device
         self.games_per_match = games_per_match
         self.sliding_window_size = sliding_window_size
         self.temperature = temperature
+        self.use_ema_for_eval = use_ema_for_eval
+        self.eval_seed = eval_seed
         self.latest_summary_stats: Dict[str, Dict] = {}   # NEW
         self._pair_results: Dict[Tuple[str, str], Dict[str, int]] = {}
 
@@ -259,9 +296,21 @@ class ModelTournament:
             self.logger.error(f"Error saving tournament history: {e}")
 
     def _load_model(self, checkpoint_path: Path) -> NetworkWrapper:
-        """Load a model from checkpoint."""
+        """Load a model from checkpoint.
+
+        When `use_ema_for_eval` is set and a `<stem>_ema.pt` sibling exists,
+        that EMA-smoothed weight file is used for play instead of the raw
+        iteration checkpoint. The model is still keyed by the original path
+        upstream so Glicko/promotion tracking stays consistent.
+        """
+        actual_path = checkpoint_path
+        if self.use_ema_for_eval:
+            ema_path = checkpoint_path.with_name(checkpoint_path.stem + '_ema.pt')
+            if ema_path.exists():
+                actual_path = ema_path
+                self.logger.debug(f"Loading EMA weights for {checkpoint_path.name}: {ema_path}")
         model = NetworkWrapper(device=self.device)
-        model.load_model(str(checkpoint_path))
+        model.load_model(str(actual_path))
         return model
 
     def _play_match(self,
@@ -275,7 +324,6 @@ class ModelTournament:
         for each move. This prevents MPS driver memory from growing unbounded.
         """
         import gc
-        import numpy as np
 
         white_wins = 0
         black_wins = 0
@@ -290,6 +338,23 @@ class ModelTournament:
         for game_num in range(self.games_per_match):
             self.logger.debug(f"Playing game {game_num + 1}/{self.games_per_match}: "
                               f"{white_id} (White) vs {black_id} (Black)")
+
+            # Snapshot + seed RNGs per game when deterministic eval is enabled.
+            # State is restored in the finally below so tournament play doesn't
+            # leak into subsequent training / self-play RNG consumers.
+            rng_snapshot = None
+            if self.eval_seed is not None:
+                rng_snapshot = (
+                    torch.get_rng_state(),
+                    np.random.get_state(),
+                    random.getstate(),
+                )
+                game_seed = derive_match_seed(
+                    self.eval_seed, white_id, black_id, game_num
+                )
+                torch.manual_seed(game_seed)
+                np.random.seed(game_seed)
+                random.seed(game_seed)
 
             game_state = GameState()
             move_count = 0
@@ -341,6 +406,14 @@ class ModelTournament:
 
             # MEMORY: Clear game state after each game
             del game_state
+
+            # Restore RNG state snapshotted above, so tournament seeding doesn't
+            # bleed into training / self-play consumers between matches.
+            if rng_snapshot is not None:
+                torch_state, np_state, py_state = rng_snapshot
+                torch.set_rng_state(torch_state)
+                np.random.set_state(np_state)
+                random.setstate(py_state)
 
             # MEMORY: Periodic cleanup every 20 games to prevent MPS memory accumulation
             if (game_num + 1) % 20 == 0:
@@ -471,6 +544,388 @@ class ModelTournament:
 
         # Final GC pass
         gc.collect()
+
+    # ------------------------------------------------------------------ #
+    # Absolute evaluation anchor (CLOUD_TRAINING_PLAN §1.3)
+    # ------------------------------------------------------------------ #
+    # The anchor eval plays a candidate NetworkWrapper against a fixed
+    # HeuristicAgent opponent (same depth, same weights, same seed every
+    # iteration). This gives an ABSOLUTE measure of playing strength
+    # independent of the relative Elo from the round-robin, which is the
+    # only way to interpret long training trajectories — relative ratings
+    # drift with the pool, but anchor_win_rate is anchored to a fixed
+    # baseline for the life of the run.
+    #
+    # Kept as a separate call (not folded into the round-robin) so it
+    # survives any future changes to the Elo / promotion-gate logic.
+    def run_anchor_eval(
+        self,
+        candidate_network: NetworkWrapper,
+        candidate_label: str,
+        num_games: int = 40,
+        depth: int = 3,
+        seed: int = 1337,
+        max_moves_per_game: int = 200,
+        use_mcts: bool = False,
+        mcts_simulations: int = 64,
+        heuristic_time_limit_seconds: float = 0.0,
+    ) -> Dict:
+        """Play the candidate network against a fixed HeuristicAgent baseline.
+
+        Games are split half white / half black for the candidate, using a
+        deterministic per-game seed derived from ``seed``. The baseline
+        HeuristicAgent is constructed once per call with depth ``depth``,
+        default phase-aware weights, and a fixed ``random_seed`` so its
+        tie-breaking is reproducible across iterations.
+
+        Args:
+            candidate_network: Loaded NetworkWrapper to evaluate.
+            candidate_label: Identifier for logs (e.g. ``checkpoint_iteration_7``).
+            num_games: Total games (split 50/50 between colors).
+            depth: HeuristicAgent max search depth.
+            seed: Base RNG seed used to derive per-game seeds. KEEP STABLE
+                across iterations — the whole point of the anchor is that
+                the baseline doesn't drift.
+            use_mcts: If True, the candidate plays via pure-neural MCTS
+                instead of raw policy-head argmax. Tests how the model
+                actually plays in deployment; raw-policy mode is kept as a
+                diagnostic for the policy head in isolation.
+            mcts_simulations: Per-move sim budget when ``use_mcts=True``.
+                Subtree reuse is ON within a game; root Dirichlet noise is
+                disabled so the eval is deterministic across iterations.
+            heuristic_time_limit_seconds: Per-move wall-clock cap on the
+                HeuristicAgent's alpha-beta search. 0.0 (default) is "no
+                limit" — preserves existing training-loop determinism.
+                Set >0 (e.g. 30.0) for offline eval at depth=3, where the
+                pathological alpha-beta blow-up on certain network-produced
+                positions (see WARMSTART_PHASE_LOG.md §4b/§5b) would
+                otherwise hang the eval indefinitely. With iterative
+                deepening on, the agent gracefully reports the deepest
+                COMPLETED depth's best move when the budget is hit, so this
+                is a liveness fix that costs only the depth on positions
+                where depth=3 wasn't reachable anyway.
+
+        Returns:
+            Dict with keys ``games_played``, ``candidate_wins``,
+            ``anchor_wins``, ``draws``, ``win_rate`` (candidate wins /
+            games_played; draws count as 0 in numerator), and ``mode``
+            (``'raw_policy'`` or ``'mcts'``).
+
+            On failure (e.g. HeuristicAgent construction blows up), returns
+            a dict with ``games_played=0`` and a ``skipped_reason`` key —
+            callers should treat that as "skip, don't fail the iteration."
+        """
+        # Import here so a broken HeuristicAgent / heuristics subtree can't
+        # crash the tournament module at import time.
+        try:
+            from ..agents.heuristic_agent import HeuristicAgent, HeuristicAgentConfig
+            from ..heuristics import YinshHeuristics
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.warning(f"Anchor eval skipped — could not import HeuristicAgent: {e}")
+            return {
+                'games_played': 0, 'candidate_wins': 0, 'anchor_wins': 0,
+                'draws': 0, 'win_rate': 0.0, 'skipped_reason': f'import: {e}',
+            }
+
+        try:
+            # Anchor opponent uses the FAST heuristic (no forced-sequence
+            # detection). The anchor agent does its own alpha-beta search on
+            # top of the heuristic, so the anchor's per-move strength comes
+            # from search depth, not from the heuristic's forced-sequence
+            # mini-search. With detection ON, each anchor move was ~9-10s
+            # (60 child positions × ~159ms eval). Disabling brings each anchor
+            # move to ~30-40ms and each game from ~7 min to a few seconds.
+            # The anchor stays the same across iterations and configs, so
+            # the relative-comparison signal of the sweep is preserved.
+            fast_evaluator = YinshHeuristics(
+                enable_forced_sequence_detection=False,
+            )
+            anchor_agent = HeuristicAgent(
+                config=HeuristicAgentConfig(
+                    max_depth=depth,
+                    min_depth=min(depth, 1),
+                    use_iterative_deepening=True,
+                    # Default 0.0 = no wall-clock limit (determinism wins for
+                    # training-loop anchor eval). Offline depth=3 eval should
+                    # pass a positive value to prevent alpha-beta hangs on
+                    # pathological positions; iterative deepening guarantees
+                    # the deepest-completed-depth result is returned.
+                    time_limit_seconds=float(heuristic_time_limit_seconds),
+                    random_tiebreak=False,   # deterministic across iterations
+                    random_seed=seed,
+                    use_transposition_table=True,
+                    zobrist_seed=f"anchor-seed-{seed}",
+                ),
+                evaluator=fast_evaluator,
+            )
+        except Exception as e:
+            self.logger.warning(f"Anchor eval skipped — HeuristicAgent construction failed: {e}")
+            return {
+                'games_played': 0, 'candidate_wins': 0, 'anchor_wins': 0,
+                'draws': 0, 'win_rate': 0.0, 'skipped_reason': f'construct: {e}',
+            }
+
+        # Build a per-game MCTS factory when use_mcts is True. We rebuild
+        # per game (not per move) so subtree reuse benefits within a game
+        # without leaking visits across games. Pure-neural mode + zero
+        # Dirichlet noise + deterministic temp ensures the eval is
+        # reproducible game-over-game.
+        mcts_factory = None
+        if use_mcts:
+            try:
+                from ..training.self_play import MCTS as _AnchorMCTS
+
+                def _build_anchor_mcts():
+                    return _AnchorMCTS(
+                        network=candidate_network,
+                        evaluation_mode="pure_neural",
+                        heuristic_evaluator=None,
+                        num_simulations=mcts_simulations,
+                        late_simulations=mcts_simulations,
+                        simulation_switch_ply=10_000,
+                        enable_subtree_reuse=True,
+                        epsilon_mix_start=0.0,
+                        epsilon_mix_end=0.0,
+                        epsilon_mix_taper_moves=0,
+                        initial_temp=1.0,
+                        final_temp=1.0,
+                        annealing_steps=1,
+                    )
+                mcts_factory = _build_anchor_mcts
+            except Exception as e:
+                self.logger.warning(
+                    f"Anchor eval (MCTS): failed to build MCTS, falling back to raw policy: {e}"
+                )
+                use_mcts = False
+
+        mode_label = 'mcts' if use_mcts else 'raw_policy'
+        anchor_label = f"anchor_heuristic_d{depth}"
+        half = num_games // 2
+        # Fixed pairing sequence: first `half` games candidate plays White,
+        # remaining games candidate plays Black. Same order every iteration.
+        color_order = ['white'] * half + ['black'] * (num_games - half)
+
+        candidate_wins = 0
+        anchor_wins = 0
+        draws = 0
+        games_played = 0
+        total_moves = 0
+
+        # Pre-allocate a reusable input tensor for the candidate network.
+        cand_input_tensor = candidate_network._acquire_input_tensor(batch_size=1)
+
+        try:
+            for game_num, cand_color in enumerate(color_order):
+                # Per-game progress log — important for multi-hour evals
+                # where the user otherwise has no idea what's happening.
+                game_t0 = time.time()
+                self.logger.info(
+                    f"[anchor {mode_label}] game {game_num + 1}/{num_games} "
+                    f"start (cand={cand_color} vs {anchor_label})"
+                )
+                # Deterministic per-game seed, stable across iterations, so
+                # the SAME pairing sequence is replayed every time.
+                rng_snapshot = (
+                    torch.get_rng_state(),
+                    np.random.get_state(),
+                    random.getstate(),
+                )
+                game_seed = derive_match_seed(
+                    seed, candidate_label, anchor_label, game_num
+                )
+                torch.manual_seed(game_seed)
+                np.random.seed(game_seed)
+                random.seed(game_seed)
+                # Reset anchor's internal RNG each game so identical
+                # positions produce identical moves across iterations.
+                anchor_agent._rng = random.Random(seed)
+                anchor_agent.clear_transposition_table()
+
+                # Fresh MCTS per game so subtree reuse stays in-game only.
+                game_mcts = mcts_factory() if mcts_factory is not None else None
+
+                game_state = GameState()
+                move_count = 0
+
+                # Map color → side
+                candidate_is_white = (cand_color == 'white')
+
+                try:
+                    while not game_state.is_terminal() and move_count < max_moves_per_game:
+                        valid_moves = game_state.get_valid_moves()
+                        if not valid_moves:
+                            break
+
+                        cand_to_move = (
+                            (game_state.current_player == Player.WHITE and candidate_is_white)
+                            or (game_state.current_player == Player.BLACK and not candidate_is_white)
+                        )
+
+                        if cand_to_move:
+                            if game_mcts is not None:
+                                # MCTS path: visit-distribution → greedy argmax
+                                # over valid moves. select_move with temp=0
+                                # picks the highest-prob valid move. Use the
+                                # batched search so each move evaluates leaves
+                                # in NN batches — single-leaf search at 64+
+                                # sims is ~10× slower on MPS / CUDA.
+                                visit_probs = game_mcts.search_batch(
+                                    game_state, move_count, batch_size=32
+                                )
+                                visit_probs_t = torch.from_numpy(np.asarray(visit_probs)).to(
+                                    candidate_network.device
+                                )
+                                selected_move = candidate_network.select_move(
+                                    visit_probs_t, valid_moves, temperature=0.0
+                                )
+                                del visit_probs_t
+                            else:
+                                state_array = candidate_network.state_encoder.encode_state(game_state)
+                                cand_input_tensor.copy_(
+                                    torch.from_numpy(np.array(state_array)).unsqueeze(0)
+                                )
+                                move_probs, _ = candidate_network.predict(cand_input_tensor)
+                                # temperature=0 → argmax, fully deterministic given seeds
+                                selected_move = candidate_network.select_move(
+                                    move_probs, valid_moves, temperature=0.0
+                                )
+                                del move_probs
+                        else:
+                            selected_move = anchor_agent.select_move(game_state)
+
+                        if selected_move is None:
+                            break
+                        success = game_state.make_move(selected_move)
+                        if not success:
+                            self.logger.warning(
+                                f"Anchor eval: invalid move at game {game_num} "
+                                f"move {move_count} — aborting game."
+                            )
+                            break
+                        # Keep MCTS's cached root in sync with the game tree
+                        # so subtree-reuse benefits accrue across moves.
+                        if game_mcts is not None:
+                            game_mcts.advance_root(selected_move)
+                        move_count += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"Anchor eval: game {game_num} crashed ({e}); counting as draw."
+                    )
+                    winner = None
+                else:
+                    winner = game_state.get_winner()
+
+                if winner == Player.WHITE:
+                    if candidate_is_white:
+                        candidate_wins += 1
+                    else:
+                        anchor_wins += 1
+                elif winner == Player.BLACK:
+                    if candidate_is_white:
+                        anchor_wins += 1
+                    else:
+                        candidate_wins += 1
+                else:
+                    draws += 1
+
+                games_played += 1
+                total_moves += move_count
+
+                # Per-game completion log — running totals so the user can
+                # estimate ETA and track win rate as the eval progresses.
+                game_dt = time.time() - game_t0
+                if winner == Player.WHITE:
+                    outcome = 'cand_W' if candidate_is_white else 'anchor_W'
+                elif winner == Player.BLACK:
+                    outcome = 'anchor_W' if candidate_is_white else 'cand_W'
+                else:
+                    outcome = 'draw'
+                self.logger.info(
+                    f"[anchor {mode_label}] game {game_num + 1}/{num_games} "
+                    f"done: {outcome} in {move_count} moves ({game_dt/60:.1f} min). "
+                    f"running W/L/D = {candidate_wins}/{anchor_wins}/{draws}"
+                )
+
+                del game_state
+
+                # Restore outer RNG state so anchor seeding doesn't leak.
+                torch_state, np_state, py_state = rng_snapshot
+                torch.set_rng_state(torch_state)
+                np.random.set_state(np_state)
+                random.setstate(py_state)
+        finally:
+            candidate_network._release_tensor(cand_input_tensor)
+
+        win_rate = (candidate_wins / games_played) if games_played > 0 else 0.0
+        result = {
+            'games_played': games_played,
+            'candidate_wins': candidate_wins,
+            'anchor_wins': anchor_wins,
+            'draws': draws,
+            'win_rate': win_rate,
+            'depth': depth,
+            'seed': seed,
+            'avg_game_length': (total_moves / games_played) if games_played > 0 else 0.0,
+            'mode': mode_label,
+            'mcts_simulations': mcts_simulations if use_mcts else 0,
+        }
+        self.logger.info(
+            f"Anchor eval [{mode_label}]: {candidate_label} vs {anchor_label} → "
+            f"W/L/D = {candidate_wins}/{anchor_wins}/{draws} "
+            f"({win_rate:.1%} win rate over {games_played} games)"
+        )
+        return result
+
+    def run_anchor_eval_batch(
+        self,
+        models: List[Tuple[str, Path]],
+        num_games: int = 40,
+        depth: int = 3,
+        seed: int = 1337,
+        max_moves_per_game: int = 200,
+        use_mcts: bool = False,
+        mcts_simulations: int = 64,
+    ) -> Dict[str, Dict]:
+        """Run anchor eval for a list of (label, checkpoint_path) entries.
+
+        Uses lazy model loading so memory stays bounded — only one candidate
+        is resident at a time. Missing checkpoints are skipped gracefully.
+        Set ``use_mcts=True`` to evaluate with pure-neural MCTS instead of
+        raw policy argmax.
+        """
+        results: Dict[str, Dict] = {}
+        for label, ckpt in models:
+            if ckpt is None:
+                continue
+            ckpt = Path(ckpt)
+            if not ckpt.exists():
+                self.logger.info(f"Anchor eval: skipping {label} — checkpoint not found at {ckpt}")
+                continue
+            try:
+                net = self._load_model(ckpt)
+            except Exception as e:
+                self.logger.warning(f"Anchor eval: failed to load {label} from {ckpt}: {e}")
+                continue
+            try:
+                results[label] = self.run_anchor_eval(
+                    candidate_network=net,
+                    candidate_label=label,
+                    num_games=num_games,
+                    depth=depth,
+                    seed=seed,
+                    max_moves_per_game=max_moves_per_game,
+                    use_mcts=use_mcts,
+                    mcts_simulations=mcts_simulations,
+                )
+            finally:
+                if hasattr(net, 'cleanup'):
+                    try:
+                        net.cleanup()
+                    except Exception:
+                        pass
+                del net
+                self._clear_model_memory()
+        return results
 
     def run_full_round_robin_tournament(self, current_iteration: int):
         """
@@ -606,12 +1061,16 @@ class ModelTournament:
             summary_stats[model_id]['rd'] = self.glicko_tracker.get_rd(model_id)
         self.latest_summary_stats = summary_stats.copy()
 
+        # Per-pair Wilson 95% CIs — surfaces statistical noise that the gate alone hides.
+        pair_cis = self._compute_pair_cis()
+
         # Save tournament results
         self.tournament_history[tournament_id] = {
             'iteration': current_iteration,
             'timestamp': datetime.now().isoformat(),
             'round_robin_results': [vars(r) for r in round_robin_results],
             'stats': summary_stats,
+            'pair_cis': pair_cis,
         }
         self._save_tournament_history()
 
@@ -626,11 +1085,59 @@ class ModelTournament:
                 f"WhiteWinRate: {st['white_win_rate'] * 100:.1f}% | "
                 f"BlackWinRate: {st['black_win_rate'] * 100:.1f}%"
             )
+        if pair_cis:
+            self.logger.info(f"\n{'-' * 20} Per-Pair 95% CI {'-' * 20}")
+            for entry in pair_cis:
+                self.logger.info(
+                    f"{entry['model_a']} vs {entry['model_b']}: "
+                    f"{entry['wins_a']}/{entry['total']} "
+                    f"(p={entry['win_rate_a']:.3f}, SE={entry['se']:.3f}, "
+                    f"CI95=[{entry['ci_lower']:.3f}, {entry['ci_upper']:.3f}])"
+                )
         self.logger.info("=" * 60)
 
         # Final memory cleanup
         self._clear_model_memory()
         self.logger.info("Tournament complete (lazy loading kept memory usage low)")
+
+    def _compute_pair_cis(self) -> List[Dict]:
+        """Per-pair Wilson 95% CI on model_a's win rate (decisives only — draws excluded
+        from numerator and denominator so the proportion is well-defined). Returned as
+        a list ordered by iteration ascending. Empty list if no pairs were played."""
+        from .stats import wilson_bounds, standard_error
+
+        out = []
+        for (model_a, model_b), rec in self._pair_results.items():
+            wins_a = rec.get('wins_a', 0)
+            wins_b = rec.get('wins_b', 0)
+            draws = rec.get('draws', 0)
+            decisive = wins_a + wins_b
+            total = decisive + draws
+            if total == 0:
+                continue
+            lower, upper = wilson_bounds(wins_a, decisive)
+            se = standard_error(wins_a, decisive)
+            out.append({
+                'model_a': model_a,
+                'model_b': model_b,
+                'wins_a': wins_a,
+                'wins_b': wins_b,
+                'draws': draws,
+                'total': total,
+                'win_rate_a': (wins_a / decisive) if decisive > 0 else 0.0,
+                'ci_lower': lower,
+                'ci_upper': upper,
+                'se': se,
+            })
+
+        def _iter_key(model_id: str) -> int:
+            try:
+                return int(model_id.split('_')[-1])
+            except (ValueError, IndexError):
+                return -1
+
+        out.sort(key=lambda e: (_iter_key(e['model_a']), _iter_key(e['model_b'])))
+        return out
 
     def _aggregate_round_robin_stats(self, match_results: List[MatchResult]) -> Dict[str, Dict]:
         """

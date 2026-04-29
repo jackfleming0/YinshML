@@ -234,22 +234,30 @@ class AdaptivePoolSizer:
             self.consecutive_low_pressure = 0
             
             if self.consecutive_high_pressure >= self.required_consecutive_signals:
+                old_size = self.current_size
                 new_size = self._grow_pool()
                 self.consecutive_high_pressure = 0
-                logger.info(f"Adaptive pool growth triggered: {self.current_size} -> {new_size} "
-                           f"(miss rate: {miss_rate:.3f})")
+                # Only log if size actually changed; otherwise it's logspam
+                # for a no-op (e.g. already at max).
+                if new_size != old_size:
+                    logger.info(f"Adaptive pool growth triggered: {old_size} -> {new_size} "
+                               f"(miss rate: {miss_rate:.3f})")
                 return new_size
-                
+
         elif miss_rate < self.low_pressure_threshold:
             self.consecutive_low_pressure += 1
             self.consecutive_high_pressure = 0
-            
+
             # More conservative shrinking (2x the signals required)
             if self.consecutive_low_pressure >= self.required_consecutive_signals * 2:
+                old_size = self.current_size
                 new_size = self._shrink_pool()
                 self.consecutive_low_pressure = 0
-                logger.info(f"Adaptive pool shrink triggered: {self.current_size} -> {new_size} "
-                           f"(miss rate: {miss_rate:.3f})")
+                # Only log if size actually changed (most common case at the
+                # floor: 50 -> 50 fires every ~30s otherwise).
+                if new_size != old_size:
+                    logger.info(f"Adaptive pool shrink triggered: {old_size} -> {new_size} "
+                               f"(miss rate: {miss_rate:.3f})")
                 return new_size
         else:
             # Reset counters when in the normal range

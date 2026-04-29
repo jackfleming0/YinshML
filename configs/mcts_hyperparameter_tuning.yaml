@@ -1,0 +1,94 @@
+# MCTS Hyperparameter Tuning Configuration
+# This file defines the search space and optimization parameters for MCTS hyperparameter tuning
+
+# Hyperparameter Search Space
+hyperparameter_space:
+  # Exploration constant C (UCB1)
+  c_puct_min: 0.5
+  c_puct_max: 2.0
+  c_puct_step: 0.25
+  
+  # Heuristic weight alpha
+  heuristic_alpha_min: 0.1
+  heuristic_alpha_max: 0.7
+  heuristic_alpha_step: 0.1
+  
+  # Epsilon for greedy rollouts
+  epsilon_greedy_min: 0.2
+  epsilon_greedy_max: 0.6
+  epsilon_greedy_step: 0.1
+  
+  # Simulation budget
+  num_simulations_min: 1000
+  num_simulations_max: 5000
+  num_simulations_step: 1000
+  
+  # Simulation depth limits
+  max_depth_min: 30
+  max_depth_max: 80
+  max_depth_step: 10
+
+# Tuning Configuration
+tuning_config:
+  # Evaluation parameters
+  evaluation_games: 20  # Number of games per parameter set
+  max_move_time: 3.0   # Maximum allowed move time in seconds
+  min_win_rate_improvement: 0.05  # Minimum win rate improvement for significance
+  
+  # Optimization parameters
+  use_bayesian_optimization: false  # Use Bayesian optimization instead of grid search
+  bayesian_iterations: 50  # Number of Bayesian optimization iterations
+  bayesian_acquisition: 'EI'  # Acquisition function: 'EI', 'PI', 'UCB'
+  
+  # Statistical testing
+  confidence_level: 0.95  # Confidence level for statistical tests
+  min_games_for_significance: 10  # Minimum games for statistical significance
+  
+  # Parallel execution
+  max_workers: 4  # Maximum number of parallel workers
+  timeout_per_game: 300  # Timeout per game in seconds
+
+# Baseline MCTS Configuration
+baseline_config:
+  num_simulations: 1000
+  c_puct: 1.414  # √2
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 50
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.8
+  
+  # Analysis integration parameters
+  use_heuristic_evaluation: true
+  use_phase_aware_budget: true
+  use_enhanced_ucb: true
+  heuristic_weight: 0.3
+  
+  # Heuristic guidance parameters
+  use_heuristic_guidance: true
+  heuristic_alpha: 0.3
+  epsilon_greedy: 0.4
+  use_heuristic_rollouts: true
+  
+  # Phase-specific simulation budget multipliers
+  phase_budget_multipliers:
+    early: 1.0
+    mid: 1.2
+    late: 0.8
+
+# Output Configuration
+output:
+  results_file: "mcts_tuning_results.json"
+  report_file: "mcts_tuning_report.txt"
+  log_level: "INFO"
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,33 @@
+{
+  "status": "OK",
+  "data": {
+    "players": [
+      {"id": "100", "name": "Alice", "color": "#ffffff"},
+      {"id": "200", "name": "Bob", "color": "#000000"}
+    ],
+    "logs": [
+      {"data": [
+        {"type": "move", "log": "${player_name} places a ring on ${locationTo}",
+         "args": {"player_id": "100", "player_name": "Alice",
+                  "locationFrom": "@0", "locationTo": "J6"}}
+      ]},
+      {"data": [
+        {"type": "move", "log": "${player_name} places a ring on ${locationTo}",
+         "args": {"player_id": "200", "player_name": "Bob",
+                  "locationFrom": "@1", "locationTo": "B2"}},
+        {"type": "restartUndo", "log": "${player_name} takes back their last move",
+         "args": {"player_id": "200", "player_name": "Bob",
+                  "currentMove": 2}}
+      ]},
+      {"data": [
+        {"type": "move", "log": "${player_name} places a ring on ${locationTo}",
+         "args": {"player_id": "200", "player_name": "Bob",
+                  "locationFrom": "@1", "locationTo": "K10"}}
+      ]},
+      {"data": [
+        {"type": "gameEnd", "log": "${player_name} has removed 3 rings",
+         "args": {"player_id": "200", "player_name": "Bob"}}
+      ]}
+    ]
+  }
+}

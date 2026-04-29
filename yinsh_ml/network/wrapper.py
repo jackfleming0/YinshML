@@ -293,6 +293,71 @@ class NetworkWrapper:
                         f"Re-instantiate NetworkWrapper with the matching flag."
                     )
 
+            # Hard-fail on value-head mode mismatch. The state dict shape may be
+            # compatible enough to silently load (or get filtered out below), but
+            # the value-head semantics differ: classification outputs softmax over
+            # outcome classes, regression outputs a tanh'd scalar. Loading across
+            # modes corrupts inference and the trainer's loss surface.
+            ckpt_has_outcome_values = any(
+                k.endswith('outcome_values') for k in state_dict
+            )
+            ckpt_mode = 'classification' if ckpt_has_outcome_values else 'regression'
+            if ckpt_mode != self.network.value_mode:
+                raise RuntimeError(
+                    f"Value-head mode mismatch: checkpoint is {ckpt_mode} but wrapper "
+                    f"was constructed with value_mode='{self.network.value_mode}'. "
+                    f"Re-instantiate NetworkWrapper with the matching value_mode."
+                )
+            if ckpt_mode == 'classification':
+                outcome_key = next(
+                    k for k in state_dict if k.endswith('outcome_values')
+                )
+                ckpt_classes = state_dict[outcome_key].shape[0]
+                if ckpt_classes != self.network.num_value_classes:
+                    raise RuntimeError(
+                        f"num_value_classes mismatch: checkpoint has {ckpt_classes} "
+                        f"classes but wrapper was constructed with "
+                        f"num_value_classes={self.network.num_value_classes}. "
+                        f"Re-instantiate NetworkWrapper with the matching value."
+                    )
+
+            # Hard-fail on policy-head size mismatch. The final policy Linear's
+            # out_features encodes the move-index layout: different sizes mean
+            # different move→index meaning, and the silent shape-filter below
+            # would randomly-initialize the policy output, playing garbage.
+            #
+            # Known past sizes (policy-head out_features):
+            #   7395 — pre-move-encoder-rework legacy layout
+            #   8390 — post-rework, collision-free ring-movement, 1080-slot
+            #          REMOVE_MARKERS sequence hash (had 17 collisions out of
+            #          123 valid 5-in-a-row lines and an incorrect inverse
+            #          that fabricated an illegal diagonal)
+            #   7433 — current layout: collision-free REMOVE_MARKERS
+            #          (123 slots, one per valid hex 5-line). Changing the
+            #          REMOVE_MARKERS sub-layout is a BREAKING change for any
+            #          saved checkpoint — even if total_moves were identical,
+            #          the slot ↔ line mapping differs, so MCTS / policy
+            #          logits would silently route to wrong moves. This guard
+            #          fires on total-size change; any intra-size layout swap
+            #          must add a layout-version tag to the checkpoint.
+            policy_out_key = next(
+                (k for k in state_dict if k.endswith('policy_head.7.weight')), None
+            )
+            if policy_out_key is not None:
+                ckpt_policy_size = state_dict[policy_out_key].shape[0]
+                expected_policy_size = self.network.total_moves
+                if ckpt_policy_size != expected_policy_size:
+                    raise RuntimeError(
+                        f"Policy-head size mismatch: checkpoint has "
+                        f"{ckpt_policy_size} output slots but the current encoder "
+                        f"emits {expected_policy_size}. Known past sizes: 7395 "
+                        f"(pre-rework), 8390 (collision-prone REMOVE_MARKERS), "
+                        f"7433 (current, collision-free 123-slot REMOVE_MARKERS). "
+                        f"Retrain from scratch or migrate the policy head "
+                        f"explicitly — silently filtering this layer would "
+                        f"randomly re-initialize the policy output."
+                    )
+
             compatible_state_dict = {}
             model_state = self.network.state_dict()
             for key, param in state_dict.items():
@@ -361,8 +426,9 @@ class NetworkWrapper:
             mlmodel.save(path)
             self.logger.info(f"Model exported to CoreML format at {path}")
 
-            # Move model back to MPS
-            self.network.to('mps')
+            # Move model back to its original device (CUDA / MPS / CPU).
+            # Previously hardcoded to 'mps' which crashed on CUDA boxes.
+            self.network.to(self.device)
 
         except Exception as e:
             self.logger.error(f"Error exporting to CoreML: {str(e)}")
@@ -435,8 +501,10 @@ class NetworkWrapper:
             with torch.no_grad():
                 policy_logits, values = self.network(batch_tensor)
 
-                # Ensure value predictions are in [-1, 1]
-                values = torch.tanh(values)
+                # Value is already in [-1, 1] for both modes:
+                # - classification: softmax * outcome_values (model.py:319)
+                # - regression: final Tanh layer (model.py:191)
+                # Re-applying tanh here over-compresses (matches the predict() fix).
 
                 # Apply temperature scaling to policy logits
                 if temperature != 1.0:

@@ -1,0 +1,58 @@
+# Enhanced MCTS Configuration Example
+# This configuration incorporates analysis findings for improved performance
+
+# Standard MCTS parameters
+num_simulations: 100
+late_simulations: 120  # 20% more simulations for late game complexity
+simulation_switch_ply: 20
+c_puct: 1.0
+dirichlet_alpha: 0.3
+value_weight: 1.0
+max_depth: 50
+
+# Temperature parameters
+initial_temp: 1.0
+final_temp: 0.1
+annealing_steps: 30
+temp_clamp_fraction: 0.8
+
+# Analysis integration parameters
+use_heuristic_evaluation: true
+use_phase_aware_budget: true
+use_enhanced_ucb: true
+heuristic_weight: 0.3  # Weight for heuristic vs neural network evaluation
+
+# Heuristic guidance parameters (Task 10)
+use_heuristic_guidance: true
+heuristic_alpha: 0.3  # Weight for heuristic in UCB1 combination
+epsilon_greedy: 0.4  # Epsilon for greedy rollouts biased by heuristics
+use_heuristic_rollouts: true  # Use heuristic evaluation for leaf nodes
+
+# Phase-specific simulation budget multipliers
+# Based on analysis findings:
+# - Early game: Standard budget (1.0)
+# - Mid game: 20% more simulations for complexity (1.2)
+# - Late game: 20% fewer simulations for tactical focus (0.8)
+phase_budget_multipliers:
+  early: 1.0
+  mid: 1.2
+  late: 0.8
+
+# Self-play parameters
+num_workers: 4
+games_per_iteration: 100
+
+# Training parameters
+learning_rate: 0.001
+batch_size: 32
+epochs: 10
+
+# Memory management
+use_memory_pool: true
+pool_size: 1000
+
+# Metrics and logging
+enable_metrics: true
+log_level: INFO
+save_checkpoints: true
+checkpoint_interval: 10

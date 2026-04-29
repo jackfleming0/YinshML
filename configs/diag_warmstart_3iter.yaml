@@ -1,0 +1,106 @@
+version: 1
+
+# 3-iter diagnostic warm-start (peer plan, 2026-04-26).
+#
+# Run with:
+#   python scripts/run_training.py \
+#       -c configs/diag_warmstart_3iter.yaml \
+#       --init-checkpoint <path-to-supervised.pt>
+#
+# Smaller-scale cousin of phase_d_warmstart.yaml: 3 iterations × 20 games to
+# quickly validate the joint-update fix + warm-start path before committing
+# to a full cloud run. games_per_iteration=20 + anchor.num_games=20 keeps
+# total wall-clock under ~30 min on a 4090. Anchor runs both raw-policy and
+# MCTS variants side-by-side so the peer's "raw vs MCTS" comparison shows up.
+
+device: auto
+num_iterations: 3
+save_dir: runs
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 1.0
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
+  num_simulations: 96
+  late_simulations: 64
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3
+  games_per_iteration: 20
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 50000
+  ema_decay: null
+  use_ema_for_eval: false
+  lr_schedule: cosine
+  warmup_epochs: 2
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 40
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260426
+
+anchor:
+  enabled: true
+  num_games: 20
+  depth: 3
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 0   # We want anchor signal from iter 0 since we
+                               # warm-start from a non-random init.
+  mcts_enabled: true
+  mcts_simulations: 96
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5

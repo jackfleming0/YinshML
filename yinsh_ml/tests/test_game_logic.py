@@ -1,6 +1,6 @@
 import unittest
 from yinsh_ml.game.game_state import GameState, GamePhase
-from yinsh_ml.game.constants import Player, Position, PieceType
+from yinsh_ml.game.constants import Player, Position, PieceType, RINGS_PER_PLAYER
 from yinsh_ml.game.moves import Move, MoveType
 
 
@@ -649,6 +649,185 @@ class TestYinshGameLogic(unittest.TestCase):
         self.assertEqual(self.game.phase, GamePhase.GAME_OVER)
         self.assertEqual(self.game.black_score, 3)
         self.assertEqual(self.game.get_winner(), Player.BLACK)
+
+
+class TestStalemateDetection(unittest.TestCase):
+    """Exercise the stalemate branch of is_terminal() / get_winner()."""
+
+    def _fresh_main_game(self) -> GameState:
+        """Build a fresh GameState already in MAIN_GAME with an empty board."""
+        game = GameState()
+        # Pretend both players finished placement (rings are placed manually below).
+        game.rings_placed = {Player.WHITE: RINGS_PER_PLAYER,
+                             Player.BLACK: RINGS_PER_PLAYER}
+        game.phase = GamePhase.MAIN_GAME
+        game.current_player = Player.WHITE
+        return game
+
+    def test_stalemate_white_has_no_legal_moves(self):
+        """If the player to move has zero legal moves, the game is terminal
+        and the opponent is declared the winner.
+
+        Construct a position where all five White rings sit in the A-column
+        corner, mutually blocking each other along the column, and a
+        surrounding wall of Black rings blocks the remaining hex directions.
+        (We use more than 5 black rings on the board — the stalemate detector
+        only cares about the current player's legal moves, not how many rings
+        the opponent has placed historically.)
+        """
+        game = self._fresh_main_game()
+
+        # White rings: A2, A3, A4, A5 (consecutive in column A; each blocks
+        # the next along (0,1)/(0,-1)) plus B2 bundled into the cluster.
+        white_rings = ['A2', 'A3', 'A4', 'A5', 'B2']
+        for p in white_rings:
+            game.board.place_piece(Position.from_string(p), PieceType.WHITE_RING)
+
+        # Wall of Black rings covering every remaining on-board hex neighbour
+        # of any white ring. Rings stop ring traversal immediately (see
+        # Board.valid_move_positions), so a ring in every adjacent square
+        # yields zero valid destinations for the cluster.
+        black_rings = ['B1', 'B3', 'B4', 'B5', 'B6', 'C2', 'C3']
+        for p in black_rings:
+            game.board.place_piece(Position.from_string(p), PieceType.BLACK_RING)
+
+        # Sanity-check: every White ring's `valid_move_positions` is empty.
+        for p in white_rings:
+            dests = game.board.valid_move_positions(Position.from_string(p))
+            self.assertEqual(
+                dests, [],
+                f"White ring at {p} unexpectedly has valid moves: {dests}",
+            )
+
+        # get_valid_moves() returns [] → stalemate.
+        self.assertEqual(game.get_valid_moves(), [])
+        self.assertTrue(game.is_stalemate())
+        self.assertEqual(game.get_winner(), Player.BLACK)
+
+
+class TestMarkerRemovalAtomicity(unittest.TestCase):
+    """_handle_marker_removal must not half-apply an invalid removal."""
+
+    def test_invalid_third_marker_leaves_board_unchanged(self):
+        game = GameState()
+        game.phase = GamePhase.ROW_COMPLETION
+        game.current_player = Player.WHITE
+
+        # First two positions hold valid white markers, the third is empty,
+        # the last two are irrelevant (never reached if validation is atomic).
+        positions = ['E5', 'E6', 'E7', 'E8', 'E9']
+        game.board.place_piece(Position.from_string('E5'), PieceType.WHITE_MARKER)
+        game.board.place_piece(Position.from_string('E6'), PieceType.WHITE_MARKER)
+        # E7 deliberately left empty.
+
+        snapshot_before = dict(game.board.pieces)
+
+        move = Move(
+            type=MoveType.REMOVE_MARKERS,
+            player=Player.WHITE,
+            markers=[Position.from_string(p) for p in positions],
+        )
+        ok = game._handle_marker_removal(move)
+
+        self.assertFalse(ok, "removal with an empty square must fail")
+        # The previous (buggy) implementation would have removed E5 and E6
+        # before discovering the E7 problem. Verify atomic rollback.
+        self.assertEqual(game.board.pieces, snapshot_before,
+                         "board must be unchanged on failed marker removal")
+
+    def test_invalid_wrong_color_leaves_board_unchanged(self):
+        game = GameState()
+        game.phase = GamePhase.ROW_COMPLETION
+        game.current_player = Player.WHITE
+
+        positions = ['E5', 'E6', 'E7', 'E8', 'E9']
+        game.board.place_piece(Position.from_string('E5'), PieceType.WHITE_MARKER)
+        game.board.place_piece(Position.from_string('E6'), PieceType.WHITE_MARKER)
+        # Third marker is the wrong colour (black, not white).
+        game.board.place_piece(Position.from_string('E7'), PieceType.BLACK_MARKER)
+        game.board.place_piece(Position.from_string('E8'), PieceType.WHITE_MARKER)
+        game.board.place_piece(Position.from_string('E9'), PieceType.WHITE_MARKER)
+
+        snapshot_before = dict(game.board.pieces)
+
+        move = Move(
+            type=MoveType.REMOVE_MARKERS,
+            player=Player.WHITE,
+            markers=[Position.from_string(p) for p in positions],
+        )
+        ok = game._handle_marker_removal(move)
+
+        self.assertFalse(ok, "removal must reject a wrong-colour marker")
+        self.assertEqual(game.board.pieces, snapshot_before,
+                         "board must be unchanged on failed marker removal")
+
+
+class TestMoveMakerLifecycle(unittest.TestCase):
+    """_move_maker must be initialized on construction and cleared after a
+    completed row-completion sequence (and on GAME_OVER)."""
+
+    def test_fresh_game_state_has_no_move_maker(self):
+        game = GameState()
+        self.assertIsNone(game._move_maker)
+        self.assertIsNone(game._prev_player)
+        self.assertIsNone(game._last_regular_player)
+
+    def test_move_maker_cleared_after_row_completion_sequence(self):
+        """Run a complete row-completion sequence end-to-end; afterwards
+        _move_maker (and helpers) must be back to None."""
+        game = GameState()
+        # Stand up the same initial ring layout used by TestYinshGameLogic.
+        ring_positions = [
+            ('A2', Player.WHITE), ('A3', Player.WHITE), ('A4', Player.WHITE),
+            ('A5', Player.WHITE), ('C5', Player.WHITE),
+            ('I5', Player.BLACK), ('K7', Player.BLACK), ('K8', Player.BLACK),
+            ('K9', Player.BLACK), ('K10', Player.BLACK),
+        ]
+        for pos_str, player in ring_positions:
+            game.current_player = player
+            game.make_move(Move(
+                type=MoveType.PLACE_RING,
+                player=player,
+                source=Position.from_string(pos_str),
+            ))
+        self.assertEqual(game.phase, GamePhase.MAIN_GAME)
+
+        # Plant a complete white row (E1..E5) so the next White ring move
+        # immediately triggers the row-completion sequence.
+        game.current_player = Player.WHITE
+        for p in ['E1', 'E2', 'E3', 'E4', 'E5']:
+            game.board.place_piece(Position.from_string(p), PieceType.WHITE_MARKER)
+        # Any legal ring move by White will trigger the row-completion
+        # transition because E1..E5 is already a complete row. Move C5 → D5.
+        self.assertTrue(game.make_move(Move(
+            type=MoveType.MOVE_RING,
+            player=Player.WHITE,
+            source=Position.from_string('C5'),
+            destination=Position.from_string('D5'),
+        )))
+        self.assertEqual(game.phase, GamePhase.ROW_COMPLETION)
+        # While the sequence is in flight, _move_maker is populated.
+        self.assertIsNotNone(game._move_maker)
+
+        # Remove the 5-marker row.
+        self.assertTrue(game.make_move(Move(
+            type=MoveType.REMOVE_MARKERS,
+            player=Player.WHITE,
+            markers=[Position.from_string(p) for p in ['E1', 'E2', 'E3', 'E4', 'E5']],
+        )))
+        # Remove a ring to score.
+        self.assertTrue(game.make_move(Move(
+            type=MoveType.REMOVE_RING,
+            player=Player.WHITE,
+            source=Position.from_string('A2'),
+        )))
+
+        # Back in MAIN_GAME and _move_maker is cleared.
+        self.assertEqual(game.phase, GamePhase.MAIN_GAME)
+        self.assertIsNone(game._move_maker)
+        self.assertIsNone(game._prev_player)
+        self.assertIsNone(game._last_regular_player)
+
 
 if __name__ == '__main__':
     unittest.main()

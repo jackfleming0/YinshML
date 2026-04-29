@@ -1,0 +1,128 @@
+version: 1
+
+# Phase 1 (de-risk) warm-start cloud run.
+# See WARMSTART_PHASE_LOG.md §5 for context.
+#
+# Goal: verify three preconditions before committing to a 30-40 iter long run:
+#   1. Per-iter cost stays flat as iter count grows (was ballooning to 90+ min
+#      by iter 4 in the prior 5-iter attempt).
+#   2. Anchor differentiates models (depth=2 saturated at 100% across iters).
+#   3. Trend confirmed monotonic (currently wobble 50/100/50/100 — could be
+#      plateauing at supervised prior's strength).
+#
+# Differences from phase_d_warmstart.yaml:
+#   - tournament_sliding_window 3 → 2          (cuts pair count from 3 to 1)
+#   - arena.games_per_match 100 → 50           (CI still ±10pt; halves arena cost)
+#   - anchor.depth 2 → 3                       (depth=2 saturated; depth=3 only
+#                                               blew up alpha-beta on iter_1's
+#                                               regressed positions, fine after that)
+#   - anchor.num_games 10 → 20                 (depth=3 needs more games for ±22pt CI)
+#   - anchor.mcts_simulations 32 → 64          (matches deployment-realistic budget)
+#
+# Run with:
+#   python scripts/run_training.py \
+#       -c configs/phase_d_warmstart_derisk.yaml \
+#       --init-checkpoint models/supervised_seed/best_supervised.pt
+
+device: auto
+num_iterations: 12
+save_dir: runs
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 1.0
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
+  num_simulations: 96
+  late_simulations: 64
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3
+  games_per_iteration: 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: null
+  use_ema_for_eval: false
+  lr_schedule: cosine
+  warmup_epochs: 4
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 50              # was 100 — Wilson CI still ±10pt
+  promotion_threshold: 0.55
+  tournament_sliding_window: 2     # was 3 — pair count: O(N choose 2), 3 pairs → 1 pair
+  eval_seed: 20260428
+
+anchor:
+  # Disabled per WARMSTART_PHASE_LOG.md §5c — depth=3 hangs on iter_1
+  # regressed positions (alpha-beta blow-up), depth=2 saturates at 100%.
+  # Tournament round-robin is the load-bearing per-iter signal; one-shot
+  # eval vs HeuristicAgent goes at end of run.
+  enabled: false
+  num_games: 20
+  depth: 3
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 1
+  mcts_enabled: true
+  mcts_simulations: 32
+
+export:
+  export_every: 4
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5

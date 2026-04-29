@@ -87,7 +87,7 @@ hash_value = hasher.hash_board(board)
 ```
 
 ##### `hash_state(game_state: GameState) -> int`
-Compute the hash of a complete game state (currently just the board).
+Compute the hash of a complete game state: **board + side-to-move + game phase**. Two states with identical piece placement but different `current_player` or `phase` MUST hash to different values — otherwise transposition-table lookups would return evaluations computed from the wrong perspective (or under the wrong legal-move set).
 
 ```python
 from yinsh_ml.game.game_state import GameState
@@ -95,6 +95,12 @@ state = GameState()
 state.board.place_piece(Position.from_string("E5"), PieceType.WHITE_RING)
 hash_value = hasher.hash_state(state)
 ```
+
+##### `toggle_side_to_move(current_player: Player, current_hash: int) -> int`
+O(1) incremental update: XOR the side-to-move contribution into `current_hash`. Use during search when the player-to-move changes (ring move ending main-game turn, phase transitions).
+
+##### `toggle_phase(phase: GamePhase, current_hash: int) -> int`
+O(1) incremental update: XOR the phase contribution into `current_hash`. Use when the game phase transitions (RING_PLACEMENT → MAIN_GAME → ROW_COMPLETION → ...).
 
 ##### `place_ring(position: Position, player: Player, current_hash: int) -> int`
 Incrementally update hash when placing a ring.

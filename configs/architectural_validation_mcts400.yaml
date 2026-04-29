@@ -1,0 +1,62 @@
+# Architectural Improvements Validation Run
+# Matches MCTS 400 baseline config exactly, but with:
+# - Enhanced encoding (15 channels instead of 6)
+# - D6 symmetry augmentation (up to 6x data expansion)
+#
+# Baseline comparison (5 runs):
+#   Final ELO: avg 1497 (range 1477-1510)
+#   Best ELO:  avg 1523 (range 1504-1542)
+
+# Device and general settings
+device: auto
+num_iterations: 10
+save_dir: runs/architectural_validation
+
+# === ARCHITECTURAL IMPROVEMENTS (NEW) ===
+encoding:
+  type: enhanced  # Use 15-channel enhanced encoding
+  num_channels: 15
+
+augmentation:
+  enabled: true
+  include_reflections: true
+  max_augmentations: 6  # Conservative: 6x instead of full 12x for memory
+
+# === SELF-PLAY SETTINGS (matches baseline) ===
+self_play:
+  games_per_iteration: 100
+  num_simulations: 400  # MCTS 400 baseline
+  late_simulations: 400
+  simulation_switch_ply: 20
+  evaluation_mode: hybrid
+  heuristic_weight: 0.7
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 500
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+
+# === TRAINER SETTINGS (matches baseline) ===
+trainer:
+  batch_size: 256
+  epochs_per_iteration: 4
+  max_buffer_size: 20000
+  batches_per_epoch: auto
+  lr: 0.001
+  value_head_lr_factor: 2.5
+  l2_reg: 0.0
+  discrimination_weight: 0.5
+  value_loss_weights: [0.5, 0.5]
+
+# === ARENA/TOURNAMENT (matches baseline) ===
+arena:
+  games_per_match: 40
+  promotion_threshold: 0.55
+
+# === EXPORT SETTINGS ===
+export:
+  export_every: 5
+  coreml_dir: models/coreml

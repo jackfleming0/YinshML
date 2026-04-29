@@ -57,6 +57,7 @@ import secrets
 import numpy as np
 
 from .constants import PieceType, Position, Player, VALID_POSITIONS, is_valid_position
+from .types import GamePhase
 
 if TYPE_CHECKING:
     from .board import Board
@@ -107,6 +108,15 @@ class ZobristTable:
     positions: Tuple[Position, ...]
     piece_types: Tuple[PieceType, ...]
     values: np.ndarray  # shape == (len(positions), len(piece_types))
+    # Single 64-bit key XORed into the hash when it is BLACK's turn to move.
+    # Follows standard chess-engine convention: WHITE-to-move hash is the base,
+    # BLACK-to-move toggles this key.
+    side_to_move_key: int = 0
+    # Per-phase 64-bit keys indexed by GamePhase.value. A position with
+    # identical pieces but a different game phase (e.g. MAIN_GAME vs
+    # ROW_COMPLETION vs RING_REMOVAL) has different legal moves, so it must
+    # hash differently.
+    phase_keys: Tuple[int, ...] = ()
     _position_to_index: Optional[Dict[Position, int]] = None
     _piece_to_index: Optional[Dict[PieceType, int]] = None
 
@@ -165,6 +175,15 @@ class ZobristInitializer:
         self._position_to_index = {pos: idx for idx, pos in enumerate(self._positions)}
         self._piece_to_index = {piece: idx for idx, piece in enumerate(self._piece_types)}
         self._table = self._generate_table()
+        # Auxiliary keys for side-to-move and game-phase. These are drawn from
+        # the same random stream as the piece/position keys but with distinct
+        # tags so they cannot collide with entries in `_table`.
+        self._used_values_aux: set[int] = set(int(v) for v in self._table.flatten().tolist())
+        self._used_values_aux.discard(0)
+        self._side_to_move_key = self._draw_aux_key(tag="side_to_move")
+        self._phase_keys: Tuple[int, ...] = tuple(
+            self._draw_aux_key(tag=f"phase:{phase.name}") for phase in GamePhase
+        )
 
     @staticmethod
     def _enumerate_positions() -> Tuple[Position, ...]:
@@ -204,6 +223,28 @@ class ZobristInitializer:
             return int.from_bytes(digest[:8], byteorder="big", signed=False)
         return secrets.randbits(64)
 
+    def _draw_aux_key(self, *, tag: str) -> int:
+        """Draw a 64-bit key for an auxiliary state component (side-to-move,
+        game phase, etc.). Ensures the drawn key is non-zero and does not
+        collide with any existing Zobrist-table entry."""
+        counter = 0
+        while True:
+            if self._seed is not None:
+                hasher = hashlib.blake2b(digest_size=16)
+                hasher.update(self._seed)
+                hasher.update(b"aux:")
+                hasher.update(tag.encode("utf-8"))
+                hasher.update(counter.to_bytes(4, byteorder="little", signed=False))
+                digest = hasher.digest()
+                value = int.from_bytes(digest[:8], byteorder="big", signed=False)
+            else:
+                value = secrets.randbits(64)
+            counter += 1
+            if value == 0 or value in self._used_values_aux:
+                continue
+            self._used_values_aux.add(value)
+            return value
+
     @property
     def positions(self) -> Tuple[Position, ...]:
         return self._positions
@@ -214,7 +255,21 @@ class ZobristInitializer:
 
     @property
     def table(self) -> ZobristTable:
-        return ZobristTable(self._positions, self._piece_types, self._table.copy())
+        return ZobristTable(
+            self._positions,
+            self._piece_types,
+            self._table.copy(),
+            side_to_move_key=self._side_to_move_key,
+            phase_keys=self._phase_keys,
+        )
+
+    @property
+    def side_to_move_key(self) -> int:
+        return self._side_to_move_key
+
+    @property
+    def phase_keys(self) -> Tuple[int, ...]:
+        return self._phase_keys
 
     def value(self, position: Position, piece: PieceType) -> int:
         try:
@@ -302,8 +357,48 @@ class ZobristHasher:
         return current
 
     def hash_state(self, game_state: "GameState") -> int:
-        """Hash a full GameState (currently only board contents)."""
-        return self.hash_board(game_state.board)
+        """Hash a full GameState including board, side-to-move, and phase.
+
+        Two states with identical piece placement but different
+        ``current_player`` or ``phase`` MUST hash to different values,
+        otherwise transposition-table lookups will return evaluations computed
+        from the wrong perspective (or under the wrong legal-move set).
+        """
+        current = self.hash_board(game_state.board)
+        current = self.toggle_side_to_move(game_state.current_player, current)
+        current = self.toggle_phase(game_state.phase, current)
+        return current
+
+    def toggle_side_to_move(self, current_player: Player, current_hash: int) -> int:
+        """XOR the side-to-move contribution into ``current_hash``.
+
+        By convention the base hash represents "WHITE to move"; the
+        side-to-move key is XORed in when it is BLACK's turn. Calling this
+        with WHITE is a no-op, and calling it twice with the same player
+        returns the original hash (XOR is involutive).
+        """
+        if current_player == Player.BLACK:
+            return current_hash ^ self._table.side_to_move_key
+        return current_hash
+
+    def flip_side_to_move(self, current_hash: int) -> int:
+        """Unconditionally toggle the side-to-move bit.
+
+        Use this for O(1) incremental updates when a move implicitly switches
+        the player-to-move.
+        """
+        return current_hash ^ self._table.side_to_move_key
+
+    def toggle_phase(self, phase: GamePhase, current_hash: int) -> int:
+        """XOR the per-phase contribution into ``current_hash``.
+
+        Each game phase has its own 64-bit key. When the phase changes call
+        this twice (once with the old phase, once with the new) to flip the
+        contribution incrementally. For a full recomputation, call once with
+        the active phase.
+        """
+        key = self._table.phase_keys[phase.value]
+        return current_hash ^ key
 
     def toggle(self, position: Position, piece: PieceType, current_hash: int) -> int:
         """XOR the hash contribution of a specific position and piece."""

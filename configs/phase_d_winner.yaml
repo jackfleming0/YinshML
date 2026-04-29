@@ -1,0 +1,126 @@
+# Phase D: scaled-up winner run.
+#
+# Inherits the lr_conservative recipe (which won Phase C on both peak
+# and cumulative anchor metrics — see CLOUD_TRAINING_PLAN.md §5 + the
+# Phase C trajectory analysis):
+#
+#   trainer.lr: 0.0005           (vs baseline 0.001)
+#   trainer.epochs_per_iteration: 2  (vs baseline 4)
+#   trainer.warmup_epochs: 20    (vs baseline 10)
+#
+# Scales the rest back up to real-recipe budget now that the heuristic
+# perf fix landed:
+#   self_play.num_simulations: 48 -> 96  (back to full)
+#   self_play.late_simulations: 32 -> 64
+#   self_play.games_per_iteration: 30 -> 50
+#   trainer.max_buffer_size: 50_000 -> 100_000  (Phase C ran iter 4+ near
+#                                                 capacity; bigger buffer
+#                                                 retains more diversity)
+#   anchor.num_games: 6 -> 20    (Phase C 6-game anchor had ±40pt CI;
+#                                 20 games gives ±20pt — usable signal)
+#   arena.games_per_match: 40 -> 80  (sharper Wilson gate)
+#
+# Iteration count: 50 (matches plan §5 default; can stop early if
+# anchor plateaus past iter 30+).
+#
+# Estimated cost on RTX 4090 with the heuristic perf fix:
+#   ~15-20 min/iter × 50 iters = ~12-17 hrs = ~$5-7
+version: 1
+device: auto
+num_iterations: 50
+save_dir: runs_phase_d
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
+  num_simulations: 96            # WINNER scale-up: was 48 in Phase C trim
+  late_simulations: 64           # WINNER scale-up: was 32
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 6
+  games_per_iteration: 50        # WINNER scale-up: was 30
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0005                     # WINNER recipe (lr_conservative): was 0.001 in baseline
+  value_head_lr_factor: 5.0
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  discrimination_weight: 0.5
+  epochs_per_iteration: 2        # WINNER recipe: was 4 in baseline
+  batches_per_epoch: auto
+  max_buffer_size: 100000        # WINNER scale-up: was 50K (saturated by iter 5)
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 20              # WINNER recipe: was 10
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 80            # WINNER scale-up: was 40
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260415
+
+export:
+  export_every: 10               # less frequent in Phase D — only need final
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
+
+anchor:
+  enabled: true
+  num_games: 20                  # WINNER scale-up: was 6 (CI was ±40pt; 20 → ±20pt)
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 3

@@ -19,7 +19,7 @@ from typing import Optional
 from ..game.game_state import GameState
 from ..game.constants import (
     Player, PieceType, Position, is_valid_position,
-    POINTS_TO_WIN, HEX_DIRECTIONS,
+    POINTS_TO_WIN,
 )
 from ..game.types import GamePhase
 

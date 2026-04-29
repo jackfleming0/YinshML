@@ -131,26 +131,54 @@ def _restore_optimizer_state(supervisor, checkpoint: dict, logger: logging.Logge
         logger.warning(f"Could not restore value_scheduler_state_dict: {exc}")
 
 
+def _extract_model_state(checkpoint_obj, checkpoint_path: Path):
+    """Return the raw model state_dict from a checkpoint payload.
+
+    Supports both supervisor checkpoints (raw state_dict) and trainer-style
+    payloads with a ``model_state_dict`` key. Used by both the resume path
+    (which also restores optimizer/scheduler state) and the init-checkpoint
+    path (weights only).
+    """
+    if isinstance(checkpoint_obj, dict) and "model_state_dict" in checkpoint_obj and isinstance(
+        checkpoint_obj["model_state_dict"], dict
+    ):
+        return checkpoint_obj["model_state_dict"]
+    if isinstance(checkpoint_obj, dict):
+        return checkpoint_obj
+    raise RuntimeError(
+        f"Unsupported checkpoint object type at {checkpoint_path}: {type(checkpoint_obj)}"
+    )
+
+
 def _load_resume_checkpoint(network: NetworkWrapper, supervisor: TrainingSupervisor, checkpoint_path: Path, device: str, logger: logging.Logger) -> None:
     import torch
 
     logger.info(f"Loading checkpoint: {checkpoint_path}")
     checkpoint_obj = torch.load(checkpoint_path, map_location=device)
-
     checkpoint_dict = checkpoint_obj if isinstance(checkpoint_obj, dict) else {}
-    if isinstance(checkpoint_obj, dict) and "model_state_dict" in checkpoint_obj and isinstance(
-        checkpoint_obj["model_state_dict"], dict
-    ):
-        model_state = checkpoint_obj["model_state_dict"]
-    elif isinstance(checkpoint_obj, dict):
-        # Supervisor checkpoints are raw state_dict objects.
-        model_state = checkpoint_obj
-    else:
-        raise RuntimeError(f"Unsupported checkpoint object type: {type(checkpoint_obj)}")
+    model_state = _extract_model_state(checkpoint_obj, checkpoint_path)
 
     _load_model_state_compatible(network.network, model_state, logger)
     _restore_optimizer_state(supervisor, checkpoint_dict, logger)
     logger.info("Checkpoint loaded successfully")
+
+
+def _load_init_checkpoint(network: NetworkWrapper, checkpoint_path: Path, device: str, logger: logging.Logger) -> None:
+    """Warm-start a fresh run from an existing checkpoint's weights only.
+
+    Unlike ``_load_resume_checkpoint``, this skips optimizer and scheduler
+    state — the run starts at iteration 0 in a new run directory with fresh
+    Adam moments / SGD momentum and a fresh LR schedule. Use when you want
+    the network to inherit a learned prior (e.g. from supervised pretraining
+    or a prior self-play run) without inheriting its optimizer history.
+    """
+    import torch
+
+    logger.info(f"Warm-starting from init checkpoint: {checkpoint_path}")
+    checkpoint_obj = torch.load(checkpoint_path, map_location=device)
+    model_state = _extract_model_state(checkpoint_obj, checkpoint_path)
+    _load_model_state_compatible(network.network, model_state, logger)
+    logger.info("Init checkpoint weights loaded (optimizer / scheduler state skipped)")
 
 
 def main() -> None:
@@ -160,7 +188,22 @@ def main() -> None:
     parser.add_argument('--save-dir', type=str, default=None, help='Override save_dir')
     parser.add_argument('--export-every', type=int, default=None, help='Override export cadence')
     parser.add_argument('--resume', type=str, default=None, help='Resume from existing run directory (e.g., runs/20260216_094801)')
+    parser.add_argument(
+        '--init-checkpoint',
+        type=str,
+        default=None,
+        help=(
+            'Warm-start a fresh run from an existing checkpoint. Unlike --resume, '
+            'this creates a new timestamped run directory, starts at iteration 0, '
+            'and loads ONLY model weights (optimizer / scheduler state are reset). '
+            'Use for warm-starting from a supervised-pretrained or earlier-run '
+            'checkpoint. Mutually exclusive with --resume.'
+        ),
+    )
     args = parser.parse_args()
+
+    if args.resume and args.init_checkpoint:
+        parser.error("--resume and --init-checkpoint are mutually exclusive")
 
     cfg = load_config(Path(args.config))
 
@@ -172,9 +215,13 @@ def main() -> None:
     device = select_device(cfg.get('device', 'auto'))
     num_iterations = args.iterations or int(cfg.get('num_iterations', 50))
 
-    # Handle resume vs new run
+    # Handle resume vs init-checkpoint vs fresh run.
+    # `start_iteration` and `checkpoint_to_load` flow into the loader below;
+    # `init_checkpoint_to_load` (if set) goes through the weights-only path
+    # so optimizer + iteration counter reset to fresh.
     start_iteration = 0
     checkpoint_to_load = None
+    init_checkpoint_to_load: Optional[Path] = None
 
     if args.resume:
         run_dir = Path(args.resume)
@@ -193,6 +240,14 @@ def main() -> None:
     else:
         base_save_dir = Path(args.save_dir or cfg.get('save_dir', 'runs'))
         run_dir = ensure_dir(base_save_dir / time.strftime('%Y%m%d_%H%M%S'))
+
+        if args.init_checkpoint:
+            init_path = Path(args.init_checkpoint)
+            if not init_path.exists():
+                logger.error(f"--init-checkpoint path does not exist: {init_path}")
+                sys.exit(1)
+            init_checkpoint_to_load = init_path
+            logger.info(f"Warm-starting new run {run_dir} from {init_path}")
 
     # Export settings
     export_cfg = cfg.get('export', {})
@@ -228,15 +283,29 @@ def main() -> None:
         # Self-play / MCTS
         'evaluation_mode': sp.get('evaluation_mode', 'hybrid'),  # NEW: Default to hybrid mode
         'heuristic_weight': float(sp.get('heuristic_weight', 0.7)),  # NEW: Default 70% heuristic weight
+        'heuristic_weight_start': float(sp.get('heuristic_weight_start', sp.get('heuristic_weight', 0.7))),
+        'heuristic_weight_end': float(sp.get('heuristic_weight_end', sp.get('heuristic_weight', 0.7))),
+        'heuristic_weight_anneal_iterations': int(sp.get('heuristic_weight_anneal_iterations', 0)),
         'num_workers': sp.get('num_workers', 'auto'),
         'late_simulations': sp.get('late_simulations'),
         'simulation_switch_ply': sp.get('simulation_switch_ply', 20),
+        # Probabilistic fast-sim split (alphazero-general style). Default off.
+        'fast_simulations': int(sp.get('fast_simulations', 0)),
+        'fast_sim_prob': float(sp.get('fast_sim_prob', 0.0)),
         'c_puct': float(sp.get('c_puct', 1.0)),
         'dirichlet_alpha': float(sp.get('dirichlet_alpha', 0.3)),
         'value_weight': float(sp.get('value_weight', 1.0)),
         'max_depth': int(sp.get('max_depth', 300)),
         'use_batched_mcts': bool(sp.get('use_batched_mcts', True)),
         'mcts_batch_size': int(sp.get('mcts_batch_size', 32)),
+        'enable_subtree_reuse': bool(sp.get('enable_subtree_reuse', True)),
+        'fpu_reduction': float(sp.get('fpu_reduction', 0.25)),
+        'epsilon_mix_start': float(sp.get('epsilon_mix_start', 0.25)),
+        'epsilon_mix_end': float(sp.get('epsilon_mix_end', 0.0)),
+        'epsilon_mix_taper_moves': int(sp.get('epsilon_mix_taper_moves', 20)),
+        # Root policy temperature: reshape root child priors before noise.
+        # 1.0 = no-op; >1 flattens (more exploration); <1 sharpens.
+        'root_policy_temp': float(sp.get('root_policy_temp', 1.0)),
         'initial_temp': float(sp.get('initial_temp', 1.0)),
         'final_temp': float(sp.get('final_temp', 0.1)),
         'annealing_steps': int(sp.get('annealing_steps', 30)),
@@ -250,6 +319,60 @@ def main() -> None:
         'batches_per_epoch': trainer_cfg.get('batches_per_epoch', 'auto'),
         'max_buffer_size': int(trainer_cfg.get('max_buffer_size', 10000)),
         'discrimination_weight': float(trainer_cfg.get('discrimination_weight', 0.5)),
+        # EMA eval target. `ema_decay=None` disables the shadow entirely; set it
+        # to e.g. 0.999 to have the trainer track a smoothed copy that the
+        # tournament plays with instead of the single-step-noisy live weights.
+        'ema_decay': (float(trainer_cfg['ema_decay'])
+                      if trainer_cfg.get('ema_decay') is not None else None),
+        'use_ema_for_eval': bool(trainer_cfg.get('use_ema_for_eval', True)),
+        # Gaussian soft value targets. σ in class-widths; 0 = hard one-hot CE.
+        'soft_value_target_sigma': float(trainer_cfg.get('soft_value_target_sigma', 0.5)),
+        # LR schedule: 'cosine' (default) or 'step' for the legacy StepLR(step_size=10, gamma=0.9).
+        'lr_schedule': trainer_cfg.get('lr_schedule', 'cosine'),
+        'warmup_epochs': int(trainer_cfg.get('warmup_epochs', 0)),
+        # bf16 autocast for training forward + loss. Auto-disabled on CPU.
+        'enable_autocast': bool(trainer_cfg.get('enable_autocast', True)),
+        # Search-consistency probe (Track B §5). Off by default. Reads from a
+        # nested `trainer.search_consistency:` block when present so the YAML
+        # stays organized; falls back to flat `trainer.search_consistency_*`
+        # keys for ergonomics.
+        'enable_search_consistency': bool(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'enabled', trainer_cfg.get('enable_search_consistency', False)
+            )
+        ),
+        'search_consistency_weight': float(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'policy_weight', trainer_cfg.get('search_consistency_weight', 0.1)
+            )
+        ),
+        'search_consistency_value_weight': float(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'value_weight', trainer_cfg.get('search_consistency_value_weight', 1.0)
+            )
+        ),
+        'search_consistency_every_k_steps': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'every_k_steps', trainer_cfg.get('search_consistency_every_k_steps', 10)
+            )
+        ),
+        'search_consistency_long_sims': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'long_sims', trainer_cfg.get('search_consistency_long_sims', 64)
+            )
+        ),
+        'search_consistency_batch_size': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'batch_size', trainer_cfg.get('search_consistency_batch_size', 32)
+            )
+        ),
+        'search_consistency_warmup_iters': int(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'warmup_iters', trainer_cfg.get('search_consistency_warmup_iters', 3)
+            )
+        ),
+        # Cosine horizon = full training run in epochs. Scaled below when we
+        # know num_iterations × epochs_per_iteration.
         # Augmentation settings (Phase 2 architectural improvements)
         'enable_augmentation': enable_augmentation,
         'max_augmentations': int(max_augmentations),
@@ -262,7 +385,41 @@ def main() -> None:
         # Arena / gating
         'promotion_threshold': float(arena_cfg.get('promotion_threshold', 0.55)),
         'tournament_sliding_window': int(arena_cfg.get('tournament_sliding_window', 5)),
+        # Deterministic tournament seed. Leave unset (or null) for stochastic play.
+        'eval_seed': arena_cfg.get('eval_seed', None),
+        # Gate revert (RiverNewbury-style). Default off preserves the
+        # AlphaZero-continuous-training behavior. Recommended on for
+        # warm-start runs from a strong supervised checkpoint.
+        'revert_self_play_on_gate_failure': bool(arena_cfg.get('revert_self_play_on_gate_failure', False)),
+        'reset_optimizer_on_revert': bool(arena_cfg.get('reset_optimizer_on_revert', True)),
+        # Anchor eval (CLOUD_TRAINING_PLAN §1.3). Reads from a nested
+        # `anchor:` block in the YAML for organization, with sensible
+        # defaults for any run that doesn't specify one.
+        'anchor_enabled': bool((cfg.get('anchor') or {}).get('enabled', True)),
+        'anchor_num_games': int((cfg.get('anchor') or {}).get('num_games', 40)),
+        'anchor_depth': int((cfg.get('anchor') or {}).get('depth', 3)),
+        'anchor_seed': int((cfg.get('anchor') or {}).get('seed', 1337)),
+        'anchor_max_moves_per_game': int((cfg.get('anchor') or {}).get('max_moves_per_game', 200)),
+        'anchor_skip_first_n_iterations': int((cfg.get('anchor') or {}).get('skip_first_n_iterations', 1)),
+        # MCTS-vs-anchor (primary strength metric). Off by default to keep
+        # legacy configs unchanged; raw-policy anchor still runs and stays
+        # the diagnostic. When on, the candidate also plays the anchor with
+        # pure-neural MCTS (`mcts_simulations` per move, subtree-reuse on,
+        # root noise off) so anchor numbers reflect deployment-style play.
+        'anchor_mcts_enabled': bool((cfg.get('anchor') or {}).get('mcts_enabled', False)),
+        'anchor_mcts_simulations': int((cfg.get('anchor') or {}).get('mcts_simulations', 64)),
+        # Checkpoint retention: 0 = keep all, N>0 = keep top-N by Elo, N<0 =
+        # legacy "delete rejected immediately." Default 5 prunes most of a
+        # long run's history; for runs where you want to head-to-head every
+        # iteration later, set to 0 in the YAML.
+        'checkpoint_retention_count': int(trainer_cfg.get('checkpoint_retention_count', 5)),
     }
+
+    games_per_iteration = int(sp.get('games_per_iteration', 50))
+    epochs_per_iteration = int(trainer_cfg.get('epochs_per_iteration', 40))  # INCREASED: from 4 to 40 for better training
+    # Compute the cosine horizon from the outer training loop's full epoch count
+    # so the LR curve is scaled to the run, not to a single iteration.
+    mode_settings['total_epochs'] = num_iterations * epochs_per_iteration
 
     # Instantiate network and supervisor
     network = NetworkWrapper(device=device, use_enhanced_encoding=use_enhanced_encoding)
@@ -275,16 +432,30 @@ def main() -> None:
         tournament_games=int(arena_cfg.get('games_per_match', 200)),
         mcts_simulations=int(sp.get('num_simulations', 96)),
         mode_settings=mode_settings,
+        full_config=cfg,
     )
-
-    games_per_iteration = int(sp.get('games_per_iteration', 50))
-    epochs_per_iteration = int(trainer_cfg.get('epochs_per_iteration', 40))  # INCREASED: from 4 to 40 for better training
 
     # Load checkpoint if resuming
     if checkpoint_to_load:
         _load_resume_checkpoint(network, supervisor, checkpoint_to_load, device, logger)
+        # Sync supervisor's internal iteration counter so the next call to
+        # train_iteration runs as `start_iteration` (not overwriting iteration_0/).
+        # Supervisor's _load_best_model_state already restores this from
+        # best_model_state.json in the common case, but we set it explicitly
+        # to guarantee correctness when that file is missing or stale.
+        try:
+            supervisor.set_resume_iteration(start_iteration)
+        except Exception as e:
+            logger.warning(f"Failed to sync supervisor iteration counter: {e}")
+    elif init_checkpoint_to_load is not None:
+        # Warm-start: weights only. Iteration counter stays at 0 (the new run
+        # starts fresh), and supervisor.set_resume_iteration is intentionally
+        # NOT called so iteration_0 / best_model bookkeeping behaves as a new
+        # run that just happens to inherit a learned prior.
+        _load_init_checkpoint(network, init_checkpoint_to_load, device, logger)
 
     start_time = time.time()
+    last_completed_iteration = start_iteration  # tracks successful iterations for manifest_final
     for it in range(start_iteration, num_iterations):
         logger.info(f'Starting iteration {it + 1}/{num_iterations}')
         summary = supervisor.train_iteration(num_games=games_per_iteration, epochs=epochs_per_iteration)
@@ -303,6 +474,7 @@ def main() -> None:
 
         elapsed_h = (time.time() - start_time) / 3600.0
         logger.info(f'Iteration {it + 1} complete. Elapsed: {elapsed_h:.2f}h')
+        last_completed_iteration = it + 1  # 1-based count of completed iterations
 
         # After each iteration: snapshot current config and write tuner suggestions
         try:
@@ -338,6 +510,17 @@ def main() -> None:
                 logger.warning(f'Failed to append feedback entry: {e}')
         except Exception as e:
             logger.warning(f'Auto-tuning suggestions failed: {e}')
+
+    # Training loop completed normally — write the final manifest.
+    # final_anchor_win_rate comes from the last iteration's anchor eval
+    # (CLOUD_TRAINING_PLAN §1.3). None if anchor eval was disabled/skipped.
+    try:
+        supervisor.finalize_manifest(
+            iterations_completed=last_completed_iteration,
+            final_anchor_win_rate=getattr(supervisor, '_latest_anchor_win_rate', None),
+        )
+    except Exception as e:
+        logger.warning(f'finalize_manifest failed: {e}')
 
 
 if __name__ == '__main__':

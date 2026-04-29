@@ -92,8 +92,11 @@ class YinshNetwork(nn.Module):
         """
         super().__init__()
 
-        # Fixed output size
-        self.total_moves = 7395
+        # Policy head output size comes from the encoder so there's one source
+        # of truth. The legacy hardcoded 7395 here + in StateEncoder used to
+        # silently go out of sync when the layout changed.
+        from ..utils.encoding import StateEncoder as _StateEncoder
+        self.total_moves = _StateEncoder().total_moves
         self.value_mode = value_mode
         self.num_value_classes = num_value_classes
         self.input_channels = input_channels  # Store for reference

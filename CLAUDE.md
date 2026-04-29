@@ -155,9 +155,9 @@ yinsh-track --help
 
 **`yinsh_ml/network/`** - Neural network
 - `model.py` - YinshNetwork (ResNet-style with attention)
-- Input: 6×11×11 channels (white/black rings/markers, valid moves, phase)
-- Outputs: Policy head (121×121 move probabilities) + Value head (position evaluation)
-- `wrapper.py` - NetworkWrapper for inference
+- Input: 6×11×11 channels (white/black rings/markers, valid moves, phase+player sentinel) — or 15 channels in enhanced mode
+- Outputs: Policy head (flat 7433-slot move distribution; size comes from `StateEncoder().total_moves`) + Value head (position evaluation)
+- `wrapper.py` - NetworkWrapper for inference (hard-fails on policy-size mismatch)
 
 **`yinsh_ml/training/`** - Training pipeline
 - `trainer.py` - YinshTrainer (network training loop)
@@ -197,7 +197,8 @@ yinsh-track --help
 Two encoders live side-by-side, selected by the single `use_enhanced_encoding` flag:
 
 - **Basic (6-ch, default)** — `yinsh_ml/utils/encoding.py::StateEncoder`
-  1. White Rings / 2. Black Rings / 3. White Markers / 4. Black Markers / 5. Valid Moves / 6. Game Phase
+  1. Current player's Rings / 2. Opponent's Rings / 3. Current player's Markers / 4. Opponent's Markers / 5. Valid Moves / 6. Game Phase (broadcast) + side-to-move sentinel at off-board cell A1
+  Channels 0–3 are side-normalized (always "current player first"), so `decode_state` recovers side-to-move from the A1 sentinel on channel 5 rather than flipping colors by player. A1 is off the hex board (column A only has rows 2–5), so it never collides with real game state and survives D2 augmentation.
 - **Enhanced (15-ch)** — `yinsh_ml/utils/enhanced_encoding.py::EnhancedStateEncoder` (inherits from `StateEncoder`)
   Adds row threats, partial rows, ring mobility, center distance, ring influence, turn number, score differential.
 
@@ -219,7 +220,7 @@ Weights are **phase-specific** - different priorities for early/mid/late game.
 
 ### Transposition Table Integration
 - **Enabled by default** in `HeuristicAgent`
-- Uses Zobrist hashing for position encoding
+- Uses Zobrist hashing for position encoding — `ZobristHasher.hash_state(state)` hashes the board **AND** side-to-move **AND** game phase. Two positions with identical piece layout but different `current_player` or `phase` now correctly hash to different values. O(1) `toggle_side_to_move` / `toggle_phase` helpers support incremental updates.
 - Depth-preferred replacement policy (keeps deeper searches)
 - Typical hit rates: 60-80% in game tree search
 - Default size: 2^20 entries (1M positions, ~40-50MB)
@@ -410,6 +411,20 @@ When working in this codebase, **proactively improve what you encounter**:
 - Integrating learned heuristics into MCTS for better training efficiency
 - Optimizing transposition table performance
 - Tuning MCTS parameters for hybrid evaluation mode
+
+### Foundational Rule Fixes (April 2026)
+
+A batch of correctness fixes to the core game engine and encoding. Any policy-head checkpoint from before these fixes is **not load-compatible** (policy size went from 8390 → 7433).
+
+1. **Pseudo-diagonal row bug** — `find_marker_rows` / `is_valid_marker_sequence` no longer accept the non-hex `(-1, 1)` / `(1, -1)` diagonal. Single source of truth is `DIRECTIONS` (3 forward axes) and `HEX_LINE_AXES` (6 signed directions) in `yinsh_ml/game/constants.py`; `HEX_DIRECTIONS` now uses matching-sign diagonals.
+2. **Zobrist hash** — includes side-to-move AND game phase. `ZobristHasher.hash_state(state)` with O(1) `toggle_side_to_move` / `toggle_phase` helpers (`yinsh_ml/game/zobrist.py`).
+3. **Encoder** — `decode_state` no longer flips colors for BLACK-to-move; current player is recovered from a sentinel at off-board cell A1 on channel 5 (`yinsh_ml/utils/encoding.py`).
+4. **Move encoding** — `REMOVE_MARKERS` uses a deterministic 123-entry lookup table (was 121 slots with 17 collisions). `total_moves`: **8390 → 7433**. **Breaking change** for policy-head checkpoints; `NetworkWrapper.load_model` hard-fails with a clear error (`yinsh_ml/utils/encoding.py`, `yinsh_ml/network/wrapper.py`).
+5. **Stalemate detection** — `is_terminal` / `get_winner` handle no-legal-moves in MAIN_GAME (`yinsh_ml/game/game_state.py`).
+6. **`_handle_marker_removal`** — atomic (validate-all, then remove-all) (`yinsh_ml/game/game_state.py`).
+7. **`_move_maker`** — always-initialized (`None` when inactive), cleared on GAME_OVER (`yinsh_ml/game/game_state.py`).
+8. **BGA parser** — `"restarts their turn"` is a multi-action undo that pops all same-player notifications back to the opponent's boundary. Replay pass rate: 54/60 → 60/60 (`yinsh_ml/data/scrapers/bga.py`).
+9. **6/7-marker row support** — `find_marker_rows` now returns the full maximal run (5/6/7 positions); the move generator enumerates every length-5 window over it. `total_moves` is unchanged at 7433 because the 123-entry REMOVE_MARKERS table is already windows-of-5, agnostic to underlying run length (`yinsh_ml/game/board.py`, `yinsh_ml/game/moves.py`).
 
 ## Troubleshooting
 

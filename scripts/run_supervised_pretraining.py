@@ -109,6 +109,17 @@ def create_model(args) -> tuple:
     return model, device
 
 
+def _value_targets_to_classes(values: torch.Tensor, num_classes: int) -> torch.Tensor:
+    """Map scalar targets in [-1, 1] to class indices in [0, num_classes-1].
+
+    Matches the discretization used in yinsh_ml/training/trainer.py so the
+    supervised and self-play value heads optimize the same objective.
+    Expert outcomes {-1, 0, +1} → classes {0, mid, num_classes-1}.
+    """
+    normalized = (values + 1.0) / 2.0 * (num_classes - 1)
+    return torch.round(normalized).long().clamp(0, num_classes - 1)
+
+
 def train(model, device, train_loader, val_loader, args):
     """Run supervised training loop."""
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
@@ -123,11 +134,14 @@ def train(model, device, train_loader, val_loader, args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    num_value_classes = model.num_value_classes
+
     for epoch in range(1, args.epochs + 1):
         # --- Training ---
         model.train()
         train_policy_loss = 0.0
         train_value_loss = 0.0
+        train_value_correct = 0
         train_correct = 0
         train_total = 0
 
@@ -140,14 +154,18 @@ def train(model, device, train_loader, val_loader, args):
 
             optimizer.zero_grad()
 
-            pred_logits, pred_values = model(states)
+            pred_logits, _ = model(states)
+            value_logits = model._value_logits  # populated in forward()
 
             # Policy loss: cross-entropy against expert moves
             log_probs = F.log_softmax(pred_logits, dim=1)
             policy_loss = -(policies * log_probs).sum(dim=1).mean()
 
-            # Value loss: MSE against game outcomes
-            value_loss = F.mse_loss(pred_values.view(-1), values)
+            # Value loss: cross-entropy on discretized outcome classes.
+            # Mirrors yinsh_ml/training/trainer.py — same loss surface as
+            # self-play so the warm-start checkpoint isn't washed out on iter 1.
+            target_class = _value_targets_to_classes(values, num_value_classes)
+            value_loss = F.cross_entropy(value_logits, target_class)
 
             # Combined loss
             loss = policy_loss + args.value_weight * value_loss
@@ -164,6 +182,9 @@ def train(model, device, train_loader, val_loader, args):
             pred_moves = pred_logits.argmax(dim=1)
             expert_moves = policies.argmax(dim=1)
             train_correct += (pred_moves == expert_moves).sum().item()
+
+            pred_class = value_logits.argmax(dim=1)
+            train_value_correct += (pred_class == target_class).sum().item()
             train_total += len(states)
 
             batch_count += 1
@@ -183,14 +204,19 @@ def train(model, device, train_loader, val_loader, args):
         avg_policy = train_policy_loss / n_train
         avg_value = train_value_loss / n_train
         accuracy = train_correct / train_total if train_total > 0 else 0
+        value_accuracy = train_value_correct / train_total if train_total > 0 else 0
 
         # --- Validation ---
-        val_policy, val_value, val_acc = evaluate(model, device, val_loader)
+        val_policy, val_value, val_acc, val_value_acc = evaluate(
+            model, device, val_loader, num_value_classes
+        )
 
         logger.info(
             f"Epoch {epoch:3d}/{args.epochs} | "
-            f"Train: P={avg_policy:.4f} V={avg_value:.4f} Acc={accuracy:.3f} | "
-            f"Val: P={val_policy:.4f} V={val_value:.4f} Acc={val_acc:.3f} | "
+            f"Train: P={avg_policy:.4f} V={avg_value:.4f} "
+            f"PAcc={accuracy:.3f} VAcc={value_accuracy:.3f} | "
+            f"Val: P={val_policy:.4f} V={val_value:.4f} "
+            f"PAcc={val_acc:.3f} VAcc={val_value_acc:.3f} | "
             f"LR={scheduler.get_last_lr()[0]:.6f}"
         )
 
@@ -215,12 +241,16 @@ def train(model, device, train_loader, val_loader, args):
     return save_path
 
 
-def evaluate(model, device, data_loader) -> tuple:
-    """Evaluate model on a dataset. Returns (policy_loss, value_loss, accuracy)."""
+def evaluate(model, device, data_loader, num_value_classes) -> tuple:
+    """Evaluate model on a dataset.
+
+    Returns (policy_loss, value_ce_loss, policy_top1_accuracy, value_class_accuracy).
+    """
     model.eval()
     total_policy = 0.0
     total_value = 0.0
     correct = 0
+    value_correct = 0
     total = 0
 
     with torch.no_grad():
@@ -229,11 +259,14 @@ def evaluate(model, device, data_loader) -> tuple:
             policies = policies.to(device)
             values = values.to(device)
 
-            pred_logits, pred_values = model(states)
+            pred_logits, _ = model(states)
+            value_logits = model._value_logits
 
             log_probs = F.log_softmax(pred_logits, dim=1)
             policy_loss = -(policies * log_probs).sum(dim=1).mean()
-            value_loss = F.mse_loss(pred_values.view(-1), values)
+
+            target_class = _value_targets_to_classes(values, num_value_classes)
+            value_loss = F.cross_entropy(value_logits, target_class)
 
             total_policy += policy_loss.item() * len(states)
             total_value += value_loss.item() * len(states)
@@ -241,10 +274,15 @@ def evaluate(model, device, data_loader) -> tuple:
             pred_moves = pred_logits.argmax(dim=1)
             expert_moves = policies.argmax(dim=1)
             correct += (pred_moves == expert_moves).sum().item()
+
+            pred_class = value_logits.argmax(dim=1)
+            value_correct += (pred_class == target_class).sum().item()
             total += len(states)
 
     n = len(data_loader.dataset)
-    return total_policy / n, total_value / n, correct / total if total > 0 else 0
+    policy_top1 = correct / total if total > 0 else 0
+    value_top1 = value_correct / total if total > 0 else 0
+    return total_policy / n, total_value / n, policy_top1, value_top1
 
 
 def main():

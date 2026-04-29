@@ -126,7 +126,7 @@ class GameRecorder:
         self.current_game.turns.append(turn)
         self.current_game.total_turns = len(self.current_game.turns)
         
-        logger.debug(f"Recorded turn {turn.turn_number}: {move}")
+        pass
         return turn
     
     def end_game(self, game_state: GameState, winner: Optional[Player] = None) -> Optional[GameRecord]:
@@ -206,7 +206,7 @@ class GameRecorder:
         try:
             with open(filepath, 'w') as f:
                 json.dump(game_record.to_dict(), f, indent=2)
-            logger.debug(f"Saved game record to {filepath}")
+            pass
         except Exception as e:
             logger.error(f"Failed to save game record: {e}")
     
@@ -245,7 +245,7 @@ class GameRecorder:
                 metadata=data['metadata']
             )
             
-            logger.debug(f"Loaded game record: {game_id}")
+            pass
             return game_record
             
         except Exception as e:
@@ -260,7 +260,7 @@ class GameRecorder:
         """
         game_files = list(self.output_dir.glob("*.json"))
         game_ids = [f.stem for f in game_files]
-        logger.debug(f"Found {len(game_ids)} game records")
+        pass
         return sorted(game_ids)
     
     def get_statistics(self) -> Dict[str, Any]:

@@ -805,7 +805,7 @@ class MemoryMappedExperienceBuffer:
         
         self._mmap_buffer[0:self.HEADER_SIZE] = header_data
         self._mmap_buffer.flush()
-        logger.debug("Initialized buffer header")
+        pass
     
     def _validate_header(self) -> None:
         """Validate existing buffer header."""
@@ -824,7 +824,7 @@ class MemoryMappedExperienceBuffer:
             if header.capacity != self.capacity:
                 raise BufferCorruptionError(f"Capacity mismatch: {header.capacity} != {self.capacity}")
             
-            logger.debug("Buffer header validation passed")
+            pass
             
         except BufferCorruptionError as e:
             # For configuration mismatches, don't attempt recovery
@@ -1000,7 +1000,7 @@ class MemoryMappedExperienceBuffer:
             # Update memory budget
             self.budget_manager.register_addition(experience_size)
             
-            logger.debug(f"Added experience {experience_id} at position {header.write_position}")
+            pass
             
             return experience_id
     
@@ -1249,7 +1249,7 @@ class MemoryMappedExperienceBuffer:
                     if evicted_count * self.item_size >= bytes_to_free:
                         break
         
-        logger.debug(f"Evicted {evicted_count} experiences using {self.config.eviction_policy} policy")
+        pass
         return evicted_count
 
     def _evict_experience_by_id(self, experience_id: str) -> bool:
@@ -1597,7 +1597,7 @@ class MemoryMappedExperienceBuffer:
                             oldest_timestamp = min(oldest_timestamp, experience.timestamp)
                             newest_timestamp = max(newest_timestamp, experience.timestamp)
                     except Exception as e:
-                        logger.debug(f"Failed to sample experience at index {i}: {e}")
+                        pass
                         continue
                 
                 # Normalize phase distribution based on actual sample

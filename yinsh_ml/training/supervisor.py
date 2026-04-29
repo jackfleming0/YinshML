@@ -2,9 +2,12 @@
 
 import gc
 import logging
+import os
+import subprocess
 from pathlib import Path
 import time
-from typing import Optional, List, Tuple, Dict
+from datetime import datetime, timezone
+from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 import json
 import psutil, platform
@@ -22,6 +25,12 @@ from ..game.constants import Player, PieceType
 from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics # Keep if used for internal tracking
 from ..utils.tournament import ModelTournament, _canon # Import _canon if used directly
+from ..utils.manifest import (
+    build_launch_manifest,
+    build_final_manifest,
+    infer_encoder,
+    write_manifest,
+)
 # --- Memory Pool Imports ---
 from ..memory import (
     GameStatePool, TensorPool, 
@@ -42,25 +51,34 @@ class TrainingSupervisor:
     """
     Supervises the AlphaZero-style training loop: self-play → training → evaluation.
 
-    === AlphaZero-Style Continuous Training ===
-    This supervisor implements TRUE AlphaZero training:
+    === AlphaZero-Style Continuous Training (default) ===
+    By default, this supervisor implements continuous training:
 
-    1. NEVER reverts network weights on "bad" iterations
-    2. NEVER reverts or filters the replay buffer
+    1. Does NOT revert network weights on "bad" iterations
+    2. Does NOT revert or filter the replay buffer
     3. Buffer uses natural FIFO eviction (oldest samples discarded when full)
     4. Training continues on latest weights regardless of tournament results
-    5. Best model is saved for EVALUATION/COMPARISON only, not for reverting
+    5. Best model is saved for EVALUATION/COMPARISON only
 
-    Why no reversion?
+    Why no reversion (the default rationale)?
     - Reversion creates a closed loop where the model can't escape local optima
     - AlphaZero's insight: more diverse training data beats careful curation
     - Temporary ELO dips are normal and will recover with continued training
     - The model needs to explore to find better strategies
 
+    === Opt-in Gate (RiverNewbury / AlphaGo-Zero style) ===
+    Set `arena.revert_self_play_on_gate_failure: true` to enable a model gate.
+    On a failed Wilson gate, the supervisor reloads `best_model.pt` weights
+    into self.network before the next self-play iteration. Recommended for
+    WARM-START runs from a supervised checkpoint, where the prior is strong
+    enough that "no reversion" lets self-play degrade the prior across
+    iterations (the warm-start regression failure mode). Optimizer momentum
+    is also reset by default (`reset_optimizer_on_revert: true`).
+
     Tournament results are used for:
     - Monitoring training progress (ELO tracking)
     - Saving checkpoints of promising models
-    - NOT for gating or reverting the training process
+    - Conditionally gating self-play weights (only if `revert_self_play_on_gate_failure`)
     """
 
     def __init__(self,
@@ -72,7 +90,11 @@ class TrainingSupervisor:
                  # This defines the *early* simulation budget.
                  mcts_simulations: int = 100,
                  # --- All other config settings arrive here ---
-                 mode_settings: Optional[Dict] = None
+                 mode_settings: Optional[Dict] = None,
+                 # --- Full raw training config, for the reproducibility manifest.
+                 #     Optional so existing call sites that only pass mode_settings
+                 #     still work; run_training.py supplies the full YAML dict.
+                 full_config: Optional[Dict[str, Any]] = None,
                 ):
         """
         Supervises the full training loop, configured via direct args and mode_settings.
@@ -96,8 +118,50 @@ class TrainingSupervisor:
         if mode_settings is None:
             mode_settings = {}
         self.mode_settings = mode_settings  # <<< STORE mode_settings AS INSTANCE VARIABLE
+        self.full_config = full_config
 
         self.logger.info(f"Initializing TrainingSupervisor in '{self.save_dir}'")
+
+        # ==================================================================
+        # 0. Write per-run launch manifest (reproducibility anchor).
+        # Done early, before any heavy init, so even crashes mid-setup leave
+        # behind a trace of what was attempted. Failures here are logged but
+        # never abort training.
+        # ==================================================================
+        self._launch_manifest: Optional[Dict[str, Any]] = None
+        self._start_time = datetime.now(timezone.utc)
+        self._promotion_count: int = 0
+        try:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            # Prefer the full raw config; fall back to mode_settings so there's
+            # always SOMETHING captured, even if the caller hasn't been updated.
+            cfg_for_manifest = self.full_config if self.full_config is not None else self.mode_settings
+            encoder_name = infer_encoder(
+                cfg_for_manifest,
+                fallback_channels=getattr(self.network, "input_channels", None),
+            )
+            # total_moves is encoder-independent (REMOVE_MARKERS table is shared),
+            # so StateEncoder() is the canonical source.
+            total_moves = StateEncoder().total_moves
+            # Try to find the repo root by walking up from this file to a .git
+            # marker; fall back to cwd (which is what run_training.py uses).
+            repo_root = Path(__file__).resolve().parents[2]
+            if not (repo_root / ".git").exists():
+                repo_root = Path.cwd()
+
+            self._launch_manifest = build_launch_manifest(
+                config=cfg_for_manifest,
+                device=self.device,
+                encoder=encoder_name,
+                total_moves=total_moves,
+                repo_root=repo_root,
+                start_time=self._start_time,
+            )
+            if write_manifest(self.save_dir / "manifest.json", self._launch_manifest):
+                self.logger.info(f"Wrote launch manifest to {self.save_dir / 'manifest.json'}")
+        except Exception as exc:
+            # Catch-all: manifest write must never abort training.
+            self.logger.warning(f"FAILED to build/write launch manifest: {exc}. Training continues.")
         self.logger.info(f"Base MCTS Simulations (early game): {mcts_simulations}")
         # Log received mode_settings for debugging
         # Be careful logging sensitive info if any exists in config
@@ -146,9 +210,34 @@ class TrainingSupervisor:
         value_loss_weights = self.mode_settings.get('value_loss_weights', (0.5, 0.5))
         discrimination_weight = self.mode_settings.get('discrimination_weight', 0.5)
         max_buffer_size = self.mode_settings.get('max_buffer_size', 10000)  # Default 10K for backward compatibility
-        base_lr = self.mode_settings.get('lr', 0.001)
-        lr_schedule = self.mode_settings.get('lr_schedule', 'constant')
-        warmup_steps = self.mode_settings.get('warmup_steps', 0)
+        base_lr = float(self.mode_settings.get('lr', 1e-3))
+        # LR schedule knobs. Default cosine-with-warmup; set lr_schedule: 'step'
+        # to fall back to the legacy StepLR(step_size=10, gamma=0.9).
+        lr_schedule = self.mode_settings.get('lr_schedule', 'cosine')
+        warmup_epochs = int(self.mode_settings.get('warmup_epochs', 0))
+        total_epochs = int(self.mode_settings.get('total_epochs', 200))
+        # bf16 autocast for forward + loss. Auto-disabled on CPU.
+        enable_autocast = bool(self.mode_settings.get('enable_autocast', True))
+        # Search-consistency probe (Track B §5). Off by default; flip
+        # `enable_search_consistency: true` in trainer config to arm.
+        enable_search_consistency = bool(self.mode_settings.get('enable_search_consistency', False))
+        search_consistency_weight = float(self.mode_settings.get('search_consistency_weight', 0.1))
+        search_consistency_value_weight = float(self.mode_settings.get('search_consistency_value_weight', 1.0))
+        search_consistency_every_k_steps = int(self.mode_settings.get('search_consistency_every_k_steps', 10))
+        search_consistency_long_sims = int(self.mode_settings.get('search_consistency_long_sims', 64))
+        search_consistency_batch_size = int(self.mode_settings.get('search_consistency_batch_size', 32))
+        search_consistency_warmup_iters = int(self.mode_settings.get('search_consistency_warmup_iters', 3))
+        # EMA eval target — None disables entirely. When set, the trainer keeps
+        # a shadow copy updated after every optimizer step, and the supervisor
+        # saves a sibling `_ema.pt` checkpoint that the tournament consumes.
+        ema_decay = self.mode_settings.get('ema_decay', None)
+        # Gaussian soft value targets. σ in class-widths; 0 disables (hard CE).
+        soft_value_target_sigma = float(self.mode_settings.get('soft_value_target_sigma', 0.5))
+        self._use_ema_for_eval = bool(self.mode_settings.get('use_ema_for_eval', True))
+        # Deterministic tournament eval: when set, every match play is reproducible
+        # across runs. `None` keeps the old non-deterministic behavior.
+        _raw_eval_seed = self.mode_settings.get('eval_seed', None)
+        self._eval_seed = int(_raw_eval_seed) if _raw_eval_seed is not None else None
 
         # Augmentation settings (Phase 2 architectural improvements)
         enable_augmentation = self.mode_settings.get('enable_augmentation', False)
@@ -170,9 +259,40 @@ class TrainingSupervisor:
         evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
         heuristic_weight = self.mode_settings.get('heuristic_weight', 0.7)
 
+        # Heuristic-weight curriculum (linear anneal start → end over N iterations,
+        # held at end afterwards). Defaults make this a no-op (start == end == current).
+        self._hw_start = float(self.mode_settings.get('heuristic_weight_start', heuristic_weight))
+        self._hw_end = float(self.mode_settings.get('heuristic_weight_end', heuristic_weight))
+        self._hw_anneal_iters = int(self.mode_settings.get('heuristic_weight_anneal_iterations', 0))
+        if self._hw_start != self._hw_end:
+            self.logger.info(
+                f"Heuristic curriculum: {self._hw_start:.2f} → {self._hw_end:.2f} "
+                f"linearly over {self._hw_anneal_iters} iterations"
+            )
+        # Seed SelfPlay's heuristic_weight at the iter-0 curriculum value so the
+        # first self-play batch runs with start, not the static back-compat value.
+        heuristic_weight = self._compute_heuristic_weight(0)
+
         # Extract batched MCTS parameters (Phase 2.1)
         use_batched_mcts = self.mode_settings.get('use_batched_mcts', True)
         mcts_batch_size = self.mode_settings.get('mcts_batch_size', 32)
+        # Subtree reuse: carry MCTS tree across moves within each self-play game
+        # (Track A polish item). Default on — disable via config for A/B testing.
+        enable_subtree_reuse = bool(self.mode_settings.get('enable_subtree_reuse', True))
+        # First-Play Urgency reduction (PUCT). 0 disables; KataGo default 0.25.
+        fpu_reduction = float(self.mode_settings.get('fpu_reduction', 0.25))
+        # Root Dirichlet noise mixing schedule (taper early-game → late-game).
+        epsilon_mix_start = float(self.mode_settings.get('epsilon_mix_start', 0.25))
+        epsilon_mix_end = float(self.mode_settings.get('epsilon_mix_end', 0.0))
+        epsilon_mix_taper_moves = int(self.mode_settings.get('epsilon_mix_taper_moves', 20))
+        # Probabilistic fast/slow sim split. Default off; opt-in via config when
+        # you want to spend less compute on the bulk of moves and concentrate
+        # search where it matters. RiverNewbury default: fast=20, prob=0.75.
+        fast_simulations = int(self.mode_settings.get('fast_simulations', 0))
+        fast_sim_prob = float(self.mode_settings.get('fast_sim_prob', 0.0))
+        # Root policy temperature: reshape root child priors before noise.
+        # alphazero-general default 1.1 (slight softening); 1.0 disables.
+        root_policy_temp = float(self.mode_settings.get('root_policy_temp', 1.0))
 
         _mcts_config_for_init = { # Use temporary name to avoid confusion
             'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
@@ -180,6 +300,8 @@ class TrainingSupervisor:
             'num_simulations': mcts_simulations, # Early sims from direct arg
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,
+            'fast_simulations': fast_simulations,
+            'fast_sim_prob': fast_sim_prob,
             'c_puct': c_puct,
             'dirichlet_alpha': dirichlet_alpha,
             # *** THIS IS THE PROBLEM LINE ***
@@ -192,6 +314,12 @@ class TrainingSupervisor:
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,
             'temp_clamp_fraction': temp_clamp_fraction,
+            'enable_subtree_reuse': enable_subtree_reuse,
+            'fpu_reduction': fpu_reduction,
+            'epsilon_mix_start': epsilon_mix_start,
+            'epsilon_mix_end': epsilon_mix_end,
+            'epsilon_mix_taper_moves': epsilon_mix_taper_moves,
+            'root_policy_temp': root_policy_temp,
         }
 
         self.self_play = SelfPlay(
@@ -223,6 +351,20 @@ class TrainingSupervisor:
             # Augmentation settings (Phase 2 architectural improvements)
             enable_augmentation=enable_augmentation,
             max_augmentations=max_augmentations,
+            ema_decay=ema_decay,
+            soft_value_target_sigma=soft_value_target_sigma,
+            base_lr=base_lr,
+            lr_schedule=lr_schedule,
+            warmup_epochs=warmup_epochs,
+            total_epochs=total_epochs,
+            enable_autocast=enable_autocast,
+            enable_search_consistency=enable_search_consistency,
+            search_consistency_weight=search_consistency_weight,
+            search_consistency_value_weight=search_consistency_value_weight,
+            search_consistency_every_k_steps=search_consistency_every_k_steps,
+            search_consistency_long_sims=search_consistency_long_sims,
+            search_consistency_batch_size=search_consistency_batch_size,
+            search_consistency_warmup_iters=search_consistency_warmup_iters,
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,
             # lr_schedule = lr_schedule,
@@ -233,19 +375,10 @@ class TrainingSupervisor:
         self.logger.info(f"Trainer initialized with buffer size: {max_buffer_size:,} samples "
                          f"({max_buffer_size/1000:.0f}K, ~{max_buffer_size/100:.0f} games at 100 moves each)")
 
-        # --- Configure Trainer Optimizers/Schedulers based on mode_settings ---
-        # This assumes YinshTrainer exposes methods or attributes to configure these
-        # If Trainer creates optimizers in __init__, we need to pass parameters there.
-        # Let's assume Trainer's __init__ handles this based on passed params (like base_lr, value_head_lr_factor, etc.)
-        # We already passed necessary factors/weights above. If base_lr needs explicit setting:
-        if hasattr(self.trainer, 'policy_optimizer') and hasattr(self.trainer, 'value_optimizer'):
-            self.trainer.policy_optimizer.param_groups[0]['lr'] = base_lr
-            self.trainer.value_optimizer.param_groups[0]['lr'] = base_lr * value_head_lr_factor
-            # Re-initialize schedulers if LR changes significantly or schedule type changes
-            # self.trainer.reinitialize_schedulers(lr_schedule, warmup_steps, ...) # Hypothetical method
-            self.logger.info(f"Trainer optimizers configured: Base LR={base_lr}, Value Factor={value_head_lr_factor}")
-        else:
-             self.logger.warning("Could not find optimizers on Trainer to configure LR directly. Assuming Trainer handles it internally.")
+        self.logger.info(
+            f"Trainer optimizers configured: Base LR={base_lr}, Value Factor={value_head_lr_factor}, "
+            f"Schedule={lr_schedule}, Warmup={warmup_epochs}, TotalEpochs={total_epochs}"
+        )
 
 
         # self.visualizer = TrainingVisualizer() # Keep if used
@@ -261,9 +394,20 @@ class TrainingSupervisor:
             training_dir=self.save_dir, # Tournaments evaluate models within this run's directory
             device=self.device,
             games_per_match=self.tournament_games, # Use the value passed to supervisor
-            sliding_window_size=tournament_window
+            sliding_window_size=tournament_window,
+            use_ema_for_eval=self._use_ema_for_eval,
+            eval_seed=self._eval_seed,
         )
-        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}, Window={tournament_window}")
+        ema_state = (
+            f"ema_decay={ema_decay}, use_ema_for_eval={self._use_ema_for_eval}"
+            if ema_decay is not None else "EMA disabled"
+        )
+        seed_state = (
+            f"eval_seed={self._eval_seed} (deterministic)"
+            if self._eval_seed is not None else "eval_seed=None (stochastic)"
+        )
+        self.logger.info(f"Tournament Manager Initialized: Games/Match={self.tournament_games}, "
+                         f"Window={tournament_window}, {ema_state}, {seed_state}")
 
 
         # --- Best Model Tracking ---
@@ -279,6 +423,56 @@ class TrainingSupervisor:
         self.checkpoint_retention_count: int = self.mode_settings.get('checkpoint_retention_count', 5)
         # Registry: list of (iteration, elo, path) tuples, sorted by ELO descending
         self._checkpoint_registry: list = []
+
+        # --- Gating revert behavior (RiverNewbury alphazero-general-style gate) ---
+        # When True: on a failed Wilson gate (and no Elo improvement), reload the
+        # current best_model.pt weights into self.network BEFORE the next self-play
+        # iteration runs. Self-play data for iteration N+1 will then be drawn from
+        # a known-good policy instead of the rejected one.
+        #
+        # Default False preserves the supervisor's original "AlphaZero-style
+        # continuous training, never revert" behavior — fine for from-scratch
+        # training where there is no strong prior to protect, but the wrong
+        # default for warm-start runs from a strong supervised checkpoint.
+        # Recommended: set to True for any warm-start / resumed-from-prior config.
+        self.revert_on_gate_failure: bool = bool(
+            self.mode_settings.get('revert_self_play_on_gate_failure', False)
+        )
+        # Whether to also reset optimizer momentum on revert. Almost always you
+        # want this — momentum points in the direction the rejected weights came
+        # from, which (by definition of being rejected) was bad.
+        self.reset_optimizer_on_revert: bool = bool(
+            self.mode_settings.get('reset_optimizer_on_revert', True)
+        )
+
+        # --- Absolute Evaluation Anchor (CLOUD_TRAINING_PLAN §1.3) ---
+        # Fixed opponent per iteration so we can track absolute strength
+        # independent of the relative Elo pool. See
+        # ModelTournament.run_anchor_eval for details.
+        self.anchor_enabled: bool = bool(self.mode_settings.get('anchor_enabled', True))
+        self.anchor_num_games: int = int(self.mode_settings.get('anchor_num_games', 40))
+        self.anchor_depth: int = int(self.mode_settings.get('anchor_depth', 3))
+        self.anchor_seed: int = int(self.mode_settings.get('anchor_seed', 1337))
+        # Per-game move cap inside anchor eval. 500 (the previous hardcoded
+        # value) runs pathologically long on random-init networks that can't
+        # end games cheaply — Phase B smoke showed ~60min per model on iter 0.
+        # 200 matches typical anchor game length and keeps eval bounded.
+        self.anchor_max_moves_per_game: int = int(self.mode_settings.get('anchor_max_moves_per_game', 200))
+        # Skip anchor eval for the first N iterations (random-init networks
+        # give no useful anchor signal and the eval is expensive). Set to 0
+        # to anchor every iter from the start.
+        self.anchor_skip_first_n_iterations: int = int(self.mode_settings.get('anchor_skip_first_n_iterations', 1))
+        # MCTS-vs-anchor eval. When enabled, an additional pass runs the
+        # candidate via pure-neural MCTS (subtree-reuse on, root noise off)
+        # against the same anchor opponent. Raw-policy stays as a diagnostic
+        # for the policy head in isolation; MCTS-vs-anchor is the primary
+        # strength metric since it matches deployment behavior.
+        self.anchor_mcts_enabled: bool = bool(self.mode_settings.get('anchor_mcts_enabled', False))
+        self.anchor_mcts_simulations: int = int(self.mode_settings.get('anchor_mcts_simulations', 64))
+        # Most recent candidate anchor win rate — consumed by
+        # run_training.py → finalize_manifest at the end of the run.
+        # Set from MCTS eval when enabled, else from raw-policy eval.
+        self._latest_anchor_win_rate: Optional[float] = None
 
         # --- Experiment Tracking ---
         self.experiment_tracker = None
@@ -342,18 +536,40 @@ class TrainingSupervisor:
         self.logger.info(f"  Workers: {num_workers}")
 
     def _log_mps_memory(self, phase_name: str = ""):
-        """Log MPS driver allocated memory for debugging memory growth.
+        """Log a one-line memory snapshot: RSS + MPS driver/current + buffer size.
+
+        Consolidates process RSS, MPS allocator state, and replay-buffer size so
+        iter-over-iter growth at each transition is visible on a single line.
 
         Args:
             phase_name: Name of the phase for logging context
         """
+        parts = []
+        try:
+            rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
+            parts.append(f"rss={rss_gb:.2f}GB")
+        except Exception:
+            pass
+
         if torch.backends.mps.is_available():
             try:
-                driver_mem = torch.mps.driver_allocated_memory() / (1024 * 1024 * 1024)
-                current_mem = torch.mps.current_allocated_memory() / (1024 * 1024 * 1024)
-                self.logger.info(f"[MPS Memory] {phase_name}: driver={driver_mem:.2f}GB, current={current_mem:.2f}GB")
+                driver_mem = torch.mps.driver_allocated_memory() / (1024 ** 3)
+                current_mem = torch.mps.current_allocated_memory() / (1024 ** 3)
+                parts.append(f"mps_driver={driver_mem:.2f}GB")
+                parts.append(f"mps_current={current_mem:.2f}GB")
             except Exception as e:
                 self.logger.debug(f"Could not get MPS memory stats: {e}")
+
+        try:
+            if hasattr(self, 'trainer') and self.trainer is not None:
+                buf_size = self.trainer.experience.size()
+                buf_max = self.trainer.experience.max_size
+                parts.append(f"buffer={buf_size}/{buf_max}")
+        except Exception:
+            pass
+
+        if parts:
+            self.logger.info(f"[Memory] {phase_name}: {', '.join(parts)}")
 
     def _clear_memory_cache(self, phase_name: str = ""):
         """Clear PyTorch memory caches to free up memory with aggressive tensor cleanup.
@@ -464,6 +680,28 @@ class TrainingSupervisor:
             except Exception as e:
                 self.logger.warning(f"Failed to log metric '{metric_name}': {e}")
 
+    def _compute_heuristic_weight(self, iteration: int) -> float:
+        """Linear interpolation start → end over `anneal_iterations`, held at end after.
+
+        iteration=0 returns start; iteration>=anneal_iterations returns end.
+        anneal_iterations==0 snaps immediately to end (useful for a hard-reset config).
+        """
+        anneal = max(self._hw_anneal_iters, 0)
+        if anneal == 0:
+            return self._hw_end
+        alpha = min(max(iteration, 0) / anneal, 1.0)
+        return self._hw_start + alpha * (self._hw_end - self._hw_start)
+
+    def _apply_heuristic_curriculum(self, iteration: int) -> float:
+        """Push this iteration's curriculum weight to every surface that MCTS reads
+        from: the SelfPlay instance attr, the main MCTS object, and the mcts_config
+        dict that worker processes use to spawn per-game MCTS. Returns the new weight."""
+        hw = self._compute_heuristic_weight(iteration)
+        self.self_play.heuristic_weight = hw
+        self.self_play.mcts.heuristic_weight = hw
+        self.self_play.mcts_config['heuristic_weight'] = hw
+        return hw
+
     def train_iteration(self, num_games: int, epochs: int):
         """
         One full self-play -> training -> evaluation -> model-selection cycle.
@@ -523,6 +761,14 @@ class TrainingSupervisor:
         self.self_play.network = self.network
         # Pass the number of games for this iteration
         self.self_play.current_iteration = current_iteration
+
+        previous_hw = self.self_play.mcts.heuristic_weight
+        hw = self._apply_heuristic_curriculum(current_iteration)
+        if self._hw_start != self._hw_end:
+            self.logger.info(
+                f"[Curriculum] iter {current_iteration}: heuristic_weight "
+                f"{previous_hw:.3f} → {hw:.3f}"
+            )
 
         self.logger.info(f"Generating {num_games} self-play games...")
         self._log_mps_memory("before self-play")
@@ -687,6 +933,8 @@ class TrainingSupervisor:
         self.logger.info(f"📊 Buffer contains ~{estimated_games:.0f} games of experience "
                          f"(avg {avg_game_length:.0f} moves/game)")
 
+        self._log_mps_memory("before training epoch loop")
+
         for epoch in range(epochs):
             self.logger.info(f"Starting Epoch {epoch + 1}/{epochs}")
 
@@ -785,6 +1033,22 @@ class TrainingSupervisor:
         self.network.save_model(str(checkpoint_path))
         self.logger.info(f"Candidate checkpoint saved to {checkpoint_path}")
 
+        # Sibling EMA checkpoint for tournament eval. We swap the EMA weights
+        # into the live module only long enough to write the file, then put
+        # the live weights back — the trainer's next optimizer step needs the
+        # unsmoothed weights in place, not the EMA copy.
+        ema = getattr(self.trainer, 'ema', None)
+        if ema is not None:
+            ema_checkpoint_path = checkpoint_path.with_name(
+                checkpoint_path.stem + '_ema.pt'
+            )
+            ema.swap_into(self.network.network)
+            try:
+                self.network.save_model(str(ema_checkpoint_path))
+                self.logger.info(f"EMA checkpoint saved to {ema_checkpoint_path}")
+            finally:
+                ema.restore(self.network.network)
+
         # MEMORY-OPTIMIZATION: Check checkpoint file size
         try:
             import os
@@ -792,6 +1056,15 @@ class TrainingSupervisor:
             self.logger.info(f"Checkpoint file size: {checkpoint_size_mb:.1f} MB")
         except:
             pass
+
+        # Persist the replay buffer so a crash / --resume doesn't lose the
+        # 10s of thousands of self-play samples accumulated to this point.
+        # Writes replay_buffer.pkl.gz next to the run's iteration dirs; the
+        # trainer looks for it at init and loads if present.
+        try:
+            self.trainer.experience.save_buffer(str(self.save_dir / "replay_buffer.pkl"))
+        except Exception as e:
+            self.logger.warning(f"Failed to save replay buffer: {e}")
 
         # ------------------------------------------------------------------ #
         # 4. TOURNAMENT EVALUATION
@@ -850,6 +1123,193 @@ class TrainingSupervisor:
         self._log_mps_memory("after tournament")
 
         # ------------------------------------------------------------------ #
+        # 4b. ABSOLUTE EVALUATION ANCHOR (CLOUD_TRAINING_PLAN §1.3)
+        # ------------------------------------------------------------------ #
+        # Fixed opponent, unchanged across iterations: lets us read an
+        # absolute strength trajectory out of metrics.json without having
+        # to cross-reference the Elo tables (which are only meaningful
+        # relative to the pool and drift with it).
+        #
+        # Runs AFTER the round-robin as an independent step so any future
+        # changes to the Elo gating logic don't bleed into the anchor
+        # baseline. Failures here are always non-fatal.
+        anchor_results: Dict[str, Dict] = {}
+        anchor_results_mcts: Dict[str, Dict] = {}
+        candidate_anchor_win_rate: Optional[float] = None
+        # Skip anchor eval for early iterations (random-init gives no signal).
+        # `current_iteration` is 0-based, so `skip_first_n=1` skips iter 0 only.
+        anchor_skipped_early = (
+            self.anchor_enabled
+            and self.anchor_skip_first_n_iterations > 0
+            and current_iteration < self.anchor_skip_first_n_iterations
+        )
+        if anchor_skipped_early:
+            self.logger.info(
+                f"Anchor eval skipped: iter {current_iteration} < anchor_skip_first_n_iterations="
+                f"{self.anchor_skip_first_n_iterations} (random-init networks give no useful signal)"
+            )
+        if self.anchor_enabled and not anchor_skipped_early:
+            try:
+                # Build (label, checkpoint_path) list: candidate + 2 predecessors.
+                # "prev" and "prev-prev" = preceding iteration indices by path;
+                # missing checkpoints are silently skipped by the batch runner.
+                anchor_models: List[Tuple[str, Path]] = []
+                anchor_models.append((
+                    _canon(str(checkpoint_path)),
+                    checkpoint_path,
+                ))
+                for prev_iter in (current_iteration - 1, current_iteration - 2):
+                    if prev_iter < 0:
+                        continue
+                    prev_ckpt = self.save_dir / f"iteration_{prev_iter}" / f"checkpoint_iteration_{prev_iter}.pt"
+                    anchor_models.append((
+                        _canon(str(prev_ckpt)),
+                        prev_ckpt,
+                    ))
+
+                self.logger.info(
+                    f"Running anchor eval: {len(anchor_models)} model(s) vs "
+                    f"HeuristicAgent(depth={self.anchor_depth}) x {self.anchor_num_games} games "
+                    f"(seed={self.anchor_seed}, mcts={'on' if self.anchor_mcts_enabled else 'off'})"
+                )
+                candidate_label = _canon(str(checkpoint_path))
+                # Raw-policy diagnostic. Always runs — fast, isolates the
+                # policy head from search. Print result as soon as it's
+                # available so the operator sees progress before MCTS
+                # eval (which can be 5-10× slower) finishes.
+                anchor_results = self.tournament_manager.run_anchor_eval_batch(
+                    models=anchor_models,
+                    num_games=self.anchor_num_games,
+                    depth=self.anchor_depth,
+                    seed=self.anchor_seed,
+                    max_moves_per_game=self.anchor_max_moves_per_game,
+                    use_mcts=False,
+                ) or {}
+                cand_res = anchor_results.get(candidate_label)
+                if cand_res and cand_res.get('games_played', 0) > 0:
+                    raw_win_rate = float(cand_res['win_rate'])
+                    won = int(cand_res['candidate_wins'])
+                    total = int(cand_res['games_played'])
+                    anchor_msg = (
+                        f"ANCHOR[raw]: iter {current_iteration}, "
+                        f"{won}/{total} = {raw_win_rate:.1%}"
+                    )
+                    self.logger.info(anchor_msg)
+                    print(anchor_msg, flush=True)
+                    candidate_anchor_win_rate = raw_win_rate
+
+                # MCTS-vs-anchor (primary metric). Stored under separate
+                # labels in metrics.json so both series persist for plotting.
+                anchor_results_mcts: Dict[str, Dict] = {}
+                cand_res_mcts: Optional[Dict] = None
+                if self.anchor_mcts_enabled:
+                    anchor_results_mcts = self.tournament_manager.run_anchor_eval_batch(
+                        models=anchor_models,
+                        num_games=self.anchor_num_games,
+                        depth=self.anchor_depth,
+                        seed=self.anchor_seed,
+                        max_moves_per_game=self.anchor_max_moves_per_game,
+                        use_mcts=True,
+                        mcts_simulations=self.anchor_mcts_simulations,
+                    ) or {}
+                    cand_res_mcts = anchor_results_mcts.get(candidate_label)
+                    if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
+                        mcts_win_rate = float(cand_res_mcts['win_rate'])
+                        won_m = int(cand_res_mcts['candidate_wins'])
+                        total_m = int(cand_res_mcts['games_played'])
+                        mcts_msg = (
+                            f"ANCHOR[mcts/{self.anchor_mcts_simulations}]: iter {current_iteration}, "
+                            f"{won_m}/{total_m} = {mcts_win_rate:.1%}"
+                        )
+                        self.logger.info(mcts_msg)
+                        print(mcts_msg, flush=True)
+                        # MCTS is the primary strength metric when enabled —
+                        # downstream consumers (manifest_final, dashboards) read
+                        # `_latest_anchor_win_rate` and should see deployment-style
+                        # play strength, not raw-policy strength.
+                        candidate_anchor_win_rate = mcts_win_rate
+
+                if candidate_anchor_win_rate is not None:
+                    self._latest_anchor_win_rate = candidate_anchor_win_rate
+                elif not (cand_res and cand_res.get('games_played', 0) > 0):
+                    self.logger.warning(
+                        f"Anchor eval produced no usable result for candidate {candidate_label}"
+                    )
+
+                # Emit the other models' anchor rates for triangulation.
+                for lbl, res in anchor_results.items():
+                    if lbl == candidate_label:
+                        continue
+                    if res.get('games_played', 0) > 0:
+                        self.logger.info(
+                            f"ANCHOR (prev,raw): {lbl} → "
+                            f"{res['candidate_wins']}/{res['games_played']} "
+                            f"= {res['win_rate']:.1%}"
+                        )
+                if self.anchor_mcts_enabled:
+                    for lbl, res in anchor_results_mcts.items():
+                        if lbl == candidate_label:
+                            continue
+                        if res.get('games_played', 0) > 0:
+                            self.logger.info(
+                                f"ANCHOR (prev,mcts): {lbl} → "
+                                f"{res['candidate_wins']}/{res['games_played']} "
+                                f"= {res['win_rate']:.1%}"
+                            )
+
+                # Mirror the candidate rates into the experiment tracker so
+                # dashboards pick them up alongside tournament_* metrics.
+                # `anchor_win_rate` tracks the primary metric (MCTS when
+                # enabled, raw-policy otherwise); raw and MCTS are also
+                # logged under explicit suffixes so both series are available.
+                if (
+                    candidate_anchor_win_rate is not None
+                    and self.experiment_tracker
+                    and self.experiment_id
+                ):
+                    try:
+                        iteration_1b = current_iteration + 1
+                        self._log_metric_safe(
+                            'anchor_win_rate', candidate_anchor_win_rate, iteration_1b
+                        )
+                        if cand_res and cand_res.get('games_played', 0) > 0:
+                            self._log_metric_safe(
+                                'anchor_win_rate_raw', float(cand_res['win_rate']), iteration_1b
+                            )
+                            self._log_metric_safe(
+                                'anchor_games_played',
+                                int(cand_res['games_played']),
+                                iteration_1b,
+                            )
+                            self._log_metric_safe(
+                                'anchor_candidate_wins',
+                                int(cand_res['candidate_wins']),
+                                iteration_1b,
+                            )
+                            self._log_metric_safe(
+                                'anchor_draws', int(cand_res['draws']), iteration_1b
+                            )
+                        if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
+                            self._log_metric_safe(
+                                'anchor_win_rate_mcts',
+                                float(cand_res_mcts['win_rate']),
+                                iteration_1b,
+                            )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to log anchor metrics: {e}")
+            except Exception as e:
+                self.logger.warning(
+                    f"Anchor eval failed (non-fatal): {e}", exc_info=True
+                )
+                anchor_results = {}
+                anchor_results_mcts = {}
+                candidate_anchor_win_rate = None
+        else:
+            self.logger.info("Anchor eval disabled via mode_settings['anchor_enabled']=False")
+
+        self._clear_memory_cache("anchor")
+
+        # ------------------------------------------------------------------ #
         # 5. PROMOTION / REVERSION (using Wilson Gate)
         # ------------------------------------------------------------------ #
         candidate_iteration = current_iteration
@@ -891,8 +1351,17 @@ class TrainingSupervisor:
         if perform_wilson_check:
             wilson_threshold = self.mode_settings.get('promotion_threshold', 0.55)
             promote_by_wilson = self._should_promote(wins, total, threshold=wilson_threshold)
+            win_rate = (wins / total) if total > 0 else 0.0
+            lb, ub = self._wilson_bounds(wins, total)
+            se = self._standard_error(wins, total)
+            straddles = lb <= wilson_threshold <= ub
+            straddle_flag = "  [CI straddles threshold — rejection may be statistical noise]" if straddles and not promote_by_wilson else ""
             self.logger.info(
-                f"Wilson Gate Check: Wins={wins}, Total={total}, LB={self._wilson_lower_bound(wins, total):.3f}, Threshold={wilson_threshold} -> {'PROMOTE' if promote_by_wilson else 'REJECT'}")
+                f"Wilson Gate Check: wins={wins}/{total} "
+                f"(win_rate={win_rate:.3f}, SE={se:.3f}, CI95=[{lb:.3f}, {ub:.3f}], "
+                f"threshold={wilson_threshold}) -> "
+                f"{'PROMOTE' if promote_by_wilson else 'REJECT'}{straddle_flag}"
+            )
 
         # --- Final Promotion Decision Logic (AlphaZero-style: never revert) ---
         promote = False
@@ -901,7 +1370,12 @@ class TrainingSupervisor:
         if promote_by_wilson:
             promote = True
             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) passed Wilson gate.")
-        elif self.best_model_iteration < 0:
+        elif self.best_model_iteration < 0 and candidate_iteration == 0:
+            # Auto-promote the very first model of a fresh run only. On a
+            # resumed run (candidate_iteration > 0) we must NOT treat the
+            # resumed iteration as "the first model" — that branch would
+            # overwrite best_model_state.json with the current (likely weaker)
+            # candidate and wipe the prior Elo baseline.
             promote = True
             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) is the first model.")
         elif candidate_elo > self.best_model_elo:
@@ -913,6 +1387,7 @@ class TrainingSupervisor:
 
         # --- Apply Decision ---
         if promote:
+            self._promotion_count += 1
             self.best_model_elo = candidate_elo
             self.best_model_iteration = candidate_iteration
             self.best_model_path = checkpoint_path
@@ -934,9 +1409,12 @@ class TrainingSupervisor:
                     self._log_metric_safe('best_model_elo', self.best_model_elo, iteration)
                     self._log_metric_safe('best_model_iteration', self.best_model_iteration, iteration)
                     if perform_wilson_check:
+                        lb, ub = self._wilson_bounds(wins, total)
                         self._log_metric_safe('wilson_wins', wins, iteration)
                         self._log_metric_safe('wilson_total', total, iteration)
-                        self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
+                        self._log_metric_safe('wilson_lower_bound', lb, iteration)
+                        self._log_metric_safe('wilson_upper_bound', ub, iteration)
+                        self._log_metric_safe('wilson_standard_error', self._standard_error(wins, total), iteration)
                 except Exception as e:
                     self.logger.warning(f"Failed to log promotion metrics: {e}")
 
@@ -946,17 +1424,55 @@ class TrainingSupervisor:
 
         else:
             # =================================================================
-            # ALPHAZERO-STYLE CONTINUOUS TRAINING - NO REVERSION
+            # FAILED-GATE BRANCH — two strategies, gated by `revert_on_gate_failure`.
             # =================================================================
-            # Key insight: AlphaZero NEVER reverts weights or buffer.
-            # - The model didn't beat best, but we CONTINUE training with current weights
-            # - This allows exploration and prevents getting stuck in local optima
-            # - Best model is just a checkpoint for evaluation, not for reverting
-            # - Temporary ELO dips are normal and will recover with more training
+            # Default (revert_on_gate_failure=False): AlphaZero-style continuous
+            # training. Keep the rejected weights and let the next iteration
+            # recover. Right answer when the prior is weak (from-scratch runs)
+            # because reverting would prevent escape from local optima.
+            #
+            # Opt-in (revert_on_gate_failure=True): RiverNewbury / AlphaGo-Zero
+            # style gate. Reload best_model.pt before the next self-play
+            # iteration so its data is generated by a known-good policy.
+            # Right answer when the prior is strong (warm-start from supervised
+            # checkpoint) because rejected weights produce bad self-play data
+            # that compounds across iterations into the warm-start regression.
             # =================================================================
-            self.logger.info(f"🔄 CONTINUING: Iter {candidate_iteration} didn't beat best (ELO {candidate_elo:.1f} vs {self.best_model_elo:.1f})")
-            self.logger.info(f"   AlphaZero-style: training continues with current weights, no reversion")
-            self.logger.info(f"   Best model (iter {self.best_model_iteration}) saved for comparison only")
+            if self.revert_on_gate_failure and self.best_model_path and self.best_model_path.exists():
+                self.logger.info(
+                    f"⏪ REVERTING: Iter {candidate_iteration} failed gate "
+                    f"(ELO {candidate_elo:.1f} vs best {self.best_model_elo:.1f}). "
+                    f"Reloading best model (iter {self.best_model_iteration}) "
+                    f"for next self-play iteration."
+                )
+                try:
+                    self.network.load_model(str(self.best_model_path))
+                    self.logger.info(f"   ✓ Loaded best weights from {self.best_model_path.name}")
+                    if self.reset_optimizer_on_revert:
+                        # Momentum was building in the direction of the rejected
+                        # weights — that direction was bad by definition (gate
+                        # failed), so resetting prevents the next training step
+                        # from immediately marching back into the rejected zone.
+                        self._reinitialize_optimizers()
+                except Exception as exc:
+                    # Don't crash the whole run on a revert failure. Fall back
+                    # to continuous-training behavior with a loud warning.
+                    self.logger.error(
+                        f"Revert failed ({exc}); continuing with rejected weights. "
+                        f"This iteration's self-play data may be poor."
+                    )
+            else:
+                if self.revert_on_gate_failure:
+                    # Flag was on but we couldn't actually revert (no best
+                    # model checkpoint yet, or it's missing on disk).
+                    self.logger.warning(
+                        f"revert_on_gate_failure=True but no usable best_model_path "
+                        f"(best_iter={self.best_model_iteration}). "
+                        f"Continuing with current weights this iteration."
+                    )
+                self.logger.info(f"🔄 CONTINUING: Iter {candidate_iteration} didn't beat best (ELO {candidate_elo:.1f} vs {self.best_model_elo:.1f})")
+                self.logger.info(f"   AlphaZero-style: training continues with current weights, no reversion")
+                self.logger.info(f"   Best model (iter {self.best_model_iteration}) saved for comparison only")
 
             # Checkpoint retention: only delete immediately if using old behavior (retention_count < 0)
             if self.checkpoint_retention_count < 0:
@@ -979,9 +1495,12 @@ class TrainingSupervisor:
                     self._log_metric_safe('model_promoted', 0.0, iteration)
                     self._log_metric_safe('candidate_elo', candidate_elo, iteration)
                     if perform_wilson_check:
+                        lb, ub = self._wilson_bounds(wins, total)
                         self._log_metric_safe('wilson_wins', wins, iteration)
                         self._log_metric_safe('wilson_total', total, iteration)
-                        self._log_metric_safe('wilson_lower_bound', self._wilson_lower_bound(wins, total), iteration)
+                        self._log_metric_safe('wilson_lower_bound', lb, iteration)
+                        self._log_metric_safe('wilson_upper_bound', ub, iteration)
+                        self._log_metric_safe('wilson_standard_error', self._standard_error(wins, total), iteration)
                         self._log_metric_safe('wilson_passed', 0.0, iteration)
                 except Exception as e:
                     self.logger.warning(f"Failed to log metrics: {e}")
@@ -1012,6 +1531,14 @@ class TrainingSupervisor:
             pass
 
         # Aggregate metrics for this iteration
+        extra_metrics: Dict[str, Any] = {
+            'tournament_rating': current_elo,
+            'tournament_win_rate': tourn_win_rate,
+        }
+        # anchor_win_rate is the primary signal for §1.3; always recorded
+        # (None if the anchor eval was skipped/failed) so downstream
+        # dashboards can assume the key is always present per-iteration.
+        extra_metrics['anchor_win_rate'] = candidate_anchor_win_rate
         self.metrics.add_iteration_metrics(
             avg_game_length=avg_game_len,
             avg_ring_mobility=avg_ring_mobility,
@@ -1019,10 +1546,22 @@ class TrainingSupervisor:
             draw_rate=pseudo_draws / len(outcomes) if outcomes else 0,
             policy_loss=final_pol_loss,
             value_loss=final_val_loss,
-            tournament_rating=current_elo,
-            tournament_win_rate=tourn_win_rate
+            **extra_metrics,
         )
-        self._save_metrics(iteration_dir)
+        # Store the full anchor payload (all models) alongside the
+        # iteration's metrics.json so the triangulation data is
+        # inspectable after the run without rerunning eval. Both raw and
+        # MCTS variants persist under separate keys.
+        anchor_payload = {'anchor_eval': anchor_results}
+        if self.anchor_mcts_enabled:
+            anchor_payload['anchor_eval_mcts'] = anchor_results_mcts
+        self._save_metrics(iteration_dir, extra_payload=anchor_payload)
+
+        # Cloud-safe backup: push the run dir to SYNC_RUN_DEST after each
+        # iteration so a terminated spot instance doesn't lose everything
+        # since the last manual rsync. No-op when SYNC_RUN_DEST is unset
+        # (the common local case). Never fatal. See CLOUD_TRAINING_PLAN §1.5.
+        self._maybe_sync_run_dir()
 
         # Calculate total iteration time for logging and metrics
         total_iteration_time = time.time() - t0  # Total time from start of iteration
@@ -1127,6 +1666,11 @@ class TrainingSupervisor:
         self.logger.info(f"│")
         self.logger.info(f"│ TOURNAMENT")
         self.logger.info(f"│   Candidate ELO: {current_elo:.1f}, Win Rate: {tourn_win_rate:.1%}")
+        if candidate_anchor_win_rate is not None:
+            self.logger.info(
+                f"│   Anchor vs HeuristicAgent(d={self.anchor_depth}): "
+                f"{candidate_anchor_win_rate:.1%}"
+            )
         self.logger.info(f"│   Best Model: Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
         if promote:
             self.logger.info(f"│   Decision: ✅ NEW BEST (promoted to best model)")
@@ -1166,6 +1710,10 @@ class TrainingSupervisor:
                     'rating': current_elo,
                     'win_rate': tourn_win_rate,
                     'raw_stats': tournament_stats
+                },
+                'anchor': {
+                    'win_rate': candidate_anchor_win_rate,
+                    'results': anchor_results,
                 }
             },
             'model_selection': {
@@ -1324,13 +1872,18 @@ class TrainingSupervisor:
             pass
 
     def _reinitialize_optimizers(self):
-        """Reinitialize optimizers to clear all state (momentum, Adam buffers, etc.)"""
+        """Reinitialize optimizers to clear all state (momentum, Adam buffers, etc.).
+
+        After recreating the optimizers, we rebuild the schedulers via
+        `trainer._build_schedulers(resume_epoch=trainer._global_epoch)` so
+        cosine-annealing picks up at the correct point in its curve — without
+        this, we'd either restart cosine from iteration 0 every iter (LR never
+        actually anneals), or we'd be at whatever point StepLR happened to be
+        at (the legacy behavior, coincidentally near-correct because StepLR's
+        state was implicitly recreated at `param_groups[0]['lr']`).
+        """
         try:
             self.logger.info("Reinitializing optimizers to clear state...")
-
-            # Get current learning rates before reinit
-            policy_lr = self.trainer.policy_optimizer.param_groups[0]['lr']
-            value_lr = self.trainer.value_optimizer.param_groups[0]['lr']
 
             # Separate out parameters for policy vs. value heads
             value_params = [p for n, p in self.trainer.network.network.named_parameters()
@@ -1338,36 +1891,33 @@ class TrainingSupervisor:
             policy_params = [p for n, p in self.trainer.network.network.named_parameters()
                              if 'value_head' not in n]
 
-            # Recreate optimizers with current learning rates
+            # Recreate optimizers at base LR — `_build_schedulers` will fast-
+            # forward to the correct point of the cosine curve.
             import torch.optim as optim
 
             self.trainer.policy_optimizer = optim.Adam(
                 policy_params,
-                lr=policy_lr,
+                lr=self.trainer._base_policy_lr,
                 weight_decay=1e-4
             )
 
             self.trainer.value_optimizer = optim.SGD(
                 value_params,
-                lr=value_lr,
+                lr=self.trainer._base_value_lr,
                 momentum=0.9,
                 weight_decay=1e-3
             )
 
-            # Recreate schedulers
-            self.trainer.policy_scheduler = optim.lr_scheduler.StepLR(
-                self.trainer.policy_optimizer,
-                step_size=10,
-                gamma=0.9
-            )
+            # Rebuild schedulers and fast-forward to the current global epoch
+            # so cosine state is preserved across the reset.
+            self.trainer._build_schedulers(resume_epoch=self.trainer._global_epoch)
 
-            self.trainer.value_scheduler = optim.lr_scheduler.StepLR(
-                self.trainer.value_optimizer,
-                step_size=10,
-                gamma=0.9
+            policy_lr = self.trainer.policy_optimizer.param_groups[0]['lr']
+            value_lr = self.trainer.value_optimizer.param_groups[0]['lr']
+            self.logger.info(
+                f"Optimizers reinitialized at epoch {self.trainer._global_epoch} "
+                f"(policy_lr={policy_lr:.6f}, value_lr={value_lr:.6f})"
             )
-
-            self.logger.info(f"Optimizers reinitialized (policy_lr={policy_lr:.6f}, value_lr={value_lr:.6f})")
 
         except Exception as e:
             self.logger.error(f"Error reinitializing optimizers: {e}")
@@ -1535,13 +2085,32 @@ class TrainingSupervisor:
                 self._iteration_counter = state.get('_iteration_counter', 0) # Load counter
 
                 if best_path_str:
-                    # Ensure path is relative to the current save_dir for portability
-                    potential_path = self.save_dir / Path(best_path_str).name # Reconstruct path relative to save_dir
-                    if potential_path.exists():
-                         self.best_model_path = potential_path
-                         self.logger.info(f"Loaded best model state from {state_path}")
+                    # Interpret stored path as relative to save_dir (portable across moves).
+                    # Historically the state file was written with just the filename, so
+                    # also tolerate a bare filename by falling back to the canonical
+                    # iteration_<N>/checkpoint_iteration_<N>.pt layout when available.
+                    stored = Path(best_path_str)
+                    candidates = []
+                    if stored.is_absolute():
+                        candidates.append(stored)
                     else:
-                         self.logger.warning(f"Best model path '{potential_path}' from state file not found. Resetting tracking.")
+                        candidates.append(self.save_dir / stored)
+                    # Back-compat: legacy state files stored only the filename; try
+                    # to rebuild the iteration_N/<filename> layout from best_model_iteration.
+                    if self.best_model_iteration is not None and self.best_model_iteration >= 0:
+                        iter_dir = self.save_dir / f"iteration_{self.best_model_iteration}"
+                        candidates.append(iter_dir / stored.name)
+                    # Last-resort fallback: flat layout directly under save_dir.
+                    candidates.append(self.save_dir / stored.name)
+
+                    resolved = next((p for p in candidates if p.exists()), None)
+                    if resolved is not None:
+                         self.best_model_path = resolved
+                         self.logger.info(f"Loaded best model state from {state_path} (path={resolved})")
+                    else:
+                         self.logger.warning(
+                             f"Best model path from state file not found. Tried: {candidates}. Resetting tracking."
+                         )
                          self._reset_best_model_state() # Reset completely if path invalid
                 else:
                      self.best_model_path = None # No path stored
@@ -1586,6 +2155,78 @@ class TrainingSupervisor:
         self.best_model_path = None
         self._iteration_counter = 0 # Reset counter too
         self.logger.info("Reset best model tracking state.")
+
+    def _maybe_sync_run_dir(self) -> None:
+        """Shell out to scripts/sync_run.sh if SYNC_RUN_DEST is set.
+
+        No-op when the env var is missing (the local development case).
+        Failures are logged at warning level but never abort training —
+        we prefer a training run that loses a single iteration's backup
+        over a run that crashes mid-iteration because a bucket was
+        misconfigured.
+        """
+        if not os.environ.get("SYNC_RUN_DEST"):
+            return
+        # Resolve the script path relative to the repo root, walking up
+        # from this file. Falls back to cwd so an unusual layout still works.
+        script = Path(__file__).resolve().parents[2] / "scripts" / "sync_run.sh"
+        if not script.exists():
+            fallback = Path.cwd() / "scripts" / "sync_run.sh"
+            if fallback.exists():
+                script = fallback
+            else:
+                self.logger.warning(
+                    "SYNC_RUN_DEST is set but scripts/sync_run.sh is missing; skipping sync."
+                )
+                return
+        try:
+            proc = subprocess.run(
+                [str(script), str(self.save_dir)],
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 min hard cap; sync should never block the loop
+                check=False,
+            )
+            if proc.returncode == 0:
+                self.logger.info(
+                    f"[sync_run] pushed {self.save_dir.name} → SYNC_RUN_DEST"
+                )
+                if proc.stdout.strip():
+                    self.logger.debug(f"[sync_run] stdout: {proc.stdout.strip()}")
+            else:
+                self.logger.warning(
+                    f"[sync_run] exit {proc.returncode} (non-fatal). "
+                    f"stderr: {proc.stderr.strip()[:500]}"
+                )
+        except subprocess.TimeoutExpired:
+            self.logger.warning(
+                "[sync_run] timed out after 10 min; training continues."
+            )
+        except Exception as exc:
+            self.logger.warning(f"[sync_run] launch failed (non-fatal): {exc}")
+
+    def set_resume_iteration(self, next_iteration: int) -> None:
+        """Sync the internal iteration counter to the next iteration to run.
+
+        Called from the resume entrypoint AFTER the checkpoint is loaded so
+        the first post-resume call to ``train_iteration`` runs as iteration
+        ``next_iteration`` (e.g., resuming from ``iteration_5`` → 6). This
+        prevents overwriting the iteration_0/ directory and skipping the
+        round-robin due to only one model being visible.
+
+        Safe to call unconditionally: the state-file load already restores
+        the counter in the common case; this just guarantees correctness when
+        ``best_model_state.json`` is missing or stale relative to the
+        on-disk iteration_*/ directories.
+        """
+        if next_iteration < 0:
+            raise ValueError(f"next_iteration must be >= 0, got {next_iteration}")
+        prior = self._iteration_counter
+        self._iteration_counter = int(next_iteration)
+        if prior != self._iteration_counter:
+            self.logger.info(
+                f"Resume sync: _iteration_counter {prior} → {self._iteration_counter}"
+            )
 
     def _register_checkpoint(self, iteration: int, elo: float, checkpoint_path: Path):
         """
@@ -1639,9 +2280,24 @@ class TrainingSupervisor:
             elos = [f"{e['iteration']}:{e['elo']:.0f}" for e in self._checkpoint_registry]
             self.logger.debug(f"Checkpoint retention: keeping {len(self._checkpoint_registry)} checkpoints: {', '.join(elos)}")
 
-    def _save_metrics(self, iteration_dir: Path) -> None:
-        """Save training metrics for the completed iteration."""
+    def _save_metrics(
+        self,
+        iteration_dir: Path,
+        extra_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Save training metrics for the completed iteration.
+
+        Args:
+            iteration_dir: Where to drop ``metrics.json``.
+            extra_payload: Optional dict merged into the serialized metrics
+                blob. Used e.g. to surface the full anchor-eval breakdown
+                (per-model wins/losses/draws) alongside the per-iteration
+                scalar series.
+        """
         metrics_data = self.metrics.get_latest_metrics() # Assuming method exists
+        if extra_payload:
+            for k, v in extra_payload.items():
+                metrics_data[k] = v
         metrics_data['timestamp'] = time.time()
         # Convert numpy types for JSON serialization
         serializable_data = {}
@@ -1697,19 +2353,18 @@ class TrainingSupervisor:
 
 
     @staticmethod
-    def _wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
-        """Wilson score confidence interval lower bound."""
-        if total == 0: return 0.0
-        p_hat = wins / total
-        try:
-            term_inside_sqrt = (p_hat * (1 - p_hat) / total) + (z**2 / (4 * total**2))
-            # Handle potential negative value due to floating point errors near 0 or 1
-            if term_inside_sqrt < 0:
-                 term_inside_sqrt = 0
-            lower_bound = (p_hat + z**2 / (2 * total) - z * math.sqrt(term_inside_sqrt)) / (1 + z**2 / total)
-        except ValueError: # math domain error if term_inside_sqrt is negative
-             lower_bound = 0.0 # Should be handled by the check above, but belt and suspenders
-        return max(0.0, lower_bound) # Ensure non-negative
+    def _wilson_bounds(wins: int, total: int, z: float = 1.96) -> Tuple[float, float]:
+        from ..utils.stats import wilson_bounds
+        return wilson_bounds(wins, total, z)
+
+    @classmethod
+    def _wilson_lower_bound(cls, wins: int, total: int, z: float = 1.96) -> float:
+        return cls._wilson_bounds(wins, total, z)[0]
+
+    @staticmethod
+    def _standard_error(wins: int, total: int) -> float:
+        from ..utils.stats import standard_error
+        return standard_error(wins, total)
 
 
     def _should_promote(self, wins: int, total: int,
@@ -1724,3 +2379,68 @@ class TrainingSupervisor:
 
         self.logger.debug(f"Promotion Gate Check: Wins={wins}, Total={total}, Confidence={conf*100:.0f}%, Wilson LB={lb:.4f}, Threshold={threshold}")
         return lb > threshold
+
+    def finalize_manifest(
+        self,
+        *,
+        iterations_completed: int,
+        final_anchor_win_rate: Optional[float] = None,
+    ) -> bool:
+        """Write `manifest_final.json` at the end of a successful training run.
+
+        Intended to be called from the outer training loop (e.g. `run_training.py`)
+        once the final iteration completes. Pulls its fields from in-memory
+        supervisor state (best model, promotion count) plus whatever the caller
+        supplies (iterations_completed, final_anchor_win_rate — the latter is
+        None until CLOUD_TRAINING_PLAN §1.3 lands).
+
+        Returns True on success, False if anything went wrong (always non-fatal).
+        """
+        if self._launch_manifest is None:
+            # Launch manifest never got written; rebuild a minimal one so we
+            # still leave SOMETHING behind for forensics.
+            self.logger.warning(
+                "finalize_manifest called but no launch manifest in memory; "
+                "writing final manifest with best-effort metadata only."
+            )
+            try:
+                cfg_for_manifest = self.full_config if self.full_config is not None else self.mode_settings
+                encoder_name = infer_encoder(
+                    cfg_for_manifest,
+                    fallback_channels=getattr(self.network, "input_channels", None),
+                )
+                repo_root = Path(__file__).resolve().parents[2]
+                if not (repo_root / ".git").exists():
+                    repo_root = Path.cwd()
+                self._launch_manifest = build_launch_manifest(
+                    config=cfg_for_manifest,
+                    device=self.device,
+                    encoder=encoder_name,
+                    total_moves=StateEncoder().total_moves,
+                    repo_root=repo_root,
+                    start_time=self._start_time,
+                )
+            except Exception as exc:
+                self.logger.warning(f"FAILED to rebuild launch manifest in finalize: {exc}.")
+                return False
+
+        try:
+            best_path = str(self.best_model_save_path) if self.best_model_save_path and Path(self.best_model_save_path).exists() else None
+            final = build_final_manifest(
+                self._launch_manifest,
+                end_time=datetime.now(timezone.utc),
+                iterations_completed=iterations_completed,
+                final_anchor_win_rate=final_anchor_win_rate,
+                best_checkpoint_path=best_path,
+                promotion_count=self._promotion_count,
+            )
+            ok = write_manifest(self.save_dir / "manifest_final.json", final)
+            if ok:
+                self.logger.info(
+                    f"Wrote final manifest to {self.save_dir / 'manifest_final.json'} "
+                    f"(iterations={iterations_completed}, promotions={self._promotion_count})"
+                )
+            return ok
+        except Exception as exc:
+            self.logger.warning(f"FAILED to write final manifest: {exc}. Training considered complete anyway.")
+            return False

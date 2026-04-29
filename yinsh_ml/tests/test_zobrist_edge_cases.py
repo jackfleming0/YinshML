@@ -82,18 +82,31 @@ def test_max_pieces_board():
 
 
 def test_hash_with_game_state():
-    """Test hashing a complete GameState."""
+    """Test hashing a complete GameState.
+
+    hash_state now includes side-to-move and game-phase contributions, so it
+    must NOT equal hash_board by construction. However, recomputing the same
+    hash from hash_board plus the explicit toggles must match.
+    """
     hasher = ZobristHasher(seed="gamestate-test")
     state = GameState()
-    
+
     # Place some pieces
     state.board.place_piece(Position.from_string("E5"), PieceType.WHITE_RING)
     state.board.place_piece(Position.from_string("F6"), PieceType.BLACK_MARKER)
-    
+
     hash_from_state = hasher.hash_state(state)
     hash_from_board = hasher.hash_board(state.board)
-    
-    assert hash_from_state == hash_from_board
+
+    # They differ because hash_state mixes in phase (and side-to-move when BLACK).
+    assert hash_from_state != hash_from_board
+
+    # Manual reconstruction matches.
+    reconstructed = hasher.toggle_phase(
+        state.phase,
+        hasher.toggle_side_to_move(state.current_player, hash_from_board),
+    )
+    assert reconstructed == hash_from_state
 
 
 def test_incremental_update_reversibility():

@@ -166,7 +166,7 @@ class TaskScheduler:
                 'current_requirements': config.resource_requirements.copy(),
                 'last_updated': time.time()
             }
-            logger.debug(f"Registered task '{config.task_id}' with priority {config.priority.name}")
+            pass
     
     def get_tasks_by_priority(self, max_priority: TaskPriority) -> List[TaskConfiguration]:
         """Get all tasks at or below the specified priority level."""
@@ -349,7 +349,7 @@ class DegradationPolicyManager:
         """Add a custom degradation rule."""
         with self._lock:
             self.rules.append(rule)
-            logger.debug(f"Added degradation rule: {rule.description}")
+            pass
     
     def get_applicable_rules(self, pressure: MemoryPressureLevel, 
                            task_priority: TaskPriority) -> List[DegradationRule]:
@@ -430,7 +430,7 @@ class GracefulDegradationManager:
     def register_task(self, config: TaskConfiguration) -> None:
         """Register a task for degradation management."""
         self.task_scheduler.register_task(config)
-        logger.debug(f"Registered task '{config.task_id}' for degradation management")
+        pass
     
     def _handle_memory_prediction(self, prediction: MemoryPrediction) -> None:
         """Handle memory pressure predictions."""
@@ -693,7 +693,7 @@ class GracefulDegradationManager:
             # Remove from active degradations
             del self.active_degradations[strategy]
             
-            logger.debug(f"Restored strategy {strategy.value}")
+            pass
             return True
             
         except Exception as e:
@@ -800,7 +800,7 @@ class GracefulDegradationManager:
                 # Process deferred tasks
                 resumed_tasks = self.task_scheduler.process_deferred_tasks()
                 if resumed_tasks:
-                    logger.debug(f"Resumed {len(resumed_tasks)} deferred tasks")
+                    pass
                 
                 # Process recovery queue
                 self._process_recovery_queue()

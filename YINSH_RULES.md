@@ -27,13 +27,14 @@ This document summarizes the core rules of the **YINSH** board game so you can u
    - Moves are limited in distance: a ring may travel at most five spaces in one move (see `MAX_RING_MOVE_DISTANCE`). The ring always leaves markers behind.
 3. **Row Capture**:
    - As soon as five consecutive markers of the same color line up along a straight direction, the owning player removes those markers and one of their rings from the board. The removed ring can later be re-used to increase remaining pieces as long as additional rings remain on the board.
+   - A run may be longer than five — a player is allowed to extend a line to 6 or 7 markers before closing the row. When capturing, the player picks **any five consecutive markers** from the run (any length-5 window) to remove. The move generator enumerates every window across runs of length 5/6/7, and `board.find_marker_rows(...)` now returns the **full maximal run** (not a truncated five) so every legal window is visible.
    - Removing a row may open up new capture opportunities on the same turn, but you must continue moving other rings until capture opportunities are exhausted.
 4. **Victory Condition**:
    - The first player to capture **three** rows wins (`POINTS_TO_WIN = 3`), unless the game configuration is set to blitz (`POINTS_TO_WIN_BLITZ = 1`).
 
 ## Movement and Capture Details
 
-- **Valid Directions**: Moves follow the board’s axial system: `(0,1)`, `(1,0)`, `(1,1)`, `(−1,1)` (defined as `DIRECTIONS`). These correspond to the vertical and two diagonal lines of the hex board.
+- **Valid Directions**: The YINSH board has three hex line axes, each with two opposite directions (six total). In this `(column, row)` coordinate system they are: vertical `(0, 1)` / `(0, -1)`, horizontal `(1, 0)` / `(-1, 0)`, and the matching-sign diagonal `(1, 1)` / `(-1, -1)`. The forward-only subset — `(0,1)`, `(1,0)`, `(1,1)` — is exposed as `DIRECTIONS` for row-sweep scans, while the full six directions are `HEX_DIRECTIONS`. The opposite-sign pair `(1, -1)` / `(-1, 1)` is a pseudo-diagonal and is **not** a line on the board.
 - **Marker Tracking**: The board maintains markers for all moves. Capturing five markers removes them permanently and resets the associated ring. Some implementations (like `yinsh_ml/heuristics`) also consider runs of up to seven markers (`MAX_MARKER_SEQUENCE = 7`).
 - **Ring Constraints**: Rings may only move across empty cells. The destination must be empty, and the ring cannot stop in the middle of another marker sequence unless the path is clear.
 

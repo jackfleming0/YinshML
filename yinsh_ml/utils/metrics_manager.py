@@ -29,7 +29,7 @@ class TrainingMetrics:
                               policy_loss     : float,
                               value_loss      : float,
                               **extras):
-        logger.debug(f"Adding metrics – win:{win_rate:.3f}, extras:{list(extras.keys())}")
+        pass
 
         self.game_lengths .append(float(avg_game_length))
         self.ring_mobility.append(float(avg_ring_mobility))

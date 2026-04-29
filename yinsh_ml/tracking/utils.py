@@ -110,7 +110,7 @@ class DatabaseConnectionManager:
                     self._configure_connection(conn)
                     
                     self._connections[thread_id] = conn
-                    logger.debug(f"Created new connection for thread {thread_id}")
+                    pass
                     
                 except sqlite3.Error as e:
                     raise ConnectionError(f"Failed to connect to database: {e}")
@@ -135,7 +135,7 @@ class DatabaseConnectionManager:
             # Set row factory for named access
             conn.row_factory = sqlite3.Row
             
-            logger.debug("Applied SQLite optimizations to connection")
+            pass
             
         except sqlite3.Error as e:
             logger.warning(f"Failed to apply some SQLite optimizations: {e}")
@@ -149,14 +149,14 @@ class DatabaseConnectionManager:
             if thread_id in self._connections:
                 self._connections[thread_id].close()
                 del self._connections[thread_id]
-                logger.debug(f"Closed connection for thread {thread_id}")
+                pass
     
     def _close_all_connections_unsafe(self):
         """Close all active connections without acquiring lock. Internal use only."""
         for thread_id, conn in list(self._connections.items()):
             try:
                 conn.close()
-                logger.debug(f"Closed connection for thread {thread_id}")
+                pass
             except sqlite3.Error as e:
                 logger.warning(f"Error closing connection for thread {thread_id}: {e}")
         
@@ -248,7 +248,7 @@ def transaction_context():
             try:
                 yield conn
                 conn.commit()
-                logger.debug("Transaction committed successfully")
+                pass
             except Exception as e:
                 conn.rollback()
                 logger.error(f"Transaction rolled back due to error: {e}")
@@ -403,9 +403,9 @@ def add_tags_to_experiment(conn: sqlite3.Connection, experiment_id: int,
                 """, (experiment_id, tag.strip()))
             except sqlite3.IntegrityError:
                 # Tag already exists for this experiment, skip
-                logger.debug(f"Tag '{tag}' already exists for experiment {experiment_id}")
+                pass
         
-        logger.debug(f"Added {len(tags)} tags to experiment {experiment_id}")
+        pass
         
     except ValidationError:
         raise
@@ -458,7 +458,7 @@ def add_metric_to_experiment(conn: sqlite3.Connection, experiment_id: int,
         """, (experiment_id, metric_name.strip(), float(metric_value), iteration, timestamp))
         
         metric_id = cursor.lastrowid
-        logger.debug(f"Added metric {metric_name}={metric_value} to experiment {experiment_id}")
+        pass
         
         return metric_id
         
@@ -609,7 +609,7 @@ def query_experiments(status: str = None, tags: List[str] = None,
                 del exp['environment_json']
                 experiments.append(exp)
             
-            logger.debug(f"Found {len(experiments)} experiments matching criteria")
+            pass
             return experiments
             
     except sqlite3.Error as e:

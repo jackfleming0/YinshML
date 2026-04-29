@@ -355,7 +355,11 @@ class TournamentEvaluator:
         logger.info(f"Starting {remaining_games} games with {config.concurrent_workers} workers")
         start_time = time.perf_counter()
         
-        with multiprocessing.Pool(processes=config.concurrent_workers) as pool:
+        # 'spawn' start method: required on Linux when CUDA is in-play in
+        # the parent (fork can't re-init CUDA). No-op on macOS where spawn
+        # is already default.
+        mp_ctx = multiprocessing.get_context('spawn')
+        with mp_ctx.Pool(processes=config.concurrent_workers) as pool:
             results = []
             for i, result in enumerate(pool.starmap(
                 _play_game_worker,
@@ -480,7 +484,7 @@ class TournamentEvaluator:
             with open(output_file, "w") as f:
                 json.dump(data, f, indent=2)
             
-            logger.debug(f"Saved tournament results to {output_path}")
+            pass
         except Exception as e:
             logger.warning(f"Failed to save tournament results: {e}")
     

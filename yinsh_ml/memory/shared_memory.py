@@ -268,7 +268,7 @@ class SharedMemoryRegion:
         )
         
         duration = time.time() - start_time
-        logger.debug(f"Created shared memory region '{self.name}' ({self.size} bytes) in {duration:.3f}s")
+        pass
         
     def _attach_region(self):
         """Attach to an existing shared memory region."""
@@ -286,7 +286,7 @@ class SharedMemoryRegion:
         self._increment_ref_count()
         
         duration = time.time() - start_time
-        logger.debug(f"Attached to shared memory region '{self.name}' in {duration:.3f}s")
+        pass
         
     def _create_unix_region(self):
         """Create shared memory region using Unix mmap."""
@@ -661,7 +661,7 @@ class SharedMemoryRegion:
                     os.path.exists(self._temp_file_path)):
                     try:
                         os.unlink(self._temp_file_path)
-                        logger.debug(f"Removed shared memory file: {self._temp_file_path}")
+                        pass
                     except OSError as e:
                         logger.warning(f"Failed to remove shared memory file {self._temp_file_path}: {e}")
                         
@@ -853,7 +853,7 @@ class SharedMemoryManager:
         self._shutdown = False
         self._cleanup_thread = threading.Thread(target=self._cleanup_worker, daemon=True)
         self._cleanup_thread.start()
-        logger.debug("Started shared memory cleanup thread")
+        pass
         
     def _cleanup_worker(self):
         """Background worker for cleaning up orphaned regions."""

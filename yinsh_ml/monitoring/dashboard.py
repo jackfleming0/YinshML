@@ -231,7 +231,7 @@ class MemoryDashboard:
                     filepath = export_dir / f"memory_metrics_{timestamp}.csv"
                     self.exporter.export_csv(str(filepath))
                 
-                logger.debug(f"Exported {format_name} data to {filepath}")
+                pass
                 
             except Exception as e:
                 logger.error(f"Failed to export {format_name} data: {e}")

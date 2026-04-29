@@ -17,6 +17,7 @@ import random
 from ..utils.metrics_logger import MetricsLogger, EpochMetrics
 from ..utils.enhanced_metrics import EnhancedMetricsCollector
 from ..network.wrapper import NetworkWrapper
+from .ema import EMAShadow
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 
@@ -41,6 +42,13 @@ class GameExperience:
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
         self.phases = deque(maxlen=max_size)
+        # move_numbers: per-sample outer-game move index. Used by the search-
+        # consistency probe (`YinshTrainer._search_consistency_step`) to drive
+        # `MCTS.search(state, move_number)` correctly — `decode_state` cannot
+        # recover the move number from the encoded tensor, so we have to track
+        # it alongside. Default 0 for old buffer files loaded without this
+        # field.
+        self.move_numbers = deque(maxlen=max_size)
         self.max_size = max_size  # Store for logging
         self.subsample_long_games = subsample_long_games
 
@@ -73,7 +81,8 @@ class GameExperience:
                             values: list,
                             final_white_score: int = None,
                             final_black_score: int = None,
-                            discount_factor: float = 1.0):
+                            discount_factor: float = 1.0,
+                            move_numbers: Optional[List[int]] = None):
         """
         Add a completed game to the replay buffer with memory optimization.
 
@@ -86,10 +95,20 @@ class GameExperience:
             final_white_score:  (Optional) White's final score - only used for logging.
             final_black_score:  (Optional) Black's final score - only used for logging.
             discount_factor:    (Deprecated) No longer used - values are already position-specific.
+            move_numbers:       (Optional) Per-position outer-game move index.
+                                Defaults to ``range(len(states))`` — correct since
+                                callers pass states in move order. Tracked so the
+                                search-consistency probe can drive MCTS with the
+                                correct move number (``decode_state`` can't recover
+                                it from the encoded tensor).
         """
         # Safety check
         assert len(states) == len(policies), "Mismatch: states vs. policies!"
         assert len(states) == len(values), "Mismatch: states vs. values!"
+        if move_numbers is None:
+            move_numbers = list(range(len(states)))
+        else:
+            assert len(states) == len(move_numbers), "Mismatch: states vs. move_numbers!"
 
         # Memory optimization: Subsample very long games
         if self.subsample_long_games and len(states) > 100:
@@ -112,8 +131,9 @@ class GameExperience:
                     states = [states[i] for i in keep_indices]
                     policies = [policies[i] for i in keep_indices]
                     values = [values[i] for i in keep_indices]  # Fix #1: Also subsample values
+                    move_numbers = [move_numbers[i] for i in keep_indices]
 
-                    logger.debug(f"[Memory Opt] Reduced long game from {len(states)} → {len(keep_indices)} states")
+                    pass
 
         # Helper to decode phases from channel 5
         def decode_phase(state: np.ndarray) -> str:
@@ -142,7 +162,7 @@ class GameExperience:
         original_count = 0
         augmented_count = 0
 
-        for idx, (state, policy, value, phase) in enumerate(zip(states, policies, values, phases)):
+        for idx, (state, policy, value, phase, mn) in enumerate(zip(states, policies, values, phases, move_numbers)):
             # Fix #1: Use MCTS root value directly (position-specific, not game outcome)
             self.states.append(state)
             # MEMORY: Store policy as float16 to reduce buffer memory by 50%
@@ -150,6 +170,7 @@ class GameExperience:
             self.move_probs.append(policy_f16)
             self.values.append(float(value))  # MCTS root value for this position
             self.phases.append(phase)
+            self.move_numbers.append(int(mn))
             original_count += 1
 
             # Apply augmentation if enabled
@@ -174,10 +195,13 @@ class GameExperience:
                         self.move_probs.append(aug_policy_f16)
                         self.values.append(float(aug_value))
                         self.phases.append(phase)
+                        # Augmented samples inherit move_number from the original
+                        # — D2 transforms preserve the position's outer-game time.
+                        self.move_numbers.append(int(mn))
                         augmented_count += 1
 
                 except Exception as e:
-                    logger.debug(f"Augmentation failed for state {idx}: {e}")
+                    pass
 
             # Track total states for memory monitoring
             self._total_states_added += 1
@@ -189,8 +213,7 @@ class GameExperience:
 
         # Log information about the replay buffer (debug level to avoid spam)
         aug_info = f", augmented={augmented_count}" if self.enable_augmentation else ""
-        logger.debug(f"[Replay Buffer] Added game with scores W={final_white_score}, B={final_black_score}, "
-                     f"margin={normalized_margin:.3f}, original={original_count}{aug_info}. Replay size={self.size()}")
+        pass
 
         # Periodically check memory usage
         if self._total_states_added - self._last_memory_check > self._memory_check_interval:
@@ -218,8 +241,7 @@ class GameExperience:
                 item_size = state_size + policy_size + 16  # Extra for values/phases
                 buffer_mb = (item_size * len(self.states)) / (1024 * 1024)
 
-                logger.debug(
-                    f"[Memory Monitor] Process: {memory_mb:.1f}MB, Buffer: ~{buffer_mb:.1f}MB, States: {len(self.states)}")
+                pass
 
                 # If memory is getting high, force garbage collection
                 # NOTE: Buffer reduction disabled - was causing training plateau by destroying data
@@ -240,10 +262,11 @@ class GameExperience:
                         self.move_probs = deque(list(self.move_probs)[start_idx:], maxlen=self.max_size)
                         self.values = deque(list(self.values)[start_idx:], maxlen=self.max_size)
                         self.phases = deque(list(self.phases)[start_idx:], maxlen=self.max_size)
+                        self.move_numbers = deque(list(self.move_numbers)[start_idx:], maxlen=self.max_size)
 
                         logger.warning(f"[Memory Manager] Reduced buffer from {current_size} to {len(self.states)} states (extreme memory pressure)")
         except Exception as e:
-            logger.debug(f"[Memory Monitor] Error checking memory: {e}")
+            pass
 
     def save_buffer(self, path: str, compress: bool = True):
         """Save the replay buffer to disk with compression option."""
@@ -253,7 +276,8 @@ class GameExperience:
             'states': list(self.states),
             'move_probs': list(self.move_probs),
             'values': list(self.values),
-            'phases': list(self.phases)
+            'phases': list(self.phases),
+            'move_numbers': list(self.move_numbers),
         }
 
         mode = 'wb'
@@ -303,6 +327,15 @@ class GameExperience:
                 self.phases = deque([default_phase] * len(self.states), maxlen=self.max_size)
             else:
                 self.phases = deque(loaded_phases, maxlen=self.max_size)
+
+            # Backward compat: older buffers don't carry move_numbers. Default
+            # to 0 so the search-consistency probe sees a single peak-noise
+            # epsilon_mix value across all loaded samples — degraded but safe.
+            loaded_move_numbers = data.get('move_numbers', None)
+            if loaded_move_numbers is None or len(loaded_move_numbers) != len(self.states):
+                self.move_numbers = deque([0] * len(self.states), maxlen=self.max_size)
+            else:
+                self.move_numbers = deque(loaded_move_numbers, maxlen=self.max_size)
 
             logger.info(f"[Replay Buffer] Loaded from {path}. Size: {self.size()}")
 
@@ -368,7 +401,7 @@ class GameExperience:
             phase_counts = {"RING_PLACEMENT": 0, "MAIN_GAME": 0, "RING_REMOVAL": 0}
             for idx in indices:
                 phase_counts[self.phases[idx]] += 1
-            logger.debug(f"[Batch Stats] Phase distribution: {phase_counts}")
+            pass
 
         return states, probs, values.unsqueeze(1)
 
@@ -388,7 +421,21 @@ class YinshTrainer:
                  max_buffer_size: int = 10000,
                  discrimination_weight: float = 0.5,
                  enable_augmentation: bool = False,
-                 max_augmentations: int = 12):
+                 max_augmentations: int = 12,
+                 ema_decay: Optional[float] = None,
+                 soft_value_target_sigma: float = 0.5,
+                 base_lr: float = 1e-3,
+                 lr_schedule: str = 'cosine',
+                 warmup_epochs: int = 0,
+                 total_epochs: int = 200,
+                 enable_autocast: bool = True,
+                 enable_search_consistency: bool = False,
+                 search_consistency_weight: float = 0.1,
+                 search_consistency_value_weight: float = 1.0,
+                 search_consistency_every_k_steps: int = 10,
+                 search_consistency_long_sims: int = 64,
+                 search_consistency_batch_size: int = 32,
+                 search_consistency_warmup_iters: int = 3):
         """
         Initialize the trainer.
 
@@ -405,6 +452,72 @@ class YinshTrainer:
             discrimination_weight: Weight for discrimination loss term (encourages value spread)
             enable_augmentation: If True, apply D6 symmetry augmentation to training data
             max_augmentations: Maximum augmented samples per original (1-12, default 12)
+            ema_decay: If set, maintain an EMA shadow of network weights updated
+                after every optimizer step. The supervisor swaps this copy in
+                when writing the per-iteration checkpoint so the tournament
+                eval target is the smoothed weights, not the single-step-noisy
+                live weights. Typical values: 0.999 (AlphaZero-ish cadence).
+                None disables the shadow entirely.
+            soft_value_target_sigma: Standard deviation (in value-class widths)
+                of the Gaussian smoothing applied to discrete value targets
+                before cross-entropy. With 7 classes spanning score diffs
+                {-3..+3}, σ=0.5 spreads ~38% of the mass onto adjacent classes,
+                teaching the value head that "outcome +2 and outcome +3 are
+                neighbors, not arbitrary labels." Set to 0 to use hard one-hot
+                targets (old behavior) for A/B testing.
+            base_lr: Base learning rate for the policy head's Adam optimizer.
+                The value head uses `base_lr * value_head_lr_factor`. Previously
+                the optimizer was hardcoded to lr=1e-3 at construction and the
+                supervisor overwrote `param_groups[0]['lr']` post-init — which
+                worked by accident for StepLR (captured base_lrs never mattered)
+                but is incompatible with cosine decay (the scheduler grabs
+                base_lrs at construction, so an overwrite would leave them
+                pointing at the wrong base). Threading the LR through here
+                keeps scheduler state coherent with actual optimizer LR.
+            lr_schedule: 'cosine' (default) for linear-warmup + cosine-annealing
+                down to zero across `total_epochs`; 'step' for the legacy
+                StepLR(step_size=10, gamma=0.9). Cosine gives smooth decay with
+                no cliffs; StepLR is kept for A/B.
+            warmup_epochs: Linear warmup from 0.1·base_lr to base_lr over the
+                first N epochs, then cosine decay takes over for the remaining
+                `total_epochs - warmup_epochs`. 0 disables warmup entirely.
+            total_epochs: Horizon for the cosine annealing curve. Usually
+                `num_iterations × epochs_per_iteration`. The supervisor passes
+                this in so the curve is scaled to the full training run, not to
+                a single iteration's handful of epochs.
+            enable_autocast: If True, wrap forward passes and loss computations
+                in `torch.autocast(device_type=...)`. MPS uses bf16 (no grad
+                scaler needed); CUDA also uses bf16 by default under autocast.
+                CE-family losses are auto-promoted to fp32 internally so value-
+                head gradient precision is preserved. CPU disables autocast
+                regardless — bf16 ops on CPU don't win wall-clock back.
+            enable_search_consistency: Track B §5 probe. When True, every K
+                training batches the trainer runs long-search MCTS on a
+                sampled batch of replay-buffer positions and trains the
+                network to match the long-search policy + value targets
+                (KL on policy, MSE on value). The hypothesis is that the
+                0.104 discrimination plateau is a training-signal problem —
+                if MCTS-distillation pushes past it, the AZ recipe is
+                sufficient. Default False so existing training is unaffected.
+            search_consistency_weight: Multiplier on the policy-distillation
+                CE term (KL(π_long || softmax(network_logits))). Scales
+                relative to the main policy/value losses.
+            search_consistency_value_weight: Multiplier on the value-
+                distillation MSE term ((v_long − v_pred)^2).
+            search_consistency_every_k_steps: Apply the consistency step
+                every K `train_step` calls. K=10 ≈ +30-50% wall-clock at
+                K=10/batch=32/long_sims=64.
+            search_consistency_long_sims: MCTS sim budget for the
+                "teacher" search whose visit distribution + root value
+                become the distillation target. Higher = stronger target,
+                quadratically more expensive.
+            search_consistency_batch_size: Number of replay-buffer
+                positions sampled per consistency step. Each requires one
+                long-search MCTS — the dominant cost of the probe.
+            search_consistency_warmup_iters: Skip the consistency step
+                until iteration N. Early iterations have a noisy network
+                whose long-search outputs are themselves unreliable
+                targets; warming up lets the policy stabilize first.
         """
         self.state_encoder = network.state_encoder
         self.batch_size = batch_size
@@ -422,9 +535,71 @@ class YinshTrainer:
         self.network.network = self.network.network.to(self.device)
         self.metrics_logger = metrics_logger
 
+        # EMA shadow (optional). Must be built *after* the network is on the
+        # target device so the shadow tensors live alongside the live weights —
+        # otherwise `update()` would copy cross-device every step.
+        self.ema: Optional[EMAShadow] = None
+        if ema_decay is not None:
+            self.ema = EMAShadow(self.network.network, decay=float(ema_decay))
+
         self.value_loss_weights = value_loss_weights
         self.value_head_lr_factor = value_head_lr_factor
         self.discrimination_weight = discrimination_weight
+        self.soft_value_target_sigma = float(soft_value_target_sigma)
+        # Search-consistency probe (Track B §5). All knobs read from config
+        # via `mode_settings` in the supervisor. Off by default so existing
+        # training is unaffected; flip `enable_search_consistency` to true to
+        # arm the probe. The probe-side MCTS instance is built lazily on the
+        # first call to `_search_consistency_step` because constructing it at
+        # __init__ time would log MCTS init banners during pure-supervised
+        # runs that never use it.
+        self.enable_search_consistency = bool(enable_search_consistency)
+        self.search_consistency_weight = float(search_consistency_weight)
+        self.search_consistency_value_weight = float(search_consistency_value_weight)
+        self.search_consistency_every_k_steps = int(search_consistency_every_k_steps)
+        self.search_consistency_long_sims = int(search_consistency_long_sims)
+        self.search_consistency_batch_size = int(search_consistency_batch_size)
+        self.search_consistency_warmup_iters = int(search_consistency_warmup_iters)
+        self._sc_mcts = None  # lazy
+        self._sc_step_counter = 0
+        self._sc_loss_history: list = []  # rolling, capped
+        # LR schedule state. `_global_epoch` is incremented once per
+        # `train_epoch()` and drives scheduler fast-forward on reinit.
+        self.lr_schedule = lr_schedule
+        self.warmup_epochs = int(warmup_epochs)
+        self.total_epochs = int(total_epochs)
+        self._base_policy_lr = float(base_lr)
+        self._base_value_lr = float(base_lr) * float(value_head_lr_factor)
+        self._global_epoch = 0
+
+        # Autocast: bf16 forward + loss on MPS/CUDA. CE-family losses auto-
+        # promote to fp32 under autocast, so value-head gradient precision is
+        # preserved without a GradScaler. CPU disables — bf16 on CPU doesn't
+        # buy wall-clock back. MPS autocast requires PyTorch 2.3+; on older
+        # builds `torch.autocast(device_type='mps')` raises RuntimeError at
+        # context construction. Probe and fall back gracefully rather than
+        # crashing mid-training.
+        self._autocast_device = self.device.type  # 'cuda' | 'mps' | 'cpu'
+        self._autocast_enabled = bool(enable_autocast) and self._autocast_device in ('cuda', 'mps')
+        if self._autocast_enabled:
+            try:
+                # Probe with the exact args `_autocast()` will use at train
+                # time. bf16 is both safer (no GradScaler) and the only MPS
+                # autocast dtype that was stable in our target PyTorch range.
+                with torch.autocast(
+                    device_type=self._autocast_device,
+                    dtype=torch.bfloat16,
+                    enabled=True,
+                ):
+                    pass
+            except RuntimeError as e:
+                # This PyTorch build doesn't support autocast on this device.
+                # Historical: PyTorch ≤2.2 + MPS rejected device_type='mps'
+                # entirely. We now require ≥2.7.1 so this branch is mostly
+                # belt-and-suspenders, but it still catches surprise builds
+                # (e.g. custom wheels, WASM targets).
+                self._autocast_enabled = False
+                self._autocast_unsupported_reason = str(e)
 
         # Separate out parameters for policy vs. value heads
         value_params = [p for n, p in self.network.network.named_parameters()
@@ -434,13 +609,13 @@ class YinshTrainer:
 
         self.policy_optimizer = optim.Adam(
             policy_params,
-            lr=0.001,
+            lr=self._base_policy_lr,
             weight_decay=1e-4
         )
 
         self.value_optimizer = optim.SGD(
             value_params,
-            lr=0.0001 * value_head_lr_factor,
+            lr=self._base_value_lr,
             momentum=0.9,
             weight_decay=1e-3
         )
@@ -461,29 +636,40 @@ class YinshTrainer:
             self.logger.info(f"Augmentation enabled: up to {max_augmentations}x data expansion")
         if replay_buffer_path is not None:
             from os import path as osp
-            if osp.exists(replay_buffer_path):
-                self.experience.load_buffer(replay_buffer_path)
+            # save_buffer writes `.pkl.gz` when compression is on; check both forms
+            candidate = replay_buffer_path
+            if not osp.exists(candidate):
+                gz = replay_buffer_path if replay_buffer_path.endswith('.gz') else replay_buffer_path + '.gz'
+                if osp.exists(gz):
+                    candidate = gz
+            if osp.exists(candidate):
+                self.experience.load_buffer(candidate)
             else:
                 self.logger.info(f"[Replay Buffer] File '{replay_buffer_path}' not found. Starting with empty buffer.")
 
-        # Schedulers: Simple StepLR to avoid LR instability
-        # Previous CyclicLR caused dramatic LR drops (1e-3 → 1e-5) causing training instability
-        # StepLR provides gentle, predictable decay
-        self.policy_scheduler = optim.lr_scheduler.StepLR(
-            self.policy_optimizer,
-            step_size=10,  # Decay every 10 epochs
-            gamma=0.9  # Multiply LR by 0.9
+        # Schedulers: cosine-annealing with linear warmup by default; StepLR
+        # kept as the A/B fallback. See `_build_schedulers` for the math and
+        # for the reason we fast-forward on reinit instead of preserving
+        # scheduler objects across optimizer reconstructions.
+        self._build_schedulers(resume_epoch=0)
+        self.logger.info(
+            f"Schedulers: {self.lr_schedule} "
+            f"(warmup_epochs={self.warmup_epochs}, total_epochs={self.total_epochs})"
         )
-
-        self.value_scheduler = optim.lr_scheduler.StepLR(
-            self.value_optimizer,
-            step_size=10,
-            gamma=0.9
-        )
-
-        self.logger.info(f"Schedulers: StepLR (step_size=10, gamma=0.9)")
         self.logger.info(f"Initial LRs: Policy={self.policy_optimizer.param_groups[0]['lr']:.2e}, "
                          f"Value={self.value_optimizer.param_groups[0]['lr']:.2e}")
+        if self._autocast_enabled:
+            self.logger.info(
+                f"Autocast: ENABLED (device_type={self._autocast_device}, dtype=bf16)"
+            )
+        elif getattr(self, '_autocast_unsupported_reason', None):
+            self.logger.warning(
+                f"Autocast: DISABLED — device_type={self._autocast_device!r} is not "
+                f"supported by this PyTorch build ({self._autocast_unsupported_reason}). "
+                f"Training will run in fp32. On MPS, upgrade to PyTorch ≥ 2.7 to enable."
+            )
+        else:
+            self.logger.info(f"Autocast: DISABLED (device_type={self._autocast_device})")
 
         self.l2_reg = l2_reg
         # Logger already initialized earlier for use during __init__
@@ -521,10 +707,166 @@ class YinshTrainer:
         uniform = torch.ones_like(targets) / n_classes
         return (1 - epsilon) * targets + epsilon * uniform
 
+    @staticmethod
+    def _summarize_ece(diag: dict) -> Optional[str]:
+        """Compute Expected Calibration Error from per-bin accumulators and
+        render a compact reliability-diagram sparkline. Returns a one-line
+        string like ``ECE=0.0421, reliability=▁▂▃▃▄▅▅▆▇█ bin_counts=[...]`` or
+        None if no samples accumulated yet.
+
+        The sparkline glyphs encode ``acc − conf`` per bin (well-calibrated
+        bins render near the middle of the glyph range). A heavy-left /
+        heavy-right sparkline means the head is over- / under-confident
+        respectively."""
+        bin_correct = diag.get('ece_bin_correct')
+        bin_conf = diag.get('ece_bin_conf')
+        bin_count = diag.get('ece_bin_count')
+        if bin_correct is None or bin_count is None or bin_conf is None:
+            return None
+        total = bin_count.sum().item()
+        if total <= 0:
+            return None
+
+        # ECE = weighted |acc - conf| across bins with nonzero count.
+        ece = 0.0
+        per_bin_gap = []  # (acc - conf) per bin; used for the sparkline.
+        for b in range(bin_count.numel()):
+            n = bin_count[b].item()
+            if n > 0:
+                acc = bin_correct[b].item() / n
+                conf = bin_conf[b].item() / n
+                ece += (n / total) * abs(acc - conf)
+                per_bin_gap.append(acc - conf)
+            else:
+                per_bin_gap.append(None)
+
+        # Sparkline: map (acc - conf) ∈ [-1, 1] onto 8 glyphs. Empty bins
+        # render as a space so the reader sees the sparse regions.
+        glyphs = '▁▂▃▄▅▆▇█'
+        def _glyph(x):
+            if x is None:
+                return ' '
+            # clamp + scale to [0, len(glyphs)-1]
+            x = max(-1.0, min(1.0, x))
+            idx = int((x + 1.0) / 2.0 * (len(glyphs) - 1))
+            return glyphs[idx]
+        spark = ''.join(_glyph(g) for g in per_bin_gap)
+        counts = '[' + ','.join(str(int(bin_count[b].item())) for b in range(bin_count.numel())) + ']'
+        return f"ECE={ece:.4f}, reliability={spark} bin_counts={counts}"
+
+    def _autocast(self):
+        """Autocast context manager. Always returns a fresh context (can't be
+        reused across `with` blocks). When disabled — either by the
+        `enable_autocast=False` flag, the CPU device gate, or the init-time
+        probe failing on unsupported builds — this returns a real null-context
+        so the `with self._autocast():` call path stays uniform. We can't lean
+        on `torch.autocast(enabled=False, device_type=...)` here: older
+        PyTorch versions (and MPS on ≤2.2) validate `device_type` *before*
+        checking `enabled`, so the call raises on builds without MPS-autocast
+        support even when enabled=False.
+
+        Uses bf16 explicitly. MPS autocast's default is fp16 (PyTorch 2.7+),
+        which without a `GradScaler` risks gradient underflow. bf16 has the
+        same dynamic range as fp32 with a ~half-precision mantissa, so
+        gradients don't underflow and we don't need GradScaler at all.
+        """
+        if not self._autocast_enabled:
+            import contextlib
+            return contextlib.nullcontext()
+        return torch.autocast(
+            device_type=self._autocast_device,
+            dtype=torch.bfloat16,
+            enabled=True,
+        )
+
+    def _build_schedulers(self, resume_epoch: int = 0) -> None:
+        """(Re)construct policy + value schedulers against the current
+        optimizers, then fast-forward to `resume_epoch` so LR state survives
+        the per-iteration `_reinitialize_optimizers` reset in the supervisor.
+
+        Optimizer LRs are reset to `_base_policy_lr` / `_base_value_lr` first
+        because PyTorch schedulers capture `base_lrs` at construction time
+        from `optimizer.param_groups[i]['lr']` — if the optimizer was already
+        decayed, cosine would anchor its curve at the wrong peak. Stepping
+        `resume_epoch` times forward puts us back where we were.
+        """
+        import warnings
+
+        for pg in self.policy_optimizer.param_groups:
+            pg['lr'] = self._base_policy_lr
+        for pg in self.value_optimizer.param_groups:
+            pg['lr'] = self._base_value_lr
+
+        if self.lr_schedule == 'cosine':
+            cosine_epochs = max(1, self.total_epochs - self.warmup_epochs)
+            if self.warmup_epochs > 0:
+                policy_warm = optim.lr_scheduler.LinearLR(
+                    self.policy_optimizer, start_factor=0.1, end_factor=1.0,
+                    total_iters=self.warmup_epochs,
+                )
+                policy_cos = optim.lr_scheduler.CosineAnnealingLR(
+                    self.policy_optimizer, T_max=cosine_epochs,
+                )
+                self.policy_scheduler = optim.lr_scheduler.SequentialLR(
+                    self.policy_optimizer,
+                    schedulers=[policy_warm, policy_cos],
+                    milestones=[self.warmup_epochs],
+                )
+                value_warm = optim.lr_scheduler.LinearLR(
+                    self.value_optimizer, start_factor=0.1, end_factor=1.0,
+                    total_iters=self.warmup_epochs,
+                )
+                value_cos = optim.lr_scheduler.CosineAnnealingLR(
+                    self.value_optimizer, T_max=cosine_epochs,
+                )
+                self.value_scheduler = optim.lr_scheduler.SequentialLR(
+                    self.value_optimizer,
+                    schedulers=[value_warm, value_cos],
+                    milestones=[self.warmup_epochs],
+                )
+            else:
+                self.policy_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    self.policy_optimizer, T_max=self.total_epochs,
+                )
+                self.value_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    self.value_optimizer, T_max=self.total_epochs,
+                )
+        elif self.lr_schedule == 'step':
+            # Legacy StepLR for A/B. Cliffs every 10 epochs at γ=0.9 per the
+            # historical CyclicLR-instability note.
+            self.policy_scheduler = optim.lr_scheduler.StepLR(
+                self.policy_optimizer, step_size=10, gamma=0.9,
+            )
+            self.value_scheduler = optim.lr_scheduler.StepLR(
+                self.value_optimizer, step_size=10, gamma=0.9,
+            )
+        else:
+            raise ValueError(f"Unknown lr_schedule: {self.lr_schedule!r}")
+
+        # Fast-forward. Suppress PyTorch's "step() called before optimizer.step()"
+        # warning — we're rebuilding, not actually training.
+        if resume_epoch > 0:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                for _ in range(resume_epoch):
+                    self.policy_scheduler.step()
+                    self.value_scheduler.step()
+
     def train_step(self,
                    batch_size: int,
                    phase_weights: Optional[Dict[str, float]] = None) -> Tuple[float, float, float, Dict]:
-        """Training step with separate policy and value optimization."""
+        """Joint policy + value training step.
+
+        One forward pass produces (pred_logits, pred_values); both losses are
+        computed and summed into `total_loss`, which backpropagates once. The
+        policy_optimizer (Adam, owns trunk + policy_head) and value_optimizer
+        (SGD, owns value_head only) both step against the joint gradient, so
+        the shared trunk learns from value supervision in addition to policy
+        supervision. Per-head clip max_norms (1.0 / 0.5) are preserved by
+        clipping the disjoint param sets independently between backward and
+        step. Two optimizers are kept (instead of one with two param groups)
+        so the existing scheduler + checkpoint state-dict code stays intact.
+        """
         if len(self.experience.states) < batch_size:
             return 0.0, 0.0, 0.0, {'top_1_accuracy': 0.0, 'top_3_accuracy': 0.0, 'top_5_accuracy': 0.0}
 
@@ -552,8 +894,12 @@ class YinshTrainer:
             self.logger.debug(f"Training tensors device after transfer: {device_after}")
             self.logger.debug(f"Network device: {next(self.network.network.parameters()).device}")
 
-        # Forward pass
-        pred_logits, pred_values = self.network.network(states)
+        # Forward pass. Autocast wraps forward + loss so CE-family ops (log_softmax,
+        # cross_entropy) auto-promote to fp32 internally and the heavy conv/linear
+        # work runs in bf16. No GradScaler: MPS autocast uses bf16 (no underflow);
+        # we also stay in bf16 on CUDA by default, which similarly doesn't need it.
+        with self._autocast():
+            pred_logits, pred_values = self.network.network(states)
 
         # Monitor / log value head metrics
         value_metrics = self._monitor_value_head(
@@ -583,44 +929,50 @@ class YinshTrainer:
         #         actual_outcome=target_values[i].detach().cpu().numpy()
         #     )
 
-        # --- Policy Optimization ---
+        # --- Joint Policy + Value Optimization ---
+        # Single forward (already computed `pred_logits`, `pred_values` above).
+        # Combined loss = policy + value so the shared trunk learns from BOTH
+        # signals. Two optimizers stay (Adam for trunk+policy, SGD for value
+        # head) to preserve per-head LR + weight-decay schedules; the joint
+        # backward routes value-loss gradient through the trunk into Adam,
+        # which is the bug fix — previously value_loss.backward() populated
+        # trunk .grad but only value_optimizer.step() ran, so the trunk only
+        # ever saw the policy signal.
         self.policy_optimizer.zero_grad()
-        with torch.set_grad_enabled(True):
-            scaled_logits = pred_logits / self.temperature
-            log_probs = F.log_softmax(scaled_logits, dim=1)
-            policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
-
-            # L2 regularization for policy
-            if self.l2_reg > 0:
-                l2_loss = 0
-                for name, param in self.network.network.named_parameters():
-                    if 'value_head' not in name:
-                        l2_loss += torch.norm(param)
-                policy_loss = policy_loss + self.l2_reg * l2_loss
-
-            policy_loss_val = float(policy_loss.item())  # for logging
-            # CRITICAL FIX: Remove retain_graph=True to prevent memory leak
-            # The graph is no longer needed after this backward pass
-            policy_loss.backward()
-
-            # Clip gradients
-            policy_params = [p for n, p in self.network.network.named_parameters()
-                             if 'value_head' not in n]
-            torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
-
-            self.policy_optimizer.step()
-            # NOTE: Scheduler stepping moved to train_epoch() - step once per epoch, not per batch
-
-        # --- Value Optimization ---
         self.value_optimizer.zero_grad()
         with torch.set_grad_enabled(True):
-            # Recompute (because we did backward above)
-            _, pred_values = self.network.network(states)
+            # ---- Policy loss ----
+            with self._autocast():
+                scaled_logits = pred_logits / self.temperature
+                log_probs = F.log_softmax(scaled_logits, dim=1)
+                policy_loss = -(target_probs * log_probs).sum(dim=1).mean()
 
-            # Classification-based value head (AlphaZero approach)
-            # Uses cross-entropy loss on discrete outcome distribution
-            # This naturally encourages confident predictions and avoids MSE's variance minimization bias
+                # L2 regularization for policy
+                if self.l2_reg > 0:
+                    l2_loss = 0
+                    for name, param in self.network.network.named_parameters():
+                        if 'value_head' not in name:
+                            l2_loss += torch.norm(param)
+                    policy_loss = policy_loss + self.l2_reg * l2_loss
 
+            policy_loss_val = float(policy_loss.item())  # for logging
+            # Per-batch policy entropy. `log_probs` is fp32 under autocast (F.log_softmax
+            # is on the fp32-promote list for CUDA; we `.float()`-cast elsewhere for MPS).
+            # Low entropy means the policy has collapsed onto a narrow subset of moves;
+            # `train_epoch` watches the epoch-over-epoch trend for sudden drops.
+            with torch.no_grad():
+                # Entropy H = -Σ p·log(p), averaged over the batch. Using log_probs
+                # directly avoids recomputing softmax + log.
+                policy_probs = log_probs.exp()
+                batch_entropy = -(policy_probs * log_probs).sum(dim=1).mean()
+                self.last_policy_entropy = float(batch_entropy.item())
+
+            # ---- Value loss (reuses `pred_values` from the joint forward) ----
+            # Classification-based value head (AlphaZero approach).
+            # Uses cross-entropy loss on discrete outcome distribution.
+            # The CE math is fp32-promoted explicitly below for cross-device
+            # consistency, so wrapping in `_autocast()` here is unnecessary
+            # (the heavy forward already ran under autocast).
             if hasattr(self.network.network, 'value_mode') and self.network.network.value_mode == 'classification':
                 # Get the logits that were stored during forward pass
                 if hasattr(self.network.network, '_value_logits'):
@@ -629,11 +981,34 @@ class YinshTrainer:
                     # Convert continuous target values to discrete class labels
                     # Map target ∈ [-1, 1] to class ∈ {0, 1, 2, 3, 4, 5, 6}
                     # For 7 classes representing: {-3, -2, -1, 0, +1, +2, +3} score differences
-                    target_normalized = (target_values_flat + 1.0) / 2.0 * (self.network.network.num_value_classes - 1)
-                    target_class = torch.round(target_normalized).long().clamp(0, self.network.network.num_value_classes - 1)
+                    num_value_classes = self.network.network.num_value_classes
+                    target_normalized = (target_values_flat + 1.0) / 2.0 * (num_value_classes - 1)
+                    target_class = torch.round(target_normalized).long().clamp(0, num_value_classes - 1)
 
-                    # Cross-entropy loss encourages confident predictions
-                    ce_loss = F.cross_entropy(value_logits, target_class)
+                    # CE math runs in fp32 — explicit `.float()` cast defends
+                    # against autocast promotion rules differing by device:
+                    # CUDA promotes `log_softmax` to fp32 automatically, MPS/CPU
+                    # don't (the promotion list is per-device). Promoting at
+                    # the boundary guarantees platform-independent precision for
+                    # value-head gradients regardless of runtime hardware.
+                    value_logits_fp32 = value_logits.float()
+                    if self.soft_value_target_sigma > 0:
+                        # Gaussian soft targets: mass centered on the (unrounded)
+                        # target spreads onto neighboring classes. Encodes ordinal
+                        # structure — outcome +2 is closer to +3 than to -2 — which
+                        # hard one-hot CE throws away.
+                        class_indices = torch.arange(
+                            num_value_classes, device=value_logits.device, dtype=target_normalized.dtype
+                        )
+                        # dist_sq[i, k] = (k - target_normalized[i])^2
+                        dist_sq = (class_indices.unsqueeze(0) - target_normalized.unsqueeze(1)) ** 2
+                        target_dist = torch.exp(-dist_sq / (2.0 * self.soft_value_target_sigma ** 2))
+                        target_dist = target_dist / target_dist.sum(dim=1, keepdim=True)
+                        log_probs = F.log_softmax(value_logits_fp32, dim=1)
+                        ce_loss = -(target_dist * log_probs).sum(dim=1).mean()
+                    else:
+                        # Hard one-hot CE (old behavior). Kept for A/B testing.
+                        ce_loss = F.cross_entropy(value_logits_fp32, target_class)
 
                     # Track metrics for monitoring
                     batch_variance = torch.var(pred_values)
@@ -665,12 +1040,19 @@ class YinshTrainer:
 
                         # DIAGNOSTIC FIX: Store real value head metrics for epoch summary
                         # These persist across batches and are summarized in train_epoch
+                        ECE_N_BINS = 10
                         if not hasattr(self, '_epoch_value_diagnostics'):
                             self._epoch_value_diagnostics = {
                                 'mean_abs_values': [],
                                 'pred_class_counts': torch.zeros(self.network.network.num_value_classes),
                                 'target_class_counts': torch.zeros(self.network.network.num_value_classes),
-                                'batch_variances': []
+                                'batch_variances': [],
+                                # ECE accumulators: per-bin sums of correctness, confidence,
+                                # and count. Summed across batches; ECE computed at epoch end
+                                # as Σ_b (n_b / N) · |acc_b − conf_b|.
+                                'ece_bin_correct': torch.zeros(ECE_N_BINS),
+                                'ece_bin_conf': torch.zeros(ECE_N_BINS),
+                                'ece_bin_count': torch.zeros(ECE_N_BINS),
                             }
 
                         self._epoch_value_diagnostics['mean_abs_values'].append(mean_abs_value.item())
@@ -680,6 +1062,21 @@ class YinshTrainer:
                         for c in range(self.network.network.num_value_classes):
                             self._epoch_value_diagnostics['pred_class_counts'][c] += (pred_class == c).sum().item()
                             self._epoch_value_diagnostics['target_class_counts'][c] += (target_class == c).sum().item()
+
+                        # ECE bin accumulation. confidence = max_softmax_prob per sample.
+                        # Binning uses fp32 logits to match the CE-loss dtype (avoids
+                        # bf16-precision drift in the probability tails that matter for
+                        # calibration).
+                        value_probs = F.softmax(value_logits_fp32, dim=1)
+                        confidences, preds = value_probs.max(dim=1)
+                        correct = (preds == target_class).float()
+                        bin_idx = (confidences * ECE_N_BINS).long().clamp(0, ECE_N_BINS - 1)
+                        for b in range(ECE_N_BINS):
+                            mask = (bin_idx == b)
+                            if mask.any():
+                                self._epoch_value_diagnostics['ece_bin_correct'][b] += correct[mask].sum().cpu()
+                                self._epoch_value_diagnostics['ece_bin_conf'][b] += confidences[mask].sum().cpu()
+                                self._epoch_value_diagnostics['ece_bin_count'][b] += mask.sum().cpu()
 
                     # Log for diagnostics
                     if not hasattr(self, '_batch_counter'):
@@ -733,14 +1130,28 @@ class YinshTrainer:
             # Store variance for epoch-level tracking
             self.last_value_variance = float(batch_variance.item())
 
-            value_loss.backward()
+            # ---- Joint backward + step ----
+            # `total_loss` propagates through both heads. The trunk receives
+            # gradient contributions from both losses and is updated by Adam
+            # (via `policy_optimizer`, which owns trunk + policy_head). The
+            # value head receives only value-loss gradient (policy_loss has
+            # no path through value_head) and is updated by SGD (via
+            # `value_optimizer`). Per-head clip max_norms are preserved by
+            # clipping the disjoint param sets independently before step().
+            total_loss = policy_loss + value_loss
+            total_loss.backward()
 
-            # Clip value head gradients
+            policy_params = [p for n, p in self.network.network.named_parameters()
+                             if 'value_head' not in n]
             value_params = [p for n, p in self.network.network.named_parameters()
                             if 'value_head' in n]
+            torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
             torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
 
+            self.policy_optimizer.step()
             self.value_optimizer.step()
+            if self.ema is not None:
+                self.ema.update()
             # NOTE: Scheduler stepping moved to train_epoch() - step once per epoch, not per batch
 
         # Debugging prints (debug level only)
@@ -808,8 +1219,244 @@ class YinshTrainer:
 
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         return (policy_loss_val, value_loss_val, value_accuracy, move_accuracies)
+
+    def _build_consistency_mcts(self):
+        """Lazily build the pure-neural MCTS used by the search-consistency
+        probe. Subtree reuse is disabled (each sampled position is independent
+        — there is no game continuity between samples). The MCTS shares the
+        live network so its targets always reflect the current weights.
+        """
+        from .self_play import MCTS  # local import to avoid circular at module load
+        return MCTS(
+            network=self.network,
+            evaluation_mode="pure_neural",
+            heuristic_evaluator=None,
+            num_simulations=self.search_consistency_long_sims,
+            late_simulations=self.search_consistency_long_sims,
+            simulation_switch_ply=10_000,  # never switch
+            enable_subtree_reuse=False,
+            # Disable root Dirichlet noise for distillation searches —
+            # we want clean targets, not exploration noise.
+            epsilon_mix_start=0.0,
+            epsilon_mix_end=0.0,
+            epsilon_mix_taper_moves=0,
+            # Greedy temperature so visit-count → π is sharp, not flattened.
+            initial_temp=1.0,
+            final_temp=1.0,
+            annealing_steps=1,
+        )
+
+    def _search_consistency_step(self) -> Optional[Dict[str, float]]:
+        """One distillation step: long-search MCTS targets → network.
+
+        For each sampled replay-buffer position:
+          1. Decode tensor → GameState (move_number is recovered from the
+             `move_numbers` deque, since `decode_state` can't reconstruct it).
+          2. Run long-search MCTS with the live network as the leaf evaluator.
+             Visit-distribution → π_long. `mcts.last_root_value` → v_long.
+          3. Forward the network on the encoded state with grad enabled to
+             produce (policy_logits, v_pred).
+          4. Loss = λ_π · CE(π_long, softmax(logits)) + λ_v · MSE(v_long, v_pred).
+             Both targets are detached — gradients flow only through the
+             network's direct forward pass (the MCTS-internal evaluations are
+             numpy and don't propagate). This is policy/value distillation
+             from a stronger (longer-search) target into the network.
+
+        Returns a small stats dict on a step taken, or None when skipped.
+        """
+        if not self.enable_search_consistency:
+            return None
+        if self.experience.size() < self.search_consistency_batch_size:
+            return None
+        if self.current_iteration < self.search_consistency_warmup_iters:
+            return None
+
+        if self._sc_mcts is None:
+            self._sc_mcts = self._build_consistency_mcts()
+        mcts = self._sc_mcts
+        # Re-bind the MCTS's network reference to the *current* trainer
+        # network on every step. The supervisor's `_reset_network_objects`
+        # (every 3 iters at iter % 3 == 0, supervisor.py:1251-1252) swaps
+        # `self.trainer.network` for a freshly-loaded NetworkWrapper —
+        # without this rebind, the cached MCTS holds a stale reference to
+        # the OLD wrapper whose tensor pool / device state may have been
+        # torn down, and every `predict_from_state` raises. Also keep the
+        # encoder in sync (cheap, defends against any future encoder swap).
+        mcts.network = self.network
+        mcts.state_encoder = self.network.state_encoder
+        # Always start each consistency step with a fresh tree — sampled
+        # positions have no game continuity.
+        mcts.reset_tree()
+
+        n = self.experience.size()
+        sample_size = min(self.search_consistency_batch_size, n)
+        indices = np.random.choice(n, size=sample_size, replace=False)
+
+        # Force eval mode for the MCTS-distillation searches so the
+        # subsequent training-mode forward (later in this method) is the
+        # ONLY path that touches BN with `training=True`. The MCTS leaf
+        # evaluator calls `predict()` which sets eval internally, but we
+        # belt-and-suspenders here so any future code path that bypasses
+        # `predict` still gets a clean eval-mode network for the search.
+        self.network.network.eval()
+
+        encoder = self.state_encoder
+        target_pis = []
+        target_vs = []
+        states_for_forward = []
+        skipped = 0
+        # Per-cause counters so when nothing trains we can see why.
+        skip_decode = 0
+        skip_terminal = 0
+        skip_search_exc = 0
+        skip_degenerate_pi = 0
+
+        # Wrap the whole search loop in no_grad so even if a code path inside
+        # MCTS bypasses the no_grad blocks in `_evaluate_state` /
+        # `predict_from_state` / `predict`, BN's train-mode batch-size-1 check
+        # is still skipped. (PyTorch BN's check fires on `self.training`
+        # alone — `is_grad_enabled()` is *not* part of it — so this no_grad
+        # is purely about ensuring no autograd graph is built; the eval()
+        # forcing above is what protects BN.)
+        with torch.no_grad():
+            for idx in indices:
+                state_np = self.experience.states[idx]
+                move_no = int(self.experience.move_numbers[idx])
+                try:
+                    game_state = encoder.decode_state(state_np)
+                except Exception as e:
+                    self.logger.debug(f"[SC] decode_state failed for idx={idx}: {e}")
+                    skipped += 1
+                    skip_decode += 1
+                    continue
+                if game_state.is_terminal():
+                    # Terminal states have no MCTS distribution to learn — skip.
+                    skipped += 1
+                    skip_terminal += 1
+                    continue
+                try:
+                    # Use `search_batch` (not `search`): it accumulates leaf
+                    # evaluations and forwards them as a single
+                    # `predict_batch(states_to_evaluate)` call. The serial
+                    # `search` calls `predict_from_state(state)` per leaf which
+                    # forwards a single-position tensor. With BatchNorm1d in
+                    # the value head, a batch_size=1 forward in train mode
+                    # raises ValueError. Even though `predict()` calls
+                    # `eval()` first, the `nn.BatchNorm1d` at value_head[8]
+                    # has been observed to fire the error from iter 1 onwards
+                    # in real training runs — likely an interaction with
+                    # MPS bf16 autocast state from the preceding train_step.
+                    # Batched evaluation (batch_size > 1) bypasses the trap.
+                    pi_long = mcts.search_batch(
+                        game_state, move_number=move_no, batch_size=32
+                    )
+                except Exception as e:
+                    self.logger.debug(f"[SC] MCTS search failed for idx={idx}: {e}")
+                    skipped += 1
+                    skip_search_exc += 1
+                    # Capture the first exception's type+message for the all-skipped
+                    # info log. Subsequent exceptions of the same step share this.
+                    if not hasattr(self, '_sc_last_exc'):
+                        self._sc_last_exc = ''
+                    if not self._sc_last_exc:
+                        self._sc_last_exc = f"{type(e).__name__}: {e}"
+                    mcts.reset_tree()
+                    continue
+                v_long = float(getattr(mcts, 'last_root_value', 0.0))
+                mcts.reset_tree()  # independent positions
+
+                # MCTS returned a normalized visit distribution; defend against
+                # the all-zero degenerate case (pre-existing MCTS warning path).
+                if not np.isfinite(pi_long).all() or pi_long.sum() <= 0:
+                    skipped += 1
+                    skip_degenerate_pi += 1
+                    continue
+
+                target_pis.append(pi_long.astype(np.float32))
+                target_vs.append(v_long)
+                states_for_forward.append(state_np)
+
+        if not states_for_forward:
+            # Surface the breakdown so the per-epoch warning has actionable
+            # context (which skip cause dominated). Single INFO line per
+            # all-skipped step is fine — they're rare in healthy runs.
+            exc_info = getattr(self, '_sc_last_exc', '')
+            exc_suffix = f" first_exc=[{exc_info}]" if exc_info else ""
+            self.logger.info(
+                f"[SC] step skipped all {sample_size} samples "
+                f"(decode={skip_decode}, terminal={skip_terminal}, "
+                f"search_exc={skip_search_exc}, degenerate_pi={skip_degenerate_pi})"
+                f"{exc_suffix}"
+            )
+            self._sc_last_exc = ''  # reset for next step
+            return {'skipped': float(skipped), 'samples': 0.0}
+
+        # Stack into batched tensors. State tensors come from the buffer
+        # already encoded; forward expects fp32 on the trainer device.
+        states_tensor = torch.stack(
+            [torch.from_numpy(s).float() for s in states_for_forward]
+        ).to(self.device)
+        pi_target = torch.from_numpy(np.stack(target_pis)).to(self.device)  # detached by construction
+        v_target = torch.tensor(target_vs, dtype=torch.float32, device=self.device)
+
+        self.network.network.train()
+        self.policy_optimizer.zero_grad()
+        self.value_optimizer.zero_grad()
+
+        with self._autocast():
+            pred_logits, pred_values = self.network.network(states_tensor)
+        # Promote CE math to fp32 (same pattern as the main value-head loss).
+        log_probs = F.log_softmax(pred_logits.float(), dim=1)
+        # Cross-entropy with the long-search distribution as soft target.
+        # Equivalent to KL(π_long || softmax(logits)) up to a constant in π_long.
+        policy_consistency_loss = -(pi_target * log_probs).sum(dim=1).mean()
+        value_consistency_loss = F.mse_loss(pred_values.view(-1).float(), v_target)
+
+        total = (
+            self.search_consistency_weight * policy_consistency_loss
+            + self.search_consistency_value_weight * value_consistency_loss
+        )
+        total.backward()
+
+        # Reuse the same grad clipping bounds as the main loops.
+        policy_params = [p for n, p in self.network.network.named_parameters()
+                         if 'value_head' not in n]
+        value_params = [p for n, p in self.network.network.named_parameters()
+                        if 'value_head' in n]
+        torch.nn.utils.clip_grad_norm_(policy_params, max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(value_params, max_norm=0.5)
+
+        self.policy_optimizer.step()
+        self.value_optimizer.step()
+        if self.ema is not None:
+            self.ema.update()
+
+        # Clear cached value logits to mirror the main train_step's hygiene.
+        if hasattr(self.network.network, '_value_logits'):
+            self.network.network._value_logits = None
+        if hasattr(self.network.network, 'value_head_activations'):
+            self.network.network.value_head_activations.clear()
+
+        stats = {
+            'samples': float(len(states_for_forward)),
+            'skipped': float(skipped),
+            'skip_decode': float(skip_decode),
+            'skip_terminal': float(skip_terminal),
+            'skip_search_exc': float(skip_search_exc),
+            'skip_degenerate_pi': float(skip_degenerate_pi),
+            'policy_loss': float(policy_consistency_loss.item()),
+            'value_loss': float(value_consistency_loss.item()),
+            'total_loss': float(total.item()),
+        }
+        # Keep a small rolling history for epoch-end logging.
+        self._sc_loss_history.append(stats)
+        if len(self._sc_loss_history) > 200:
+            self._sc_loss_history = self._sc_loss_history[-200:]
+        return stats
 
     def clear_training_state(self):
         """Clear accumulated training state to prevent memory leaks.
@@ -982,11 +1629,29 @@ class YinshTrainer:
                 "RING_REMOVAL": 1.0
             }
 
+        # Snapshot consistency-loss history length so we can report just this
+        # epoch's contribution at the bottom (and not stale stats across runs).
+        sc_history_start = len(self._sc_loss_history)
+        sc_attempts_this_epoch = 0  # gate fired (regardless of internal skips)
+
         for batch in range(batches_per_epoch):
             p_loss, v_loss, v_acc, move_accs = self.train_step(
                 batch_size,
                 phase_weights=phase_weights
             )
+
+            # Search-consistency probe (Track B §5). Gated by `enable_search_
+            # consistency` and a warmup-iter check inside the step itself; this
+            # block is just the every-K-batches cadence. Counter advances on
+            # every batch (not just on enabled steps) so disabling/re-enabling
+            # at runtime doesn't reset the cadence.
+            self._sc_step_counter += 1
+            if (
+                self.enable_search_consistency
+                and self._sc_step_counter % max(1, self.search_consistency_every_k_steps) == 0
+            ):
+                sc_attempts_this_epoch += 1
+                self._search_consistency_step()
 
             # Track value head metrics
             value_confidences.append(self._get_current_value_confidence())
@@ -1111,24 +1776,113 @@ class YinshTrainer:
                 # Mean confidence (mean abs value)
                 mean_conf = np.mean(diag['mean_abs_values']) if diag['mean_abs_values'] else 0.0
 
+                # `mean_abs_value` is the value-head "discrimination" metric
+                # tracked in RESEARCH_LOG.md (0.104 ceiling). Logged with the
+                # explicit `discrimination=` alias so the §5 search-consistency
+                # bake-off can grep for plateau-break events without parsing a
+                # second name. The two are identical by construction.
                 self.logger.info(
-                    f"[Value Diagnostics] mean_abs_value={mean_conf:.4f}\n"
+                    f"[Value Diagnostics] discrimination={mean_conf:.4f} "
+                    f"(mean_abs_value={mean_conf:.4f})\n"
                     f"  Target class %: [{', '.join(target_pct)}] (classes 0-{num_classes-1})\n"
                     f"  Pred class %:   [{', '.join(pred_pct)}]"
                 )
+
+            # Expected Calibration Error + reliability-diagram sparkline.
+            # ECE = Σ_b (n_b / N) · |acc_b − conf_b|. Sparkline shows per-bin
+            # (acc − conf) as a compact glyph so drift is visible at a glance.
+            if 'ece_bin_count' in diag:
+                ece_report = self._summarize_ece(diag)
+                if ece_report is not None:
+                    self.logger.info(f"[Value Diagnostics] {ece_report}")
 
             # Reset diagnostics for next epoch
             self._epoch_value_diagnostics = {
                 'mean_abs_values': [],
                 'pred_class_counts': torch.zeros(num_classes),
                 'target_class_counts': torch.zeros(num_classes),
-                'batch_variances': []
+                'batch_variances': [],
+                'ece_bin_correct': torch.zeros(diag['ece_bin_count'].numel() if 'ece_bin_count' in diag else 10),
+                'ece_bin_conf': torch.zeros(diag['ece_bin_count'].numel() if 'ece_bin_count' in diag else 10),
+                'ece_bin_count': torch.zeros(diag['ece_bin_count'].numel() if 'ece_bin_count' in diag else 10),
             }
+
+        # Policy entropy + collapse detection. Low entropy = policy has collapsed
+        # onto a narrow subset of moves — a known failure mode of this codebase.
+        # Track a rolling history, flag sudden drops >50% below the 3-epoch mean.
+        current_entropy = stats_accum.get('policy_entropy', 0.0)
+        if current_entropy > 0:
+            self._policy_entropy_history = getattr(self, '_policy_entropy_history', [])
+            if len(self._policy_entropy_history) >= 3:
+                recent_mean = float(np.mean(self._policy_entropy_history[-3:]))
+                if recent_mean > 0.1 and current_entropy < 0.5 * recent_mean:
+                    self.logger.warning(
+                        f"[Value Diagnostics] POLICY ENTROPY COLLAPSE: "
+                        f"{current_entropy:.3f} < 0.5 × 3-epoch avg ({recent_mean:.3f})"
+                    )
+            self._policy_entropy_history.append(current_entropy)
+            # Bound memory: keep most-recent 20 epochs.
+            self._policy_entropy_history = self._policy_entropy_history[-20:]
+            self.logger.info(
+                f"[Value Diagnostics] policy_entropy={current_entropy:.3f} "
+                f"(rolling N={len(self._policy_entropy_history)})"
+            )
+
+        # Search-consistency probe summary for this epoch. We log the per-
+        # epoch averages of the policy/value distillation losses so the
+        # discrimination-plateau hypothesis can be evaluated against the
+        # standard `[Value Diagnostics]` lines side-by-side.
+        if self.enable_search_consistency and len(self._sc_loss_history) > sc_history_start:
+            this_epoch = self._sc_loss_history[sc_history_start:]
+            steps = len(this_epoch)
+            avg_p = float(np.mean([s['policy_loss'] for s in this_epoch]))
+            avg_v = float(np.mean([s['value_loss'] for s in this_epoch]))
+            avg_total = float(np.mean([s['total_loss'] for s in this_epoch]))
+            avg_samples = float(np.mean([s['samples'] for s in this_epoch]))
+            avg_skipped = float(np.mean([s['skipped'] for s in this_epoch]))
+            self.logger.info(
+                f"[SearchConsistency] steps={steps} "
+                f"policy_distill={avg_p:.4f} value_distill={avg_v:.4f} "
+                f"total={avg_total:.4f} samples/step={avg_samples:.1f} "
+                f"skipped/step={avg_skipped:.2f}"
+            )
+        elif self.enable_search_consistency:
+            # Probe armed but produced no logged steps this epoch. Three
+            # distinct reasons — surface them so a config bug doesn't hide
+            # behind the same diagnostic as legitimate warmup behavior.
+            if sc_attempts_this_epoch == 0:
+                # Gate cadence didn't fire — usually short-epoch + large k.
+                reason = "every_k_steps gate not hit this epoch"
+            elif self.current_iteration < self.search_consistency_warmup_iters:
+                reason = f"warmup ({self.current_iteration}/{self.search_consistency_warmup_iters} iters)"
+            elif self.experience.size() < self.search_consistency_batch_size:
+                reason = (
+                    f"buffer too small "
+                    f"({self.experience.size()}<{self.search_consistency_batch_size})"
+                )
+            else:
+                # Gate hit, not in warmup, buffer big enough — but every
+                # attempt skipped all positions internally (decode_state
+                # failures or all-terminal samples). Bump severity because
+                # this means the loss is silently no-op'ing.
+                self.logger.warning(
+                    f"[SearchConsistency] step fired {sc_attempts_this_epoch}× "
+                    f"but every attempt produced 0 distillation samples — "
+                    f"all positions skipped (terminal or decode_state failed). "
+                    f"Re-enable DEBUG logging to inspect the per-position skip cause."
+                )
+                reason = None
+            if reason is not None:
+                self.logger.info(f"[SearchConsistency] no steps this epoch ({reason})")
 
         # Step schedulers once per epoch (not per batch!)
         # This ensures LR decay happens at a reasonable rate
         self.policy_scheduler.step()
         self.value_scheduler.step()
+        # Track global epoch across the whole training run so the supervisor
+        # can rebuild cosine state correctly after each per-iteration optimizer
+        # reset (see `_build_schedulers`).
+        self._global_epoch += 1
 
         return vars(metrics)
 

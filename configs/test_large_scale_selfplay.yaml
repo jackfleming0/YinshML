@@ -1,0 +1,67 @@
+# Test configuration for large-scale self-play (small run for testing)
+# Target: 100 games for testing purposes
+
+version: 1
+
+# Hardware/runtime
+device: auto
+num_iterations: 1
+save_dir: test_large_scale_selfplay_runs
+
+# Self-play / MCTS - Optimized for testing
+self_play:
+  num_simulations: 25         # Reduced for faster games
+  late_simulations: 15        # Reduced for faster games
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 100              # Reduced for faster games
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: auto
+  games_per_iteration: 100    # Test with 100 games
+
+# Data collection settings
+data_collection:
+  target_games: 100           # Test target
+  min_games: 50              # Minimum acceptable
+  max_games: 150             # Maximum if time allows
+  batch_size: 10             # Games per batch
+  save_interval: 5           # Save every 5 games
+  progress_interval: 10       # Log progress every 10 games
+  checkpoint_interval: 25     # Create checkpoint every 25 games
+  validation_interval: 50     # Validate data every 50 games
+  
+# Storage settings
+storage:
+  output_dir: test_large_scale_selfplay_data
+  use_parquet_storage: true
+  parquet_batch_size: 20
+  compression: snappy
+  validation_enabled: true
+  
+# Monitoring settings
+monitoring:
+  log_level: INFO
+  performance_logging: true
+  memory_monitoring: true
+  disk_space_monitoring: true
+  alert_threshold_games_per_hour: 5   # Alert if below 5 games/hour
+  alert_threshold_disk_usage: 90      # Alert if disk usage > 90%
+  
+# Quality control
+quality_control:
+  min_game_length: 5         # Minimum turns per game
+  max_game_length: 200       # Maximum turns per game
+  rule_based_probability: 0.1
+  random_seed: 42
+  
+# Recovery settings
+recovery:
+  checkpoint_enabled: true
+  resume_from_checkpoint: true
+  backup_interval: 50        # Backup every 50 games
+  max_backups: 3             # Keep last 3 backups

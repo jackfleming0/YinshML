@@ -170,7 +170,7 @@ class TensorPool:
             if key in self._tensor_pools and self._tensor_pools[key]:
                 tensor = self._tensor_pools[key].pop()
                 hit = True
-                logger.debug(f"Exact match found for shape {shape}")
+                pass
                 
             # Try tensor reshaping if enabled and no exact match
             elif self.config.enable_tensor_reshaping:
@@ -190,7 +190,7 @@ class TensorPool:
                         was_reshaped = True
                         hit = True
                         self.statistics.tensor_reshapes += 1
-                        logger.debug(f"Tensor reshaped from {tensor.shape} to {shape}")
+                        pass
                     except Exception as e:
                         logger.warning(f"Failed to reshape tensor: {e}")
                         tensor = None
@@ -200,7 +200,7 @@ class TensorPool:
                 try:
                     tensor = torch.zeros(shape, dtype=dtype, device=device) if zero_init else torch.empty(shape, dtype=dtype, device=device)
                     self._track_new_tensor_memory(tensor)
-                    logger.debug(f"Created new tensor with shape {shape}")
+                    pass
                 except Exception as e:
                     logger.error(f"Failed to create tensor {shape} on {device}: {e}")
                     raise
@@ -291,9 +291,9 @@ class TensorPool:
             if self._is_within_memory_limits(key[2]):  # device_str
                 # Return to appropriate pool
                 self._tensor_pools[key].append(tensor)
-                logger.debug(f"Tensor returned to pool with key {key}")
+                pass
             else:
-                logger.debug(f"Tensor not returned to pool due to memory limits for device {key[2]}")
+                pass
             
             self.statistics.tensor_deallocations += 1
     
@@ -466,7 +466,7 @@ class TensorPool:
         # This is a placeholder for more sophisticated pool size adaptation
         # In practice, this might involve growing/shrinking specific shape pools
         # based on their usage patterns
-        logger.debug(f"Adapting pool sizes with target: {new_target_size}")
+        pass
         
         # For now, we just log the adaptation event
         # More sophisticated implementation would:
@@ -537,7 +537,7 @@ class TensorPool:
                     torch.cuda.empty_cache()
 
                 if total_cleared > 0:
-                    logger.debug(f"TensorPool clear_all: released {total_cleared} tensors")
+                    pass
         except Exception as e:
             logger.warning(f"Error during TensorPool clear_all: {e}")
         return total_cleared

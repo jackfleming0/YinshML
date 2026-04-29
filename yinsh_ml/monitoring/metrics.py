@@ -119,7 +119,7 @@ class MemoryMetricsCollector:
                             'max_size': getattr(pool.config, 'max_capacity', 1000) or 1000
                         }
                     except Exception as e:
-                        logger.debug(f"Error getting game state pool stats: {e}")
+                        pass
                         return {
                             'utilization': 0.0,
                             'hit_rate': 0.0,
@@ -143,7 +143,7 @@ class MemoryMetricsCollector:
                             'max_size': 1000  # Default
                         }
                     except Exception as e:
-                        logger.debug(f"Error getting tensor pool stats: {e}")
+                        pass
                         return {
                             'utilization': 0.0,
                             'hit_rate': 0.0,

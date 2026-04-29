@@ -62,9 +62,19 @@ class MCTSConfig:
     
     # Heuristic score normalization
     heuristic_score_scale: float = 50.0  # Scale factor for tanh normalization
-    
+
     # Phase-aware weighting
     use_phase_aware_weighting: bool = True
+
+    # First-Play Urgency (KataGo-style PUCT). 0 disables.
+    fpu_reduction: float = 0.25
+
+    # Root Dirichlet noise mixing schedule. `new_prior = (1-eps)*prior + eps*noise`
+    # where eps linearly interpolates from `epsilon_mix_start` to `epsilon_mix_end`
+    # over `epsilon_mix_taper_moves`. Matches the training-path MCTS config.
+    epsilon_mix_start: float = 0.25
+    epsilon_mix_end: float = 0.0
+    epsilon_mix_taper_moves: int = 20
 
 
 class MCTSNode:
@@ -145,8 +155,17 @@ class MCTS:
         self.heuristic_evaluator = None
         if self.config.use_heuristic_evaluation:
             try:
-                self.heuristic_evaluator = YinshHeuristics()
-                self.logger.info("YinshHeuristics evaluator initialized successfully")
+                # MCTS already does multi-ply lookahead via simulation; the
+                # heuristic's own forced-sequence detector duplicates that
+                # work at every leaf and dominates wall-clock. Disable it
+                # here. Standalone HeuristicAgent uses the default (enabled).
+                self.heuristic_evaluator = YinshHeuristics(
+                    enable_forced_sequence_detection=False,
+                )
+                self.logger.info(
+                    "YinshHeuristics evaluator initialized "
+                    "(forced-sequence detection disabled for MCTS use)"
+                )
             except Exception as e:
                 self.logger.warning(f"Failed to initialize heuristic evaluator: {e}")
                 self.heuristic_evaluator = None
@@ -208,26 +227,25 @@ class MCTS:
                 self.logger.warning(f"Failed to return state to pool: {e}")
     
     def _create_child_node(self, state: GameState, parent, prior_prob: float) -> MCTSNode:
-        """Create a child node with proper memory management."""
-        if self._pool_enabled:
-            child_state = self._acquire_state_copy(state)
-            child_node = MCTSNode(
-                child_state,
-                parent=parent,
-                prior_prob=prior_prob,
-                c_puct=self.config.c_puct,
-                state_pool=self.game_state_pool
-            )
-            child_node._owns_state = True
-            return child_node
-        else:
-            return MCTSNode(
-                state.copy(),
-                parent=parent,
-                prior_prob=prior_prob,
-                c_puct=self.config.c_puct
-            )
+        """Create a child node WITHOUT copying the game state.
+
+        Child node states were never read during search (the traversal uses a
+        running current_state copy advanced by make_move), so the ~85 deep-copies
+        per expansion were pure waste.
+        """
+        return MCTSNode(None, parent=parent, prior_prob=prior_prob, c_puct=self.config.c_puct)
     
+    def _compute_epsilon_mix(self, move_number: int) -> float:
+        """Linearly taper root-noise mixing fraction from `epsilon_mix_start`
+        at move 0 to `epsilon_mix_end` at `epsilon_mix_taper_moves`, then
+        clamped at end. Returns start value if taper is disabled."""
+        if self.config.epsilon_mix_taper_moves <= 0:
+            return self.config.epsilon_mix_start
+        alpha = min(max(move_number, 0) / self.config.epsilon_mix_taper_moves, 1.0)
+        return self.config.epsilon_mix_start + alpha * (
+            self.config.epsilon_mix_end - self.config.epsilon_mix_start
+        )
+
     def _get_simulation_budget(self, move_number: int) -> int:
         """Get simulation budget based on move number."""
         if move_number < self.config.simulation_switch_ply:
@@ -236,20 +254,40 @@ class MCTS:
             return self.config.late_simulations or self.config.num_simulations
     
     def _select_action(self, node: MCTSNode) -> Optional[int]:
-        """Select action using UCB."""
+        """Select action using UCB, with FPU for unvisited children.
+
+        Unvisited children are scored with
+        ``q_fpu = −node.value() − fpu_reduction · sqrt(Σ π(c) for visited c)``
+        instead of the default ``q=0``. Negation on `node.value()` flips from
+        grandparent-POV (the backprop convention) into parent-POV.
+        """
         if not node.children:
             return None
-        
+
         parent_visit_count = node.visit_count
+        fpu_reduction = self.config.fpu_reduction
+        fpu_q = 0.0
+        if fpu_reduction > 0:
+            visited_policy_sum = sum(
+                c.prior_prob for c in node.children.values() if c.visit_count > 0
+            )
+            fpu_q = -node.value() - fpu_reduction * np.sqrt(visited_policy_sum)
+
         best_action = None
         best_score = float('-inf')
-        
+
         for action, child in node.children.items():
-            score = child.get_ucb_score(parent_visit_count)
+            if child.visit_count == 0 and fpu_reduction > 0:
+                # Inline UCB with the FPU baseline in place of child.value().
+                u_value = (child.c_puct * child.prior_prob *
+                           np.sqrt(parent_visit_count) / (1 + child.visit_count))
+                score = fpu_q + u_value
+            else:
+                score = child.get_ucb_score(parent_visit_count)
             if score > best_score:
                 best_score = score
                 best_action = action
-        
+
         return best_action
     
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
@@ -466,14 +504,16 @@ class MCTS:
                                 prior_prob=self._get_move_prob(policy, move)
                             )
                         
-                        # Apply Dirichlet noise at root
+                        # Apply Dirichlet noise at root. Mixing fraction tapers
+                        # with move_number so late-game positions lose root
+                        # randomness — see `_compute_epsilon_mix`.
                         if node is root and not hasattr(root, "dirichlet_applied"):
-                            if self.config.dirichlet_alpha > 0 and len(valid_moves) > 0:
+                            epsilon_mix = self._compute_epsilon_mix(move_number)
+                            if self.config.dirichlet_alpha > 0 and len(valid_moves) > 0 and epsilon_mix > 0:
                                 noise = np.random.dirichlet([self.config.dirichlet_alpha] * len(valid_moves))
-                                epsilon_mix = 0.25
                                 for i, move in enumerate(valid_moves):
                                     child_node = root.children[move]
-                                    child_node.prior_prob = ((1 - epsilon_mix) * child_node.prior_prob + 
+                                    child_node.prior_prob = ((1 - epsilon_mix) * child_node.prior_prob +
                                                            epsilon_mix * noise[i])
                                 root.dirichlet_applied = True
             elif value is None and depth >= self.config.max_depth:

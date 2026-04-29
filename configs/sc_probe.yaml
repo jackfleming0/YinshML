@@ -1,0 +1,158 @@
+version: 1
+
+# Hardware/runtime
+device: auto  # one of: auto, cuda, mps, cpu
+# Track B §5 probe: search-consistency regularization with long-search
+# distillation. Scaled down from stock training.yaml to fit an overnight
+# Mac Mini budget (~6-8 hours) while keeping enough signal to decide the
+# plateau-break hypothesis: 8 iterations (warmup=2 + 6 active-SC iters),
+# fewer games and fewer sims than the 50-iter reference. Extrapolates to
+# the full schedule once the decision gate fires.
+num_iterations: 8
+save_dir: runs
+
+# Self-play / MCTS
+self_play:
+  evaluation_mode: hybrid     # Options: pure_neural, pure_heuristic, hybrid
+  heuristic_weight: 0.3       # Back-compat default; overridden by curriculum below when anneal>0
+  # Curriculum: linearly anneal heuristic_weight from start → end over N iterations,
+  # then hold at end. Dampens the iter 1-2 warm-start regression by starting self-play
+  # close to the supervised distribution (heavy heuristic) and rolling off to pure
+  # neural by the time the value head has readjusted.
+  heuristic_weight_start: 1.0
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
+  num_simulations: 48         # Cut from 160 for sc_probe overnight budget
+  late_simulations: 24        # Cut from 96 for sc_probe overnight budget
+  simulation_switch_ply: 20   # switch point between early/late budgets
+  c_puct: 1.0
+  dirichlet_alpha: 0.3        # root noise
+  value_weight: 1.0           # UCB value term weight
+  max_depth: 300
+  # Batched MCTS settings (Phase 2.1 - 10-20x speedup)
+  use_batched_mcts: true      # Enable batched leaf evaluation
+  mcts_batch_size: 32         # Number of leaves to collect before batching (16-64 recommended)
+  enable_subtree_reuse: true  # Carry MCTS tree across moves within a self-play game:
+                              # after each played move, advance root to the chosen child
+                              # and keep its visits/priors instead of rebuilding from scratch.
+                              # Roughly doubles effective sims-per-move at no NN cost. Set
+                              # to false for A/B comparison against the old fresh-root path.
+  fpu_reduction: 0.25         # First-Play Urgency (KataGo-style PUCT). Unvisited children
+                              # score their Q as `q_parent - fpu_reduction * sqrt(Σπ_visited)`
+                              # instead of 0 — discourages exploring low-prior moves once
+                              # decent siblings have been tried. 0 = disable, KataGo default 0.25.
+  # Root Dirichlet noise mixing: new_prior = (1−eps)·prior + eps·noise.
+  # `eps` tapers linearly from start → end over `taper_moves`, then clamps
+  # at end. Exploration pressure stays on early moves where most value comes
+  # from diversity; late-game tactical positions run without root randomness
+  # so MCTS can commit. Set end == start to disable the taper.
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3              # Capped at 3 on macOS: RESEARCH_LOG.md L33 — saves ~4GB vs 4+ workers at ~15% time cost
+  games_per_iteration: 20     # Cut from 100 for sc_probe overnight budget; 20 × 8 iters = 160 games total
+
+# Learner / Trainer
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5  # RUN B: Reverted to 0.5 (Run A showed 0.3 caused regression)
+  epochs_per_iteration: 4     # REDUCED: from 40 to 4 to prevent overfitting (AlphaZero equivalent)
+  batches_per_epoch: auto     # auto scales with buffer size
+  max_buffer_size: 50000      # REDUCED: from 100K to 50K for faster iteration cycles
+  # EMA shadow of network weights for tournament eval. Updated after every
+  # optimizer step; written as checkpoint_iteration_N_ema.pt next to the live
+  # checkpoint. The tournament loads the EMA file when present so single-step
+  # loss dips don't leak into the promotion gate's win-rate numbers.
+  ema_decay: 0.999            # null to disable the shadow entirely
+  use_ema_for_eval: true      # If true, tournament prefers the _ema.pt sibling
+  # LR schedule. `cosine` gives linear warmup to base_lr over warmup_epochs,
+  # then cosine annealing to ~0 over (total_epochs - warmup_epochs). Total
+  # epochs = num_iterations × epochs_per_iteration is computed at launch.
+  # `step` restores the legacy StepLR(step_size=10, gamma=0.9) for A/B.
+  lr_schedule: cosine
+  warmup_epochs: 10            # ~5% of default 50×4=200 epochs; bump if scaling up
+  # Mixed-precision (bf16) autocast around training forward + loss. CE-family
+  # ops auto-promote to fp32 internally so value-head gradients stay stable.
+  # Auto-disabled on CPU (bf16 on CPU doesn't win wall-clock back). On MPS,
+  # expect ~20-30% training throughput win + lower MPS driver memory.
+  enable_autocast: true
+  soft_value_target_sigma: 0.5 # Gaussian smoothing (in class-widths) of the 7-class
+                               # value target before CE. σ=0.5 spreads ~38% mass onto
+                               # neighbors, encoding ordinal structure (+2 is closer to
+                               # +3 than to -2) that hard one-hot CE throws away. Set
+                               # to 0 to restore hard-CE behavior for A/B testing.
+  # Track B §5 — search-consistency probe. Distills long-search MCTS targets
+  # (visit distribution + root value) into the network as an auxiliary loss
+  # every K training batches. Tests whether the 0.104 discrimination plateau
+  # is a training-signal problem. Off by default — flip `enabled: true` to
+  # arm. Expect ~+30-50% wall-clock with the defaults below.
+  search_consistency:
+    enabled: true              # armed for Track B §5 probe
+    policy_weight: 0.1         # KL(π_long || softmax(logits)) coefficient
+    value_weight: 1.0          # MSE(v_long, v_pred) coefficient
+    every_k_steps: 5           # Tighter cadence for fewer-batches-per-iter regime
+    long_sims: 24              # Cut from 64; still 2× the self-play sim budget
+    batch_size: 16             # Cut from 32 to fit the reduced wall-clock envelope
+    warmup_iters: 2            # Cut from 3 to save an iter in the 8-iter budget
+
+# Phase-weighted sampling (emphasize critical game phases)
+# MAIN_GAME is where most strategic decisions happen
+# RING_PLACEMENT is setup phase (moderately important)
+# RING_REMOVAL happens after runs complete (least critical to learn)
+phase_weights:
+  RING_PLACEMENT: 1.0         # Moderate emphasis (setup phase)
+  MAIN_GAME: 2.0              # Double emphasis (most critical phase)
+  RING_REMOVAL: 0.5           # Half emphasis (mechanical phase)
+
+# D6 Symmetry Augmentation (12x data expansion)
+# YINSH has hexagonal symmetry: 6 rotations + 6 reflections
+# This effectively multiplies training data for FREE
+augmentation:
+  enabled: true
+  max_augmentations: 4        # D2 Klein 4-group: identity + 180° + 2 reflections
+
+# Evaluation & gating
+arena:
+  games_per_match: 40         # Cut from 100 to fit overnight budget; Wilson CI wider but probe is a diagnostic, not a gate-tightening study.
+                              # Doubles arena wall-clock vs 50 (3 pairs × 2 dirs × 100 games
+                              # = 600 games per iter). Bumping further is a sharper-CI vs
+                              # iteration-throughput tradeoff — re-evaluate after a couple
+                              # of iters land with CI logging.
+  promotion_threshold: 0.55   # Wilson LB threshold
+  tournament_sliding_window: 3  # 3 most-recent models in the pool. Expanding to 5 would
+                                # 3.3× arena cost (10 pairs vs 3) — defer until per-pair
+                                # CI logs reveal whether we're opponent-diversity-bound.
+  eval_seed: 20260415         # Deterministic match play. Each game is seeded from a
+                              # stable hash of (eval_seed, white_id, black_id, game_num),
+                              # so reruns with the same checkpoints reproduce exactly
+                              # while different orientations / games still diverge. Set
+                              # to null to restore the old stochastic behavior.
+
+# Export settings
+export:
+  export_every: 5              # iterations
+  coreml_dir: models/coreml
+
+# Difficulty presets (used at inference time)
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
+

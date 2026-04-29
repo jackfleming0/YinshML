@@ -1,0 +1,72 @@
+# Architectural Improvements - Smoke Test Configuration
+# Quick validation that encoding and augmentation work correctly
+#
+# Run with: python scripts/run_training.py --config configs/architectural_smoke_test.yaml
+
+version: 1
+
+# Hardware/runtime
+device: auto
+num_iterations: 3  # Just enough to verify pipeline works
+save_dir: runs/smoke_test
+
+# === PHASE 1: Enhanced State Encoding ===
+encoding:
+  type: enhanced  # "basic" (6 channels) or "enhanced" (15 channels)
+  num_channels: 15
+
+# === PHASE 2: Symmetry Augmentation ===
+augmentation:
+  enabled: true
+  include_reflections: true
+  max_augmentations: 4  # Limited for fast testing
+
+# Self-play / MCTS - Minimal settings for fast testing
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  num_simulations: 32        # Minimal for speed
+  late_simulations: 32
+  simulation_switch_ply: 10
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 100
+  use_batched_mcts: true
+  mcts_batch_size: 16
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 15
+  temp_clamp_fraction: 0.6
+  num_workers: 0             # Single-threaded for debugging
+  games_per_iteration: 5     # Minimal games
+
+# Learner / Trainer
+trainer:
+  batch_size: 64             # Small batch for fast testing
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 2    # Minimal training
+  batches_per_epoch: 4       # Fixed small number
+  max_buffer_size: 5000
+  enable_augmentation: true
+  max_augmentations: 4
+
+# Evaluation - Skip for smoke test
+arena:
+  games_per_match: 10
+  promotion_threshold: 0.55
+
+# Export settings
+export:
+  export_every: 100          # Effectively disabled for smoke test
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 10
+    temperature: 1.0
+    c_puct: 1.0

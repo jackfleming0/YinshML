@@ -44,10 +44,11 @@ class YinshHeuristics:
         self,
         weights: Optional[Dict[str, Any]] = None,
         phase_config: Optional[PhaseConfig] = None,
-        weight_config_file: Optional[str] = None
+        weight_config_file: Optional[str] = None,
+        enable_forced_sequence_detection: bool = True,
     ):
         """Initialize the YinshHeuristics evaluator.
-        
+
         Args:
             weights: Optional dictionary of feature weights for different phases.
                      If None, default weights will be used based on correlation
@@ -57,11 +58,20 @@ class YinshHeuristics:
             weight_config_file: Optional path to weight configuration file.
                                If provided, weights will be loaded from this file.
                                If None and weights is None, default weights will be used.
-                     
+            enable_forced_sequence_detection: If True (default), evaluate_position
+                runs detect_forced_sequences — a recursive multi-ply lookahead that
+                walks ~10×10×10 game-state copies. This is ~99% of heuristic time
+                inside MCTS hybrid mode (per profiling); MCTS itself already does
+                this lookahead via simulation, so disabling it for MCTS callers
+                gives a ~30× heuristic speedup with no real-search-quality loss.
+                Standalone HeuristicAgent uses the default (True). MCTS callers
+                should explicitly pass False.
+
         Raises:
             ValueError: If weights structure is invalid.
             FileNotFoundError: If weight_config_file is specified but doesn't exist.
         """
+        self._enable_forced_sequence_detection = bool(enable_forced_sequence_detection)
         # Initialize weight manager
         self.weight_manager = WeightManager()
         
@@ -163,9 +173,14 @@ class YinshHeuristics:
             return tactical_score
         
         # 0.75. Check for forced sequences (multi-move forced outcomes)
-        # Skip forced sequence detection during RING_PLACEMENT phase for performance
-        # (forced sequences are only relevant in MAIN_GAME phase)
-        if game_state.phase == GamePhase.MAIN_GAME:
+        # Gated by `enable_forced_sequence_detection` because the recursive
+        # ~10×10×10 lookahead dominates MCTS leaf-eval wall-clock (~99% of
+        # heuristic time on profiled 16-ply slice). MCTS-side callers pass
+        # False; standalone HeuristicAgent leaves it on.
+        if (
+            self._enable_forced_sequence_detection
+            and game_state.phase == GamePhase.MAIN_GAME
+        ):
             forced_score = detect_forced_sequences(game_state, player)
             if forced_score is not None:
                 return forced_score

@@ -18,13 +18,18 @@ from yinsh_ml.search.mcts import MCTS, MCTSConfig, EvaluationMode
 from yinsh_ml.search.training_tracker import TrainingTracker
 from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.heuristics import YinshHeuristics
+from yinsh_ml.utils.encoding import StateEncoder
+
+# Policy output size — driven by the encoder so tests track the authoritative
+# layout instead of hardcoding a number that goes stale on every rework.
+TOTAL_MOVES = StateEncoder().total_moves
 
 
 class MockNetworkWrapper:
     """Mock network wrapper for testing."""
-    
+
     def __init__(self):
-        self.total_moves = 7395
+        self.total_moves = TOTAL_MOVES
     
     def predict(self, state_tensor):
         """Return mock policy and value."""
@@ -62,7 +67,7 @@ class TestHeuristicMCTSIntegration(unittest.TestCase):
         # Run search
         try:
             policy = mcts.search(self.game_state, move_number=5)
-            self.assertEqual(len(policy), 7395)
+            self.assertEqual(len(policy), TOTAL_MOVES)
             self.assertGreaterEqual(policy.sum(), 0.0)
         except Exception as e:
             self.fail(f"MCTS search failed in pure heuristic mode: {e}")
@@ -84,7 +89,7 @@ class TestHeuristicMCTSIntegration(unittest.TestCase):
         # Run search
         try:
             policy = mcts.search(self.game_state, move_number=5)
-            self.assertEqual(len(policy), 7395)
+            self.assertEqual(len(policy), TOTAL_MOVES)
         except Exception as e:
             self.fail(f"MCTS search failed in pure neural mode: {e}")
     
@@ -107,7 +112,7 @@ class TestHeuristicMCTSIntegration(unittest.TestCase):
         # Run search
         try:
             policy = mcts.search(self.game_state, move_number=5)
-            self.assertEqual(len(policy), 7395)
+            self.assertEqual(len(policy), TOTAL_MOVES)
         except Exception as e:
             self.fail(f"MCTS search failed in hybrid mode: {e}")
     
@@ -249,7 +254,7 @@ class TestHeuristicMCTSIntegration(unittest.TestCase):
         # Should fallback to neural without crashing
         try:
             policy = mcts.search(self.game_state, move_number=5)
-            self.assertEqual(len(policy), 7395)
+            self.assertEqual(len(policy), TOTAL_MOVES)
         except Exception as e:
             self.fail(f"MCTS should handle heuristic failure gracefully: {e}")
         finally:
@@ -270,7 +275,7 @@ class TestHeuristicMCTSIntegration(unittest.TestCase):
         policy = mcts.search(self.game_state, move_number=5)
         
         # Verify policy is valid
-        self.assertEqual(len(policy), 7395)
+        self.assertEqual(len(policy), TOTAL_MOVES)
         self.assertGreaterEqual(policy.sum(), 0.0)
         self.assertLessEqual(policy.sum(), 1.1)  # Allow small floating point error
     
@@ -288,7 +293,7 @@ class TestHeuristicMCTSIntegration(unittest.TestCase):
             
             try:
                 policy = mcts.search(self.game_state, move_number=5)
-                self.assertEqual(len(policy), 7395)
+                self.assertEqual(len(policy), TOTAL_MOVES)
             except Exception as e:
                 self.fail(f"MCTS failed with budget {budget}: {e}")
     
@@ -322,7 +327,7 @@ class TestHeuristicMCTSIntegration(unittest.TestCase):
         # Run search - should use pool
         try:
             policy = mcts.search(self.game_state, move_number=5)
-            self.assertEqual(len(policy), 7395)
+            self.assertEqual(len(policy), TOTAL_MOVES)
         except Exception as e:
             self.fail(f"MCTS failed with memory pool: {e}")
 

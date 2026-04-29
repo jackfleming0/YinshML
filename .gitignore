@@ -6,13 +6,18 @@
 !scripts/**
 !yinsh_ml/
 !yinsh_ml/**
+!configs/
+!configs/*.yaml
+configs/local/
 !pyproject.toml
 !requirements.txt
 !setup.py
 
 # Allowed root-level documentation
 !CLAUDE.md
-!TODO.md
+!TODO_baseline.md
+!TODO_frontier.md
+!NEXT_UP.md
 !README*.md
 !YINSH_RULES.md
 !QUICK_START_GUIDE.md
@@ -21,6 +26,10 @@
 !ARCHITECTURAL_IMPROVEMENTS_PLAN.md
 !ANALYSIS_SUMMARY_100K_GAMES.md
 !RESEARCH_LOG.md
+!CLOUD_TRAINING_PLAN.md
+!REMOTE_TRAINING_INVESTIGATION.md
+!WARMSTART_PHASE_LOG.md
+!OVERNIGHT_RESULTS.md
 
 !results/
 !logs/
@@ -30,6 +39,11 @@
 !analysis/
 !analysis/**
 analysis/analysis_output
+
+# analysis_output/ is a whitelist: large .png/.txt reports stay ignored,
+# but the pickled heuristic evaluator IS a runtime dep and ships in git.
+!analysis_output/
+!analysis_output/heuristic_evaluator_model.pkl
 
 
 # Python virtual environment

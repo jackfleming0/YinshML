@@ -74,12 +74,29 @@ VALID_POSITIONS: Dict[str, Set[int]] = {
     'K': set(range(7, 11)),  # K7-K10
 }
 
-# Directions for moves and row detection
+# Directions for moves and row detection.
+#
+# The YINSH board has THREE hex line axes (each with two opposite
+# directions, giving 6 total). In this (column, row) coordinate system
+# the three axes are:
+#   - vertical:    (0, 1) / (0, -1)
+#   - horizontal:  (1, 0) / (-1, 0)
+#   - diagonal:    (1, 1) / (-1, -1)   # NOTE: matching signs
+#
+# The OTHER "diagonal" with opposite signs — (1, -1) / (-1, 1) — is a
+# pseudo-diagonal that does NOT correspond to any line on the YINSH
+# board in this coordinate system, and must NOT be used for row
+# detection or line validation. See the reference in
+# yinsh_ml/data/parsers/utils.py::HEX_LINE_DIRECTIONS and the ring
+# movement logic in Board.valid_move_positions.
+#
+# DIRECTIONS is the "forward-only" set of the 3 hex axes, suitable for
+# scanning patterns (e.g. row detection) where we only want to walk
+# each axis once.
 DIRECTIONS = [
     (0, 1),  # Vertical
     (1, 0),  # Horizontal
-    (1, 1),  # Diagonal up-right
-    (-1, 1),  # Diagonal up-left
+    (1, 1),  # Diagonal (matching-sign)
 ]
 
 # Game configuration
@@ -93,38 +110,33 @@ MAX_RING_MOVE_DISTANCE = 5  # Maximum spaces a ring can move
 MIN_MARKER_SEQUENCE = 5  # Minimum markers needed for removal
 MAX_MARKER_SEQUENCE = 7  # Maximum possible markers in a row
 
-# Hexagonal geometry constants
+# Hexagonal geometry constants — the full set of 6 hex neighbour
+# directions (both signs of each of the 3 axes above). Used by ring
+# movement and any logic that needs to enumerate neighbours.
 HEX_DIRECTIONS = [
-    (1, 0),  # East
-    (1, -1),  # Northeast
-    (0, -1),  # Northwest
-    (-1, 0),  # West
-    (-1, 1),  # Southwest
-    (0, 1),  # Southeast
+    (0, 1),   # Vertical +
+    (0, -1),  # Vertical -
+    (1, 0),   # Horizontal +
+    (-1, 0),  # Horizontal -
+    (1, 1),   # Diagonal + (matching-sign)
+    (-1, -1), # Diagonal - (matching-sign)
 ]
+
+# Convenient axis-set for validating that a (dx, dy) step lies on a
+# real hex line. Kept in sync with HEX_DIRECTIONS.
+HEX_LINE_AXES = frozenset(HEX_DIRECTIONS)
+
+
+_VALID_POSITIONS_SET: frozenset = frozenset(
+    (col, row)
+    for col, rows in VALID_POSITIONS.items()
+    for row in rows
+)
 
 
 def is_valid_position(pos: Position) -> bool:
     """Check if a position is valid on the YINSH board."""
-    try:
-        logger.debug(f"Checking validity of position: {pos}")
-        logger.debug(f"  Column: {pos.column}, Row: {pos.row}")
-        logger.debug(f"  Valid columns: {list(VALID_POSITIONS.keys())}")
-
-        if pos.column not in VALID_POSITIONS:
-            logger.debug(f"  Invalid column: {pos.column}")
-            return False
-
-        valid_rows = VALID_POSITIONS[pos.column]
-        is_valid = pos.row in valid_rows
-        logger.debug(f"  Valid rows for column {pos.column}: {sorted(list(valid_rows))}")
-        logger.debug(f"  Row {pos.row} is valid: {is_valid}")
-
-        return is_valid
-
-    except Exception as e:
-        logger.debug(f"Error checking position validity: {e}")
-        return False
+    return (pos.column, pos.row) in _VALID_POSITIONS_SET
 
 
 def get_next_position(pos: Position, direction: tuple[int, int], steps: int = 1) -> Position:

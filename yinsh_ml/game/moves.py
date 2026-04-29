@@ -17,61 +17,61 @@ class MoveGenerator:
 
     def get_valid_moves(board: 'Board', game_state: 'GameState') -> List[Move]:
         """Get all valid moves for the current game state."""
-        logger.debug("\nEntering get_valid_moves")
+        pass
         phase = game_state.phase
         player = game_state.current_player
 
-        logger.debug(f"Finding moves for {player} in phase {phase}")
-        logger.debug(f"Phase type: {type(phase)}")
-        logger.debug(f"Phase value: {phase.value}")
+        pass
+        pass
+        pass
 
         moves = []
         if phase.value == GamePhase.RING_PLACEMENT.value:
-            logger.debug("Getting ring placement moves")
+            pass
             moves = MoveGenerator._get_ring_placement_moves(board, player)
         elif phase.value == GamePhase.MAIN_GAME.value:
-            logger.debug("Getting ring movement moves")
+            pass
             moves = MoveGenerator._get_ring_movement_moves(board, player)
         elif phase.value == GamePhase.ROW_COMPLETION.value:
-            logger.debug("Getting marker removal moves")
+            pass
             moves = MoveGenerator._get_marker_removal_moves(board, player)
         elif phase.value == GamePhase.RING_REMOVAL.value:
-            logger.debug("Getting ring removal moves")
+            pass
             moves = MoveGenerator._get_ring_removal_moves(board, player)
 
-        logger.debug(f"Found {len(moves)} valid moves")
+        pass
         return moves
 
     @staticmethod
     def _get_ring_placement_moves(board: 'Board', player: Player) -> List[Move]:
         """Get all valid ring placement moves."""
-        logger.debug("Starting ring placement generation")
+        pass
         moves = []
         valid_count = 0
         empty_count = 0
 
-        logger.debug(f"Board state:\n{board}")
+        pass
 
         # Check each position
         for col in "ABCDEFGHIJK":
             for row in range(1, 12):
                 pos = Position(col, row)
-                logger.debug(f"\nChecking {pos}")
+                pass
                 if is_valid_position(pos):
                     valid_count += 1
-                    logger.debug(f"Valid position")
+                    pass
                     if board.is_empty(pos):
                         empty_count += 1
-                        logger.debug(f"Empty position - creating move")
+                        pass
                         moves.append(Move(
                             type=MoveType.PLACE_RING,
                             player=player,
                             source=pos
                         ))
                 else:
-                    logger.debug(f"Invalid position")
+                    pass
 
-        logger.debug(f"\nRing placement generation complete:")
+        pass
 
         return moves
 
@@ -104,31 +104,44 @@ class MoveGenerator:
 
     @staticmethod
     def _get_marker_removal_moves(board: 'Board', player: Player) -> List[Move]:
-        """Get all valid marker removal moves."""
+        """Get all valid marker removal moves.
+
+        Real YINSH: when a player completes a row of 5+ same-color
+        markers, they choose ANY 5 consecutive markers from that run to
+        remove. ``find_marker_rows`` now returns the full run of
+        contiguous markers along a hex axis (length 5, 6, or 7), and
+        this function enumerates every length-5 window across it.
+
+        Windows are sorted into a canonical (column, row) order before
+        deduping via a ``frozenset`` so the same 5-window reachable from
+        overlapping 6/7-runs on the same axis is only emitted once.
+        """
         moves = []
         marker_type = PieceType.WHITE_MARKER if player == Player.WHITE else PieceType.BLACK_MARKER
 
-        # Get all rows of the player's markers
         rows = board.find_marker_rows(marker_type)
-        logger.debug(f"Found {len(rows)} rows of {marker_type}")
+        pass
 
+        seen_windows = set()
         for row in rows:
-            if len(row.positions) >= 5:
-                # For each possible sequence of 5 consecutive markers
-                for i in range(len(row.positions) - 4):
-                    # Convert slice to tuple immediately
-                    markers = tuple(row.positions[i:i + 5])
+            if len(row.positions) < 5:
+                continue
+            # row.positions is sorted (column, row); every 5-consecutive
+            # slice along the run is a legal REMOVE_MARKERS candidate.
+            for i in range(len(row.positions) - 4):
+                window = tuple(row.positions[i:i + 5])
+                key = frozenset(window)
+                if key in seen_windows:
+                    continue
+                seen_windows.add(key)
+                pass
+                moves.append(Move(
+                    type=MoveType.REMOVE_MARKERS,
+                    player=player,
+                    markers=window,
+                ))
 
-                    # Create the move with tuple of markers
-                    logger.debug(f"Creating move with markers: {[str(m) for m in markers]}")
-                    move = Move(
-                        type=MoveType.REMOVE_MARKERS,
-                        player=player,
-                        markers=markers
-                    )
-                    moves.append(move)
-
-        logger.debug(f"Generated {len(moves)} valid marker removal moves")
+        pass
         return moves
 
     @staticmethod

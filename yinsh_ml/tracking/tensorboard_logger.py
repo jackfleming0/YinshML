@@ -258,20 +258,20 @@ class TensorBoardLogger:
         Returns:
             SummaryWriter instance or None if disabled
         """
-        logger.debug(f"_get_or_create_writer called for experiment {experiment_id}, enabled={self.is_enabled()}")
+        pass
         
         if not self.is_enabled():
-            logger.debug("TensorBoard is disabled, returning None")
+            pass
             return None
         
         with self._writers_lock:
             if experiment_id not in self._writers:
                 try:
                     log_dir = self.get_log_dir(experiment_id)
-                    logger.debug(f"Creating log directory: {log_dir}")
+                    pass
                     log_dir.mkdir(parents=True, exist_ok=True)
                     
-                    logger.debug(f"Creating SummaryWriter with config: {self._config}")
+                    pass
                     writer = SummaryWriter(
                         log_dir=str(log_dir),
                         flush_secs=self._config.get('flush_secs', 120),
@@ -289,7 +289,7 @@ class TensorBoardLogger:
                     logger.error(traceback.format_exc())
                     return None
             else:
-                logger.debug(f"Using existing writer for experiment {experiment_id}")
+                pass
             
             return self._writers.get(experiment_id)
     
@@ -337,15 +337,15 @@ class TensorBoardLogger:
             value: Metric value
             iteration: Optional explicit step/iteration number
         """
-        logger.debug(f"TensorBoard log_scalar called: enabled={self.is_enabled()}, experiment_id={experiment_id}, metric={metric_name}, value={value}")
+        pass
         
         if not self.is_enabled():
-            logger.debug("TensorBoard logging is disabled, skipping")
+            pass
             return
         
         try:
             writer = self._get_or_create_writer(experiment_id)
-            logger.debug(f"Writer created/retrieved for experiment {experiment_id}: {writer is not None}")
+            pass
             
             if writer is None:
                 logger.warning(f"No TensorBoard writer available for experiment {experiment_id}")
@@ -386,7 +386,7 @@ class TensorBoardLogger:
             step = self._get_step(experiment_id, tag, iteration)
             writer.add_histogram(tag, values, step)
             
-            logger.debug(f"Logged histogram {tag} at step {step} for experiment {experiment_id}")
+            pass
             
         except Exception as e:
             logger.error(f"Failed to log histogram {tag} to TensorBoard for experiment {experiment_id}: {e}")
@@ -416,7 +416,7 @@ class TensorBoardLogger:
             step = self._get_step(experiment_id, tag, iteration)
             writer.add_text(tag, text, step)
             
-            logger.debug(f"Logged text {tag} at step {step} for experiment {experiment_id}")
+            pass
             
         except Exception as e:
             logger.error(f"Failed to log text {tag} to TensorBoard for experiment {experiment_id}: {e}")
@@ -460,7 +460,7 @@ class TensorBoardLogger:
                 with self._stats_lock:
                     self._stats['queued_metrics'] += 1
                     
-                logger.debug(f"Queued scalar metric {metric_name}={value} for experiment {experiment_id}")
+                pass
                 
             except queue.Full:
                 # Queue is full, fall back to synchronous logging
@@ -511,7 +511,7 @@ class TensorBoardLogger:
                 with self._stats_lock:
                     self._stats['queued_metrics'] += 1
                     
-                logger.debug(f"Queued histogram {tag} for experiment {experiment_id}")
+                pass
                 
             except queue.Full:
                 # Queue is full, fall back to synchronous logging
@@ -562,7 +562,7 @@ class TensorBoardLogger:
                 with self._stats_lock:
                     self._stats['queued_metrics'] += 1
                     
-                logger.debug(f"Queued text {tag} for experiment {experiment_id}")
+                pass
                 
             except queue.Full:
                 # Queue is full, fall back to synchronous logging
@@ -592,7 +592,7 @@ class TensorBoardLogger:
         # If background logging is enabled, wait for queue to be processed
         if self._background_enabled and self._metric_queue is not None:
             try:
-                logger.debug("Waiting for background queue to be processed...")
+                pass
                 start_time = time.time()
                 
                 while not self._metric_queue.empty() and (time.time() - start_time) < timeout:
@@ -612,7 +612,7 @@ class TensorBoardLogger:
                 if writer:
                     try:
                         writer.flush()
-                        logger.debug(f"Flushed TensorBoard writer for experiment {experiment_id}")
+                        pass
                     except Exception as e:
                         logger.error(f"Failed to flush TensorBoard writer for experiment {experiment_id}: {e}")
             else:
@@ -620,7 +620,7 @@ class TensorBoardLogger:
                 for exp_id, writer in self._writers.items():
                     try:
                         writer.flush()
-                        logger.debug(f"Flushed TensorBoard writer for experiment {exp_id}")
+                        pass
                     except Exception as e:
                         logger.error(f"Failed to flush TensorBoard writer for experiment {exp_id}: {e}")
     
@@ -670,7 +670,7 @@ class TensorBoardLogger:
             for experiment_id, writer in self._writers.items():
                 try:
                     writer.close()
-                    logger.debug(f"Closed TensorBoard writer for experiment {experiment_id}")
+                    pass
                 except Exception as e:
                     logger.error(f"Failed to close TensorBoard writer for experiment {experiment_id}: {e}")
             
@@ -695,7 +695,7 @@ class TensorBoardLogger:
             **kwargs: Configuration key-value pairs to update
         """
         self._config.update(kwargs)
-        logger.debug(f"TensorBoardLogger configuration updated: {kwargs}")
+        pass
     
     def get_config(self, key: str = None) -> Union[Dict[str, Any], Any]:
         """
@@ -843,7 +843,7 @@ class TensorBoardLogger:
             if writer:
                 step = self._get_step(experiment_id, tag, iteration)
                 writer.add_image(tag, img_tensor, step)
-                logger.debug(f"Logged board state image for experiment {experiment_id} at step {step}")
+                pass
                 
         except Exception as e:
             logger.error(f"Failed to log board state for experiment {experiment_id}: {e}")
@@ -890,7 +890,7 @@ class TensorBoardLogger:
             if writer:
                 step = self._get_step(experiment_id, tag, iteration)
                 writer.add_image(tag, img_tensor, step)
-                logger.debug(f"Logged game trajectory for experiment {experiment_id} at step {step}")
+                pass
                 
         except Exception as e:
             logger.error(f"Failed to log game trajectory for experiment {experiment_id}: {e}")
@@ -937,7 +937,7 @@ class TensorBoardLogger:
             if writer:
                 step = self._get_step(experiment_id, tag, iteration)
                 writer.add_image(tag, img_tensor, step)
-                logger.debug(f"Logged attention heatmap for experiment {experiment_id} at step {step}")
+                pass
                 
         except Exception as e:
             logger.error(f"Failed to log attention heatmap for experiment {experiment_id}: {e}")
@@ -987,7 +987,7 @@ class TensorBoardLogger:
                     img_tensor = torch.from_numpy(img_array)
                 
                 writer.add_image(f"{tag}_visualization", img_tensor, step)
-                logger.debug(f"Logged phase metrics for experiment {experiment_id} at step {step}")
+                pass
                 
         except Exception as e:
             logger.error(f"Failed to log phase metrics for experiment {experiment_id}: {e}")
@@ -1030,7 +1030,7 @@ class TensorBoardLogger:
                     if len(valid_actions) > 0:
                         writer.add_scalar(f"{tag}/valid_max_prob", float(np.max(valid_probs)), step)
                 
-                logger.debug(f"Logged action probabilities for experiment {experiment_id} at step {step}")
+                pass
                 
         except Exception as e:
             logger.error(f"Failed to log action probabilities for experiment {experiment_id}: {e}")
@@ -1097,7 +1097,7 @@ class TensorBoardLogger:
                                 phase_mse = np.mean((phase_preds - phase_targets) ** 2)
                                 writer.add_scalar(f"{tag}/{phase}_mse", float(phase_mse), step)
                 
-                logger.debug(f"Logged value predictions for experiment {experiment_id} at step {step}")
+                pass
                 
         except Exception as e:
             logger.error(f"Failed to log value predictions for experiment {experiment_id}: {e}") 
