@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import random
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import torch
@@ -715,6 +716,13 @@ class ModelTournament:
 
         try:
             for game_num, cand_color in enumerate(color_order):
+                # Per-game progress log — important for multi-hour evals
+                # where the user otherwise has no idea what's happening.
+                game_t0 = time.time()
+                self.logger.info(
+                    f"[anchor {mode_label}] game {game_num + 1}/{num_games} "
+                    f"start (cand={cand_color} vs {anchor_label})"
+                )
                 # Deterministic per-game seed, stable across iterations, so
                 # the SAME pairing sequence is replayed every time.
                 rng_snapshot = (
@@ -822,6 +830,22 @@ class ModelTournament:
 
                 games_played += 1
                 total_moves += move_count
+
+                # Per-game completion log — running totals so the user can
+                # estimate ETA and track win rate as the eval progresses.
+                game_dt = time.time() - game_t0
+                if winner == Player.WHITE:
+                    outcome = 'cand_W' if candidate_is_white else 'anchor_W'
+                elif winner == Player.BLACK:
+                    outcome = 'anchor_W' if candidate_is_white else 'cand_W'
+                else:
+                    outcome = 'draw'
+                self.logger.info(
+                    f"[anchor {mode_label}] game {game_num + 1}/{num_games} "
+                    f"done: {outcome} in {move_count} moves ({game_dt/60:.1f} min). "
+                    f"running W/L/D = {candidate_wins}/{anchor_wins}/{draws}"
+                )
+
                 del game_state
 
                 # Restore outer RNG state so anchor seeding doesn't leak.
