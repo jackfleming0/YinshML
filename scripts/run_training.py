@@ -397,6 +397,11 @@ def main() -> None:
         # root noise off) so anchor numbers reflect deployment-style play.
         'anchor_mcts_enabled': bool((cfg.get('anchor') or {}).get('mcts_enabled', False)),
         'anchor_mcts_simulations': int((cfg.get('anchor') or {}).get('mcts_simulations', 64)),
+        # Checkpoint retention: 0 = keep all, N>0 = keep top-N by Elo, N<0 =
+        # legacy "delete rejected immediately." Default 5 prunes most of a
+        # long run's history; for runs where you want to head-to-head every
+        # iteration later, set to 0 in the YAML.
+        'checkpoint_retention_count': int(trainer_cfg.get('checkpoint_retention_count', 5)),
     }
 
     games_per_iteration = int(sp.get('games_per_iteration', 50))

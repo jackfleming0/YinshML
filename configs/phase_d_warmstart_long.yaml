@@ -71,6 +71,10 @@ trainer:
     batch_size: 32
     warmup_iters: 3
 
+  # Keep all 30 checkpoints (~3.9 GB) so end-of-run head-to-head can rank
+  # any iteration. Default 5 prunes most of the run's history by Elo.
+  checkpoint_retention_count: 0
+
 phase_weights:
   RING_PLACEMENT: 1.0
   MAIN_GAME: 2.0
