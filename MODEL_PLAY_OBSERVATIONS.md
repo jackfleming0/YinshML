@@ -219,3 +219,119 @@ is good enough to score occasionally, not good enough to reliably win.
   with the same opening sequence as Game 1 here (`F5, G7, D7, H6, E8`),
   and see whether the same human-exploit patterns work. If they do,
   we're not at intermediate yet. If they don't, we are.
+
+---
+
+## Update: gating-revert run head-to-head results (2026-04-29 evening)
+
+The 12-iter `phase_d_warmstart_derisk_revert.yaml` run completed. Gating
+revert fired correctly on every failed gate (iters 1, 4, 5, 6, 7, 8, 9,
+10, 11). iter_3 was the last and best promotion (Wilson gate passed at
+ELO 1640). Iters 4–11 plateaued, all reloading iter_3 weights via the
+new revert mechanism.
+
+Ran `scripts/eval_head_to_head.py` over surviving checkpoints (iter_0
+was pruned by the retention-5 policy, so the bookend comparison vs the
+supervised seed isn't possible directly — see "What this implies"
+section below for the workaround). Field: iter_2, 3, 5, 6, 9. 40 games
+per pair, raw policy at temperature=0, 400 games total.
+
+### Pair-by-pair results
+
+```
+                pair  a_wins  b_wins  draws  a_score  significant?
+    iter_2 vs iter_3       0      40      0    0.000  ★★★ (iter_3 wins)
+    iter_2 vs iter_5       0      40      0    0.000  ★★★ (iter_5 wins)
+    iter_2 vs iter_6       0      40      0    0.000  ★★★ (iter_6 wins)
+    iter_2 vs iter_9      40       0      0    1.000  ★★★ (iter_2 wins ←!)
+    iter_3 vs iter_5      40       0      0    1.000  ★★★ (iter_3 wins)
+    iter_3 vs iter_6       0      40      0    0.000  ★★★ (iter_6 wins ←!)
+    iter_3 vs iter_9      40       0      0    1.000  ★★★ (iter_3 wins)
+    iter_5 vs iter_6      20      20      0    0.500   tied
+    iter_5 vs iter_9      20      20      0    0.500   tied
+    iter_6 vs iter_9       0      40      0    0.000  ★★★ (iter_9 wins)
+```
+
+Aggregate (avg score across 4 pairs each):
+```
+  #1  iter_3:  0.750
+  #2  iter_6:  0.625
+  #3  iter_5:  0.500
+  #4  iter_9:  0.375
+  #5  iter_2:  0.250
+```
+
+### Headline finding: a non-transitive cycle
+
+```
+iter_3 > iter_9 > iter_6 > iter_3
+```
+
+Plus the `iter_2 > iter_9` anomaly (iter_2 is the weakest by aggregate
+but specifically beats iter_9 40-0).
+
+### What's actually going on
+
+Same structural issue as the depth=3 eval results in `eval_vs_heuristic.py`:
+**raw policy at temperature=0 is deterministic per (model, color, seed)
+triple**. With seeded RNG and 20 games per side, all 20 games per
+(pair, color) are identical replays. Each "40-0" really means "in the
+specific deterministic game from this seed, model X wins both colors."
+True per-pair sample size is 2, not 40.
+
+This amplifies tiny policy differences into big-looking scores. iter_6
+beat iter_3 40-0 — but that doesn't mean iter_6 dominates iter_3; it
+just means iter_6's policy happens to handle iter_3's specific argmax-
+play sequences in both colors of this seed. With Dirichlet noise or
+non-zero temperature, that 40-0 would likely smear toward 50-50.
+
+It's also further evidence that **MCTS at deployment budget is what
+makes these models actually playable.** Raw-policy is too brittle —
+small policy differences become deterministic 40-0 matchups; MCTS
+smooths it. Game 2 of the qualitative play tests above (400-sim model)
+felt much more solid than Game 1 (64-sim) for exactly this reason.
+
+### What's still load-bearing despite the cycle
+
+1. **iter_3 vs iter_2 = 40-0** is consistent with the Wilson gate's
+   call. The iter_2 → iter_3 promotion was a real strength jump.
+2. **iter_3 has the highest aggregate (0.750)** across the post-revert
+   field — most consistent winner even though one specific opponent
+   (iter_6) beats its argmax-play. That matches what the training gate
+   gave us: iter_3 is the canonical "best" checkpoint.
+3. **The cycle suggests the recipe is producing models with *different*
+   policy quirks rather than monotonically stronger ones.** Each post-
+   iter_3 model has its own distribution of blind spots. None of them
+   is clearly smarter than iter_3 in a transitive sense, even though
+   none collapsed either.
+
+### Practical implication
+
+The within-run head-to-head can't answer "is iter_3 intermediate-level?"
+because all opponents are iter_3-derived. The benchmark for that is
+`eval_vs_heuristic.py --depth 3 --time-limit-per-move 30 --mcts-simulations 400`
+against iter_3, compared to the supervised seed's result (50%,
+CI=[0.188, 0.812]).
+
+**Useful side-comparison:** the same eval against iter_6 (since iter_6
+beat iter_3 head-to-head at temp=0). If iter_6 lands higher vs depth=3,
+the cycle is misleading and iter_6 is the better deployment candidate.
+If iter_6 lands lower or equal, the head-to-head was just a quirk of
+deterministic play and iter_3 remains the canonical pick.
+
+### Lesson for future eval runs
+
+When running `eval_head_to_head.py`, **don't read individual pair scores
+as ground truth**. Look at the aggregate ranking and mark "near-50/50"
+ties (like iter_5 ↔ iter_6, iter_5 ↔ iter_9) as the *real* signal:
+those models are roughly equivalent, the deterministic 40-0s are
+quirks. A model that wins 0.700+ aggregate across many opponents is
+genuinely stronger; one that wins specific 40-0 matchups but loses
+others to the same field is just policy-different, not policy-better.
+
+If you want a less-noisy head-to-head, the script should be extended
+with either (a) Dirichlet noise during eval, or (b) varying game seeds
+per replicate (so each "40 games" pair is 40 *different* games rather
+than 1 game replicated 40 times). Both involve small `eval_head_to_head.py`
+patches. Worth doing if this kind of cross-iter comparison becomes a
+recurring need.
