@@ -8,7 +8,50 @@ Rule: this file is the only one that reorders. The menus are append-or-delete on
 
 ## Active
 
-**Track A bake-off — ready to execute.** Tooling landed 2026-04-16:
+**Phase E — post-warm-start recipe rebuild (2026-04-30 onward).** Phase D shipped: gating-revert mechanism works structurally (PR #9, merged), but iter_3 of the post-fix run lost 6/24 (20%) to `HeuristicAgent(depth=3)` at deployment-realistic config — well below the ≥65% intermediate bar. Recipe plateau is real; further iterations of the same recipe won't help. See `WARMSTART_PHASE_LOG.md` §9 for the full conclusion + ranked options.
+
+**Highest-EV next step (Option 5a, ~$2, half a day):** retrain supervised seed on humans_only filtered data and re-eval. The 2026-04-30 expert-data analysis (commit `f2d899a`) found 41% of training data is bot/anonymous games (Dumbot, guest, WeakBot, etc.) — the seed literally learned chain-shuffler play from Dumbot. `scripts/analyze_and_filter_expert_data.py` produces a humans_only dataset (1312 games / 82,837 positions, 35% of input).
+
+```bash
+# 1) Filter
+python scripts/analyze_and_filter_expert_data.py --output-dir expert_games/humans_only
+
+# 2) Retrain
+python scripts/run_supervised_pretraining.py \
+    --games-dir expert_games/humans_only --epochs 10 --batch-size 256 \
+    --output-dir models/supervised_seed_humans --device cuda
+
+# 3) Eval at full N=30 vs depth=3
+python scripts/eval_vs_heuristic.py \
+    --checkpoint models/supervised_seed_humans/best_supervised.pt \
+    --num-games 30 --depth 3 --mcts-simulations 400 \
+    --time-limit-per-move 30 --device cuda \
+    --label iter_0_humans --output-json eval_iter0_humans_d3.json \
+  2>&1 | tee cloud_logs/eval_iter0_humans_d3_$(date +%Y%m%d_%H%M%S).log
+```
+
+**In parallel (Option 0, ~$2, ~7h):** rerun the *original* seed at full N=30 to get a canonical baseline for the dirty-data seed. Lets us A/B human-filtered seed vs dirty seed cleanly.
+
+```bash
+python scripts/eval_vs_heuristic.py \
+    --checkpoint models/supervised_seed/best_supervised.pt \
+    --num-games 30 --depth 3 --mcts-simulations 400 \
+    --time-limit-per-move 30 --device cuda \
+    --label iter_0_seed --output-json eval_iter0_d3_full.json \
+  2>&1 | tee cloud_logs/eval_iter0_d3_full_$(date +%Y%m%d_%H%M%S).log
+```
+
+**Engineering project (Option 1, 1-2 weeks):** **bitboard port** — replace Python game engine with C++ extension via pybind11 using yngine's `__uint128_t` bitboards + precomputed `TABLE_RAYS[121][6]` (design: temhelk/yinsh; tracked in `TODO_baseline.md` Tier 5). Expected 10-100× speedup on move generation. **Compute-independent so can run alongside the eval workload.** Once it lands, every recipe experiment becomes 10× cheaper.
+
+**Decision gate (after 5a + 0 results land):** see `WARMSTART_PHASE_LOG.md` §9d for the branching logic. Ranked options 2-7 (more games, larger network, MCTS knob tuning, growing replay window, frontier shift) all become cheap parallel A/Bs once bitboards land + we have a non-bot-trained seed.
+
+---
+
+## Stale — Track A bake-off (deferred)
+
+**Track A bake-off — tooling exists but is no longer the active question.** Phase D's data already shows that Track A polish (subtree reuse, FPU, epsilon_mix taper, etc.) wasn't enough to push iter_3 past the intermediate bar. The bake-off would still measure incremental ELO Δ from Track A vs Track A-off, which is a useful number for the record, but it doesn't help us reach intermediate-level play. Defer until the bitboard port lands and Phase E experiments give us a higher-quality challenger.
+
+Tooling landed 2026-04-16 (preserved below for when this becomes active again):
 
 - **Baseline config**: `configs/bakeoff_baseline.yaml` — ablates nine Track A training features (subtree reuse, FPU, epsilon_mix taper, heuristic-weight curriculum, EMA, cosine+warmup LR, autocast, soft value targets, deterministic eval) via config flags. Move-encoder rework + MCTS expansion bug fix stay in both runs — they're architectural/correctness, not training recipe, so measuring them as part of Track A would overstate the delta.
 - **Challenger config**: existing `configs/training.yaml` — Track A defaults, everything on.

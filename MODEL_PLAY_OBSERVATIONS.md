@@ -335,3 +335,47 @@ per replicate (so each "40 games" pair is 40 *different* games rather
 than 1 game replicated 40 times). Both involve small `eval_head_to_head.py`
 patches. Worth doing if this kind of cross-iter comparison becomes a
 recurring need.
+
+---
+
+## Update 2: iter_3 vs HeuristicAgent(depth=3) — the canonical "is it intermediate?" benchmark (2026-04-30)
+
+Ran `eval_vs_heuristic.py` against `runs/20260429_152142/iteration_3/checkpoint_iteration_3.pt` at the deployment-realistic config (400 MCTS sims, 30s/move time-limit on the heuristic, 30 games). Wall-clock 6h52m on RTX 4090.
+
+```
+Result: iter_3_revert (mcts) vs HeuristicAgent(depth=3)
+  Games played:   30
+  Candidate wins: 6   (20.0%)
+  Anchor wins:    24
+  Draws:          0
+  Win rate:       0.200  CI95=[0.095, 0.373]
+  Avg game length: 94.3 moves
+Verdict: FAILS: candidate consistently loses to heuristic.
+```
+
+### Headline
+
+**The gating-revert recipe didn't reach intermediate-level play.** iter_3, the recipe's best checkpoint, loses 20% / 80% to depth=3 heuristic. CI upper bound is 37%, comfortably below the 50% even-match line and far below the 65% intermediate bar.
+
+### Comparison to the supervised seed
+
+We tested the supervised seed at depth=3 only with **6 games** (the smoke run after the original 30-game version got killed by the no-time-limit hang), got 50% with CI95=[0.188, 0.812].
+
+| Checkpoint | N | Win rate | CI95 |
+|---|---|---|---|
+| Supervised seed (iter_0) | 6 | 50% | [0.188, 0.812] |
+| **iter_3 (post-fix)** | **30** | **20%** | **[0.095, 0.373]** |
+
+The CIs **overlap** (iter_0's lower bound 18.8% sits just above iter_3's upper bound 37.3%), so we can't *conclusively* say iter_3 is weaker than the seed — but we definitely can't say it's stronger. To disambiguate cleanly: rerun iter_0 at 30 games depth=3. ~7h, ~$2. Worth it before committing significant compute to a new recipe.
+
+### What this tells us about the recipe
+
+Putting the head-to-head and the depth=3 numbers together:
+
+- **The gating-revert mechanism works structurally.** Fired correctly 9/9 times. iter_3 was a real promotion (Wilson-validated, dominates iter_2 head-to-head 40-0).
+- **But the recipe plateaued sub-intermediate.** Iters 4–11 all reverted to iter_3, none could push past it. iter_3 itself is below the intermediate bar.
+- **The non-transitive cycle and the depth=3 result tell the same story:** post-iter_3 models aren't monotonically stronger than iter_3, AND iter_3 isn't strong enough vs the depth=3 benchmark. The recipe is bouncing around a local optimum that's *below* what we'd want.
+
+### Implication
+
+The path forward isn't "more iterations of the same recipe." That's been tested. The plateau is real. The next experiment needs to be a *different* recipe (or a different starting point), and we should make a deliberate choice about which axis to vary first. See `WARMSTART_PHASE_LOG.md` §9 (Phase E plan) for the strategic options ranking.

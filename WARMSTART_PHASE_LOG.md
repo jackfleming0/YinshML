@@ -351,3 +351,79 @@ nohup python scripts/run_training.py \
 | **Phase 3 long run (planned)** | ~$15-20 | ~$38 | Gated on Phase 2 verdict |
 | **Phase 4 eval (planned)** | ~$2 | ~$40 | After Phase 3 |
 | **Reserve** | — | $200 cap | $160 buffer |
+
+---
+
+## 9. Phase D conclusion + Phase E plan (2026-04-30)
+
+### 9a. Phase D verdict: gating revert works structurally; recipe plateaus sub-intermediate
+
+After §5d's diagnosis, the gating-revert flag landed in PR #9 (merged to `main` 2026-04-29) and the 12-iter `phase_d_warmstart_derisk_revert.yaml` run completed cleanly.
+
+**Mechanism evidence:** revert fired correctly on 9/9 failed gates (iters 1, 4, 5, 6, 7, 8, 9, 10, 11). Each rejected iteration reloaded best-model weights and reset optimizer momentum before the next self-play round, exactly as designed. No more compounding regression across iterations — the structural fix is correct.
+
+**Strength evidence:** see `MODEL_PLAY_OBSERVATIONS.md` "Update 2." iter_3 (the recipe's peak) vs `HeuristicAgent(depth=3)` at deployment-realistic config (400 MCTS sims, 30s/move time-limit, 30 games):
+- 6 wins / 24 losses / 0 draws = **20% win rate, CI95=[0.095, 0.373]**.
+- Verdict from the script: `FAILS`.
+- Below the 65% intermediate bar by a wide margin; below 50% even-match line; possibly weaker than the supervised seed itself (50% at 6 games, wide CI).
+
+**Recipe plateau evidence:** within-run head-to-head shows iter_3 has the highest aggregate score (0.750) but a non-transitive cycle exists with iters 6 and 9. The post-iter_3 plateau is real — 8 attempts, 0 promotions, no monotonic improvement.
+
+**Conclusion:** the gating revert solves the *compounding-regression* problem from §5d but does not, on its own, get us past the supervised seed's skill ceiling. iter_3 is at *roughly* iter_0's level; possibly slightly weaker. The recipe's ceiling on this seed is sub-intermediate.
+
+### 9b. What we know now that we didn't before
+
+- The §5d hypothesis ("missing rollback step is the bug") was correct *and necessary* but not *sufficient* — fixing it lets the recipe stabilize, but the local optimum it stabilizes to isn't intermediate-level.
+- The recipe's iteration cost is ~20-25 min/iter at our scale. Plateau detection (8 reverts in a row) is now a fast, reliable signal that further iterations of the same recipe won't help.
+- Eval costs are growing: depth=3 with time-limit is ~14 min/game, ~7h for a 30-game eval. Need to budget for this in any future experiment.
+- The deferred Action B (growing replay window) wasn't needed to make the revert work — but might still help once we have a recipe that's actually pushing past the seed.
+
+### 9c. Phase E options (ranked by EV against current data)
+
+The path forward isn't "more iterations of the same recipe." Options, ordered by my best guess at expected value per dollar:
+
+**Important context — supervised seed data quality is poor (commit `f2d899a`, 2026-04-30 morning).** Analysis via `scripts/analyze_and_filter_expert_data.py` found 41% of supervised training data is bot/anonymous (Dumbot 1576, guest 1099, WeakBot 306, SmartBot 166, BestBot 46). Filtering to humans_only retains 1312 games / 82,837 positions (35% of input). Likely explains why iter_0 plays "chain-shuffler" style — it's literally learned from Dumbot. **This re-orders the Phase E ranking below: Option 5 (stronger seed) is now the highest-EV change, ahead of Option 1 (bitboards), because the seed itself looks like the bottleneck.** Bitboards make all subsequent experiments cheaper, but a better seed makes them *productive*.
+
+**Option 0 — Diagnose first (~$2, ~7h).** Rerun iter_0 (the supervised seed) at 30 games vs depth=3. The 6-game smoke result was 50%, but with CI=[0.188, 0.812]. We need a clean baseline to know whether iter_3 is *as bad as the seed* or *worse than the seed*. The two cases imply different next moves. Cheapest, most informative single experiment available.
+
+```bash
+python scripts/eval_vs_heuristic.py \
+    --checkpoint models/supervised_seed/best_supervised.pt \
+    --num-games 30 --depth 3 --mcts-simulations 400 \
+    --time-limit-per-move 30 --device cuda \
+    --label iter_0_seed --output-json eval_iter0_d3_full.json \
+  2>&1 | tee cloud_logs/eval_iter0_d3_full_$(date +%Y%m%d_%H%M%S).log
+```
+
+**Option 1 — Bitboard port (action H from the alphazero-general comparison; engineering project, ~1-2 weeks).** Replace the Python game engine with a C++ extension via pybind11 using yngine's `__uint128_t` bitboards + precomputed `TABLE_RAYS[121][6]`. Expected 10-100× speedup on move generation, which is the current self-play bottleneck. Once this lands, *every other option becomes cheaper to test* — 10× more games per dollar means 10× more experiments. **Recommendation: do this first.** See `~/.claude/plans/steady-enchanting-nebula.md` action H for design notes.
+
+**Option 2 — More games per iteration (~2-4× cost per iter).** Currently 100 games/iter. Doubling to 200 or 400 might break the plateau if the recipe is signal-starved. Cheap to A/B once bitboards land. Without bitboards, this 2× the run cost.
+
+**Option 3 — Larger network.** Current network might be capacity-limited at the supervised-seed level. Bigger ResNet trunk + more attention. Risky on Mac (longer per-iter time); cheap on GPU. See `TODO_frontier.md` §2 for the broader Transformer direction.
+
+**Option 4 — Tune new MCTS knobs.** `root_policy_temp` (currently 1.0) at 1.1–1.2, `fast_simulations` for cheaper exploration. These are the new flags from PR #9 — never been A/B tested. Low cost, low expected upside on its own, but a quick win if it works.
+
+**Option 5 — Stronger supervised seed (PROMOTED to top priority 2026-04-30 given data-quality finding).** Two sub-options:
+  - **5a. Filter and retrain.** Run `scripts/analyze_and_filter_expert_data.py` to produce a humans_only dataset, retrain seed at the same epoch count, re-evaluate vs depth=3 with full N=30. ~10 min retrain on 4090 + ~7h eval = ~$2 + half a day. Highest expected value.
+  - **5b. Filter, retrain larger, retrain longer.** If 5a moves the needle, scale up: more epochs, larger network, full filtered-data sweep. ~$5-10 + ~half a day.
+
+**Option 6 — Implement Action B (growing replay window).** Replace fixed-position FIFO with iteration-based window. Cleaner training-data dynamics. Modest expected impact alone, but synergistic with options 2-3.
+
+**Option 7 — Frontier shift.** `TODO_frontier.md` §1 (MuZero), §5 (search-consistency loss). The "do now" probes (§4 IQL, §5 SC, §8 SAE) might tell us if this is necessary. We haven't run any of them yet.
+
+### 9d. Recommended sequencing (revised 2026-04-30 PM, after data-quality finding)
+
+1. **Option 5a (retrain seed on humans_only filtered data)** — ~10 min retrain + ~7h eval = ~$2, half a day. **Highest priority.** The supervised seed analysis found 41% of training data is bot games; filtering should produce a meaningfully different (and presumably stronger) seed. Eval at full N=30 vs depth=3 to compare to iter_3's 20% and the original seed's 50%-at-N=6 / TBD-at-N=30.
+2. **Option 0 (rerun iter_0 / original seed at N=30)** — can run in parallel with Option 5a since they're independent checkpoints. Establishes the canonical "is the dirty-data seed actually intermediate?" baseline.
+3. **Option 1 (bitboard port)** — engineering project. Worth starting in parallel with the above evals since it's compute-independent. Once it lands, all subsequent recipe experiments become 10× cheaper.
+4. **Decision gate after 5a + 0:**
+   - If filtered-data seed clears ≥50% vs depth=3 (CI lower bound > 0.4): seed quality WAS the bottleneck. Run a fresh `phase_d_warmstart_derisk_revert.yaml` with the new seed, expect different recipe behavior.
+   - If filtered-data seed is still ~20-30%: seed quality is one factor but not the load-bearing one. Consider Options 3 (larger network) or 7 (frontier shift).
+   - If filtered-data seed is markedly *worse* than dirty-data seed: surprising; investigate (maybe the bots played reasonable enough moves that filtering them removed coverage).
+5. **After bitboards land:** Options 2 (more games), 4 (MCTS knobs), 6 (growing window) become cheap parallel A/Bs.
+
+### 9e. What this means for the budget
+
+Phase D total spend: ~$15 actual (vs ~$40 planned through Phase 3+4). The early plateau detection saved us a 30-iter long run that wouldn't have helped. Phase E planning starts with $185 of the $200 budget remaining. Bitboard port is engineering effort, not cloud spend; recipe experiments after bitboards become 10× more efficient.
+
+---
