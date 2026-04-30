@@ -20,4 +20,6 @@ except ImportError as exc:  # pragma: no cover — surfaces build problems early
         "from the repo root to compile the C++ extension."
     ) from exc
 
-__all__ = ["_engine"]
+from .game_state import CppBoard, CppGameState  # noqa: E402
+
+__all__ = ["_engine", "CppGameState", "CppBoard"]
