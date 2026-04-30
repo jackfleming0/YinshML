@@ -31,6 +31,7 @@ configs/local/
 !WARMSTART_PHASE_LOG.md
 !OVERNIGHT_RESULTS.md
 !MODEL_PLAY_OBSERVATIONS.md
+!BITBOARD_PORT_PROMPT.md
 
 !results/
 !logs/
