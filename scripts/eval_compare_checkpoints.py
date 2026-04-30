@@ -182,10 +182,13 @@ def main():
             )
             pairs_results.append({
                 "a": la, "b": lb,
-                "a_wins": a_wins, "b_wins": b_wins, "draws": draws,
-                "a_white_wins": aw, "a_black_wins": ab,
-                "a_score": score_a, "ci95": [ci_lo, ci_hi],
-                "significant": ci_lo > 0.5 or ci_hi < 0.5,
+                "a_wins": int(a_wins), "b_wins": int(b_wins), "draws": int(draws),
+                "a_white_wins": int(aw), "a_black_wins": int(ab),
+                "a_score": float(score_a),
+                "ci95": [float(ci_lo), float(ci_hi)],
+                # Force-cast to Python bool — numpy comparisons return np.bool_
+                # which json doesn't serialize.
+                "significant": bool(ci_lo > 0.5 or ci_hi < 0.5),
             })
     elapsed = time.time() - t0
 
