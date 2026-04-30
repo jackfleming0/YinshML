@@ -1,6 +1,6 @@
 """TensorPool implementation for efficient neural network tensor management."""
 
-from typing import Dict, Tuple, Optional, List, Any, Union, DefaultDict
+from typing import Dict, Tuple, Optional, List, Any, Union, DefaultDict, NamedTuple
 from collections import defaultdict
 import threading
 import torch
@@ -85,8 +85,30 @@ class TensorPoolStatistics(PoolStatistics):
     reshape_efficiency: float = 0.0
 
 
-# Type alias for tensor key
-TensorKey = Tuple[Tuple[int, ...], torch.dtype, str]  # (shape, dtype, device_str)
+# Pool key for indexing tensors. NamedTuple so callers can use either
+# attribute access (`key.shape`) or tuple indexing (`key[0]`); both
+# styles exist in the codebase. ``device`` accepts a string or a
+# ``torch.device`` and stores it as-is — the pool's existing
+# ``_get_tensor_key`` constructs keys with a stringified device, so
+# direct construction from tests with ``torch.device('cpu')`` and
+# pool-internal construction with ``'cpu'`` are kept distinguishable
+# until the pool itself is updated to normalize.
+class TensorKey(NamedTuple):
+    shape: Tuple[int, ...]
+    dtype: "torch.dtype"
+    device: Union[str, "torch.device"]
+
+    @property
+    def size_bytes(self) -> int:
+        """Bytes occupied by a tensor with this key (independent of pool
+        residency). Mirrors ``element_size * numel`` for the dtype."""
+        # Compute element size by allocating a tiny tensor; cheap on CPU
+        # and avoids hard-coding a dtype-to-bytes table that drifts.
+        elem_bytes = torch.empty((), dtype=self.dtype).element_size()
+        n = 1
+        for d in self.shape:
+            n *= d
+        return elem_bytes * n
 
 
 class TensorPool:
