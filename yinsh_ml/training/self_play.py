@@ -1203,6 +1203,8 @@ class SelfPlay:
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
                  root_policy_temp: float = 1.0,
+                 # --- C++ bitboard engine ---
+                 use_cpp_engine: bool = False,
                 ):
         """
         Initialize SelfPlay with explicit MCTS and temperature parameters.
@@ -1267,6 +1269,7 @@ class SelfPlay:
             'epsilon_mix_end': epsilon_mix_end,  # Root mixing fraction after taper (0 = no late-game noise)
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,  # Linear taper horizon
             'root_policy_temp': root_policy_temp,  # Reshape root prior; >1 flattens, <1 sharpens
+            'use_cpp_engine': use_cpp_engine,  # Opt-in to game_cpp engine in workers
         }
         # Store optional metrics instances
         self.mcts_metrics = mcts_metrics # Store the instance
@@ -1275,9 +1278,11 @@ class SelfPlay:
         # This MCTS instance is primarily used if play_game is called directly,
         # worker processes will create their own MCTS instances.
 
-        # Filter out batched MCTS params and encoding flag that don't belong in MCTS.__init__()
+        # Filter out batched MCTS params, encoding flag, and engine flag
+        # that don't belong in MCTS.__init__()
         mcts_init_config = {k: v for k, v in self.mcts_config.items()
-                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
+                           if k not in ['use_batched_mcts', 'mcts_batch_size',
+                                        'use_enhanced_encoding', 'use_cpp_engine']}
 
         self.mcts = MCTS(
             network=self.network,
@@ -1506,15 +1511,26 @@ def play_game_worker(
         network.load_model(model_path)
         network.network.eval()
 
-        # Create local memory pool for this worker
-        from ..memory import GameStatePool, GameStatePoolConfig
-        from ..game import GameState
-        pool_config = GameStatePoolConfig(
-            initial_size=50,  # Start with moderate pool size for worker
-            enable_statistics=False,  # Disable stats in workers for performance
-            factory_func=GameState  # Use GameState constructor as factory
-        )
-        local_game_state_pool = GameStatePool(pool_config)
+        # Engine selection. The C++ bitboard engine has its own ~zero-cost
+        # clone() (struct memcpy) so the GameStatePool's whole purpose —
+        # amortizing GameState alloc + dict-resize cost — is moot. When
+        # enabled, skip pool wiring entirely and instantiate a
+        # CppGameState directly. Both paths land at MCTS via the same
+        # duck-typed surface.
+        use_cpp_engine = bool(mcts_config.get('use_cpp_engine', False))
+        if use_cpp_engine:
+            from ..game_cpp import CppGameState
+            local_game_state_pool = None
+            worker_logger.info(f"Game {game_id}: using C++ bitboard engine")
+        else:
+            from ..memory import GameStatePool, GameStatePoolConfig
+            from ..game import GameState
+            pool_config = GameStatePoolConfig(
+                initial_size=50,  # Start with moderate pool size for worker
+                enable_statistics=False,  # Disable stats in workers for performance
+                factory_func=GameState  # Use GameState constructor as factory
+            )
+            local_game_state_pool = GameStatePool(pool_config)
 
         # Use network's encoder to ensure consistent encoding (basic or enhanced)
         state_encoder = network.state_encoder
@@ -1525,14 +1541,18 @@ def play_game_worker(
 
         # Remove these from mcts_config before passing to MCTS __init__
         mcts_init_config = {k: v for k, v in mcts_config.items()
-                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
+                           if k not in ['use_batched_mcts', 'mcts_batch_size',
+                                        'use_enhanced_encoding', 'use_cpp_engine']}
 
         mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_init_config)
 
-        # --- Memory-Efficient Game Data Structures ---
-        state = local_game_state_pool.get()  # Get initial state from pool
-        from ..memory import reset_game_state
-        reset_game_state(state)  # Ensure it's properly initialized
+        # --- Initial state: pool-allocated GameState or fresh CppGameState ---
+        if use_cpp_engine:
+            state = CppGameState()
+        else:
+            state = local_game_state_pool.get()  # Get initial state from pool
+            from ..memory import reset_game_state
+            reset_game_state(state)  # Ensure it's properly initialized
 
         # Use lists instead of deques (less overhead)
         states = []
@@ -1673,8 +1693,10 @@ def play_game_worker(
         )
 
         # Clean up memory before returning
-        # Release state if possible
-        if 'local_game_state_pool' in locals() and 'state' in locals() and state is not None:
+        # Release state if possible (CppGameState path runs without a pool)
+        if ('local_game_state_pool' in locals()
+                and local_game_state_pool is not None
+                and 'state' in locals() and state is not None):
             local_game_state_pool.return_game_state(state)
 
         # Free any retained MCTS search tree (subtree reuse holds it between moves).
@@ -1694,7 +1716,9 @@ def play_game_worker(
         # Ensure cleanup even on error
         try:
             # Release state if possible
-            if 'local_game_state_pool' in locals() and 'state' in locals() and state is not None:
+            if ('local_game_state_pool' in locals()
+                    and local_game_state_pool is not None
+                    and 'state' in locals() and state is not None):
                 local_game_state_pool.return_game_state(state)
             if 'mcts' in locals():
                 mcts.reset_tree()

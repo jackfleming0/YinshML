@@ -293,6 +293,8 @@ class TrainingSupervisor:
         # Root policy temperature: reshape root child priors before noise.
         # alphazero-general default 1.1 (slight softening); 1.0 disables.
         root_policy_temp = float(self.mode_settings.get('root_policy_temp', 1.0))
+        # C++ bitboard engine. Default off until per-config validation lands.
+        use_cpp_engine = bool(self.mode_settings.get('use_cpp_engine', False))
 
         _mcts_config_for_init = { # Use temporary name to avoid confusion
             'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
@@ -320,6 +322,7 @@ class TrainingSupervisor:
             'epsilon_mix_end': epsilon_mix_end,
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,
             'root_policy_temp': root_policy_temp,
+            'use_cpp_engine': use_cpp_engine,
         }
 
         self.self_play = SelfPlay(
