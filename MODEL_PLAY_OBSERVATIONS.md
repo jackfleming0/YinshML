@@ -379,3 +379,160 @@ Putting the head-to-head and the depth=3 numbers together:
 ### Implication
 
 The path forward isn't "more iterations of the same recipe." That's been tested. The plateau is real. The next experiment needs to be a *different* recipe (or a different starting point), and we should make a deliberate choice about which axis to vary first. See `WARMSTART_PHASE_LOG.md` §9 (Phase E plan) for the strategic options ranking.
+
+---
+
+## iter_0_v2 sanity check — Game played as White at 400 sims (2026-04-30)
+
+**Model:** `models/supervised_seed_humans_only/best_supervised.pt` (humans-only seed: 1,312 games / 83K positions, no bot games — testing whether filtering the bot-contaminated subset of Boardspace fixes the prior model's tactical blind spots).
+**Method:** `scripts/play_step.py` driven by Claude subagent on macOS / MPS.
+**You played:** White
+**MCTS sims:** 400 (deployment "hard" preset)
+
+### Result
+
+**White (human) wins 3-1 in 55 moves.** Same final score as the prior iter_0 at 400 sims (Game 2 above), but a noticeably longer game (55 vs ~28 moves) and the model put up significantly more tactical resistance throughout.
+
+### Key moves and observations
+
+| # | Your move | Model response | Note |
+|---|---|---|---|
+| 1 | `place F5` | `place D5` | **Different from iter_0 v1** — neither mirror (F6) nor symmetric placement. Direct row-5 contestation. |
+| 2-5 | `place G7, D7, H6, E8` | `place E5, F3, F9, H7` | AI placed **H7 directly on my row 7 plan** between D7 and G7 — preemptive interposition, smarter than iter_0 v1's left-side cluster. |
+| 6 | `F5 → F6` | `D5 → C5` | Standard mid-game start. AI building col C. |
+| 7 | `F6 → D6` (slide) | `E5 → E7` | AI repositioned ring E5 → E7 between my D7 and E8 rings — disruptive placement. |
+| 8 | `H6 → H4` | `C5 → C6` | AI continues col C development. |
+| 9 | `D6 → D4` (jumped D5, flipped to white) | `H7 → H5` | **AI's first multi-purpose move:** ring H7→H5 jumped over my H6 white marker, flipping it to black. Drops black marker H7. So in one move: relocates ring, flips my marker, and adds a black marker. **This is a real tactical move iter_0 v1 never made at 400 sims** — it punished my unprotected H6. |
+| 10 | `D7 → D8` (sets up 3-in-a-row col D: D5,D6,D7) | `F9 → F8` | AI did NOT defend the col D 3-in-a-row. **Same blind spot as iter_0 v1.** |
+| 11 | `D4 → C4` (now 4-in-a-row col D: D4-D7) | `H5 → H8` | AI made a **bad** jump: H5→H8 jumped over its own H6,H7 black markers, flipping both to white. Net: AI sacrificed 2 of its own markers for a ring relocation, and missed the col D 4-in-a-row threat completely. |
+| 12 | `D8 → C8` (drops D8 marker → 5-in-a-row D4-D8) | — | **5-in-a-row col D, scored.** W:1 B:0. |
+| 13-14 | row removal, ring C8 | `F8 → G9` | |
+| 15 | `G7 → F7` (drops G7 white marker) | `G9 → G6` | AI's G9→G6 ring jumped over my G7 white marker, flipping it to black. **Multi-purpose move again** — flips my piece + lands ring centrally on row 6. |
+| 16 | `F7 → F10` (jumps F8,F9 black markers, flips both white → 5-in-a-row F5-F9) | — | **5-in-a-row col F, scored.** W:2 B:0. AI failed to defend the col F threat. |
+| 17 | `H4 → E4` | `H8 → H3` | **AI's strongest move of the game.** Ring H8→H3 jumps the entire col H run (H7 white, H6 white, H5 black markers — 3 markers). Flips my H6,H7 markers black, flips H5 white, lands at H3 (note: per docs the engine should land at H4 first-empty-after-run, but the move was accepted to H3 — possibly the engine allows further sliding after a jump in some edge case; not investigated). Either way, AI **wiped my col H pair** and disengaged its ring from danger. This is real defensive recognition — iter_0 v1 didn't see col H pairs at all. |
+| 18 | `E4 → I4` (jumps H4 black marker, flips white) | `G6 → D3` | AI's G6→D3 jumped my just-dropped E4 white marker, flipping it black — **another counter-flip on a marker I just made.** Same flavor as iter_0 v1's `B7→D7` chain disruption. |
+| 19 | `E8 → I8` (jumps H8, flips white) | `F3 → E3` | AI played a quiet positional move (single step), missed the developing threat. |
+| 20 | `C4 → F4` (jumps E4 black, flips white) | `E6 → H9` | AI repositioned to H9 — **defensive against my potential col H attack from the north**. Strategic awareness here. |
+| 21 | `F4 → G4` (4-in-a-row row 4: E4-H4) | `H9 → H10` | Did not defend row 4. |
+| 22 | `G4 → G2` (drops G4 → 4-in-a-row F4-H4 still, plus E4) | `D3 → F5` | **AI defended row 4 by counter-flip!** D3→F5 jumped my E4 marker, flipping it back to black. Broke my 4-in-a-row contiguity. **This is the prior model's blind spot apparently fixed.** Plus it set up... |
+| 23 | `I4 → J5` (5-in-a-row F4 wait no — I made an error, the chain became F4-I4 4-in-a-row again) | `F5 → G5; REMOVE D3,E4,F5,G6,H7; REMOVE_RING E3` | **AI scored a 5-in-a-row on the NW-SE diagonal D3-H7!** This was a multi-move plan: D3 placed several turns earlier, E4 from the counter-flip on move 22, F5 placed by my own miscalculation (it was AI's flipped marker), G6 placed turns earlier, H7 from the placement phase. The model assembled a 5-marker diagonal across many moves. **Score W:2 B:1.** Equivalent to iter_0 v1's col-C row, but along a diagonal — somewhat more impressive. |
+| 24 | `I8 → F5` (jumps H7 empty, G6 black → flips G6 white; doesn't help much) | `C6 → B6` | AI quiet move, missed defending. |
+| 25 | `F5 → E4` (sets up final move) | `B6 → B7` | **AI did not defend the row 4 4-in-a-row + ring-on-E4 setup** — the same kind of "ring on extension cell, drop marker next turn" pattern iter_0 v1 also missed. |
+| 26 | `E4 → D4` (drops E4 marker → 5-in-a-row E4-I4 row 4) | — | **5-in-a-row row 4, scored.** W:3 B:1. Win. |
+
+### Observations
+
+1. **Did the model defend my 3-in-a-rows?** No, not the col D 3-in-a-row (move 10) — same blind spot as iter_0 v1.
+2. **Did the model defend my 4-in-a-rows?** **Sometimes yes**, sometimes no.
+   - Move 11: missed the col D 4-in-a-row (failed).
+   - Move 16: missed the col F 5-in-a-row finish (well, the threat was a 1-move win via multi-flip jump — hard to see).
+   - Move 22: **DID defend** the row 4 4-in-a-row by counter-flipping E4 with D3→F5. This is a real improvement — iter_0 v1 didn't reliably spot these.
+   - Move 25: missed the second row 4 4-in-a-row → 5-in-a-row threat (failed).
+3. **Did the model make multi-flip moves itself?** Yes, **and more often than iter_0 v1**:
+   - Move 9 (`H7→H5`): single-flip + ring relocation.
+   - Move 15 (`G9→G6`): single-flip + central ring placement.
+   - Move 17 (`H8→H3`): **3-marker pass-through** wiping my col H pair. The biggest single tactical move I saw from the model.
+   - Move 18 (`G6→D3`): single-flip counter-attack on my E4.
+   - Move 22 (`D3→F5`): single-flip counter on E4 — but with a **multi-move plan** behind it (assembling the D3-H7 diagonal).
+4. **Did the model score any rows of its own?** **Yes, one row.** The D3-H7 NW-SE diagonal (move 23) — equivalent to iter_0 v1's col-C row, but constructed along a diagonal axis and visibly part of a multi-move plan rather than opportunistic.
+5. **Comparison to iter_0 at 400 sims (the prior baseline):** see below.
+
+### Comparison to iter_0 at 400 sims (the prior baseline)
+
+| Aspect | iter_0 v1 (400 sims, Game 2) | iter_0 v2 humans-only (this game) |
+|---|---|---|
+| Final score | W:3 / B:1 | W:3 / B:1 |
+| Game length | ~28 moves | 55 moves |
+| AI placement strategy | Spread across left side, B-D cols | **Mixed**: contests row 5 (D5,E5), interposes ring on row 7 (H7) directly between my placements |
+| AI scored own row? | Yes — col C straight row | Yes — D3-H7 NW-SE diagonal (multi-move plan) |
+| AI defended my 3-in-a-rows? | Sometimes | Sometimes (no on col D, but engaged elsewhere) |
+| AI defended my 4-in-a-rows? | No (missed col D finish) | **Mixed** — defended row 4 once via counter-flip (move 22), missed it the second time (move 25–26) |
+| AI multi-flip / multi-purpose moves | Saw F-col attack, missed col D | **Saw col H pair** (H8→H3 wiped it); counter-flipped my E4 marker twice (G6→D3, D3→F5); H7→H5 multi-purpose |
+| Visit distribution at 400 sims | 8.7%–17.4% (broad) | Not displayed by `play_step.py`, but moves looked decisive — likely similar |
+
+**One-paragraph summary:** This humans-only seed feels **modestly stronger tactically** than iter_0 v1, but the same headline blind spots persist — it still doesn't reliably defend a 4-in-a-row → 5-in-a-row finish. The improvements are around the edges: it makes more multi-purpose ring moves (H8→H3 was a clean 3-marker chain disruption), it counter-flipped my markers twice in the same game (D3→F5 broke my 4-in-a-row at move 22 — iter_0 v1 only managed one such defensive flip per game), and its scored row was assembled across multiple moves on a diagonal axis (slightly more impressive than iter_0 v1's straight col C). On the negative side: at move 11 it made a flat-out **bad** move (`H5→H8` sacrificing two of its own markers for no clear gain) — the model still has noisy, low-quality moves mixed in with the better ones. Net: this looks like a slightly cleaner version of the same model class. Not a different tier of play. The bot-contamination filter helped on the margin but didn't fix the core 4-in-a-row defensive blind spot. Would expect the depth=3 heuristic eval to land somewhere in the same neighborhood as iter_0 v1's 50% (CI overlapping), maybe slightly higher.
+
+### Notes on scoring evolution within the game
+
+- **My 5-in-a-rows:** col D (move 12) → col F (move 16, multi-flip finisher) → row 4 (move 26, 2-step setup). 
+- **AI's 5-in-a-row:** D3-H7 diagonal (move 23). The AI assembled this across at least 4 separate moves, and the actual completing move (F5→G5 dropping marker at F5) was a normal 1-step ring slide — the kind of move that's invisible-to-defense unless you've been tracking the diagonal threat for several turns.
+- **Total game length 55 moves** is roughly 2× the prior iter_0 games at the same budget. That's because (a) the AI scored a row mid-game, forcing me to defend across multiple chains, and (b) more counter-flips broke my chains and made me rebuild. The model is genuinely harder to grind down than iter_0 v1.
+
+---
+
+## iter_0_v2 sanity check — Game played as Black at 400 sims (2026-04-30)
+
+**Model:** `models/supervised_seed_humans_only/best_supervised.pt` (humans-only seed, same checkpoint as the White-side game above; this is the color-flipped sanity test).
+**Method:** `scripts/play_step.py` driven by Claude subagent on macOS / MPS.
+**You played:** Black (model goes first as White).
+**MCTS sims:** 400 (deployment "hard" preset).
+
+### Result
+
+**Black (human) wins 3-0 in 56 moves.** A complete shutout — the model never scored a row playing White. Score progression: 1-0 at move ~26 (row 6), 2-0 at move ~46 (NE diagonal D5-H9), 3-0 at move 56 (row 3 5-in-a-row, via game-ending multi-flip).
+
+### Key moves and observations
+
+| # | Model move | Your move | Note |
+|---|---|---|---|
+| 1 | `place D4` | `place E6` | Same opening as iter_0 v1 at 400 sims (D4 first). Not a mirror of human. |
+| 2-5 | `place F5, D5, F3, C5` | `place G7, H6, F8, I8` | **Tight cluster on left/center cols B-F**. Identical placement-strategy footprint to iter_0 v1. Did not adapt to my spread placement. |
+| 6 | `F5→G6` (1-step slide, drops F5 marker) | `H6→H9` (build col H) | Standard. |
+| 7 | `C5→B4` | `F8→F4` (jumps F5 white → flips to black) | First multi-flip exchange — I flipped white's F5 marker. |
+| 8 | `D4→D3` | `F4→H4` | AI started building col D (D4 → marker, ring on D3). |
+| 9 | `B4→B2` | `E6→F6` | AI continues quiet repositioning. |
+| 10 | `D5→D7` (white now has D4-D5 col D 2-in-a-row) | `F6→C3` (jumps D4 white, flips to mine, ring lands left) | Big disruption move on my part — flipped white's D4. |
+| 11 | `G6→E4` (jumps F5 black → flips white) | `G7→G5` (jumps G6 white → flips to black, sets up row 6 4-in-a-row D6-H6) | **The model didn't see the row 6 buildup coming.** |
+| 12 | `E4→G4` (jumps F4 black → flips white; positional) | `I8→I6` (preparing row 6 finisher) | AI made a move that re-flipped F4 to white — minor counter, but didn't address row 6 threat. |
+| 13 | `D7→H7` (jumps G7 black → flips white) | `I6→I7` (drops marker I6 → 5-in-a-row row 6 E6-I6) | **5-in-a-row row 6, Black scores. 0-1.** AI did not defend the obvious 4→5 threat. |
+| 14 | `F3→F6` — **AI played a self-flip!** Ring jumped over its own F4 + F5 markers, flipping both back to black. Net: white **gave me 2 free markers** and lost a marker. | `H9→C4` (jumps D5 white → flips, lands ring at C4) | **First clear bad move**: F3→F6 was a strict negative-EV move for white. iter_0 v1 had similar self-sacrificing moves; this is the same blind spot. |
+| 15 | `D3→D6` — **AI's first real multi-flip:** ring jumped D4 + D5 (both my markers), flipping both back to white. White now has 3-in-a-row col D (D3-D5). | `C4→E6` (jumps D5 → flips back to mine) | I had to counter-flip immediately to disrupt the col D 3-in-a-row. |
+| 16 | `B2→B3` (passive) | `E6→E3` (jumps E4 → flips to mine) | AI's response was a 1-step quiet move — didn't develop col D further. |
+| 17 | `F6→H6` (1-step slide) | `E3→C3` (jumps D3 → flips to mine) | I disrupted column D again. |
+| 18 | `H7→C2` — **AI's biggest tactical move of the game.** SW-diagonal jump from H7 through F5+E4+D3 (all my markers, contiguous), flipping all 3 back to white in one move. **Same flavor as iter_0 v1's `B7→D7` chain disruption — but flipping 3 markers in one shot, not 1.** This is a real multi-flip, the model saw it. | `I7→F7` (multi-flip H7+G7 white → flip to black, ring at F7) | I had to immediately counter with my own multi-flip to disrupt the SW diagonal that was now becoming dangerous. |
+| 19 | `H6→H8` (jumps H7 black → flips white) | `C3→G3` (multi-flip: jumps D3+E3+F3, flipping mixed-color row 3 chain) | Both sides multi-flipping. |
+| 20 | `H8→E5` (jumps G7+F6 black markers → flips to white, lands ring centrally on E5) | `F7→C7` (jumps D7 → flips to mine; **drops marker F7 → NE diagonal C4-D5-E6-F7 = 4-in-a-row mine**) | **AI didn't see the NE diagonal 4-in-a-row threat.** |
+| 21 | `D6→E7` (1-step slide, ring repositions) | `G5→G8` (jumps G7 → flips to mine, **ring lands at G8 = setup for 5-in-a-row NE diagonal next turn**) | This was the critical setup move for me. The threat was: next turn move ring G8 away → drops marker at G8 → 5-in-a-row C4-G8 NE diagonal. **The threat was visible 1 ply ahead. AI's response was the worst-case option for them**: |
+| 22 | `C2→B1` — **AI played a corner move.** Total non-defense. iter_0 v1 also missed similar 4→5 finishes. | `G8→G9` (drops marker G8) → **5-in-a-row NE diagonal D5-E6-F7-G8-H9, Black scores. 0-2.** | **Identical 4-in-a-row → 5-in-a-row blind spot as iter_0 v1.** Visible 1-ply threat, AI moved a ring to a corner instead of disrupting. |
+| 23 | `G4→G6` (jumps G5 black → flips white) | `H4→H9` — **3-marker multi-flip jump** (H6+H7+H8 white markers → all flipped to black). **My biggest tactical move of the game.** | This single move flipped 3 white markers and set up multiple new chains (col H, row 7, NE diagonal F6-H8). |
+| 24 | `E5→E2` — **Another self-flip blunder.** Ring jumped its own E3+E4 white markers, flipping both back to black. Net: white **gave me 2 more free markers** and lost a marker. | `H9→H10` (drops marker H9 → col H 4-in-a-row H6-H9) | Second clear self-sacrificing blunder. iter_0 v1 had these too. |
+| 25 | `G6→J9` — **AI's only smart defensive move of the late game.** NE-diagonal jump from G6 through H7+I8 (my markers), flipping both to white. **Disrupted my col H chain by flipping H7.** Counter-flip recognized 1 ply ahead. | `G3→G8` — **game-winning multi-flip + 5-in-a-row.** Ring jumped G4+G5+G6+G7 (4-marker run), flipping all 4. Source-drop at G3 completed row 3 5-in-a-row C3-G3. **AND** the NE diagonal E3-F4-G5-H6-I7 also became a 5-in-a-row simultaneously (the engine offered both as choices). | **Two simultaneous 5-in-a-rows from one move** — game over. |
+| 26 | — | `markers C3 D3 E3 F3 G3; remove H10` | **3-0 win.** |
+
+### Observations
+
+1. **Ring placements:** The model's 5 placements (D4, F5, D5, F3, C5) were a **tight central cluster on cols C-F**, identical in flavor to iter_0 v1's left-side cluster. Did not adapt to my spread placement (E6, G7, H6, F8, I8). Same opening pattern as iter_0 v1.
+2. **Did the model defend my 3-in-a-rows?** Sometimes. It engaged on the col D area (multi-flip D3→D6) when its own threat aligned, but never specifically defended my chains.
+3. **Did the model defend my 4-in-a-rows?** **No, twice.** Move 22 (C2→B1 corner move when I had a visible 4-in-a-row NE diagonal one ply from completion) and move 26 (failed to defend row 3 4-in-a-row). **Same exact blind spot as iter_0 v1 — defending the 4→5 finish is not in this model's repertoire.**
+4. **Did the model make multi-flip moves itself?** Yes:
+   - Move 18 (`H7→C2`): **3-marker SW-diagonal jump** — biggest tactical move from the model. Flipped 3 of my markers in one shot.
+   - Move 25 (`G6→J9`): 2-marker counter-flip disrupting my col H chain. Late-game defensive recognition.
+   - Move 15 (`D3→D6`): 2-marker jump assembling col D 3-in-a-row.
+   These three are real tactics — the model saw them. Comparable to iter_0 v1 at 400 sims.
+5. **Did the model make any clear blunders?** **Yes, two self-flips:**
+   - Move 14 (`F3→F6`): jumped its own F4+F5 markers, flipping both to black. Strictly negative-EV. Net loss: 3 white markers.
+   - Move 24 (`E5→E2`): jumped its own E3+E4 markers, flipping both to black. Strictly negative-EV. Net loss: 3 white markers.
+   - These are the same flavor as iter_0 v1's `G3→D3` move at 64 sims. **Persistent blind spot: the model does not reliably evaluate self-marker flipping as bad.** This is not just MCTS noise — both moves were visit-converged and didn't make sense.
+6. **Did the model score any rows?** **No, zero.** This is **worse than iter_0 v1** at 400 sims, which scored col C (1 row). Caveat: I'm playing as Black this game (vs White previously), so the color asymmetry might matter — but the engine has no inherent color bias.
+7. **Game length:** 56 moves. Comparable to the iter_0_v2 White-side game (55 moves) and roughly 2× the iter_0 v1 game length at 400 sims. The longer length reflects the same back-and-forth multi-flip patterns and more counter-flips.
+
+### Comparison to iter_0 at 400 sims (the prior baseline) and to the iter_0_v2 White-side game above
+
+| Aspect | iter_0 v1 (400 sims, Black) | iter_0_v2 White-side game | iter_0_v2 Black-side (this game) |
+|---|---|---|---|
+| Final score | W:3 / B:1 | W:3 / B:1 | **W:0 / B:3 (shutout)** |
+| Game length | ~28 moves | 55 moves | 56 moves |
+| AI scored own row? | Yes — col C | Yes — D3-H7 diagonal | **No** |
+| AI defended my 4-in-a-rows? | No | Mixed (1 yes, 1 no) | **No (twice)** |
+| AI multi-flip moves | 1-flip occasional | Multiple, incl. 3-flip H8→H3 | 3-flip H7→C2 + 2-flip G6→J9 |
+| AI clear blunders | Self-flip G3→D3 (64 sims) | Bad H5→H8 (move 11) | **Two self-flips: F3→F6 and E5→E2** |
+| AI placement style | Tight left-cluster | Mixed (contests row 5, interposes H7) | Tight central cluster cols C-F |
+
+**One-paragraph summary:** Playing as Black against this model is **noticeably easier** than playing as White was — I won 3-0 vs 3-1 on the prior White-side game. The model still produces real multi-flip tactics (H7→C2 was a 3-marker chain disruption, G6→J9 was a 2-flip counter on my col H chain), but it also produced **two clear self-flip blunders** in this game (F3→F6 and E5→E2, both jumping its own markers for no compensating gain). On the defensive side, the headline blind spot is unchanged: **the model does not see the 4-in-a-row → 5-in-a-row finishing pattern when threatened against it**, regardless of color. At move 22, with my NE diagonal one ply from completion, the AI played a corner move (C2→B1). At move 26, with row 3 4-in-a-row + ring on extension cell setup, the AI played another quiet move. Both are the exact pattern iter_0 v1 also missed. The bot-filter improvement (humans-only training data) appears to not have addressed this specific blind spot. Color asymmetry is the most striking finding: **either the model is meaningfully weaker as White than as Black, OR I happened to find more tactical opportunities as Black** (the game-ending move G3→G8 was a 4-marker multi-flip producing two simultaneous 5-in-a-rows — the kind of high-leverage move that's hard to set up unless the position lets you).
+
+### Notes on scoring evolution within the game
+
+- **My 5-in-a-rows:** row 6 (move ~26, from a 2-step setup I8→I6 then I6→I7) → NE diagonal D5-H9 (move ~46, from G5→G8 then G8→G9 setup, off the C4-D5-E6 base I'd built earlier) → row 3 + NE diagonal E3-I7 simultaneously (move 56, via the 4-marker multi-flip G3→G8).
+- **AI's 5-in-a-rows:** None.
+- **The game-winning move (G3→G8) is worth special note.** It flipped 4 white markers in one ring slide (G4+G5+G6+G7), AND the source-drop at G3 simultaneously completed two different 5-in-a-rows on different axes. This kind of high-leverage finishing move depends on the opponent NOT seeing the threat-line buildup — and the AI's repeated quiet moves (B2→B3, F6→H6, C2→B1) on adjacent turns gave me the time to set this up. **Same pattern as iter_0 v1: the model tolerates patient buildup of threats it can't see.**
+- **Cross-color sanity:** combined with the prior White-side game, this confirms the iter_0_v2 model is in roughly the same strength tier as iter_0 v1 — multi-flip tactics emerge, but the 4→5 defensive blind spot persists, plus self-flip blunders still occur at low but non-trivial frequency. **The humans-only filter did not produce a step-change in tactical play.** Would expect head-to-head vs iter_0 v1 to land near 50% (with high variance from determinism quirks per the cycle observations earlier in this doc), and depth=3 heuristic eval to land in the same overlapping CI as iter_0 v1 (~50%, CI95 wide).
