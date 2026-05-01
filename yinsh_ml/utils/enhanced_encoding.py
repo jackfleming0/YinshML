@@ -25,10 +25,20 @@ from ..game.constants import (
     PieceType,
     is_valid_position,
     VALID_POSITIONS,
-    MARKERS_FOR_ROW
+    MARKERS_FOR_ROW,
+    DIRECTIONS,
+    RINGS_PER_PLAYER,
 )
 from ..game.game_state import GameState, GamePhase
-from .encoding import StateEncoder  # Import base class for inheritance
+from .encoding import (
+    StateEncoder,
+    _CURRENT_PLAYER_ROW,
+    _CURRENT_PLAYER_COL,
+    _CURRENT_PLAYER_WHITE_SENTINEL,
+    _CURRENT_PLAYER_BLACK_SENTINEL,
+    _PHASE_READ_ROW,
+    _PHASE_READ_COL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,9 +200,21 @@ class EnhancedStateEncoder(StateEncoder):
             # --- Channel 11: Valid move destinations ---
             self._encode_valid_moves(state, game_state)
 
-            # --- Channel 12: Game phase (normalized scalar) ---
+            # --- Channel 12: Game phase (broadcast) + side-to-move sentinel at A1 ---
+            # Mirror the basic encoder's convention: write phase uniformly
+            # everywhere first, then override the off-board cell A1 (row 0, col 0)
+            # with a 0/1 sentinel encoding the player to move. ``decode_state``
+            # reads phase from F6 (always on-board, never the sentinel cell)
+            # and player from A1, exactly like the base class — without the
+            # sentinel here, ``StateEncoder.decode_state`` would silently report
+            # WHITE for every BLACK-to-move state, poisoning augmentation.
             phase_value = float(game_state.phase.value) / float(len(GamePhase) - 1)
             state[self.CH_GAME_PHASE] = phase_value
+            is_white_to_move = (game_state.current_player == Player.WHITE)
+            state[self.CH_GAME_PHASE, _CURRENT_PLAYER_ROW, _CURRENT_PLAYER_COL] = (
+                _CURRENT_PLAYER_WHITE_SENTINEL if is_white_to_move
+                else _CURRENT_PLAYER_BLACK_SENTINEL
+            )
 
             # --- Channel 13: Turn number (normalized 0-1, capped at 100 moves) ---
             turn_number = game_state.move_count if hasattr(game_state, 'move_count') else 0
@@ -206,6 +228,72 @@ class EnhancedStateEncoder(StateEncoder):
             raise
 
         return state
+
+    def decode_state(self, state_tensor: np.ndarray) -> GameState:
+        """Decode a 15-channel enhanced state tensor back into a GameState.
+
+        Mirrors ``StateEncoder.decode_state`` but reads the side-to-move
+        sentinel and phase from channel 12 (the enhanced encoder's
+        ``CH_GAME_PHASE``) instead of channel 5 (which carries opponent row
+        threats in the enhanced layout). Without this override, the inherited
+        ``decode_state`` reads the threat channel at A1 — always 0 because
+        A1 is off-board — and reports WHITE for every state, breaking
+        ``augmentation.py::_base_move_encoding`` for half the buffer.
+
+        Recovers: current_player, phase, board pieces, rings_placed, scores.
+        """
+        game_state = GameState()
+
+        # Side-to-move from off-board sentinel at A1 on channel 12.
+        sentinel = float(
+            state_tensor[self.CH_GAME_PHASE, _CURRENT_PLAYER_ROW, _CURRENT_PLAYER_COL]
+        )
+        is_white_to_move = sentinel < 0.5
+        game_state.current_player = Player.WHITE if is_white_to_move else Player.BLACK
+
+        # Channels 0/2 are current-player's pieces; 1/3 are opponent's. Map
+        # back to absolute (white/black) using the recovered current_player.
+        if is_white_to_move:
+            current_ring_type, opponent_ring_type = PieceType.WHITE_RING, PieceType.BLACK_RING
+            current_marker_type, opponent_marker_type = PieceType.WHITE_MARKER, PieceType.BLACK_MARKER
+        else:
+            current_ring_type, opponent_ring_type = PieceType.BLACK_RING, PieceType.WHITE_RING
+            current_marker_type, opponent_marker_type = PieceType.BLACK_MARKER, PieceType.WHITE_MARKER
+
+        for row in range(self.BOARD_SIZE):
+            for col in range(self.BOARD_SIZE):
+                pos = Position(chr(ord('A') + col), row + 1)
+                if not is_valid_position(pos):
+                    continue
+                if state_tensor[self.CH_CURRENT_RINGS, row, col] > 0.5:
+                    game_state.board.place_piece(pos, current_ring_type)
+                elif state_tensor[self.CH_OPPONENT_RINGS, row, col] > 0.5:
+                    game_state.board.place_piece(pos, opponent_ring_type)
+                elif state_tensor[self.CH_CURRENT_MARKERS, row, col] > 0.5:
+                    game_state.board.place_piece(pos, current_marker_type)
+                elif state_tensor[self.CH_OPPONENT_MARKERS, row, col] > 0.5:
+                    game_state.board.place_piece(pos, opponent_marker_type)
+
+        # Phase from F6 (always on-board, never the sentinel cell).
+        phase_value = float(
+            state_tensor[self.CH_GAME_PHASE, _PHASE_READ_ROW, _PHASE_READ_COL]
+        )
+        num_phase_values = len(GamePhase)
+        phase_idx = int(round(phase_value * (num_phase_values - 1)))
+        phase_idx = max(0, min(num_phase_values - 1, phase_idx))
+        game_state.phase = GamePhase(phase_idx)
+
+        # Recover ring counts and scores from the decoded board.
+        white_rings = len(game_state.board.get_pieces_positions(PieceType.WHITE_RING))
+        black_rings = len(game_state.board.get_pieces_positions(PieceType.BLACK_RING))
+        game_state.rings_placed = {
+            Player.WHITE: white_rings,
+            Player.BLACK: black_rings,
+        }
+        game_state.white_score = max(0, RINGS_PER_PLAYER - white_rings)
+        game_state.black_score = max(0, RINGS_PER_PLAYER - black_rings)
+
+        return game_state
 
     def _encode_pieces(self, state: np.ndarray, game_state: GameState, is_white: bool):
         """Encode piece positions (channels 0-3)."""
@@ -291,17 +379,13 @@ class EnhancedStateEncoder(StateEncoder):
         if len(marker_positions) < 4:
             return threats
 
-        # Directions for checking lines
-        directions = [
-            (0, 1),   # Vertical
-            (1, 0),   # Horizontal
-            (1, 1),   # Diagonal up-right
-            (-1, 1),  # Diagonal up-left
-        ]
-
-        # Check each marker as potential start of a near-complete row
+        # Use the canonical hex-axis set. The legacy inlined list contained
+        # the pseudo-diagonal ``(-1, 1)`` which is not a real hex line; row
+        # threats reported along it were spurious and fed the network bogus
+        # positional signal. ``DIRECTIONS`` is the single source of truth
+        # for forward-only hex axes (see game/constants.py).
         for start_pos in marker_positions:
-            for dx, dy in directions:
+            for dx, dy in DIRECTIONS:
                 # Count consecutive markers in this direction
                 run_positions = [start_pos]
 
@@ -384,15 +468,10 @@ class EnhancedStateEncoder(StateEncoder):
         if len(marker_positions) < 3:
             return partial_cells
 
-        directions = [
-            (0, 1),   # Vertical
-            (1, 0),   # Horizontal
-            (1, 1),   # Diagonal up-right
-            (-1, 1),  # Diagonal up-left
-        ]
-
+        # Same hex-axis correctness fix as in `_find_row_threats`: drop the
+        # pseudo-diagonal ``(-1, 1)`` which the engine never treats as a row.
         for start_pos in marker_positions:
-            for dx, dy in directions:
+            for dx, dy in DIRECTIONS:
                 run_positions = [start_pos]
                 current = start_pos
 

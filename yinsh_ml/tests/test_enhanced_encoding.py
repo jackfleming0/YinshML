@@ -366,23 +366,29 @@ class TestGamePhaseChannel:
         return EnhancedStateEncoder()
 
     def test_ring_placement_phase(self, encoder):
-        """Test encoding during ring placement phase."""
+        """Test encoding during ring placement phase.
+
+        Reads phase from F6 (row 5, col 5) — the canonical phase-read cell
+        used by ``decode_state``. The sentinel cell A1 (0, 0) on channel 12
+        carries side-to-move, not phase, so reading it would conflate the
+        two signals.
+        """
         state = GameState()
         state.phase = GamePhase.RING_PLACEMENT
 
         encoded = encoder.encode_state(state)
-        phase_value = encoded[12, 0, 0]
+        phase_value = encoded[12, 5, 5]
 
         # RING_PLACEMENT = 0, GamePhase has 5 values (0-4), normalized = 0/4 = 0
         assert phase_value == 0.0, f"Ring placement phase should be 0, got {phase_value}"
 
     def test_main_game_phase(self, encoder):
-        """Test encoding during main game phase."""
+        """Test encoding during main game phase. Reads from F6 (see above)."""
         state = GameState()
         state.phase = GamePhase.MAIN_GAME
 
         encoded = encoder.encode_state(state)
-        phase_value = encoded[12, 0, 0]
+        phase_value = encoded[12, 5, 5]
 
         # MAIN_GAME = 1, GamePhase has 5 values (0-4), normalized = 1/4 = 0.25
         assert phase_value == 0.25, f"Main game phase should be 0.25, got {phase_value}"
@@ -559,6 +565,174 @@ class TestDescribeChannels:
         for i in range(15):
             assert i in descriptions, f"Channel {i} not in descriptions"
             assert isinstance(descriptions[i], str), f"Channel {i} description not a string"
+
+
+class TestSideToMoveSentinel:
+    """Side-to-move sentinel + decode_state round-trip.
+
+    Pre-fix bug: ``EnhancedStateEncoder.encode_state`` wrote no sentinel and
+    inherited ``StateEncoder.decode_state`` read channel 5 cell A1 (always 0
+    in the enhanced layout because that channel is opponent-row-threats and
+    A1 is off-board). Result: every decoded state reported WHITE, so
+    ``augmentation.py::_base_move_encoding`` re-enumerated valid moves under
+    the wrong player for every BLACK-to-move sample.
+    """
+
+    @pytest.fixture
+    def encoder(self):
+        return EnhancedStateEncoder()
+
+    def test_sentinel_present_for_white_to_move(self, encoder):
+        state = GameState()
+        state.current_player = Player.WHITE
+        encoded = encoder.encode_state(state)
+        # WHITE sentinel = 0.0
+        assert encoded[12, 0, 0] == pytest.approx(0.0)
+
+    def test_sentinel_present_for_black_to_move(self, encoder):
+        state = GameState()
+        state.current_player = Player.BLACK
+        encoded = encoder.encode_state(state)
+        # BLACK sentinel = 1.0
+        assert encoded[12, 0, 0] == pytest.approx(1.0)
+
+    def test_decode_recovers_white_to_move(self, encoder):
+        state = GameState()
+        state.current_player = Player.WHITE
+        state.phase = GamePhase.MAIN_GAME
+        encoded = encoder.encode_state(state)
+        decoded = encoder.decode_state(encoded)
+        assert decoded.current_player == Player.WHITE
+
+    def test_decode_recovers_black_to_move(self, encoder):
+        """The bug-bite test: pre-fix this returned WHITE."""
+        state = GameState()
+        state.current_player = Player.BLACK
+        state.phase = GamePhase.MAIN_GAME
+        encoded = encoder.encode_state(state)
+        decoded = encoder.decode_state(encoded)
+        assert decoded.current_player == Player.BLACK, (
+            "Pre-fix this returned WHITE because the inherited decode_state "
+            "read the missing sentinel from channel 5 (opp row threats) "
+            "instead of channel 12 (game phase)."
+        )
+
+    def test_decode_round_trip_preserves_pieces_white(self, encoder):
+        state = GameState()
+        state.current_player = Player.WHITE
+        state.phase = GamePhase.MAIN_GAME
+        # Mixed pieces of both colors
+        state.board.place_piece(Position('E', 5), PieceType.WHITE_RING)
+        state.board.place_piece(Position('F', 6), PieceType.BLACK_RING)
+        state.board.place_piece(Position('D', 4), PieceType.WHITE_MARKER)
+        state.board.place_piece(Position('G', 7), PieceType.BLACK_MARKER)
+
+        decoded = encoder.decode_state(encoder.encode_state(state))
+
+        assert decoded.current_player == Player.WHITE
+        assert decoded.board.get_piece(Position('E', 5)) == PieceType.WHITE_RING
+        assert decoded.board.get_piece(Position('F', 6)) == PieceType.BLACK_RING
+        assert decoded.board.get_piece(Position('D', 4)) == PieceType.WHITE_MARKER
+        assert decoded.board.get_piece(Position('G', 7)) == PieceType.BLACK_MARKER
+
+    def test_decode_round_trip_preserves_pieces_black(self, encoder):
+        """Round-trip with BLACK to move: piece colors must NOT flip."""
+        state = GameState()
+        state.current_player = Player.BLACK
+        state.phase = GamePhase.MAIN_GAME
+        state.board.place_piece(Position('E', 5), PieceType.WHITE_RING)
+        state.board.place_piece(Position('F', 6), PieceType.BLACK_RING)
+        state.board.place_piece(Position('D', 4), PieceType.WHITE_MARKER)
+        state.board.place_piece(Position('G', 7), PieceType.BLACK_MARKER)
+
+        decoded = encoder.decode_state(encoder.encode_state(state))
+
+        assert decoded.current_player == Player.BLACK
+        # Critically: WHITE pieces still come back as WHITE, not flipped.
+        assert decoded.board.get_piece(Position('E', 5)) == PieceType.WHITE_RING
+        assert decoded.board.get_piece(Position('F', 6)) == PieceType.BLACK_RING
+        assert decoded.board.get_piece(Position('D', 4)) == PieceType.WHITE_MARKER
+        assert decoded.board.get_piece(Position('G', 7)) == PieceType.BLACK_MARKER
+
+    def test_decode_recovers_phase(self, encoder):
+        for phase in (GamePhase.RING_PLACEMENT, GamePhase.MAIN_GAME):
+            state = GameState()
+            state.current_player = Player.BLACK
+            state.phase = phase
+            decoded = encoder.decode_state(encoder.encode_state(state))
+            assert decoded.phase == phase
+
+    def test_a1_off_board_so_sentinel_does_not_collide_with_pieces(self):
+        """Sanity: A1 is off the hex board, so the sentinel cell can't be
+        overwritten by piece encoding regardless of board contents."""
+        from yinsh_ml.game.constants import is_valid_position
+        assert not is_valid_position(Position('A', 1))
+
+
+class TestPseudoDiagonalFix:
+    """Row-threat / partial-row detection no longer uses the non-hex
+    ``(-1, 1)`` direction.
+
+    Pre-fix: 4 markers along ``(-1, 1)`` (anti-diagonal in array coords) were
+    flagged as a near-row-of-5 even though the YINSH engine never treats that
+    as a valid line. Encoded threats fed the network bogus positional signal.
+    """
+
+    @pytest.fixture
+    def encoder(self):
+        return EnhancedStateEncoder()
+
+    def test_anti_diagonal_4_markers_not_a_threat(self, encoder):
+        """4 white markers along the pseudo-diagonal (-1, 1) → 0 threats.
+
+        Place markers along an anti-diagonal that traverses on-board cells.
+        Engine truth: this is not a row, so encoder must report 0 threats.
+        """
+        state = GameState()
+        state.current_player = Player.WHITE
+        state.phase = GamePhase.MAIN_GAME
+        # Walk along (-1, 1) in (col, row) array coords from a center cell.
+        # Pick four valid on-board cells along that direction. F6 → E7 → D8 → C9
+        # are on-board (column lookups valid; rows in range).
+        for col_letter, row in [('F', 6), ('E', 7), ('D', 8), ('C', 9)]:
+            state.board.place_piece(Position(col_letter, row), PieceType.WHITE_MARKER)
+
+        encoded = encoder.encode_state(state)
+        # Channel 4 = current player's row threats. Must contain no threats
+        # along the pseudo-diagonal.
+        threats = encoded[4]
+        # The two extension cells along the bogus direction are G5 and B10.
+        # Both should be 0 — they are not real row-completing threats.
+        # (G5 is on-board; B10 needs validity check.)
+        from yinsh_ml.game.constants import is_valid_position
+        for col_letter, row in [('G', 5), ('B', 10)]:
+            if is_valid_position(Position(col_letter, row)):
+                col_idx = ord(col_letter) - ord('A')
+                row_idx = row - 1
+                assert threats[row_idx, col_idx] == 0.0, (
+                    f"Pseudo-diagonal threat at {col_letter}{row} should "
+                    f"not be flagged as row-completing."
+                )
+
+    def test_canonical_diagonal_4_markers_still_creates_threat(self, encoder):
+        """The MATCHING-sign diagonal (1, 1) is a real hex axis; threats
+        along it must STILL be detected. This pins the regression boundary."""
+        state = GameState()
+        state.current_player = Player.WHITE
+        state.phase = GamePhase.MAIN_GAME
+        # 4 markers along (1, 1): C3, D4, E5, F6. Extension to G7 (or B2)
+        # should be threat-flagged.
+        for col_letter, row in [('C', 3), ('D', 4), ('E', 5), ('F', 6)]:
+            state.board.place_piece(Position(col_letter, row), PieceType.WHITE_MARKER)
+
+        encoded = encoder.encode_state(state)
+        threats = encoded[4]
+        # G7 is on-board and is the forward extension.
+        col_idx = ord('G') - ord('A')
+        row_idx = 7 - 1
+        assert threats[row_idx, col_idx] == 1.0, (
+            "Real diagonal (1, 1) row threat at G7 must still be flagged."
+        )
 
 
 if __name__ == '__main__':
