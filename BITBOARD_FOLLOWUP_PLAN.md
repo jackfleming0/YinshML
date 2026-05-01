@@ -16,16 +16,18 @@ single-game cProfile on cloud 4090 + Linux x86 at sim=400 shows:
 | Bitboard port shipped | 235s |
 | + Candidate A (heuristic eval cache) | 110s |
 | + Candidate A' (Move.__hash__ cache) | 95s |
-| + Candidate B' (vectorize UCB) | **85s** |
+| + Candidate B' (vectorize UCB) | 85s |
+| + Candidate C-1 (Position lookup table) | **76s** |
 
 (\* estimated from the 1.46× steady-state ratio — the Python baseline
 hasn't been re-profiled since A landed; both engines benefit from A
 since the heuristic is engine-agnostic.)
 
-**Cumulative wall-clock reduction: ~75% from the pre-port baseline,
-64% from the bitboard-port baseline.** Brief's 5× target is no longer
+**Cumulative wall-clock reduction: ~78% from the pre-port baseline,
+68% from the bitboard-port baseline.** Brief's 5× target is no longer
 the right framing; recipe cost is what matters and we've cut it
-substantially.
+substantially. Branch is ready to merge — see "Final state" section
+at the bottom.
 
 ## Candidate A: LANDED 2026-05-01
 
@@ -78,6 +80,24 @@ formula split exactly. 7 parity tests in
 nodes (varied visited fractions, child counts 2-80) plus 4 edge
 cases. See commits `3bb42ff`, `b80e28d`.
 
+## Candidate C-1: LANDED 2026-05-01
+
+**Measured outcome on cloud 4090:**
+- `cell_to_position` self: 4.4s → **0.69s** (-3.7s, lookup-table effect)
+- `cpp_move_to_py` cum: 24.9s → **14.7s** (-10.2s — nested
+  `cell_to_position` cost evaporated)
+- Total game time: 85s → **76s** (11% additional wall-clock; net 68%
+  vs bitboard-port baseline; 78% vs pre-port baseline)
+
+Implementation: 121-slot precomputed `Position` table at module load
+in `yinsh_ml/game_cpp/_convert.py`. `cell_to_position(cell)` is a
+`_POSITION_BY_CELL[cell]` lookup. Position is `@dataclass(frozen=True)`
+so instance sharing is safe. Parity test in
+`yinsh_ml/tests/test_cell_to_position_lookup.py` verifies the new
+lookup matches legacy divmod across all 121 cell indices, asserts
+instance sharing, and round-trips position_to_cell for the 99 valid
+YINSH cells. See commits `d3054ab`, `56f0955`.
+
 ## Profile after Candidate B' (2026-05-01, cloud 4090, 85s/game)
 
 | # | Cost center | Self | Cum | What |
@@ -103,30 +123,7 @@ C territory.**
 The new bottlenecks are MCTS internals (UCB walk + Move hashing), not
 the heuristic. Rerank in `(expected_gain / implementation_cost)`:
 
-### Candidate C-1 (NEXT, top priority): cache `cell_to_position`
-
-**Hypothesis.** 7.17M `cell_to_position` calls per game, each
-constructing a fresh `Position` dataclass — but there are only 99
-valid YINSH positions (121 with the 11×11 lattice). Same Position
-returned repeatedly is wasted work.
-
-**Fix.** Build a 121-slot list of `Position` instances at module load
-in `yinsh_ml/game_cpp/_convert.py`. `cell_to_position(cell)` becomes
-a `_POSITION_BY_CELL[cell]` lookup. Position is `@dataclass(frozen=True)`
-so sharing instances across callers is safe.
-
-**Expected gain.** `cell_to_position` self drops 4.4s → ~0.5s; the
-dataclass `Position.__init__` cost (currently scattered through
-`<string>:2(__init__)`) drops to zero for cached lookups. Combined
-estimated savings ~6-7s wall-clock = **~7-8%**.
-
-**Risk.** Very low. Same `Position` values returned (verified by
-parity test against the legacy divmod implementation across all 121
-cells). Frozen dataclass — instance sharing is safe.
-
-**Cost.** ~30 minutes including the parity test.
-
-### Candidate C-2 (after C-1): port move conversion to C++ or skip Python Move objects entirely
+### Candidate C-2 (PARKED, not pursued in this round): port move conversion to C++ or skip Python Move objects entirely
 
 **Hypothesis.** `cpp_move_to_py` (8.5s self) constructs a Python
 `Move` for every move enumerated, even though MCTS often only needs
@@ -138,8 +135,15 @@ Python Move materialization entirely on the encoder path, or (b)
 keep moves as opaque C++ tokens through MCTS and only convert at
 state-encoder boundaries.
 
-**Expected gain.** ~10-15s wall-clock = ~12-18%. Bigger lift than
-C-1 — defer until C-1 lands and we re-profile.
+**Status (post-C-1).** Profile re-run after C-1 showed
+`cpp_move_to_py` self at 7.6s and `move_to_index` at 4.3s — combined
+~12s self-time across the move-conversion path. Theoretical maximum
+saving if both went away ~6-8s wall-clock (some C++ work still
+required). Effort: 4-8 hours including parity tests for the new C++
+binding. **Parked** as the cost/benefit is much worse than the four
+landed candidates and the work is structurally different (touches
+the C++ binding surface). Pick this up if recipe cost becomes a
+problem again.
 
 ### Candidate B'' (parking lot): stats-as-arrays in Node
 
@@ -168,50 +172,60 @@ section above for the measured outcome. -->
 - **Old Candidate 1 (encoder fast-path)** — already dropped, still dropped.
 - **Old Candidate 3 (move history defer)** — already dropped.
 
-### A' and B' both LANDED
+### All landed work
 
-See "Candidate A': LANDED" and "Candidate B': LANDED" sections above
-for measured outcomes.
+A, A', B', and C-1 are all LANDED. See the "LANDED" sections above
+for measured outcomes per candidate.
 
-## Step 0 — profile first (always)
+## Final state — branch ready to merge
 
-```bash
-# On the cloud box (4090, .so built):
-git pull
-python scripts/profile_cpp_self_play.py --sims 400          # steady-state target
-python scripts/profile_cpp_self_play.py --sims 48 --tag warmup   # the 1.2× case
-```
+Trajectory:
 
-Re-profile after every candidate lands. The plan keeps getting
-overturned by data — only profile-driven choices have stuck.
+| round | wall (sim=400) | Δ this round | cumulative | effort |
+|---|---:|---:|---:|---|
+| Bitboard port baseline | 235s | — | — | — |
+| + Candidate A | 110s | -53% | -53% | ~1.5h |
+| + Candidate A' | 95s | -14% | -60% | ~30m |
+| + Candidate B' | 85s | -10% | -64% | ~1h |
+| + Candidate C-1 | 76s | -11% | **-68%** | ~30m |
 
-## Stop conditions
+Versus pre-port (~340s estimate from the original 1.46× ratio):
+**~78% wall-clock reduction, ~4.5× total speedup.**
 
-- If A' lands and the ratio is ≥2.5× steady-state vs the Python
-  engine baseline, **stop and ship**. Recipe cost is well within
-  acceptable range.
-- If A' wall-clock win is <10%, Move hashing wasn't the bottleneck I
-  thought — re-profile and check whether the work moved elsewhere
-  (e.g. dict ops directly, not hashing).
-- If profiling shows the new dominant cost is `torch.*` GPU
-  primitives, stop. That's the GPU floor + Amdahl's law on NN.
+### Why we stopped
 
-## Validation strategy
+The four landed candidates were all clean constant-factor wins with
+straightforward parity tests. What's left (C-2 port move conversion,
+B'' stats-as-arrays in Node) is structurally different — invasive
+refactors of the C++ binding or MCTS Node — with worse
+effort/benefit ratios. Pick it back up if recipe cost becomes a
+problem again.
 
-For every candidate landed:
+### Pre-merge validation
 
-1. **Parity tests pass.** `pytest yinsh_ml/heuristics/`,
-   `yinsh_ml/tests/test_game_logic.py`,
-   `yinsh_ml/tests/test_move_encoder.py`,
-   `yinsh_ml/tests/test_heuristic_integration.py` stay green. Add a
-   new parity test for any non-trivial behavioral change.
-2. **Paired stress run.** Run `cloud_smoke_cpp_stress.yaml` and
-   `cloud_smoke_py_stress.yaml`, compare iter-2 self-play time. The
-   ratio number goes in the commit message.
-3. **Regression catch.** Re-run sim=48 profile; over-optimizing the
-   high-sim path can sometimes regress the low-sim path.
+1. **Parity tests pass.** `pytest yinsh_ml/heuristics/
+   yinsh_ml/tests/test_game_logic.py
+   yinsh_ml/tests/test_move_encoder.py
+   yinsh_ml/tests/test_heuristic_integration.py
+   yinsh_ml/tests/test_move_hash_cache.py
+   yinsh_ml/tests/test_select_action_vector.py
+   yinsh_ml/tests/test_cell_to_position_lookup.py` — all green local
+   (149 passing) and on cloud (`.so`-gated tests run).
+2. **Paired stress benchmark.** Run
+   `scripts/paired_stress_benchmark.py --iterations 2` on cloud:
+   ```bash
+   python scripts/paired_stress_benchmark.py
+   ```
+   Pulls iter-2 self-play wall time from `cloud_smoke_cpp_stress.yaml`
+   and `cloud_smoke_py_stress.yaml`, prints the ratio. The number
+   goes in the merge PR description.
+3. **Regression catch.** Re-run the sim=48 profile and confirm warmup
+   case didn't regress:
+   ```bash
+   python scripts/profile_cpp_self_play.py --sims 48 --tag warmup
+   ```
 
-## Out of scope
+## Out of scope (still)
 
 - **Port MCTS to C++.** Yngine has lock-free MCTS. Weeks of work,
   separate brief.
@@ -225,7 +239,7 @@ For every candidate landed:
 
 ## Repo state
 
-- Branch: `bitboard-port`.
+- Branch: `bitboard-port` — ready to merge to main.
 - Build: `pip install -e . && python setup.py build_ext --inplace`.
 - Sanity: `pytest yinsh_ml/game_cpp/tests/ -q` should report ~140
   passing.
