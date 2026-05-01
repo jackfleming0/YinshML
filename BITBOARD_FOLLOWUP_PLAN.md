@@ -19,212 +19,155 @@ x86 vs the Python engine:
 
 Real-world recipe cost reduction is ~35%. Below the brief's 5× target.
 
-The engine layer is no longer the dominant cost — when sim=400 on a
-4090, per-move time is 290 ms (C++) vs 480 ms (Python). The 190 ms
-gap is what we saved. The remaining 290 ms is now the new headroom.
+The engine layer is no longer the dominant cost. Per-move time at
+sim=400 on a 4090 is 290 ms (C++) vs 480 ms (Python). The 190 ms gap
+is what we saved. The remaining 290 ms is the new headroom — and as
+the profile in the next section shows, the dominant cost is no longer
+in the engine wrapper at all.
 
-This doc proposes the next ~3 attacks to keep pushing the ratio up,
-ranked by expected gain per hour of work.
+## Profile results (2026-05-01, cloud 4090)
+
+A single-game cProfile run with `--sims 400` (`scripts/profile_cpp_self_play.py`)
+broke down the 235s/game self-time as follows. **The plan's original
+hypotheses were wrong** — encoder is 5.7%, not the bottleneck; the
+heuristic evaluator is 62%.
+
+| # | Cost center | Cum time | % of game | What |
+|--:|---|---:|---:|---|
+| 1 | **`YinshHeuristics.evaluate_position`** | **146s** | **62%** | Per-leaf heuristic eval (37k calls) |
+| 2 | └── `connected_marker_chains` / `_find_longest_chain` / `dfs_chain_length` | 80s | 34% | Python DFS over markers |
+| 3 | └── `tactical_patterns.detect_immediate_*` | 41s | 17% | Near-complete row pattern matching |
+| 4 | MCTS `_select_action` (UCB) | 62s | 26% | Pure-Python tree walk |
+| 5 | C++ wrapper `cpp_move_to_py` + `get_piece` + `cell↔pos` | ~75s | ~32%* | Plan original Candidate 2 |
+| 6 | Python hashing (`Position.__hash__`, enum hash) | ~50s | ~21%* | 80M `builtins.hash` calls |
+| 7 | NN `predict_batch` (forward + GPU) | 24s | 10% | The "GPU floor" |
+| 8 | `encode_state` | 13s | 5.7% | Plan original Candidate 1 — much smaller than guessed |
+
+(\* nested with #1, percentages overlap)
+
+**The headline:** the heuristic costs 6× more than the neural network
+(146s vs 24s) per game. For a `hybrid` mode that's supposed to be a
+50/50 blend, the cost ratio is wildly out of balance. The C++ engine
+port already extracted most of the engine-layer wins; what's left is
+overwhelmingly the Python heuristic.
+
+## Updated candidate ranking
+
+The plan was originally written from wrapper-code intuition. Profile
+data overrides that. Updated ranking, in order of `(expected_gain /
+implementation_cost)`:
+
+### Candidate A (NEW, top priority): cache `evaluate_position` by Zobrist hash
+
+**Hypothesis.** 37,248 evaluate_position calls per game; MCTS visits
+many positions multiple times via tree exploration and transpositions.
+Existing transposition-table evidence suggests 60–80% hit rates on
+position keys. Caching the heuristic by `(zobrist, score, move_count,
+player)` should slash 50–70% off the heuristic cost.
+
+**Fix.** Inside `YinshHeuristics`, add a dict keyed by
+`(position_fingerprint, white_score, black_score, move_count,
+player_value)` mapping to the cached float result. Position
+fingerprint is the Zobrist hash for Python `GameState` and a
+bitboard-tuple fast-path for `CppGameState` (avoids triggering
+`CppBoard.pieces` materialization which itself is non-trivial). Cache
+size capped, FIFO drop on overflow. `clear_cache()` for between-game
+reuse if the evaluator outlives a single game.
+
+**Expected gain.** If hit rate matches the existing transposition
+table at 60%, savings = 0.60 × 146s = ~88s of 235s per game = **~37%
+wall-clock**. Even at a conservative 40% hit rate, ~25% wall-clock.
+Should push the steady-state speedup ratio from 1.46× toward 2.0×+.
+
+**Risk.** Low. Cache key includes every state input the heuristic
+reads from; a parity test verifies cached vs. uncached results are
+bit-equal across many random positions. Worst case if logic is wrong:
+training data is stale, caught by the parity test.
+
+**Implementation.**
+1. Refactor `evaluate_position` body into `_evaluate_position_uncached`.
+2. Make `evaluate_position` a cache-aware wrapper.
+3. Add `_position_fingerprint(state)` helper handling both engine paths.
+4. Add `clear_cache()` and `cache_stats()` for visibility.
+5. Add parity test: 200 random states, cached == uncached.
+6. Re-run profile; expect `evaluate_position` cum time to drop ~50%+.
+
+### Candidate B (was #2): port hot heuristic features to C++
+
+**Hypothesis.** `connected_marker_chains` (80s/game) is a Python DFS
+over markers. Connected-component on a bitboard is O(popcount + a few
+shifts) in C++ — should be ~50–100× faster.
+`tactical_patterns._find_near_complete_rows` (41s/game) is similarly
+amenable to bitboard tricks.
+
+**Fix.** Add `_engine.connected_chain_length(markers_bb)` and
+`_engine.find_near_complete_rows(markers_bb)` bindings. Wire through
+features.py / tactical_patterns.py to dispatch on isinstance(state.board,
+CppBoard).
+
+**Expected gain.** Stacks on top of A, since A's cache misses still
+pay this cost. If A reaches 60% hit rate, miss-path heuristic is 0.4
+× 121s = 48s; B could halve that = ~10% additional wall-clock.
+
+**Risk.** Medium. Connected-component on a hex bitboard requires
+correct neighbor masks. Parity test against the Python implementation
+is mandatory.
+
+**Cost.** ~6–10 hours.
+
+### Candidate C (was Candidate 2): move-list conversion
+
+**Hypothesis.** `cpp_move_to_py` self-time is 11s/game; cell↔position
+conversion adds another ~10s. ~9% wall-clock if both go.
+
+**Status.** Demoted from #2 to #3. Worth doing, but A and B should
+land first.
+
+### Demoted / dropped
+
+- **Original Candidate 1 (encoder fast-path)** — DROP. Encoder is
+  5.7% of game; full elimination is well below the doc's "10%+"
+  estimate. Skip unless A and B both land and re-profile shows
+  encoder rising in the rankings.
+- **Original Candidate 3 (move history defer)** — DROP. Not in
+  top-30 self-time. Skip definitively.
 
 ## Step 0 — profile first (don't skip)
 
-Bottleneck claims below are hypotheses from the wrapper code, not
-measured. **Validate before optimizing.** Profile a representative
-training iteration with the C++ engine and rank actual self-time:
+The first time this plan ran (2026-05-01) it produced the table
+above. Re-run after every candidate lands so the next decision is
+data-driven, not intuition-driven.
 
 ```bash
-# On the cloud box (or any with the .so built):
-git checkout bitboard-port
+# On the cloud box (4090, .so built):
 git pull
-
-# Make sure the stress configs from the previous session exist, or
-# regenerate from cloud_smoke.yaml:
-python -c "import yaml; cfg=yaml.safe_load(open('configs/cloud_smoke.yaml')); sp=cfg.setdefault('self_play',{}); sp['use_cpp_engine']=True; sp['num_simulations']=400; sp['late_simulations']=400; yaml.safe_dump(cfg, open('configs/cloud_smoke_cpp_stress.yaml','w'), sort_keys=False)"
-
-# Profile a single worker run (no multiprocessing — keeps cProfile clean):
-python -c "
-import cProfile, pstats, os, tempfile, torch
-torch.set_num_threads(1)
-from yinsh_ml.network.wrapper import NetworkWrapper
-from yinsh_ml.training.self_play import play_game_worker
-
-network = NetworkWrapper(device='cuda')
-with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp:
-    torch.save(network.network.state_dict(), tmp.name)
-    model_path = tmp.name
-
-cfg = dict(evaluation_mode='hybrid', heuristic_evaluator=None, heuristic_weight=0.5,
-           num_simulations=400, late_simulations=400, simulation_switch_ply=20,
-           fast_simulations=0, fast_sim_prob=0.0, c_puct=1.0, dirichlet_alpha=0.3,
-           value_weight=1.0, max_depth=200, initial_temp=1.0, final_temp=0.1,
-           annealing_steps=30, temp_clamp_fraction=0.6, use_batched_mcts=True,
-           mcts_batch_size=32, use_enhanced_encoding=False, enable_subtree_reuse=True,
-           fpu_reduction=0.25, epsilon_mix_start=0.25, epsilon_mix_end=0.0,
-           epsilon_mix_taper_moves=20, root_policy_temp=1.0, use_cpp_engine=True)
-
-pr = cProfile.Profile(); pr.enable()
-play_game_worker(model_path=model_path, game_id=0, mcts_config=cfg)
-pr.disable(); os.unlink(model_path)
-pstats.Stats(pr).sort_stats('tottime').print_stats(30)
-"
+python scripts/profile_cpp_self_play.py --sims 400          # steady-state target
+python scripts/profile_cpp_self_play.py --sims 48 --tag warmup   # the 1.2× case
 ```
 
-Save the top-30 self-time breakdown. Anything in `yinsh_ml/utils/encoding.py`,
-`yinsh_ml/game_cpp/_convert.py`, or `yinsh_ml/network/wrapper.py` is in
-scope for this plan. Anything in `torch.*` is not — that's the GPU NN
-floor and a separate problem.
-
-## Candidate 1: state encoding — direct bitboard→numpy
-
-**Hypothesis.** `StateEncoder.encode_state` walks `board.pieces` once
-per move per sim leaf, and the lazy materialization in
-`CppBoard.pieces` iterates 85 cells × 4 bitboard checks each time. At
-400 sims/move that's 400 × ~85 cells × 4 checks = 136K Python ops per
-move just to fill the 4 piece-channel grid that the C++ side already
-has in 4 bitboards.
-
-**Fix.** Add a C++ binding `_engine.write_state_channels(state, out)`
-that takes a pre-allocated `np.ndarray((4, 11, 11), dtype=float32)`
-and writes the 4 piece channels directly via popcount-iter. Then
-either:
-  (a) Have `CppBoard.to_numpy_array` call it directly, OR
-  (b) Add a fast path in `StateEncoder.encode_state` that recognizes
-      `CppGameState` / `CppBoard` and bypasses the dict walk.
-
-**Expected gain.** On a 290 ms/move budget, saving even 30 ms/move
-of encoder time is a ~10% wall-clock improvement. Could be more if the
-encoder is called per-leaf (vs per-move).
-
-**Risk.** Low. Same numpy layout, same channel ordering — pure
-constant-factor optimization. Verify with a parity test that the
-fast-path output bit-equals the slow-path output across 1000 random
-boards.
-
-**Implementation steps.**
-1. `yinsh_ml/game_cpp/src/bindings.cpp` — add
-   `WriteStateChannels(state, py::array_t<float> out)` that asserts
-   shape `(4, 11, 11)`, then for each of 4 bitboards iterates set
-   bits via `__builtin_ctzll` and writes `1.0` to the right
-   `(channel, row, col)`.
-2. Bind it in `bindings.cpp::PYBIND11_MODULE` as
-   `m.def("write_state_channels", ...)`.
-3. Override `CppBoard.to_numpy_array()` to allocate the array and call
-   the binding.
-4. Add a parity test: random board → both Board.to_numpy_array() and
-   CppBoard.to_numpy_array() produce equal arrays.
-5. Re-run the paired stress benchmark; iter 2 ratio should improve.
-
-## Candidate 2: move-list conversion — keep moves on the C++ side
-
-**Hypothesis.** `CppGameState.get_valid_moves()` calls
-`cpp_move_to_py(cm)` for every legal move. Profiling on Mac CPU
-showed ~50K cpp_move_to_py calls per game (300 plies × ~80 valid
-moves per ply / 2 — the `/2` is from MCTS reusing). Each call
-allocates a Python `Move`, a `Position`, and possibly a `tuple` of
-markers. That's ~50K-150K Python object allocations per game just for
-the wrapper.
-
-**Fix.** Change the contract: `CppGameState.get_valid_moves()` returns
-the C++ `_engine.Move` list directly, not Python `Move` objects.
-Callers that need a Python `Move` (e.g. for `state_encoder.move_to_index`)
-convert lazily — but most callers only iterate, compare, and pick
-one, which can be done on `_engine.Move` without conversion.
-
-This is invasive — `state_encoder.move_to_index` accepts a Python
-`Move` today. Either:
-  (a) Add a parallel `move_to_index_cell(c_move)` on StateEncoder that
-      takes the C++ move directly, OR
-  (b) Add a `_engine.Move.to_index()` method on the C++ side that
-      reproduces MoveEncoder's logic in C++ (bigger but faster).
-
-(b) is the bigger win and the bigger lift.
-
-**Expected gain.** Hard to estimate without profile data. If
-cpp_move_to_py is >5% of self-time in the profile, this is worth it.
-Could be 5-15% wall-clock.
-
-**Risk.** Medium. Move encoding (the 7433-slot scheme) is rule-
-correctness-sensitive; mistakes here corrupt training data silently.
-A bit-exact parity test against MoveEncoder.move_to_index is mandatory.
-
-**Implementation steps.**
-1. Profile to confirm cpp_move_to_py is in top-10 self-time.
-2. Pick (a) or (b) based on profile evidence.
-3. For (b): port MoveEncoder.move_to_index to C++. ~150 lines, but
-   the input is a small enum + a few ints. Validate via round-trip
-   test: every `_engine.Move.to_index()` matches
-   `MoveEncoder.move_to_index(cpp_move_to_py(cm))` for 100K random
-   moves.
-4. Update CppGameState.get_valid_moves to either return C++ moves
-   directly or batch-convert.
-
-## Candidate 3: move history — defer materialization
-
-**Hypothesis.** Every `CppGameState.make_move(move)` appends to
-`self._move_history`, which holds Python `Move` objects. These are
-allocated per move, and on `copy.deepcopy(state)` (still happening for
-`state_pool=None` MCTS runs) the list of Move objects gets copied
-element-wise.
-
-**Fix.** Store move history as a list of (move_type, source_cell,
-dest_cell, marker_cells) tuples — primitives only. Materialize Python
-`Move` objects only on `state.move_history` access (lazy).
-Alternatively: don't store history at all in MCTS sim states. The
-production MCTS doesn't read move_history during search, only at
-game-end. We could expose `move_history` as `[]` during sims and
-populate on the real GameState.
-
-**Expected gain.** Smaller than the other two. Move history is ~100
-items per game; the cost is dominated by deepcopy (which we already
-killed for the bitboard portion). The wrapper's `copy()` does
-`list(self._move_history)` which is shallow — already cheap. So
-candidate 3 might be a 1-2% win.
-
-**Risk.** Low. As long as `state.move_history` returns a list of
-Python Move objects on access, callers don't notice.
-
-**Implementation steps.**
-1. Profile-confirm move_history is in top-15 self-time. If not, skip
-   this candidate.
-2. Convert `_move_history` to `list[tuple]` storing primitives.
-3. Make `move_history` a property that materializes on access. Cache
-   the materialization until next make_move.
-
-## Recommended order
-
-1. **Profile.** ~30 minutes. Top-30 self-time on cProfile. Decide
-   based on data.
-2. **Candidate 1 (encoder).** Highest confidence, lowest risk, biggest
-   expected gain. ~3-4 hours.
-3. **Re-profile.** Confirm encoder dropped out of top-15.
-4. **Candidate 2 (move conversion).** Only if cpp_move_to_py / Move
-   allocations are still a top-10 contributor. ~6-8 hours for option
-   (b), ~2 hours for option (a).
-5. **Re-profile.** Decide if Candidate 3 is worth it.
-6. **Candidate 3 (move history).** Probably skip. ~2 hours if
-   pursued.
-
-Total budget: 8-15 hours of focused work for an additional ~1.3-1.6×
-on top of the current 1.46× steady-state, taking the ratio toward
-~2-2.5×. The brief's 5× target is unlikely without bigger structural
-changes (batched MCTS in C++, lock-free tree, etc. — yngine territory
-and out of scope).
+Expect ~90–280s wall time per run (235s on the 2026-05-01 baseline).
+The script prints top-30 by tottime/cumtime/yinsh_ml-filtered and
+dumps `profile_cpp_<tag>.prof` for offline pstats.
 
 ## Stop conditions
 
-- If Candidate 1 lands and the new ratio is ≥2× steady-state, ship it.
-  Recipe cost reduction is now substantial enough to justify the work.
-- If Candidate 1 is implemented and the speedup is <5%, the encoder
-  was not the bottleneck — re-profile and reconsider candidates 2/3.
-- If profiling shows the new dominant cost is `torch.*` GPU primitives,
-  stop. The remaining gap is GPU floor + Amdahl's law on NN.
+- If Candidate A lands and the new ratio is ≥2× steady-state, ship it
+  and consider B/C optional. Recipe cost reduction is now substantial
+  enough to justify the work.
+- If Candidate A speedup is <10% measured wall-clock, the cache hit
+  rate was lower than expected — investigate via `cache_stats()` and
+  reconsider the key design before moving to B.
+- If profiling shows the new dominant cost is `torch.*` GPU
+  primitives, stop. The remaining gap is GPU floor + Amdahl's law on
+  NN.
 
 ## Validation strategy
 
 For every candidate landed:
 
-1. **Parity tests pass.** `pytest yinsh_ml/game_cpp/tests/` stays
-   green. Any change to C++ output shape / numpy layout / move encoding
+1. **Parity tests pass.** `pytest yinsh_ml/game_cpp/tests/` and
+   `pytest yinsh_ml/heuristics/tests/` stay green. Any change to a
+   shared output (heuristic score, move encoding, encoder layout)
    gets a new parity test.
 2. **Paired stress run.** Run `cloud_smoke_cpp_stress.yaml` and
    `cloud_smoke_py_stress.yaml`, compare iter-2 self-play time. The
