@@ -20,9 +20,23 @@ def position_to_cell(pos: Position) -> int:
     return _engine.cell_index(ord(pos.column) - ord("A"), pos.row)
 
 
+# Lookup table: cell index → Position. Built once at module load.
+# 121 slots cover the full 11×11 lattice (only 99 are valid YINSH
+# cells; the remainder are never queried in practice but we materialize
+# them anyway so a stray cell_to_position(invalid_cell) gives the same
+# Position the legacy divmod path returned). Position is
+# @dataclass(frozen=True) so sharing instances across callers is safe.
+#
+# Profile (BITBOARD_FOLLOWUP_PLAN.md Candidate C-1) showed
+# cell_to_position at 4.4s self / 9.9s cum across 7.17M calls per
+# game with only 99 unique outputs — perfect cache target.
+_POSITION_BY_CELL: tuple[Position, ...] = tuple(
+    Position(COLS[i // 11], (i % 11) + 1) for i in range(121)
+)
+
+
 def cell_to_position(cell: int) -> Position:
-    col_idx, row_minus = divmod(cell, 11)
-    return Position(COLS[col_idx], row_minus + 1)
+    return _POSITION_BY_CELL[cell]
 
 
 def player_to_is_black(player: Player) -> bool:
