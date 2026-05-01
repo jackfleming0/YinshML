@@ -1692,6 +1692,19 @@ def play_game_worker(
             f"Score: W={state.white_score}, B={state.black_score}. Outcome={outcome:.3f}"
         )
 
+        # Heuristic eval-cache hit-rate. Surfacing this alongside the game
+        # summary makes it easy to spot when the cache is misconfigured
+        # (e.g. evaluator getting reconstructed per-call) without re-running
+        # the cProfile script. See BITBOARD_FOLLOWUP_PLAN.md Candidate A.
+        if (mcts.heuristic_evaluator is not None
+                and hasattr(mcts.heuristic_evaluator, "cache_stats")):
+            cs = mcts.heuristic_evaluator.cache_stats()
+            if cs["hits"] + cs["misses"] > 0:
+                worker_logger.info(
+                    f"Game {game_id} eval-cache: hit_rate={cs['hit_rate']:.1%} "
+                    f"hits={cs['hits']} misses={cs['misses']} size={cs['size']}/{cs['capacity']}"
+                )
+
         # Clean up memory before returning
         # Release state if possible (CppGameState path runs without a pool)
         if ('local_game_state_pool' in locals()
