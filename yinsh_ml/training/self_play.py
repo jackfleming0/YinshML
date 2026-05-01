@@ -961,70 +961,96 @@ class MCTS:
             self._backpropagate(search_path, value)
 
     def _select_action(self, node: Node) -> Move:
-        """Select action using UCB formula with configured value_weight."""
+        """Select action using UCB formula with configured value_weight.
+
+        Vectorized over child stats. The previous scalar version was 20%
+        of self-play wall-clock at sim=400 (BITBOARD_FOLLOWUP_PLAN.md
+        Candidate B'); per-iter ``np.sqrt`` / ``np.random.uniform`` C-call
+        overhead dominated. Materializing children's stats into numpy
+        arrays once and computing UCB / argmax with vectorized ops drops
+        per-call cost from ~130µs to ~10µs.
+
+        Preserves the original semantics:
+          - Visited children: q = child.value(), u = c_puct·π·√parent /
+            (1 + visits).
+          - Unvisited children: q = fpu_q, u = c_puct·π·√(parent+ε)
+            (NO ``/ (1 + visits)`` division — original formula
+            difference, intentional).
+          - ε-noise added to every score for tie-breaking.
+
+        ``c_puct`` is identical for every child of a given MCTS instance
+        (set from ``self.c_puct`` in ``_create_child_node``), so we read
+        it from ``self`` rather than per-child.
+        """
         valid_moves = list(node.children.keys())
-        parent_visit_count = node.visit_count # Total visits to the parent node
+        if not valid_moves:
+            return None
+        parent_visit_count = node.visit_count
 
         # Handle case where node might not have been visited yet (shouldn't happen if called after expansion)
         if parent_visit_count == 0:
-             self.logger.warning("MCTS _select_action called on node with zero visits. Selecting randomly.")
-             return random.choice(valid_moves) if valid_moves else None
+            self.logger.warning("MCTS _select_action called on node with zero visits. Selecting randomly.")
+            return random.choice(valid_moves)
 
-
-        best_score = -float('inf')
-        best_move = None
-
-        # Add small random noise to break ties consistently
         epsilon = 1e-8
+        n = len(valid_moves)
+
+        # Materialize child stats. One Python pass over the dict; everything
+        # else is vectorized. Note: child.value() = value_sum / (visit_count
+        # + virtual_losses), so we pull both components and divide in numpy.
+        visits = np.empty(n, dtype=np.float64)
+        value_sums = np.empty(n, dtype=np.float64)
+        virt_losses = np.empty(n, dtype=np.float64)
+        priors = np.empty(n, dtype=np.float64)
+        for i, m in enumerate(valid_moves):
+            ch = node.children[m]
+            visits[i] = ch.visit_count
+            value_sums[i] = ch.value_sum
+            virt_losses[i] = ch.virtual_losses
+            priors[i] = ch.prior_prob
+
+        visited_mask = visits > 0
 
         # First-Play Urgency baseline for unvisited children. KataGo-style:
-        # q_fpu = q_parent − fpu_reduction · sqrt(Σ π(c) for visited c). Using
-        # `-node.value()` because this codebase's backprop stores `node.value()`
-        # from the grandparent's POV; negating flips it into node's-own-POV,
-        # which is what we want for "how good is this position from the player
-        # to move here." At fpu_reduction=0 the baseline collapses to 0,
-        # restoring the old prior-only scoring for unvisited children.
+        # q_fpu = q_parent − fpu_reduction · sqrt(Σ π(c) for visited c).
+        # ``-node.value()`` flips grandparent-POV (how this codebase
+        # stores it) into node's-own-POV. fpu_reduction=0 reduces this to
+        # the old prior-only scoring for unvisited children.
         if self.fpu_reduction > 0:
-            visited_policy_sum = 0.0
-            for _m in valid_moves:
-                _c = node.children[_m]
-                if _c.visit_count > 0:
-                    visited_policy_sum += _c.prior_prob
+            visited_policy_sum = float(priors[visited_mask].sum())
             q_parent_pov = -node.value()
             fpu_q = q_parent_pov - self.fpu_reduction * np.sqrt(visited_policy_sum)
         else:
             fpu_q = 0.0
 
-        for move in valid_moves:
-            child = node.children[move]
+        # Q-vector. value() denominator (visits + virtual_losses) is safe
+        # here because we only consult q_visited where visited_mask=True
+        # (visit_count > 0 ⇒ adjusted_visits > 0).
+        adjusted_visits = visits + virt_losses
+        # Avoid /0 in the unvisited slots; np.where below picks fpu_q anyway.
+        safe_denom = np.where(adjusted_visits > 0, adjusted_visits, 1.0)
+        q_visited = value_sums / safe_denom
+        q_values = np.where(visited_mask, q_visited, fpu_q)
+        scaled_q = self.value_weight * q_values
 
-            # Q-value (Exploitation term), scaled by value_weight
-            # Unvisited children use the FPU baseline instead of the 0 that
-            # child.value() returns by default at visit_count==0.
-            if child.visit_count == 0:
-                q_value = fpu_q
-            else:
-                q_value = child.value()
-            scaled_q = self.value_weight * q_value # Apply the weighting factor
+        # U-vector. Original code uses two different formulas:
+        #   visited:   c_puct · π · √parent / (1 + visits)
+        #   unvisited: c_puct · π · √(parent + ε)    [no division]
+        # parent_visit_count >= 1 here (we short-circuited 0 above), so
+        # √(parent + ε) ≈ √parent — but we keep both terms separately to
+        # avoid drift if anyone later changes the early-return condition.
+        c_puct = self.c_puct  # constant across children of this MCTS
+        sqrt_parent = np.sqrt(parent_visit_count)
+        sqrt_parent_eps = np.sqrt(parent_visit_count + epsilon)
+        u_visited = c_puct * priors * sqrt_parent / (1.0 + visits)
+        u_unvisited = c_puct * priors * sqrt_parent_eps
+        u_values = np.where(visited_mask, u_visited, u_unvisited)
 
-            # U-value (Exploration term)
-            # Use child's c_puct and prior_prob
-            if child.visit_count == 0:
-                u_value = child.c_puct * child.prior_prob * np.sqrt(parent_visit_count + epsilon) # Add epsilon for sqrt(0) case
-            else:
-                u_value = child.c_puct * child.prior_prob * np.sqrt(parent_visit_count) / (1 + child.visit_count)
+        # ε-noise for tiebreaking. One vector draw replaces N scalar draws.
+        noise = np.random.uniform(0.0, epsilon, size=n)
+        scores = scaled_q + u_values + noise
 
-            score = scaled_q + u_value + np.random.uniform(0, epsilon)
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-        if best_move is None and valid_moves: # Fallback if something went wrong
-            self.logger.warning("MCTS _select_action failed to find best move. Selecting randomly.")
-            return random.choice(valid_moves)
-
-        return best_move
+        return valid_moves[int(np.argmax(scores))]
 
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
         """Get policy and value from neural network and/or heuristic evaluator.
