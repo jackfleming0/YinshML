@@ -15,14 +15,15 @@ single-game cProfile on cloud 4090 + Linux x86 at sim=400 shows:
 | Pre-bitboard-port (Python engine) | ~340s* |
 | Bitboard port shipped | 235s |
 | + Candidate A (heuristic eval cache) | 110s |
-| + Candidate A' (Move.__hash__ cache) | **95s** |
+| + Candidate A' (Move.__hash__ cache) | 95s |
+| + Candidate B' (vectorize UCB) | **85s** |
 
 (\* estimated from the 1.46× steady-state ratio — the Python baseline
 hasn't been re-profiled since A landed; both engines benefit from A
 since the heuristic is engine-agnostic.)
 
-**Cumulative wall-clock reduction: ~72% from the pre-port baseline,
-60% from the bitboard-port baseline.** Brief's 5× target is no longer
+**Cumulative wall-clock reduction: ~75% from the pre-port baseline,
+64% from the bitboard-port baseline.** Brief's 5× target is no longer
 the right framing; recipe cost is what matters and we've cut it
 substantially.
 
@@ -57,68 +58,107 @@ strip on pickle (per-process `PYTHONHASHSEED`). 11 parity tests in
 `yinsh_ml/tests/test_move_hash_cache.py`. See commits `a3cfc9a`,
 `cdc63c1`.
 
-## Profile after Candidate A' (2026-05-01, cloud 4090, 95s/game)
+## Candidate B': LANDED 2026-05-01
+
+**Measured outcome on cloud 4090:**
+- `_select_action` self: 20.4s → **10.6s** (-48%)
+- `_select_action` cum: 24.5s → **14.9s** (-39%)
+- Per-call cost: 130µs → 76µs (less than the projected 10µs — the
+  Python materialization loop over `node.children` is now the gating
+  factor; further wins require storing stats as numpy arrays directly
+  in `Node`, a bigger refactor)
+- Total game time: 95s → **85s** (10% additional wall-clock; net 64%
+  vs bitboard-port baseline)
+
+Implementation: materialize children's `(visit_count, value_sum,
+virtual_losses, prior_prob)` into 4 numpy arrays per call, compute
+Q+U+ε vectorized, argmax once. Preserves the visited/unvisited UCB
+formula split exactly. 7 parity tests in
+`yinsh_ml/tests/test_select_action_vector.py` covering 192 random
+nodes (varied visited fractions, child counts 2-80) plus 4 edge
+cases. See commits `3bb42ff`, `b80e28d`.
+
+## Profile after Candidate B' (2026-05-01, cloud 4090, 85s/game)
 
 | # | Cost center | Self | Cum | What |
 |--:|---|---:|---:|---|
-| 1 | **MCTS `_select_action` (UCB)** | **20.4s** | 24.5s | 152k pure-Python tree walks (cum dropped from 50s with hash cache) |
-| 2 | `cpp_move_to_py` | 8.5s | 24.9s | C++ wrapper conversion (Candidate C) |
-| 3 | `cell_to_position` | 4.4s | 9.6s | Conversion helper |
-| 4 | `Move.__hash__` (cached) | 4.06s | 8.8s | Self unchanged (still 12M calls), cum collapsed from 29.5s |
-| 5 | `move_to_index` | 4.5s | 6.2s | Encoder side |
-| 6 | `_evaluate_and_backup_batch` | 4.6s | 71.5s | Includes NN + select_action |
-| 7 | `predict_batch` | 0.9s | 24.1s | GPU floor |
-| 8 | `encode_state` | 1.8s | 13.7s | Stable |
-| 9 | `evaluate_position` (cached) | 0.06s | 4.7s | DONE |
+| 1 | `_select_action` (vectorized) | 10.6s | 14.9s | Halved by B' but still #1; further wins need stats-as-arrays in Node |
+| 2 | **`cpp_move_to_py`** | **8.5s** | 24.9s | C++ → Python Move conversion, 3.85M calls |
+| 3 | `Position.__init__` (`<string>:2`) | 5.5s | 6.0s | dataclass __init__, 3.85M calls — the auto-generated Move ctor |
+| 4 | **`cell_to_position`** | **4.4s** | 9.9s | 7.17M calls, only 99 unique outputs — top cache target |
+| 5 | `move_to_index` | 4.5s | 6.2s | Encoder side, Python Move → int |
+| 6 | `_evaluate_and_backup_batch` | 4.5s | 70.6s | Includes NN + select + materialization |
+| 7 | `Move.__hash__` (cached) | 3.0s | 7.2s | Cache-hit `dict.get` — could be slot-based for ~2s more |
+| 8 | `predict_batch` | 0.9s | 23.4s | GPU floor |
+| 9 | `encode_state` | 1.7s | 13.6s | Stable |
+| 10 | `evaluate_position` (cached) | 0.06s | 5.3s | DONE |
 
-`_select_action` is now the unambiguous #1 self-time hotspot.
-Heuristic features remain absent from the top 30. **Candidate B'
-(vectorize UCB) is the obvious next move.**
+The C++ wrapper conversion path now dominates yinsh_ml self-time:
+`cpp_move_to_py` + `cell_to_position` + `Position.__init__` +
+`move_to_index` ≈ 23s self-time across ~4M calls per game. **Candidate
+C territory.**
 
 ## Candidate ranking after A
 
 The new bottlenecks are MCTS internals (UCB walk + Move hashing), not
 the heuristic. Rerank in `(expected_gain / implementation_cost)`:
 
-### Candidate B' (NEXT, top priority): vectorize MCTS `_select_action`
+### Candidate C-1 (NEXT, top priority): cache `cell_to_position`
 
-**Hypothesis.** `_select_action` iterates child stats in pure Python
-to compute UCB and pick argmax — 20.4s self-time across 152k calls
-post-A'. At ~80 children per state, that's ~130µs per call dominated
-by per-iter `np.sqrt` / `np.random.uniform` C-call overhead.
+**Hypothesis.** 7.17M `cell_to_position` calls per game, each
+constructing a fresh `Position` dataclass — but there are only 99
+valid YINSH positions (121 with the 11×11 lattice). Same Position
+returned repeatedly is wasted work.
 
-**Fix.** Materialize children's `(visit_count, value_sum,
-virtual_losses, prior_prob)` into numpy arrays per call (c_puct is
-constant per MCTS instance, take from `self.c_puct`). Compute Q-vector
-+ U-vector + ε-noise vector with vectorized ops; argmax once.
-Preserve the FPU branch: visited children use `child.value()`,
-unvisited use `q_parent_pov - fpu_reduction × √(visited_policy_sum)`.
-Preserve the U formula split: visited uses `c_puct × prior × √parent
-/ (1 + visits)`, unvisited uses `c_puct × prior × √parent` (no
-division).
+**Fix.** Build a 121-slot list of `Position` instances at module load
+in `yinsh_ml/game_cpp/_convert.py`. `cell_to_position(cell)` becomes
+a `_POSITION_BY_CELL[cell]` lookup. Position is `@dataclass(frozen=True)`
+so sharing instances across callers is safe.
 
-**Expected gain.** Materialization ~5-10µs per call; vectorized math
-~5µs. Total ~10-15µs vs current 130µs → ~15s wall-clock savings.
-**~16% wall-clock**.
+**Expected gain.** `cell_to_position` self drops 4.4s → ~0.5s; the
+dataclass `Position.__init__` cost (currently scattered through
+`<string>:2(__init__)`) drops to zero for cached lookups. Combined
+estimated savings ~6-7s wall-clock = **~7-8%**.
 
-**Risk.** Medium. UCB selection is numerically sensitive — wrong
-formula breaks training silently (slow regression in policy quality
-that only shows up after many iterations). Mitigations:
-1. Numerical-parity test: build many synthetic nodes with random
-   stats; assert vector and scalar implementations pick the same
-   move with the same numpy RNG state.
-2. Keep the scalar implementation under a fallback flag for at least
-   one cycle so we can A/B compare on the cloud if needed.
-3. Run heuristic_mcts_performance + selfplay tests before commit.
+**Risk.** Very low. Same `Position` values returned (verified by
+parity test against the legacy divmod implementation across all 121
+cells). Frozen dataclass — instance sharing is safe.
 
-### Candidate C (was old Candidate 2): move-list conversion
+**Cost.** ~30 minutes including the parity test.
 
-**Hypothesis.** `cpp_move_to_py` (6.9s self / 20.2s cum) +
-`cell_to_position` (~5s self / ~9s cum) = ~30s cum from C++→Python
-move conversion alone.
+### Candidate C-2 (after C-1): port move conversion to C++ or skip Python Move objects entirely
 
-**Status.** Now ~14% of game time after A. Worth picking up after A'
-and B' if we re-profile and it's still in the top 5.
+**Hypothesis.** `cpp_move_to_py` (8.5s self) constructs a Python
+`Move` for every move enumerated, even though MCTS often only needs
+the C++ representation. `move_to_index` (4.5s self) then takes that
+Python Move and converts to an integer for policy indexing.
+
+**Fix.** Either (a) add `_engine.Move.to_index()` in C++ and skip
+Python Move materialization entirely on the encoder path, or (b)
+keep moves as opaque C++ tokens through MCTS and only convert at
+state-encoder boundaries.
+
+**Expected gain.** ~10-15s wall-clock = ~12-18%. Bigger lift than
+C-1 — defer until C-1 lands and we re-profile.
+
+### Candidate B'' (parking lot): stats-as-arrays in Node
+
+**Hypothesis.** `_select_action` post-B' is gated by the
+materialization loop over `node.children`. Storing children's stats
+as numpy arrays directly in the parent Node would eliminate that
+loop entirely; selection becomes a few vectorized ops on
+already-allocated arrays.
+
+**Cost / risk.** Significant Node refactor — touches expansion,
+backpropagation, virtual loss tracking, subtree reuse. Not worth it
+unless we exhaust C-1 / C-2.
+
+<!-- B' was here pre-2026-05-01; LANDED, see "Candidate B': LANDED"
+section above for the measured outcome. -->
+
+<!-- Old Candidate C split into C-1 and C-2 above; the C-1 sub-task
+(cache cell_to_position) is the new top priority. -->
+
 
 ### Dropped candidates
 
@@ -128,10 +168,10 @@ and B' if we re-profile and it's still in the top 5.
 - **Old Candidate 1 (encoder fast-path)** — already dropped, still dropped.
 - **Old Candidate 3 (move history defer)** — already dropped.
 
-### A' is LANDED
+### A' and B' both LANDED
 
-Hash cache shipped 2026-05-01 (commits `a3cfc9a`, `cdc63c1`). See the
-"Candidate A': LANDED" section above for measured outcome.
+See "Candidate A': LANDED" and "Candidate B': LANDED" sections above
+for measured outcomes.
 
 ## Step 0 — profile first (always)
 
