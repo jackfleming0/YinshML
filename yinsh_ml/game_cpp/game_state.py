@@ -25,7 +25,7 @@ from typing import Iterable, List, Optional
 
 import numpy as np
 
-from yinsh_ml.game.board import Row
+from yinsh_ml.game.board import Board, Row
 from yinsh_ml.game.constants import (
     Player,
     PieceType,
@@ -33,6 +33,7 @@ from yinsh_ml.game.constants import (
     RINGS_PER_PLAYER,
     VALID_POSITIONS,
 )
+from yinsh_ml.game.game_state import GameState
 from yinsh_ml.game.types import GamePhase, Move, MoveType
 from yinsh_ml.game_cpp import _engine
 from yinsh_ml.game_cpp._convert import (
@@ -46,19 +47,21 @@ from yinsh_ml.game_cpp._convert import (
 )
 
 
-class CppBoard:
+class CppBoard(Board):
     """Read-only Board facade backed by a ``_engine.State``.
 
-    Hot-path methods (``find_marker_rows``, ``valid_move_positions``,
-    ``get_piece``, ``is_empty``, ``to_numpy_array``) read straight off
-    the bitboards. The ``pieces`` dict and a few lower-traffic helpers
-    materialize lazily and cache; the cache is invalidated whenever
-    the parent CppGameState advances.
+    Inherits from ``yinsh_ml.game.board.Board`` so duck-typed callers
+    that defensively ``isinstance(_, Board)`` keep working — the
+    parent's ``__init__`` initializes a ``pieces`` dict that we
+    shadow via the lazy property below. Hot-path methods
+    (``find_marker_rows``, ``valid_move_positions``, ``get_piece``,
+    ``is_empty``, ``to_numpy_array``) read straight off the
+    bitboards.
     """
 
-    __slots__ = ("_state", "_pieces_cache")
-
     def __init__(self, state: _engine.State):
+        # Don't call super().__init__() — we don't want to allocate a
+        # Python pieces dict that would shadow our lazy materialization.
         self._state = state
         self._pieces_cache: Optional[dict[Position, PieceType]] = None
 
@@ -211,13 +214,18 @@ class CppBoard:
         return [pos for pos, piece in self.pieces.items() if piece == piece_type]
 
 
-class CppGameState:
+class CppGameState(GameState):
     """Drop-in replacement for ``yinsh_ml.game.GameState`` backed by a
     C++ bitboard engine.
 
-    Surface chosen to match the duck-typed interface MCTS, self-play,
-    and the encoder all read from. Two semantic differences worth
-    knowing:
+    Inherits from ``GameState`` so any code defensively checking
+    ``isinstance(state, GameState)`` (notably the heuristic evaluator)
+    accepts both engines without conditionals scattered through the
+    callers. The override skips ``super().__init__()`` to avoid
+    allocating a Python ``Board`` and the per-attribute storage that
+    we replace with property descriptors backed by the C++ State.
+
+    Two semantic differences worth knowing:
 
       * ``copy()`` / ``__deepcopy__`` — both bottom out in the C++
         struct memcpy, not a Python deepcopy. This is the point of
@@ -229,9 +237,11 @@ class CppGameState:
         should drive through ``CppGameState`` (most do).
     """
 
-    __slots__ = ("_state", "_move_history", "_board_view", "_board_dirty")
-
     def __init__(self):
+        # Skip GameState.__init__ — we don't want a Python Board or
+        # the rings_placed dict it allocates. Property descriptors
+        # below project the underlying C++ State into the same
+        # attribute names.
         self._state = _engine.State()
         self._move_history: list[Move] = []
         self._board_view: Optional[CppBoard] = None
