@@ -14,14 +14,15 @@ single-game cProfile on cloud 4090 + Linux x86 at sim=400 shows:
 |---|---:|
 | Pre-bitboard-port (Python engine) | ~340s* |
 | Bitboard port shipped | 235s |
-| Bitboard port + Candidate A (heuristic eval cache) | **110s** |
+| + Candidate A (heuristic eval cache) | 110s |
+| + Candidate A' (Move.__hash__ cache) | **95s** |
 
 (\* estimated from the 1.46× steady-state ratio — the Python baseline
 hasn't been re-profiled since A landed; both engines benefit from A
 since the heuristic is engine-agnostic.)
 
-**Cumulative wall-clock reduction: ~68% from the pre-port baseline,
-53% from the bitboard-port baseline.** Brief's 5× target is no longer
+**Cumulative wall-clock reduction: ~72% from the pre-port baseline,
+60% from the bitboard-port baseline.** Brief's 5× target is no longer
 the right framing; recipe cost is what matters and we've cut it
 substantially.
 
@@ -41,76 +42,74 @@ Position fingerprint is Zobrist for Python `GameState` and a direct
 bitboard tuple for `CppGameState`. See commits `f6d3617`, `7690cff`,
 `09beec3`. Parity tests in `yinsh_ml/heuristics/test_eval_cache.py`.
 
-## Profile after Candidate A (2026-05-01, cloud 4090, 110s/game)
+## Candidate A': LANDED 2026-05-01
 
-The original heuristic-dominated profile is gone. New top costs:
+**Measured outcome on cloud 4090:**
+- `Move.__hash__` cum: 29.5s → **8.8s** (-21s recursive chain savings)
+- `builtins.hash` self: 25.5s → 3.3s
+- `enum.__hash__` self: 5.2s → 0.6s
+- Total game time: 110s → **95s** (14% additional wall-clock; net 60%
+  vs bitboard-port baseline)
+- Cache `dict.get` overhead: ~2s/game (acceptable)
+
+Implementation: lazy-memoize `Move.__hash__` in `__dict__['_hash']`,
+strip on pickle (per-process `PYTHONHASHSEED`). 11 parity tests in
+`yinsh_ml/tests/test_move_hash_cache.py`. See commits `a3cfc9a`,
+`cdc63c1`.
+
+## Profile after Candidate A' (2026-05-01, cloud 4090, 95s/game)
 
 | # | Cost center | Self | Cum | What |
 |--:|---|---:|---:|---|
-| 1 | **MCTS `_select_action` (UCB)** | **24.5s** | 50.2s | 201k pure-Python tree walks |
-| 2 | **`Move.__hash__` chain** (Move + enum + recursive `builtins.hash`) | **~30s** | ~30s | 12M Move hashes/game from MCTS dict ops |
-| 3 | `_evaluate_and_backup_batch` (incl. NN forward) | 3.7s | 57.8s | The whole MCTS leaf-eval batch |
-| 4 | `cpp_move_to_py` | 6.9s | 20.2s | C++ wrapper conversion |
-| 5 | NN `predict_batch` (incl. `torch.conv2d`) | 0.8s | 19.9s | The GPU floor |
-| 6 | `cell_to_position` / `position_to_cell` | ~5s | ~9s | Wrapper conversion helpers |
-| 7 | Encoder `encode_state` | 1.4s | 11.2s | Stable; not worth touching |
-| 8 | `evaluate_position` (cached) | 0.05s | 4.5s | DONE |
+| 1 | **MCTS `_select_action` (UCB)** | **20.4s** | 24.5s | 152k pure-Python tree walks (cum dropped from 50s with hash cache) |
+| 2 | `cpp_move_to_py` | 8.5s | 24.9s | C++ wrapper conversion (Candidate C) |
+| 3 | `cell_to_position` | 4.4s | 9.6s | Conversion helper |
+| 4 | `Move.__hash__` (cached) | 4.06s | 8.8s | Self unchanged (still 12M calls), cum collapsed from 29.5s |
+| 5 | `move_to_index` | 4.5s | 6.2s | Encoder side |
+| 6 | `_evaluate_and_backup_batch` | 4.6s | 71.5s | Includes NN + select_action |
+| 7 | `predict_batch` | 0.9s | 24.1s | GPU floor |
+| 8 | `encode_state` | 1.8s | 13.7s | Stable |
+| 9 | `evaluate_position` (cached) | 0.06s | 4.7s | DONE |
 
-Heuristic features (`connected_marker_chains`, `tactical_patterns`)
-are no longer in the top 30. **Old Candidate B is dead.**
+`_select_action` is now the unambiguous #1 self-time hotspot.
+Heuristic features remain absent from the top 30. **Candidate B'
+(vectorize UCB) is the obvious next move.**
 
 ## Candidate ranking after A
 
 The new bottlenecks are MCTS internals (UCB walk + Move hashing), not
 the heuristic. Rerank in `(expected_gain / implementation_cost)`:
 
-### Candidate A' (NEXT, top priority): cache `Move.__hash__`
-
-**Hypothesis.** `Move` is a dataclass; its `__hash__` recursively
-hashes `MoveType` (enum), `Player` (enum), `Position` (dataclass with
-column/row), and an optional markers tuple every call. 12M of these
-per game = ~30s cumulative. MCTS uses Move objects as dict keys on
-every child lookup and edge update, so the same Move's hash is
-recomputed thousands of times.
-
-**Fix.** Add a `_hash` slot to `Move` (and `Position` if it's also
-hot). Compute on first `__hash__` call, return cached int thereafter.
-Move is treated as immutable everywhere — caching is safe.
-
-**Expected gain.** ~25s of 110s = **~23% wall-clock** if hash chain
-shrinks to a single int read. Conservatively ~15% even if the constant
-overhead is bigger than expected.
-
-**Risk.** Low. Hash semantics preserved (same input → same int);
-equality unchanged. A parity test that constructs many Move objects
-and asserts `hash(a) == hash(b) iff a == b` covers the invariant.
-
-**Implementation.**
-1. Read `yinsh_ml/game/types.py::Move` to confirm dataclass shape.
-2. Add `_hash: Optional[int]` slot, lazy-compute in `__hash__`.
-3. Check whether `Position` deserves the same treatment.
-4. Run `pytest yinsh_ml/heuristics/ yinsh_ml/tests/test_game_logic.py
-   yinsh_ml/tests/test_move_encoder.py`.
-5. Re-run profile; expect `Move.__hash__` to drop out of top-10.
-
-### Candidate B' (after A'): vectorize MCTS `_select_action`
+### Candidate B' (NEXT, top priority): vectorize MCTS `_select_action`
 
 **Hypothesis.** `_select_action` iterates child stats in pure Python
-to compute UCB and pick argmax — 24.5s self-time across 201k calls.
-At ~80 children per state, that's ~120µs per call, dominated by
-Python loop overhead.
+to compute UCB and pick argmax — 20.4s self-time across 152k calls
+post-A'. At ~80 children per state, that's ~130µs per call dominated
+by per-iter `np.sqrt` / `np.random.uniform` C-call overhead.
 
-**Fix.** Store children's `(visit_count, prior, q_value)` as numpy
-arrays inside the node. Compute UCB as a vectorized op; argmax is one
-numpy call.
+**Fix.** Materialize children's `(visit_count, value_sum,
+virtual_losses, prior_prob)` into numpy arrays per call (c_puct is
+constant per MCTS instance, take from `self.c_puct`). Compute Q-vector
++ U-vector + ε-noise vector with vectorized ops; argmax once.
+Preserve the FPU branch: visited children use `child.value()`,
+unvisited use `q_parent_pov - fpu_reduction × √(visited_policy_sum)`.
+Preserve the U formula split: visited uses `c_puct × prior × √parent
+/ (1 + visits)`, unvisited uses `c_puct × prior × √parent` (no
+division).
 
-**Expected gain.** 30-40s cum savings = **~25% wall-clock**. Effort:
-~3-4 hours including careful regression testing.
+**Expected gain.** Materialization ~5-10µs per call; vectorized math
+~5µs. Total ~10-15µs vs current 130µs → ~15s wall-clock savings.
+**~16% wall-clock**.
 
-**Risk.** Medium. MCTS correctness sensitive to numerical details
-(NaN handling, FPU reduction, Dirichlet noise mix-in). Diff smoke
-test against current MCTS over a few hundred games — same final
-move distribution.
+**Risk.** Medium. UCB selection is numerically sensitive — wrong
+formula breaks training silently (slow regression in policy quality
+that only shows up after many iterations). Mitigations:
+1. Numerical-parity test: build many synthetic nodes with random
+   stats; assert vector and scalar implementations pick the same
+   move with the same numpy RNG state.
+2. Keep the scalar implementation under a fallback flag for at least
+   one cycle so we can A/B compare on the cloud if needed.
+3. Run heuristic_mcts_performance + selfplay tests before commit.
 
 ### Candidate C (was old Candidate 2): move-list conversion
 
@@ -128,6 +127,11 @@ and B' if we re-profile and it's still in the top 5.
   ~2s/game. Not worth a C++ port.
 - **Old Candidate 1 (encoder fast-path)** — already dropped, still dropped.
 - **Old Candidate 3 (move history defer)** — already dropped.
+
+### A' is LANDED
+
+Hash cache shipped 2026-05-01 (commits `a3cfc9a`, `cdc63c1`). See the
+"Candidate A': LANDED" section above for measured outcome.
 
 ## Step 0 — profile first (always)
 
