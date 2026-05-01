@@ -298,6 +298,11 @@ def main() -> None:
         'max_depth': int(sp.get('max_depth', 300)),
         'use_batched_mcts': bool(sp.get('use_batched_mcts', True)),
         'mcts_batch_size': int(sp.get('mcts_batch_size', 32)),
+        # Opt-in to the C++ bitboard engine (yinsh_ml/game_cpp). Default off
+        # until each training config has been A/B'd against the Python
+        # engine. When true, the GameStatePool is bypassed because the
+        # C++ State.clone() is faster than any pool reuse mechanism.
+        'use_cpp_engine': bool(sp.get('use_cpp_engine', False)),
         'enable_subtree_reuse': bool(sp.get('enable_subtree_reuse', True)),
         'fpu_reduction': float(sp.get('fpu_reduction', 0.25)),
         'epsilon_mix_start': float(sp.get('epsilon_mix_start', 0.25)),

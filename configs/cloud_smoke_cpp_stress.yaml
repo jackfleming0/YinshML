@@ -1,0 +1,101 @@
+# Stress variant of cloud_smoke.yaml at sim=400 with the C++ bitboard
+# engine on. Paired with cloud_smoke_py_stress.yaml (Python engine) by
+# scripts/paired_stress_benchmark.py — see BITBOARD_FOLLOWUP_PLAN.md
+# "Pre-merge validation". Differs from cloud_smoke.yaml only in:
+#   self_play.num_simulations:  48  -> 400
+#   self_play.late_simulations: 32  -> 400
+#   self_play.use_cpp_engine:   off -> on
+# All other knobs match the smoke baseline so the comparison stays
+# clean (eval mode, batch size, workers, arena, etc).
+version: 1
+device: auto
+num_iterations: 2
+save_dir: runs_cloud_smoke_cpp_stress
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 10
+  num_simulations: 400
+  late_simulations: 400
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 6
+  games_per_iteration: 10
+  use_cpp_engine: true
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 50000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 10
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+augmentation:
+  enabled: true
+  max_augmentations: 4
+arena:
+  games_per_match: 6
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260415
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
+anchor:
+  enabled: true
+  num_games: 4
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1

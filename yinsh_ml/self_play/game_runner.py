@@ -39,6 +39,8 @@ class RunnerConfig:
     # Quality metrics
     compute_quality_metrics: bool = False  # Enable quality analysis
     quality_baseline_path: Optional[str] = None  # Path to baseline for comparison
+    # Opt-in to the C++ bitboard engine (yinsh_ml/game_cpp). Default off.
+    use_cpp_engine: bool = False
 
 
 @dataclass
@@ -269,8 +271,13 @@ class SelfPlayRunner:
         # Start game recording
         game_id = self.recorder.start_game()
         
-        # Initialize game state
-        game_state = GameState()
+        # Initialize game state. CppGameState is a duck-typed drop-in so
+        # the rest of this method works unchanged for either engine.
+        if self.config.use_cpp_engine:
+            from yinsh_ml.game_cpp import CppGameState
+            game_state = CppGameState()
+        else:
+            game_state = GameState()
         
         turn_count = 0
         start_time = time.time()
@@ -283,8 +290,11 @@ class SelfPlayRunner:
                     logger.warning(f"Game {game_id} exceeded max turns ({self.config.max_turns_per_game})")
                     break
                 
-                # Get valid moves
-                valid_moves = MoveGenerator.get_valid_moves(game_state.board, game_state)
+                # Get valid moves via the GameState surface so this works
+                # with both yinsh_ml.game.GameState and CppGameState.
+                # (Was a direct MoveGenerator call; the C++ engine doesn't
+                # share MoveGenerator's internal state assumptions.)
+                valid_moves = game_state.get_valid_moves()
                 if not valid_moves:
                     logger.warning(f"Game {game_id} has no valid moves at turn {turn_count}")
                     break

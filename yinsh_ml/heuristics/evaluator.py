@@ -9,6 +9,7 @@ import numpy as np
 from ..game.game_state import GameState
 from ..game.constants import Player
 from ..game.types import GamePhase
+from ..game.zobrist import ZobristHasher
 from .phase_detection import detect_phase, get_phase_weights, GamePhaseCategory
 from .phase_config import PhaseConfig, DEFAULT_PHASE_CONFIG
 from .features import extract_all_features
@@ -46,6 +47,7 @@ class YinshHeuristics:
         phase_config: Optional[PhaseConfig] = None,
         weight_config_file: Optional[str] = None,
         enable_forced_sequence_detection: bool = True,
+        eval_cache_size: int = 100_000,
     ):
         """Initialize the YinshHeuristics evaluator.
 
@@ -66,6 +68,16 @@ class YinshHeuristics:
                 gives a ~30× heuristic speedup with no real-search-quality loss.
                 Standalone HeuristicAgent uses the default (True). MCTS callers
                 should explicitly pass False.
+            eval_cache_size: Maximum number of (position, player) results to memoize
+                in evaluate_position. Defaults to 100k entries — well above one
+                game's ~37k unique positions at sim=400. Set 0 to disable. The cache
+                is keyed by a position fingerprint (Zobrist for Python GameState,
+                bitboards for CppGameState) plus white_score, black_score, move_count
+                and player. On overflow the cache is cleared in full (cheap, and
+                far simpler than per-entry eviction); long-lived evaluators that
+                span many games can also explicitly call clear_cache() between
+                games. Cached results are bit-identical to uncached — see the
+                parity test in tests/heuristics/test_eval_cache.py.
 
         Raises:
             ValueError: If weights structure is invalid.
@@ -124,6 +136,16 @@ class YinshHeuristics:
         
         # Pre-compute weight matrix for vectorized operations
         self._build_weight_matrix()
+
+        # evaluate_position cache. See __init__ docstring for the key shape
+        # and overflow behaviour. The hasher only runs on Python GameState;
+        # CppGameState exposes its bitboards directly so we sidestep the
+        # CppBoard.pieces dict materialization that hash_state would trigger.
+        self._eval_cache_size = int(eval_cache_size)
+        self._eval_cache: Dict[tuple, float] = {}
+        self._eval_cache_hits: int = 0
+        self._eval_cache_misses: int = 0
+        self._zobrist = ZobristHasher() if self._eval_cache_size > 0 else None
     
     def evaluate_position(
         self,
@@ -161,17 +183,46 @@ class YinshHeuristics:
             raise TypeError(f"game_state must be a GameState instance, got {type(game_state)}")
         if not isinstance(player, Player):
             raise ValueError(f"player must be a Player enum value, got {type(player)}")
-        
+
+        # Cache lookup. Keyed by the full set of inputs the uncached path
+        # reads from game_state — fingerprint covers board+side+phase,
+        # scores cover terminal detection, move_count covers the
+        # EARLY/MID/LATE phase classifier in `_apply_phase_weights_fast`.
+        if self._eval_cache_size > 0:
+            key = self._cache_key(game_state, player)
+            cached = self._eval_cache.get(key)
+            if cached is not None:
+                self._eval_cache_hits += 1
+                return cached
+            self._eval_cache_misses += 1
+            score = self._evaluate_position_uncached(game_state, player)
+            # Bounded growth: clear in full on overflow rather than
+            # paying for per-entry FIFO eviction. For sim=400 this only
+            # triggers across multi-game evaluator lifetimes.
+            if len(self._eval_cache) >= self._eval_cache_size:
+                self._eval_cache.clear()
+            self._eval_cache[key] = score
+            return score
+
+        return self._evaluate_position_uncached(game_state, player)
+
+    def _evaluate_position_uncached(
+        self,
+        game_state: GameState,
+        player: Player,
+    ) -> float:
+        """The actual evaluation work, kept separate from the cache wrapper
+        so the parity test can compare cached and uncached paths directly."""
         # 0. Check for terminal positions first (immediate win/loss detection)
         terminal_score = detect_terminal_position(game_state, player)
         if terminal_score is not None:
             return terminal_score
-        
+
         # 0.5. Check for immediate tactical patterns (ring removal opportunities)
         tactical_score = detect_immediate_tactical_patterns(game_state, player)
         if tactical_score is not None:
             return tactical_score
-        
+
         # 0.75. Check for forced sequences (multi-move forced outcomes)
         # Gated by `enable_forced_sequence_detection` because the recursive
         # ~10×10×10 lookahead dominates MCTS leaf-eval wall-clock (~99% of
@@ -184,7 +235,7 @@ class YinshHeuristics:
             forced_score = detect_forced_sequences(game_state, player)
             if forced_score is not None:
                 return forced_score
-        
+
         # 1. Detect game phase (use cached config values)
         move_count = len(game_state.move_history)
         if move_count <= self._early_max:
@@ -193,7 +244,7 @@ class YinshHeuristics:
             phase = GamePhaseCategory.MID
         else:
             phase = GamePhaseCategory.LATE
-        
+
         # Get phase transition weights for smooth blending (use cached config)
         phase_transition_weights = get_phase_weights(
             game_state,
@@ -202,15 +253,70 @@ class YinshHeuristics:
             transition_window=self._transition_window,
             method=self._interpolation_method
         )
-        
+
         # 2. Extract all features
         features = extract_all_features(game_state, player)
-        
+
         # 3. Apply phase-specific weights and calculate score (optimized)
         score = self._apply_phase_weights_fast(features, phase_transition_weights)
-        
+
         # 4. Return final evaluation score
         return score
+
+    def _cache_key(self, game_state: GameState, player: Player) -> tuple:
+        """Build the eval-cache key for (game_state, player).
+
+        Includes everything the uncached path reads from game_state:
+        position fingerprint (board + side-to-move + phase), scores,
+        move_count, and the eval perspective. See class __init__
+        docstring for the rationale on each component.
+        """
+        fingerprint = self._position_fingerprint(game_state)
+        return (
+            fingerprint,
+            game_state.white_score,
+            game_state.black_score,
+            len(game_state.move_history),
+            player.value,
+        )
+
+    def _position_fingerprint(self, game_state: GameState):
+        """Return a hashable fingerprint of board + side-to-move + phase.
+
+        For CppGameState we read the four bitboards plus the phase /
+        side-to-move flags directly off the underlying ``_engine.State``
+        — this avoids triggering ``CppBoard.pieces`` materialization
+        (which iterates 85 cells per call). For pure Python GameState
+        we use the existing ZobristHasher.
+        """
+        cpp_inner = getattr(game_state, "_state", None)
+        if cpp_inner is not None and hasattr(cpp_inner, "white_rings"):
+            return (
+                cpp_inner.white_rings,
+                cpp_inner.black_rings,
+                cpp_inner.white_markers,
+                cpp_inner.black_markers,
+                cpp_inner.current_player_is_black,
+                cpp_inner.phase,
+            )
+        return self._zobrist.hash_state(game_state)
+
+    def clear_cache(self) -> None:
+        """Drop all cached evaluations. Reset hit/miss counters."""
+        self._eval_cache.clear()
+        self._eval_cache_hits = 0
+        self._eval_cache_misses = 0
+
+    def cache_stats(self) -> Dict[str, Any]:
+        """Return cache hit/miss/size counters. For profiling and tests."""
+        total = self._eval_cache_hits + self._eval_cache_misses
+        return {
+            "size": len(self._eval_cache),
+            "capacity": self._eval_cache_size,
+            "hits": self._eval_cache_hits,
+            "misses": self._eval_cache_misses,
+            "hit_rate": (self._eval_cache_hits / total) if total else 0.0,
+        }
     
     def evaluate_batch(
         self,
@@ -251,23 +357,23 @@ class YinshHeuristics:
                 f"game_states and players must have same length, "
                 f"got {len(game_states)} and {len(players)}"
             )
-        
+
         # Validate each game state and player
         for i, game_state in enumerate(game_states):
             if not isinstance(game_state, GameState):
                 raise TypeError(
                     f"game_states[{i}] must be a GameState instance, got {type(game_state)}"
                 )
-        
+
         for i, player in enumerate(players):
             if not isinstance(player, Player):
                 raise TypeError(
                     f"players[{i}] must be a Player enum value, got {type(player)}"
                 )
-        
+
         # Optimized batch evaluation with vectorization and caching
         batch_size = len(game_states)
-        
+
         # Fast path for single position (avoid batch overhead)
         if batch_size == 1:
             return [self.evaluate_position(game_states[0], players[0])]

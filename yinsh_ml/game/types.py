@@ -45,15 +45,50 @@ class Move:
             return f"{self.player.name} removes ring at {self.source}"
 
     def __hash__(self):
-        """Make Move hashable."""
+        """Make Move hashable.
+
+        Hash result is memoized in ``self.__dict__['_hash']`` after the
+        first call. Profiling on cloud 4090 (BITBOARD_FOLLOWUP_PLAN.md
+        Candidate A') showed Move.__hash__ at ~30s cum/game from 12M
+        recursive hash chains across MCTS dict ops. Caching collapses
+        each repeat call to a single dict lookup.
+
+        ``object.__setattr__`` is required because frozen dataclasses
+        block direct attribute assignment; ``__post_init__`` already
+        uses the same escape hatch for the markers tuple normalization,
+        so the precedent is established. ``__getstate__`` strips the
+        cache before pickling — string hashes depend on PYTHONHASHSEED,
+        which is per-process randomized, so a cached hash from a
+        self-play worker is wrong in the parent process.
+        """
+        cached = self.__dict__.get('_hash')
+        if cached is not None:
+            return cached
         markers_tuple = None
         if self.markers is not None:
             # Sort markers for consistent hashing
             markers_tuple = tuple(sorted(self.markers, key=lambda p: (p.column, p.row)))
-        return hash((
+        h = hash((
             self.type,
             self.player,
             self.source,
             self.destination,
             markers_tuple
         ))
+        object.__setattr__(self, '_hash', h)
+        return h
+
+    def __getstate__(self):
+        """Pickle hook: drop the per-process hash cache before serialization.
+
+        Without this, a Move hashed in a worker process (where strings
+        hash with one PYTHONHASHSEED) would carry the worker's hash into
+        the parent process (different seed) and silently break dict
+        invariants — equal Moves landing in different buckets.
+        """
+        state = self.__dict__.copy()
+        state.pop('_hash', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)

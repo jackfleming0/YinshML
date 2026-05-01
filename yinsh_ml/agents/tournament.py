@@ -195,6 +195,11 @@ class TournamentEvaluator:
         from ..game.moves import MoveGenerator
 
         state = GameState()
+        # Caller may pass either a Player enum or its int sentinel (1/-1);
+        # normalize so downstream code (rings_placed dict, MoveGenerator)
+        # always sees a Player enum and dict lookups don't KeyError.
+        if not isinstance(starting_player, Player):
+            starting_player = Player.WHITE if starting_player == 1 else Player.BLACK
         state.current_player = starting_player
         turn_count = 0
         move_times: List[float] = []

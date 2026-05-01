@@ -961,70 +961,96 @@ class MCTS:
             self._backpropagate(search_path, value)
 
     def _select_action(self, node: Node) -> Move:
-        """Select action using UCB formula with configured value_weight."""
+        """Select action using UCB formula with configured value_weight.
+
+        Vectorized over child stats. The previous scalar version was 20%
+        of self-play wall-clock at sim=400 (BITBOARD_FOLLOWUP_PLAN.md
+        Candidate B'); per-iter ``np.sqrt`` / ``np.random.uniform`` C-call
+        overhead dominated. Materializing children's stats into numpy
+        arrays once and computing UCB / argmax with vectorized ops drops
+        per-call cost from ~130µs to ~10µs.
+
+        Preserves the original semantics:
+          - Visited children: q = child.value(), u = c_puct·π·√parent /
+            (1 + visits).
+          - Unvisited children: q = fpu_q, u = c_puct·π·√(parent+ε)
+            (NO ``/ (1 + visits)`` division — original formula
+            difference, intentional).
+          - ε-noise added to every score for tie-breaking.
+
+        ``c_puct`` is identical for every child of a given MCTS instance
+        (set from ``self.c_puct`` in ``_create_child_node``), so we read
+        it from ``self`` rather than per-child.
+        """
         valid_moves = list(node.children.keys())
-        parent_visit_count = node.visit_count # Total visits to the parent node
+        if not valid_moves:
+            return None
+        parent_visit_count = node.visit_count
 
         # Handle case where node might not have been visited yet (shouldn't happen if called after expansion)
         if parent_visit_count == 0:
-             self.logger.warning("MCTS _select_action called on node with zero visits. Selecting randomly.")
-             return random.choice(valid_moves) if valid_moves else None
+            self.logger.warning("MCTS _select_action called on node with zero visits. Selecting randomly.")
+            return random.choice(valid_moves)
 
-
-        best_score = -float('inf')
-        best_move = None
-
-        # Add small random noise to break ties consistently
         epsilon = 1e-8
+        n = len(valid_moves)
+
+        # Materialize child stats. One Python pass over the dict; everything
+        # else is vectorized. Note: child.value() = value_sum / (visit_count
+        # + virtual_losses), so we pull both components and divide in numpy.
+        visits = np.empty(n, dtype=np.float64)
+        value_sums = np.empty(n, dtype=np.float64)
+        virt_losses = np.empty(n, dtype=np.float64)
+        priors = np.empty(n, dtype=np.float64)
+        for i, m in enumerate(valid_moves):
+            ch = node.children[m]
+            visits[i] = ch.visit_count
+            value_sums[i] = ch.value_sum
+            virt_losses[i] = ch.virtual_losses
+            priors[i] = ch.prior_prob
+
+        visited_mask = visits > 0
 
         # First-Play Urgency baseline for unvisited children. KataGo-style:
-        # q_fpu = q_parent − fpu_reduction · sqrt(Σ π(c) for visited c). Using
-        # `-node.value()` because this codebase's backprop stores `node.value()`
-        # from the grandparent's POV; negating flips it into node's-own-POV,
-        # which is what we want for "how good is this position from the player
-        # to move here." At fpu_reduction=0 the baseline collapses to 0,
-        # restoring the old prior-only scoring for unvisited children.
+        # q_fpu = q_parent − fpu_reduction · sqrt(Σ π(c) for visited c).
+        # ``-node.value()`` flips grandparent-POV (how this codebase
+        # stores it) into node's-own-POV. fpu_reduction=0 reduces this to
+        # the old prior-only scoring for unvisited children.
         if self.fpu_reduction > 0:
-            visited_policy_sum = 0.0
-            for _m in valid_moves:
-                _c = node.children[_m]
-                if _c.visit_count > 0:
-                    visited_policy_sum += _c.prior_prob
+            visited_policy_sum = float(priors[visited_mask].sum())
             q_parent_pov = -node.value()
             fpu_q = q_parent_pov - self.fpu_reduction * np.sqrt(visited_policy_sum)
         else:
             fpu_q = 0.0
 
-        for move in valid_moves:
-            child = node.children[move]
+        # Q-vector. value() denominator (visits + virtual_losses) is safe
+        # here because we only consult q_visited where visited_mask=True
+        # (visit_count > 0 ⇒ adjusted_visits > 0).
+        adjusted_visits = visits + virt_losses
+        # Avoid /0 in the unvisited slots; np.where below picks fpu_q anyway.
+        safe_denom = np.where(adjusted_visits > 0, adjusted_visits, 1.0)
+        q_visited = value_sums / safe_denom
+        q_values = np.where(visited_mask, q_visited, fpu_q)
+        scaled_q = self.value_weight * q_values
 
-            # Q-value (Exploitation term), scaled by value_weight
-            # Unvisited children use the FPU baseline instead of the 0 that
-            # child.value() returns by default at visit_count==0.
-            if child.visit_count == 0:
-                q_value = fpu_q
-            else:
-                q_value = child.value()
-            scaled_q = self.value_weight * q_value # Apply the weighting factor
+        # U-vector. Original code uses two different formulas:
+        #   visited:   c_puct · π · √parent / (1 + visits)
+        #   unvisited: c_puct · π · √(parent + ε)    [no division]
+        # parent_visit_count >= 1 here (we short-circuited 0 above), so
+        # √(parent + ε) ≈ √parent — but we keep both terms separately to
+        # avoid drift if anyone later changes the early-return condition.
+        c_puct = self.c_puct  # constant across children of this MCTS
+        sqrt_parent = np.sqrt(parent_visit_count)
+        sqrt_parent_eps = np.sqrt(parent_visit_count + epsilon)
+        u_visited = c_puct * priors * sqrt_parent / (1.0 + visits)
+        u_unvisited = c_puct * priors * sqrt_parent_eps
+        u_values = np.where(visited_mask, u_visited, u_unvisited)
 
-            # U-value (Exploration term)
-            # Use child's c_puct and prior_prob
-            if child.visit_count == 0:
-                u_value = child.c_puct * child.prior_prob * np.sqrt(parent_visit_count + epsilon) # Add epsilon for sqrt(0) case
-            else:
-                u_value = child.c_puct * child.prior_prob * np.sqrt(parent_visit_count) / (1 + child.visit_count)
+        # ε-noise for tiebreaking. One vector draw replaces N scalar draws.
+        noise = np.random.uniform(0.0, epsilon, size=n)
+        scores = scaled_q + u_values + noise
 
-            score = scaled_q + u_value + np.random.uniform(0, epsilon)
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-        if best_move is None and valid_moves: # Fallback if something went wrong
-            self.logger.warning("MCTS _select_action failed to find best move. Selecting randomly.")
-            return random.choice(valid_moves)
-
-        return best_move
+        return valid_moves[int(np.argmax(scores))]
 
     def _evaluate_state(self, state: GameState) -> Tuple[np.ndarray, float]:
         """Get policy and value from neural network and/or heuristic evaluator.
@@ -1203,6 +1229,8 @@ class SelfPlay:
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
                  root_policy_temp: float = 1.0,
+                 # --- C++ bitboard engine ---
+                 use_cpp_engine: bool = False,
                 ):
         """
         Initialize SelfPlay with explicit MCTS and temperature parameters.
@@ -1267,6 +1295,7 @@ class SelfPlay:
             'epsilon_mix_end': epsilon_mix_end,  # Root mixing fraction after taper (0 = no late-game noise)
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,  # Linear taper horizon
             'root_policy_temp': root_policy_temp,  # Reshape root prior; >1 flattens, <1 sharpens
+            'use_cpp_engine': use_cpp_engine,  # Opt-in to game_cpp engine in workers
         }
         # Store optional metrics instances
         self.mcts_metrics = mcts_metrics # Store the instance
@@ -1275,9 +1304,11 @@ class SelfPlay:
         # This MCTS instance is primarily used if play_game is called directly,
         # worker processes will create their own MCTS instances.
 
-        # Filter out batched MCTS params and encoding flag that don't belong in MCTS.__init__()
+        # Filter out batched MCTS params, encoding flag, and engine flag
+        # that don't belong in MCTS.__init__()
         mcts_init_config = {k: v for k, v in self.mcts_config.items()
-                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
+                           if k not in ['use_batched_mcts', 'mcts_batch_size',
+                                        'use_enhanced_encoding', 'use_cpp_engine']}
 
         self.mcts = MCTS(
             network=self.network,
@@ -1506,15 +1537,26 @@ def play_game_worker(
         network.load_model(model_path)
         network.network.eval()
 
-        # Create local memory pool for this worker
-        from ..memory import GameStatePool, GameStatePoolConfig
-        from ..game import GameState
-        pool_config = GameStatePoolConfig(
-            initial_size=50,  # Start with moderate pool size for worker
-            enable_statistics=False,  # Disable stats in workers for performance
-            factory_func=GameState  # Use GameState constructor as factory
-        )
-        local_game_state_pool = GameStatePool(pool_config)
+        # Engine selection. The C++ bitboard engine has its own ~zero-cost
+        # clone() (struct memcpy) so the GameStatePool's whole purpose —
+        # amortizing GameState alloc + dict-resize cost — is moot. When
+        # enabled, skip pool wiring entirely and instantiate a
+        # CppGameState directly. Both paths land at MCTS via the same
+        # duck-typed surface.
+        use_cpp_engine = bool(mcts_config.get('use_cpp_engine', False))
+        if use_cpp_engine:
+            from ..game_cpp import CppGameState
+            local_game_state_pool = None
+            worker_logger.info(f"Game {game_id}: using C++ bitboard engine")
+        else:
+            from ..memory import GameStatePool, GameStatePoolConfig
+            from ..game import GameState
+            pool_config = GameStatePoolConfig(
+                initial_size=50,  # Start with moderate pool size for worker
+                enable_statistics=False,  # Disable stats in workers for performance
+                factory_func=GameState  # Use GameState constructor as factory
+            )
+            local_game_state_pool = GameStatePool(pool_config)
 
         # Use network's encoder to ensure consistent encoding (basic or enhanced)
         state_encoder = network.state_encoder
@@ -1525,14 +1567,18 @@ def play_game_worker(
 
         # Remove these from mcts_config before passing to MCTS __init__
         mcts_init_config = {k: v for k, v in mcts_config.items()
-                           if k not in ['use_batched_mcts', 'mcts_batch_size', 'use_enhanced_encoding']}
+                           if k not in ['use_batched_mcts', 'mcts_batch_size',
+                                        'use_enhanced_encoding', 'use_cpp_engine']}
 
         mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_init_config)
 
-        # --- Memory-Efficient Game Data Structures ---
-        state = local_game_state_pool.get()  # Get initial state from pool
-        from ..memory import reset_game_state
-        reset_game_state(state)  # Ensure it's properly initialized
+        # --- Initial state: pool-allocated GameState or fresh CppGameState ---
+        if use_cpp_engine:
+            state = CppGameState()
+        else:
+            state = local_game_state_pool.get()  # Get initial state from pool
+            from ..memory import reset_game_state
+            reset_game_state(state)  # Ensure it's properly initialized
 
         # Use lists instead of deques (less overhead)
         states = []
@@ -1672,9 +1718,24 @@ def play_game_worker(
             f"Score: W={state.white_score}, B={state.black_score}. Outcome={outcome:.3f}"
         )
 
+        # Heuristic eval-cache hit-rate. Surfacing this alongside the game
+        # summary makes it easy to spot when the cache is misconfigured
+        # (e.g. evaluator getting reconstructed per-call) without re-running
+        # the cProfile script. See BITBOARD_FOLLOWUP_PLAN.md Candidate A.
+        if (mcts.heuristic_evaluator is not None
+                and hasattr(mcts.heuristic_evaluator, "cache_stats")):
+            cs = mcts.heuristic_evaluator.cache_stats()
+            if cs["hits"] + cs["misses"] > 0:
+                worker_logger.info(
+                    f"Game {game_id} eval-cache: hit_rate={cs['hit_rate']:.1%} "
+                    f"hits={cs['hits']} misses={cs['misses']} size={cs['size']}/{cs['capacity']}"
+                )
+
         # Clean up memory before returning
-        # Release state if possible
-        if 'local_game_state_pool' in locals() and 'state' in locals() and state is not None:
+        # Release state if possible (CppGameState path runs without a pool)
+        if ('local_game_state_pool' in locals()
+                and local_game_state_pool is not None
+                and 'state' in locals() and state is not None):
             local_game_state_pool.return_game_state(state)
 
         # Free any retained MCTS search tree (subtree reuse holds it between moves).
@@ -1694,7 +1755,9 @@ def play_game_worker(
         # Ensure cleanup even on error
         try:
             # Release state if possible
-            if 'local_game_state_pool' in locals() and 'state' in locals() and state is not None:
+            if ('local_game_state_pool' in locals()
+                    and local_game_state_pool is not None
+                    and 'state' in locals() and state is not None):
                 local_game_state_pool.return_game_state(state)
             if 'mcts' in locals():
                 mcts.reset_tree()
