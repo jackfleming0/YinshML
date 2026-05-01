@@ -55,6 +55,7 @@ def main():
                   file=sys.stderr)
             sys.exit(2)
 
+    from yinsh_ml.heuristics import YinshHeuristics
     from yinsh_ml.network.wrapper import NetworkWrapper
     from yinsh_ml.training.self_play import play_game_worker
 
@@ -69,9 +70,13 @@ def main():
         torch.save(network.network.state_dict(), tmp.name)
         model_path = tmp.name
 
+    # Match SelfPlay's default wiring (yinsh_ml/training/self_play.py:1231):
+    # forced-sequence detection off, since MCTS already does lookahead.
+    heuristic_evaluator = YinshHeuristics(enable_forced_sequence_detection=False)
+
     cfg = dict(
         evaluation_mode="hybrid",
-        heuristic_evaluator=None,
+        heuristic_evaluator=heuristic_evaluator,
         heuristic_weight=0.5,
         num_simulations=args.sims,
         late_simulations=args.sims,
