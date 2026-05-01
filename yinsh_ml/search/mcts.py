@@ -297,16 +297,15 @@ class MCTS:
         return policy, value
     
     def _get_terminal_value(self, state: GameState) -> Optional[float]:
-        """Get terminal value if state is terminal."""
-        if state.is_terminal():
-            winner = state.get_winner()
-            if winner == Player.WHITE:
-                return 1.0
-            elif winner == Player.BLACK:
-                return -1.0
-            else:
-                return 0.0
-        return None
+        """Terminal value from the leaf player's POV (matches the convention
+        used by the network and heuristic evaluators), or None if non-terminal.
+        """
+        if not state.is_terminal():
+            return None
+        winner = state.get_winner()
+        if winner is None:
+            return 0.0
+        return 1.0 if winner == state.current_player else -1.0
     
     def _normalize_heuristic_score(self, score: float) -> float:
         """Normalize heuristic score to [-1, 1] range."""
@@ -405,12 +404,31 @@ class MCTS:
             return policy[move_idx]
         return 0.0
     
-    def _backpropagate(self, search_path: List[MCTSNode], value: float):
-        """Backpropagate value through search path."""
-        for node in reversed(search_path):
+    def _backpropagate(self, search_path: List[MCTSNode], players: List[Player], value: float):
+        """Backpropagate the leaf evaluation up the search path.
+
+        ``GameState._switch_player`` does not fire on every YINSH move: capture
+        sequences (MOVE_RING→ROW_COMPLETION→REMOVE_MARKERS→REMOVE_RING) keep
+        the same player to move across multiple plies. The running value's POV
+        only flips at edges where the player actually changes.
+
+        Storage convention preserved from prior code: ``node.value_sum +=
+        running`` (no leading negation, so chess-alternating paths still store
+        +v at leaf, -v at depth 1, etc.). PUCT consumes ``child.value()``.
+
+        Args:
+            search_path: nodes from root to leaf.
+            players: parallel list, ``players[i]`` is the player to move at
+                ``search_path[i]``.
+            value: leaf evaluation in ``players[-1]``'s POV.
+        """
+        running = value
+        for i in range(len(search_path) - 1, -1, -1):
+            node = search_path[i]
             node.visit_count += 1
-            node.value_sum += value
-            value = -value  # Flip value for opponent
+            node.value_sum += running
+            if i > 0 and players[i] != players[i - 1]:
+                running = -running
     
     def get_temperature(self, move_number: int) -> float:
         """Calculate temperature based on linear annealing schedule."""
@@ -457,9 +475,12 @@ class MCTS:
             search_path = [node]
             current_state = self._acquire_state_copy(state)
             simulation_states.append(current_state)
+            # Parallel to search_path; backprop uses this to flip the running
+            # value only across edges where the player actually changes.
+            players_path = [current_state.current_player]
             depth = 0
             action = None
-            
+
             # 1. Selection
             while node.is_expanded and node.children:
                 action = self._select_action(node)
@@ -469,6 +490,7 @@ class MCTS:
                 current_state.make_move(action)
                 node = node.children[action]
                 search_path.append(node)
+                players_path.append(current_state.current_player)
                 depth += 1
                 if depth >= self.config.max_depth:
                     break
@@ -525,8 +547,8 @@ class MCTS:
                 self.logger.error("Value is None before backpropagation")
                 value = 0.0
             
-            self._backpropagate(search_path, value)
-        
+            self._backpropagate(search_path, players_path, value)
+
         # Clean up simulation states
         for state in simulation_states:
             self._release_state(state)

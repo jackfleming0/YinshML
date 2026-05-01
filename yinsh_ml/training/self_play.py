@@ -547,6 +547,10 @@ class MCTS:
             search_path = [node]
             current_state = self._acquire_state_copy(state)
             simulation_states.append(current_state)  # Track for cleanup
+            # Track player-to-move at each path node so backprop can flip the
+            # running value only across real player transitions (YINSH capture
+            # sequences keep the same player for 3+ plies).
+            players_path = [current_state.current_player]
             depth = 0
             action = None
 
@@ -559,6 +563,7 @@ class MCTS:
                 current_state.make_move(action)
                 node = node.children[action]
                 search_path.append(node)
+                players_path.append(current_state.current_player)
                 depth += 1
                 if depth >= self.max_depth:
                      break
@@ -628,7 +633,7 @@ class MCTS:
             if value is None: # Should not happen if logic above is correct, but safeguard
                  self.logger.error(f"MCTS Error: Value is None before backpropagation. State terminal: {current_state.is_terminal()}")
                  value = 0.0 # Default value if something went wrong
-            self._backpropagate(search_path, value)
+            self._backpropagate(search_path, players_path, value)
 
         # Clean up simulation states
         for state in simulation_states:
@@ -745,6 +750,9 @@ class MCTS:
             search_path = [node]
             current_state = self._acquire_state_copy(state)
             simulation_states.append(current_state)
+            # Parallel to search_path; passed through to _backpropagate so it
+            # can do conditional sign-flip across real player transitions.
+            players_path = [current_state.current_player]
             depth = 0
             action = None
 
@@ -757,6 +765,7 @@ class MCTS:
                 current_state.make_move(action)
                 node = node.children[action]
                 search_path.append(node)
+                players_path.append(current_state.current_player)
                 depth += 1
                 if depth >= self.max_depth:
                     break
@@ -775,7 +784,7 @@ class MCTS:
             terminal_value = self._get_value(current_state)
             if terminal_value is not None:
                 # Terminal state - backpropagate immediately
-                self._backpropagate(search_path, terminal_value)
+                self._backpropagate(search_path, players_path, terminal_value)
                 continue
 
             # 3. Check if we hit max depth
@@ -783,11 +792,11 @@ class MCTS:
                 # At max depth - need to evaluate but don't expand
                 # Add to batch for evaluation
                 node.add_virtual_loss()  # Mark as in-flight
-                batch_leaves.append((node, search_path, current_state, depth, False))  # False = don't expand
+                batch_leaves.append((node, search_path, players_path, current_state, depth, False))
             else:
                 # Normal leaf node - add to batch for expansion and evaluation
                 node.add_virtual_loss()  # Mark as in-flight
-                batch_leaves.append((node, search_path, current_state, depth, True))  # True = can expand
+                batch_leaves.append((node, search_path, players_path, current_state, depth, True))
 
             # 4. Process batch when it's full or we're at the end
             if len(batch_leaves) >= batch_size or sim == budget - 1:
@@ -858,7 +867,11 @@ class MCTS:
         Evaluate a batch of leaf nodes and back up the results.
 
         Args:
-            batch_leaves: List of tuples (node, search_path, current_state, depth, can_expand)
+            batch_leaves: List of tuples
+                (node, search_path, players_path, current_state, depth, can_expand).
+                ``players_path`` is parallel to ``search_path`` and lets
+                ``_backpropagate`` flip the running value only across real
+                player transitions (YINSH same-player capture sequences).
             root: Root node (for Dirichlet noise application)
             move_number: Outer-game move number, used to taper root Dirichlet
                 noise mixing via `_compute_epsilon_mix`. 0 defaults keep early-
@@ -868,7 +881,7 @@ class MCTS:
             return
 
         # Separate states for batch evaluation
-        states_to_evaluate = [item[2] for item in batch_leaves]
+        states_to_evaluate = [item[3] for item in batch_leaves]
 
         # Batch evaluate all states
         if self.evaluation_mode in ["pure_neural", "hybrid"]:
@@ -887,7 +900,7 @@ class MCTS:
             ])
 
         # Process each leaf in the batch
-        for i, (node, search_path, current_state, depth, can_expand) in enumerate(batch_leaves):
+        for i, (node, search_path, players_path, current_state, depth, can_expand) in enumerate(batch_leaves):
             # Get policy and value for this state
             if self.evaluation_mode in ["pure_neural", "hybrid"]:
                 policy_logits = policy_logits_batch[i]
@@ -958,7 +971,7 @@ class MCTS:
 
             # Remove virtual loss and backpropagate
             node.remove_virtual_loss()
-            self._backpropagate(search_path, value)
+            self._backpropagate(search_path, players_path, value)
 
     def _select_action(self, node: Node) -> Move:
         """Select action using UCB formula with configured value_weight.
@@ -1108,23 +1121,27 @@ class MCTS:
             return policy_combined, value_combined
 
     def _get_value(self, state: GameState) -> Optional[float]:
-        """Get terminal value if game ended, None otherwise. Uses normalized margin."""
+        """Terminal value from the leaf player's POV, or None if non-terminal.
+
+        Returns the score margin clipped to [-1, +1] in `state.current_player`'s
+        POV. Network and heuristic evaluators already produce leaf-player-POV
+        values (the encoder is side-normalized), so callers can treat all leaf
+        values as same-convention and pass them straight to `_backpropagate`,
+        which expects leaf-player POV.
+        """
         if not state.is_terminal():
             return None
 
-        # Calculate normalized margin based on final scores
         score_diff = state.white_score - state.black_score
-        normalized_margin = score_diff / 3.0 # Max score difference is 3 (3-0 or 0-3)
-        # Clamp the value to be strictly within [-1, 1]
-        final_value = np.clip(normalized_margin, -1.0, 1.0)
+        normalized_margin = score_diff / 3.0  # Max score difference is 3 (3-0 or 0-3)
+        white_pov_value = float(np.clip(normalized_margin, -1.0, 1.0))
 
-        # Perspective matters: MCTS backpropagates the negative of the child's value.
-        # The value returned here should be from the perspective of the *player whose turn it would be*
-        # if the game hadn't ended. However, AlphaZero often uses the value from the perspective
-        # of the player who *made the last move* leading to this terminal state. Let's clarify.
-        # If the game ends, the outcome is fixed. Let's return the objective outcome.
-        # The backpropagation step (value = -value) handles the perspective switch.
-        return final_value
+        # Flip to leaf-player POV. White-POV is positive when white scored more;
+        # if Black is the player to move at the terminal state, that's a loss
+        # for Black and the value should be negated.
+        if state.current_player == Player.WHITE:
+            return white_pov_value
+        return -white_pov_value
 
 
     def _mask_invalid_moves(self, policy: np.ndarray, valid_moves: List[Move]) -> np.ndarray:
@@ -1162,18 +1179,44 @@ class MCTS:
         return normalized_policy
 
 
-    def _backpropagate(self, path: List[Node], value: float):
-        """Backpropagate the evaluated value up the search path."""
-        # Value is from the perspective of the player whose turn is *at the end* of the path.
-        # As we go up, we flip the sign for the parent node.
-        for node in reversed(path):
+    def _backpropagate(self, path: List[Node], players: List[Player], value: float):
+        """Backpropagate the leaf evaluation up the search path.
+
+        Storage convention (preserved from prior code): each node stores
+        ``value_sum`` from its parent's player's POV; root, having no real
+        parent, stores from the opposite-of-root POV. PUCT (`_select_action`)
+        consumes ``child.value()`` directly as Q from the parent's POV.
+
+        YINSH-aware: ``GameState._switch_player`` does not fire on every move
+        (capture sequences MOVE_RING→ROW_COMPLETION→REMOVE_MARKERS→REMOVE_RING
+        keep the same player to move across 3+ plies). Walking up the path,
+        the running value's POV only flips at edges where the player actually
+        changes, not unconditionally per ply.
+
+        Args:
+            path: nodes from root to leaf, len(path) >= 1.
+            players: parallel list, ``players[i]`` is the player to move at
+                ``path[i]``. ``len(players) == len(path)``.
+            value: leaf evaluation in ``players[-1]``'s POV.
+        """
+        running = value
+        n = len(path)
+        for i in range(n - 1, -1, -1):
+            node = path[i]
             node.visit_count += 1
-            # Ensure the value perspective is correct for the node's state
-            # The value should be added from the perspective of the player *whose turn it is* at that node.
-            # Since 'value' comes from the child state, it's from the opponent's perspective relative to the current node.
-            # So, we add -value to the node's value_sum.
-            node.value_sum += -value
-            value = -value # Flip perspective for the next parent node
+            # Storage POV at this node:
+            #   non-root with same-player parent -> parent-POV == running's POV: store +running
+            #   non-root with different-player parent -> parent-POV is flipped: store -running
+            #   root (no parent) -> legacy convention, store -running
+            same_as_parent = (i > 0 and players[i] == players[i - 1])
+            if same_as_parent:
+                node.value_sum += running
+            else:
+                node.value_sum += -running
+            # Update running for the parent's iteration (running should be in
+            # players[i-1]'s POV at the next step).
+            if i > 0 and players[i] != players[i - 1]:
+                running = -running
 
 
     def _get_move_prob(self, policy: np.ndarray, move: Move) -> float:
