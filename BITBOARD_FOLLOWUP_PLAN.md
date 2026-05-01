@@ -201,29 +201,22 @@ refactors of the C++ binding or MCTS Node — with worse
 effort/benefit ratios. Pick it back up if recipe cost becomes a
 problem again.
 
-### Pre-merge validation
+### Pre-merge validation — COMPLETE 2026-05-01
 
-1. **Parity tests pass.** `pytest yinsh_ml/heuristics/
-   yinsh_ml/tests/test_game_logic.py
-   yinsh_ml/tests/test_move_encoder.py
-   yinsh_ml/tests/test_heuristic_integration.py
-   yinsh_ml/tests/test_move_hash_cache.py
-   yinsh_ml/tests/test_select_action_vector.py
-   yinsh_ml/tests/test_cell_to_position_lookup.py` — all green local
-   (149 passing) and on cloud (`.so`-gated tests run).
-2. **Paired stress benchmark.** Run
-   `scripts/paired_stress_benchmark.py --iterations 2` on cloud:
-   ```bash
-   python scripts/paired_stress_benchmark.py
-   ```
-   Pulls iter-2 self-play wall time from `cloud_smoke_cpp_stress.yaml`
-   and `cloud_smoke_py_stress.yaml`, prints the ratio. The number
-   goes in the merge PR description.
-3. **Regression catch.** Re-run the sim=48 profile and confirm warmup
-   case didn't regress:
-   ```bash
-   python scripts/profile_cpp_self_play.py --sims 48 --tag warmup
-   ```
+1. **Parity tests pass.** ✓ 149+ tests green local + cloud across
+   heuristics, game logic, move encoder, heuristic integration, move
+   hash cache, vectorized UCB, and Position lookup.
+2. **Paired stress benchmark.** ✓ `scripts/paired_stress_benchmark.py`
+   on cloud 4090, sim=400, 10 games × 2 iters:
+   - C++ engine iter-2 self-play: **177.8s** (17.8s/game with 6 workers)
+   - Python engine iter-2 self-play: **330.9s** (33.1s/game with 6 workers)
+   - **Speedup ratio (py/cpp): 1.86×**
+3. **Regression catch.** ✓ sim=48 warmup case re-profiled: 9.6s/game,
+   88-move game, cache hit rate 95.8% (matches sim=400). All four
+   candidates' wins carry over to the warmup path; NN forward
+   dominates as expected at low sim count (predict_batch + conv2d ≈
+   30%+ of game time = the GPU floor). No regression vs the original
+   1.2× sim=48 baseline ratio.
 
 ## Out of scope (still)
 
