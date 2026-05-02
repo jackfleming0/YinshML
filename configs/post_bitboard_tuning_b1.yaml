@@ -1,0 +1,125 @@
+version: 1
+
+# Post-bitboard tuning run B1: search-quality lever.
+# = configs/post_bitboard_regression_short.yaml with two changes:
+#   - num_iterations: 10 → 20            (enough to see trajectory shape)
+#   - num_simulations: 96 → 200          (test whether sim=96 was the bottleneck)
+#   - late_simulations: 64 → 128         (scaled proportionally; preserve late-game ratio)
+#
+# Hypothesis (per POST_BITBOARD_TRAINING_BRIEF.md experiment 3):
+#   The bitboard speedup makes sim=200 tractable. Heuristic-anchored
+#   sim=96 may have been extracting most but not all of the signal.
+#   Higher search quality → better training data → ELO climbs past prior plateau.
+#
+# Stop / read signals:
+#   - ELO climbs past iter-3 peak (1653) seen in 10-iter regression run → headline
+#   - ELO trajectory matches sim=96 shape → search-quality wasn't the bottleneck;
+#     next experiment is more iterations or different anneal
+#   - Per-iter wall-clock: budget ~20-22 min/iter (sim=200 doubles MCTS work but
+#     NN forward and tournament are unchanged). 20 iters → ~7h.
+#
+# Cloud kickoff:
+#   python scripts/run_training.py --config configs/post_bitboard_tuning_b1.yaml \
+#       2>&1 | tee cloud_logs/post_bitboard_b1_$(date -u +%Y%m%dT%H%M%S).log
+
+device: auto
+num_iterations: 20
+save_dir: runs
+
+self_play:
+  use_cpp_engine: true
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 1.0
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 20    # full-run anneal
+  num_simulations: 200                      # was 96 — the lever under test
+  late_simulations: 128                     # was 64 — scaled to preserve ratio
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 300
+  use_batched_mcts: true
+  mcts_batch_size: 32
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 3
+  games_per_iteration: 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 200000
+  ema_decay: null
+  use_ema_for_eval: false
+  lr_schedule: cosine
+  warmup_epochs: 4
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+
+  checkpoint_retention_count: 0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 50
+  promotion_threshold: 0.55
+  tournament_sliding_window: 2
+  eval_seed: 20260428
+
+anchor:
+  enabled: false
+  num_games: 20
+  depth: 3
+  seed: 1337
+  max_moves_per_game: 200
+  skip_first_n_iterations: 1
+  mcts_enabled: true
+  mcts_simulations: 32
+
+export:
+  export_every: 6
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
