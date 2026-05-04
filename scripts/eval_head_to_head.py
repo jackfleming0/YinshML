@@ -42,6 +42,7 @@ def play_match(
     seed: int,
     pair_label: str,
     max_moves: int = 200,
+    temperature: float = 0.0,
 ) -> Tuple[int, int, int]:
     """Play N games between two networks. Returns (white_wins, black_wins, draws).
 
@@ -76,7 +77,7 @@ def play_match(
                 state_array = net.state_encoder.encode_state(game)
                 inp.copy_(torch.from_numpy(np.array(state_array)).unsqueeze(0))
                 move_probs, _ = net.predict(inp)
-                selected = net.select_move(move_probs, valid_moves, temperature=0.0)
+                selected = net.select_move(move_probs, valid_moves, temperature=temperature)
                 del move_probs
 
                 if selected is None or not game.make_move(selected):
@@ -104,6 +105,7 @@ def play_pair(
     b_net: NetworkWrapper,
     num_games_per_side: int,
     seed: int,
+    temperature: float = 0.0,
 ) -> dict:
     """Play `num_games_per_side` with A as white, then `num_games_per_side`
     with B as white. Returns aggregated W/L/D from A's perspective.
@@ -112,10 +114,12 @@ def play_pair(
     half_seed_b = seed + 100_000
 
     a_white_wins, b_black_wins, draws_aw = play_match(
-        a_net, b_net, num_games_per_side, half_seed_a, f"{a_label}_W_vs_{b_label}_B"
+        a_net, b_net, num_games_per_side, half_seed_a, f"{a_label}_W_vs_{b_label}_B",
+        temperature=temperature,
     )
     b_white_wins, a_black_wins, draws_bw = play_match(
-        b_net, a_net, num_games_per_side, half_seed_b, f"{b_label}_W_vs_{a_label}_B"
+        b_net, a_net, num_games_per_side, half_seed_b, f"{b_label}_W_vs_{a_label}_B",
+        temperature=temperature,
     )
 
     a_wins = a_white_wins + a_black_wins
@@ -156,6 +160,10 @@ def main():
     parser.add_argument("--max-moves", type=int, default=200)
     parser.add_argument("--output-json", type=Path, default=None,
                         help="Optional path to write results as JSON")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Sampling temperature for move selection (0.0 = argmax). "
+                             "Use >0 to test whether deterministic argmax is masking real "
+                             "policy differences (e.g. white-wins-only with similar policies).")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -200,6 +208,7 @@ def main():
             res = play_pair(
                 label_a, nets[ai], label_b, nets[bj],
                 num_games_per_side=half, seed=args.seed,
+                temperature=args.temperature,
             )
             total = res["a_wins"] + res["b_wins"] + res["draws"]
             ci_lo, ci_hi = wilson_ci_95(res["a_score"], total)
