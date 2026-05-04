@@ -820,7 +820,11 @@ class TrainingSupervisor:
 
                 # Collect lightweight stats
                 game_lengths.append(len(states))
-                outcomes.append(np.mean(values) if isinstance(values, list) and values else 0.0)
+                # values[] alternates sign per player (+outcome_white at white-to-move,
+                # -outcome_white at black-to-move; see self_play.py:1750). White always
+                # moves first in YINSH, so values[0] == outcome_white. Using mean(values)
+                # would average to ~0 on any decisive game and mislabel real wins as draws.
+                outcomes.append(values[0] if isinstance(values, list) and values else 0.0)
 
                 # Calculate ring mobility from last state
                 try:
