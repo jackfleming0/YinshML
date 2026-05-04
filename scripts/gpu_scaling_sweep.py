@@ -90,7 +90,7 @@ class GPUSampler(threading.Thread):
         super().__init__(daemon=True)
         self.output_path = output_path
         self.interval = interval
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.available = shutil.which("nvidia-smi") is not None
         self.samples: List[dict] = []
 
@@ -101,7 +101,7 @@ class GPUSampler(threading.Thread):
             writer = csv.writer(f)
             writer.writerow(["t_sec", "sm_pct", "mem_pct", "pwr_w", "mem_used_mb"])
             t0 = time.time()
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     out = subprocess.check_output(
                         [
@@ -123,10 +123,10 @@ class GPUSampler(threading.Thread):
                     )
                 except Exception:
                     pass
-                self._stop.wait(self.interval)
+                self._stop_event.wait(self.interval)
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
 
     def summary(self) -> dict:
         if not self.samples:
@@ -155,7 +155,7 @@ class RSSSampler(threading.Thread):
         self.pid = pid
         self.output_path = output_path
         self.interval = interval
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.available = psutil is not None
         self.samples: List[Tuple[float, float]] = []  # (t_sec, rss_mb)
 
@@ -181,7 +181,7 @@ class RSSSampler(threading.Thread):
             writer = csv.writer(f)
             writer.writerow(["t_sec", "rss_mb"])
             t0 = time.time()
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 rss = self._total_rss_mb()
                 if rss is None:
                     break  # process gone
@@ -189,10 +189,10 @@ class RSSSampler(threading.Thread):
                 writer.writerow([t, round(rss, 1)])
                 f.flush()
                 self.samples.append((t, rss))
-                self._stop.wait(self.interval)
+                self._stop_event.wait(self.interval)
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
 
     def summary(self) -> dict:
         if not self.samples:
@@ -298,17 +298,34 @@ def run_cell(base_cfg_path: Path, num_workers: int, mcts_batch_size: int,
         "--iterations", "1",
     ]
 
-    # Line-buffered stdout so the parser can see progress in near-real-time
-    # if we ever decide to early-stop on a regression.
-    log_f = log_path.open("w")
+    # Stream stdout to BOTH the log file and the parent's terminal — flying
+    # blind for 30+ minutes per cell is what the previous run cost us.
     t0 = time.time()
     proc = subprocess.Popen(
         cmd,
         cwd=str(ROOT),
-        stdout=log_f,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        bufsize=1,
+        text=True,
     )
+
+    log_f = log_path.open("w")
+    prefix = f"[w={num_workers} b={mcts_batch_size}] "
+
+    def _tee():
+        try:
+            for line in proc.stdout:
+                log_f.write(line)
+                log_f.flush()
+                sys.stdout.write(prefix + line)
+                sys.stdout.flush()
+        except Exception:
+            pass
+
+    tee_thread = threading.Thread(target=_tee, daemon=True)
+    tee_thread.start()
 
     gpu_sampler = GPUSampler(gpu_csv)
     rss_sampler = RSSSampler(proc.pid, rss_csv)
@@ -337,6 +354,7 @@ def run_cell(base_cfg_path: Path, num_workers: int, mcts_batch_size: int,
         rss_sampler.stop()
         gpu_sampler.join(timeout=5)
         rss_sampler.join(timeout=5)
+        tee_thread.join(timeout=5)
         log_f.close()
 
     wall = time.time() - t0
