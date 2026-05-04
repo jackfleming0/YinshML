@@ -227,6 +227,25 @@ def main():
             f"[{r['ci95_lo']:.3f},{r['ci95_hi']:.3f}]  {sig}"
         )
 
+    # Per-color split — surfaces "white-wins-everything" pathology where the
+    # aggregate looks even but every game just goes to whoever moves first.
+    print("\n" + "-" * 64)
+    print("Per-color split (a_wins broken down by who was white):")
+    print("-" * 64)
+    print(f"{'pair':>20} {'a_W_wins':>10} {'a_B_wins':>10}  interpretation")
+    for r in pairs_results:
+        n_per_side = (r['a_wins'] + r['b_wins'] + r['draws']) // 2
+        a_w = r.get('a_white_wins', 0)
+        a_b = r.get('a_black_wins', 0)
+        # Flag the white-wins-only pattern: a wins almost all when white, almost none when black
+        white_dominance = (a_w / n_per_side if n_per_side else 0) - (a_b / n_per_side if n_per_side else 0)
+        flag = " ⚠ WHITE-WINS PATTERN" if white_dominance > 0.7 or white_dominance < -0.7 else ""
+        print(
+            f"{r['a_label']+' vs '+r['b_label']:>20} "
+            f"{a_w:>10} {a_b:>10}  "
+            f"(of {n_per_side} per side){flag}"
+        )
+
     # Per-model aggregate.
     print("\n" + "-" * 64)
     print("Per-model aggregate (avg score vs field):")
