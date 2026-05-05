@@ -238,13 +238,15 @@ class CellResult:
 
 def _write_cell_config(base_cfg_path: Path, num_workers: int,
                        mcts_batch_size: int, save_dir: Path,
-                       cell_dir: Path) -> Path:
+                       cell_dir: Path,
+                       use_shared_evaluator: bool = False) -> Path:
     """Deep-merge knob overrides into a copy of the base config."""
     with base_cfg_path.open() as f:
         cfg = yaml.safe_load(f)
 
     cfg.setdefault("self_play", {})["num_workers"] = num_workers
     cfg["self_play"]["mcts_batch_size"] = mcts_batch_size
+    cfg["self_play"]["use_shared_evaluator"] = use_shared_evaluator
     cfg["num_iterations"] = 1
     cfg["save_dir"] = str(save_dir)
 
@@ -271,21 +273,24 @@ def _parse_games_and_time(log_text: str) -> Tuple[Optional[int], Optional[float]
 
 
 def run_cell(base_cfg_path: Path, num_workers: int, mcts_batch_size: int,
-             cell_dir: Path, timeout_s: int) -> CellResult:
+             cell_dir: Path, timeout_s: int,
+             use_shared_evaluator: bool = False) -> CellResult:
     """Run one (num_workers, mcts_batch_size) cell and collect metrics."""
     cell_dir.mkdir(parents=True, exist_ok=True)
     save_dir = cell_dir / "run"
     config_path = _write_cell_config(
-        base_cfg_path, num_workers, mcts_batch_size, save_dir, cell_dir
+        base_cfg_path, num_workers, mcts_batch_size, save_dir, cell_dir,
+        use_shared_evaluator=use_shared_evaluator,
     )
 
     log_path = cell_dir / "stdout.log"
     gpu_csv = cell_dir / "gpu_samples.csv"
     rss_csv = cell_dir / "rss_samples.csv"
 
+    eval_tag = " evaluator=ON" if use_shared_evaluator else ""
     print(
         f"\n=== cell num_workers={num_workers} "
-        f"mcts_batch_size={mcts_batch_size} ===",
+        f"mcts_batch_size={mcts_batch_size}{eval_tag} ===",
         flush=True,
     )
     print(f"  config: {config_path}", flush=True)
@@ -472,6 +477,10 @@ def main():
                    help="mcts_batch_size values to sweep")
     p.add_argument("--timeout", type=int, default=1800,
                    help="per-cell timeout in seconds (default 30min)")
+    p.add_argument("--use-evaluator", action="store_true",
+                   help=("set self_play.use_shared_evaluator=true for every "
+                         "cell. Switches the threaded BatchedEvaluator path on "
+                         "(PR #12 Phase 2)."))
     p.add_argument("--dry-run", action="store_true",
                    help="print the sweep plan and exit")
     args = p.parse_args()
@@ -482,7 +491,8 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cells = [(w, b) for w in args.workers for b in args.batch_sizes]
 
-    print(f"Sweep over {len(cells)} cells:")
+    print(f"Sweep over {len(cells)} cells "
+          f"(shared evaluator: {'ON' if args.use_evaluator else 'off'}):")
     for w, b in cells:
         print(f"  num_workers={w} mcts_batch_size={b}")
     print(f"Output: {args.output_dir}")
@@ -495,8 +505,12 @@ def main():
     results: List[CellResult] = []
     try:
         for w, b in cells:
-            cell_dir = args.output_dir / f"w{w}_b{b}"
-            results.append(run_cell(args.base_config, w, b, cell_dir, args.timeout))
+            tag = "_eval" if args.use_evaluator else ""
+            cell_dir = args.output_dir / f"w{w}_b{b}{tag}"
+            results.append(run_cell(
+                args.base_config, w, b, cell_dir, args.timeout,
+                use_shared_evaluator=args.use_evaluator,
+            ))
     except KeyboardInterrupt:
         print("\nInterrupted — writing partial summary.", flush=True)
 
