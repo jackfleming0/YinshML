@@ -1,0 +1,131 @@
+# cloud_run_v1.yaml — first sustained training run on a 4090 cloud box.
+#
+# Sized for an overnight ~8h run at ~$0.50/hr ($4-5 budget).
+# Throughput baseline: 1250 games/hr at num_workers=4 on the 2026-05-05
+# sweep. With BatchedEvaluator (target 3-5x), revisit the iteration
+# budget upward.
+#
+# Differences vs cloud_smoke.yaml (which is a 1-iter perf-check):
+#   - 50 iterations instead of 2 — meaningful training horizon
+#   - 200 games/iter instead of 10 — enough for a stable buffer
+#   - Tournament games_per_match=20 instead of 6 — tighter ELO CIs
+#   - Buffer 100k instead of 50k — accommodates longer horizon
+#   - export_every=10 — periodic CoreML snapshots, not just at end
+#   - Anchor enabled — same defaults as smoke
+#
+# Knobs intentionally NOT changed from smoke:
+#   - num_simulations / late_simulations — already tuned (post-bitboard B2)
+#   - heuristic schedule — proven decent in B1/B2
+#   - LR schedule + EMA — survived warmstart Phase D
+#
+# To turn on the BatchedEvaluator after Phase 3 validation lands:
+#   set `use_shared_evaluator: true` in self_play below; bump num_workers
+#   to 8 or 12 (it scales differently when the evaluator coalesces).
+
+version: 1
+device: auto
+num_iterations: 50
+save_dir: runs_cloud_v1
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 25  # half the run
+  num_simulations: 48
+  late_simulations: 32
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64                   # 64 ≈ 128 in our measurements; 64 keeps memory smaller
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 4                        # measured peak on 4090; flip up after evaluator lands
+  use_shared_evaluator: false           # toggle on once BatchedEvaluator is validated
+  games_per_iteration: 200
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 10
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false                      # off by default; enable in v2 if v1 is healthy
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  # 20 games/match → 40 tournament games per iteration (one pair, both colors).
+  # CI ~22% width — meaningful but not overweighted; smoke uses 6.
+  games_per_match: 20
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260505
+
+  # Inherits the gating-failure rollback fix from PR #9 (Phase D warmstart).
+  # If the candidate fails the gate, self-play data from this iteration is
+  # discarded (rather than poisoning the buffer).
+  revert_self_play_on_gate_failure: true
+
+export:
+  export_every: 10                      # periodic CoreML, not just final
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
+
+anchor:
+  enabled: true
+  num_games: 4
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
