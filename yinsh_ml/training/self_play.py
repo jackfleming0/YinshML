@@ -176,6 +176,13 @@ class MCTS:
                  # Applied to root child priors BEFORE Dirichlet noise mixing.
                  # 1.0 is a no-op; default off so existing configs are unchanged.
                  root_policy_temp: float = 1.0,
+                 # --- Shared inference evaluator (PR #12, Phase 1) ---
+                 # When set, batched-MCTS leaf evaluation routes through this
+                 # evaluator instead of `network.predict_batch` directly. The
+                 # evaluator coalesces requests across MCTS instances, which
+                 # is the whole point — see BATCHED_EVALUATOR_DESIGN.md. None
+                 # = unchanged behavior (each MCTS calls predict_batch alone).
+                 evaluator=None,
                 ):
         """
         Initialize MCTS.
@@ -228,6 +235,11 @@ class MCTS:
         # Use network's encoder to ensure consistent encoding (basic or enhanced)
         self.state_encoder = network.state_encoder
         self.logger = logging.getLogger("MCTS") # Use module-level logger
+
+        # Optional shared evaluator. When non-None, batched leaf evaluation
+        # in `_evaluate_and_backup_batch` routes through it; otherwise it
+        # uses `network.predict_batch` directly (unchanged behavior).
+        self.evaluator = evaluator
 
         # Evaluation Mode Configuration
         self.evaluation_mode = evaluation_mode.lower()
@@ -885,8 +897,15 @@ class MCTS:
 
         # Batch evaluate all states
         if self.evaluation_mode in ["pure_neural", "hybrid"]:
-            # Use neural network for batch evaluation
-            policy_logits_batch, values_batch = self.network.predict_batch(states_to_evaluate)
+            # Route through the shared evaluator if one was provided
+            # (PR #12, Phase 1) — same return shape as predict_batch, so
+            # the only thing that changes is who actually runs the GPU
+            # call. When evaluator is None, fall back to the per-MCTS
+            # predict_batch call that's been there all along.
+            if self.evaluator is not None:
+                policy_logits_batch, values_batch = self.evaluator.evaluate_batch(states_to_evaluate)
+            else:
+                policy_logits_batch, values_batch = self.network.predict_batch(states_to_evaluate)
 
             # Convert to numpy
             policy_logits_batch = policy_logits_batch.cpu().numpy()

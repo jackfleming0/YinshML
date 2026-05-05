@@ -1,6 +1,6 @@
-"""Unit tests for BatchedEvaluator (Phase 0 of IMPLEMENTATION_PLAN.md).
+"""Unit tests for BatchedEvaluator (Phases 0-1 of IMPLEMENTATION_PLAN.md).
 
-The evaluator's correctness story has three pieces; one test each:
+Phase 0 (this module's primary scope) — three correctness pieces:
 
   T1. *Coalescence works.* N concurrent `evaluate(...)` calls collapse
       into a small number of `network.predict_batch` calls — not N
@@ -14,15 +14,25 @@ The evaluator's correctness story has three pieces; one test each:
       input, not a sibling's. This is the determinism story; if it
       fails, MCTS will silently train on cross-talked values.
 
+Phase 1 — integration into self_play.MCTS:
+
+  T4. *MCTS-with-evaluator matches direct path.* Routing through the
+      evaluator must not change search outcomes. Given the same seed,
+      `search_batch` should produce identical visit counts and move
+      probabilities whether `evaluator=None` or
+      `evaluator=BatchedEvaluator(network)`.
+
 These tests do not need a GPU — they use recording fake networks. The
 real-network smoke is in Phase 3 (Mac + cloud sweep).
 """
 
 from __future__ import annotations
 
+import random
 import threading
 from typing import List
 
+import numpy as np
 import pytest
 import torch
 
@@ -235,6 +245,93 @@ def test_shutdown_is_idempotent():
     ev = BatchedEvaluator(fake)
     ev.shutdown()
     ev.shutdown()  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# T4 — MCTS routed through evaluator matches direct-network path              #
+# --------------------------------------------------------------------------- #
+
+
+def _build_mcts(network, evaluator):
+    """Construct a self-play MCTS with deterministic-friendly settings.
+
+    Disables Dirichlet noise + epsilon-mix (no randomness from those
+    paths). The remaining randomness — the UCB tiebreak ε-noise —
+    consumes np.random the same number of times in both runs, so a
+    single seed before each run is enough to match.
+    """
+    from yinsh_ml.training.self_play import MCTS as SelfPlayMCTS
+
+    return SelfPlayMCTS(
+        network=network,
+        evaluation_mode="pure_neural",
+        num_simulations=32,
+        late_simulations=32,
+        simulation_switch_ply=20,
+        c_puct=1.0,
+        dirichlet_alpha=0.0,        # no Dirichlet noise
+        value_weight=1.0,
+        max_depth=200,
+        initial_temp=1.0,
+        final_temp=1.0,
+        annealing_steps=1,
+        enable_subtree_reuse=True,  # keep _cached_root for inspection
+        epsilon_mix_start=0.0,      # no root-noise mixing
+        epsilon_mix_end=0.0,
+        epsilon_mix_taper_moves=0,
+        evaluator=evaluator,
+    )
+
+
+def test_mcts_with_evaluator_matches_direct_path():
+    """T4: integration determinism guard.
+
+    Run `search_batch` twice — once with `evaluator=None` (direct
+    path), once with `evaluator=BatchedEvaluator(network)` — using the
+    same fake network and the same seed. Visit counts on the root's
+    children must match exactly. If they don't, the evaluator is
+    introducing nondeterminism (e.g. dropping/duplicating requests, or
+    routing them in the wrong order under coalescence).
+
+    The fake network returns zeros — uniform priors after softmax — so
+    any divergence is necessarily structural, not noise from value
+    deltas.
+    """
+    def run(use_evaluator: bool):
+        np.random.seed(42)
+        random.seed(42)
+        network = CountingFakeNetwork()
+        if use_evaluator:
+            evaluator = BatchedEvaluator(network, max_wait_ms=20.0)
+        else:
+            evaluator = None
+        try:
+            mcts = _build_mcts(network, evaluator)
+            move_probs = mcts.search_batch(GameState(), move_number=0,
+                                           batch_size=16)
+            root = mcts._cached_root
+            assert root is not None and root.children, (
+                "search produced no children — fixture is too small to "
+                "exercise the integration"
+            )
+            visits = {action: root.children[action].visit_count
+                      for action in sorted(root.children.keys(), key=str)}
+        finally:
+            if evaluator is not None:
+                evaluator.shutdown()
+        return visits, move_probs
+
+    visits_direct, probs_direct = run(use_evaluator=False)
+    visits_eval, probs_eval = run(use_evaluator=True)
+
+    assert visits_direct == visits_eval, (
+        "Visit counts diverge between direct and evaluator paths. "
+        "First few mismatches: "
+        + str([(k, visits_direct[k], visits_eval.get(k))
+               for k in visits_direct
+               if visits_direct[k] != visits_eval.get(k)][:5])
+    )
+    np.testing.assert_array_almost_equal(probs_direct, probs_eval, decimal=6)
 
 
 # Note on orphan-failure behavior:
