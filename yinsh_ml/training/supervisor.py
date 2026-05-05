@@ -1,4 +1,19 @@
 # training/supervisor.py
+#
+# TODO(refactor): this file is ~2.5K lines. The TrainingSupervisor class has
+# grown to absorb self-play orchestration, training loop, tournament eval,
+# checkpoint management, manifest I/O, metrics logging, memory management,
+# and num_workers heuristics. It's overdue for a split — proposed shape:
+#
+#   - supervisor.py           — TrainingSupervisor (orchestration only)
+#   - supervisor_eval.py      — tournament + ELO + promotion logic
+#   - supervisor_checkpoints.py — load/save/resume + manifest I/O
+#   - supervisor_metrics.py   — _log_metric_safe + experiment-tracker glue
+#   - supervisor_workers.py   — _compute_num_workers + the platform sniffing
+#
+# Anything that touches `self.` heavily probably belongs on the orchestrator;
+# anything that's a pure function of (config, paths) can move out cleanly.
+# Don't undertake this mid-experiment — pick a quiet branch.
 
 import gc
 import logging
@@ -2025,10 +2040,21 @@ class TrainingSupervisor:
     def _compute_num_workers(self) -> int:
         """Calculate optimal number of workers based on CPU cores.
 
-        MEMORY OPTIMIZATION: Set to 0 workers (synchronous mode) to prevent zombie worker processes.
-        ProcessPoolExecutor workers never properly terminate and accumulate as zombies eating 1-2GB each.
-        Even with 1 worker, tensors still grew to 16K+ and workers became zombies.
-        Synchronous mode is slower but has clean, predictable memory management.
+        Historical note: this used to default to 0 (synchronous mode) on the
+        theory that ProcessPoolExecutor workers leaked memory as zombies. The
+        2026-05 GPU scaling sweep on a 4090 (cloud_smoke.yaml, 1 iteration,
+        10 games) showed the opposite — over a single iteration:
+
+            num_workers=0  →  +695-884 MB RSS growth in 71s
+            num_workers=4  →  +45-228 MB RSS growth in 47s
+
+        Workers actually clean up faster than the supervisor process; the
+        leak (if there is one) is in the serial path, not the pool. Setting
+        `num_workers > 0` also gave a 1.9× games/hr speedup on the same
+        hardware. So the cap below is conservative for backwards compat,
+        not for safety. Configs that explicitly set `num_workers` (e.g.
+        `cloud_smoke.yaml`) bypass this default — preferred for any cloud-
+        GPU run.
         """
         configured_workers = self.mode_settings.get('num_workers', None)
         if configured_workers is not None:
@@ -2048,7 +2074,9 @@ class TrainingSupervisor:
                         f"Ignoring non-integer configured num_workers={configured_workers}; falling back to auto logic"
                     )
 
-        # CRITICAL: Use 0 workers (synchronous mode) to prevent zombie processes
+        # Conservative default for legacy configs that don't set num_workers
+        # explicitly. See the 2026-05 GPU scaling note above — the original
+        # "zombie processes" rationale didn't hold up under measurement.
         MAX_WORKERS = 0
 
         # Use platform detection for Apple Silicon
