@@ -26,7 +26,7 @@ self_play:
   final_temp: 0.1
   annealing_steps: 30
   temp_clamp_fraction: 0.6
-  num_workers: 6
+  num_workers: 4  # 2026-05-05 4090 sweep peaked here; 8/16 actively hurt. See GPU_SCALING_RESULTS.md.
   games_per_iteration: 10
 trainer:
   batch_size: 256
