@@ -64,7 +64,8 @@ if [[ ! -f "$PHASE0_DONE" ]]; then
         python -c "from yinsh_ml.game_cpp import CppGameState; print('OK')"
 
         log "Sanity: run a small subset of game_cpp tests"
-        pytest yinsh_ml/game_cpp/tests/ -q -x --timeout=60 2>&1 | tail -5 || {
+        # --timeout requires pytest-timeout plugin; skip gracefully if missing
+        pytest yinsh_ml/game_cpp/tests/ -q -x 2>&1 | tail -5 || {
             log "WARN: some game_cpp tests failed — continuing, but watch for engine bugs"
         }
     } 2>&1 | tee "$OUT_DIR/phase0_setup.log"
