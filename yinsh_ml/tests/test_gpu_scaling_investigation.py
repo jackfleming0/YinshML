@@ -289,36 +289,60 @@ def test_simple_mcts_evaluate_state_is_singleton():
 
 
 # --------------------------------------------------------------------------- #
-# C4 — no shared cross-worker BatchedEvaluator exists yet                     #
+# C4 — shared BatchedEvaluator module landed (PR #12, Phase 0)                #
 # --------------------------------------------------------------------------- #
+#
+# Was: "asserts no shared evaluator module exists yet."
+# Now: the module exists at `yinsh_ml.network.batched_evaluator` (Phase 0
+# of IMPLEMENTATION_PLAN.md). This test flipped from "asserts absence" to
+# "asserts presence" so the module's existence is still pinned, just from
+# the other side. When integration lands (Phases 1-2), don't delete this
+# — keep it as a regression guard against accidental removal.
 
 
-def test_no_shared_batched_evaluator_module():
-    """C4: cross-game batching is absent.
+def test_shared_batched_evaluator_module_exists():
+    """C4 (post-Phase 0): the shared evaluator module exists.
 
-    The doc proposes a future `BatchedEvaluator` that owns the only model
-    on the GPU and coalesces requests from N MCTS workers. It does not
-    exist yet. This test pins that — if someone adds the module, this
-    test will fail loudly and the plan should be updated to mark Part 1's
-    "future work" section as in-progress / done.
+    Inverted from the original "absence" assertion now that PR #12
+    Phase 0 has landed. The test now guards against accidental removal
+    rather than proving the gap. Dedicated unit tests for the
+    evaluator's behavior live in
+    `yinsh_ml/tests/test_batched_evaluator.py`.
     """
-    candidates = [
-        "yinsh_ml.training.batched_evaluator",
-        "yinsh_ml.search.batched_evaluator",
-        "yinsh_ml.network.batched_evaluator",
-        "yinsh_ml.network.shared_evaluator",
-    ]
-    found = []
-    for mod in candidates:
+    candidates_present = []
+    candidates_absent = []
+    for mod in [
+        "yinsh_ml.network.batched_evaluator",  # the one we landed
+    ]:
         try:
             __import__(mod)
-            found.append(mod)
+            candidates_present.append(mod)
         except ImportError:
-            continue
+            candidates_absent.append(mod)
 
-    assert not found, (
-        f"Found unexpected batched-evaluator module(s): {found}. The "
-        f"GPU scaling plan assumes none exists yet — update the plan."
+    # Negative space: these alternative locations should NOT exist.
+    # If someone moved the module, the design doc + IMPLEMENTATION_PLAN
+    # need to be updated to match.
+    for mod in [
+        "yinsh_ml.training.batched_evaluator",
+        "yinsh_ml.search.batched_evaluator",
+        "yinsh_ml.network.shared_evaluator",
+    ]:
+        try:
+            __import__(mod)
+            candidates_present.append(mod)
+        except ImportError:
+            pass  # expected
+
+    assert "yinsh_ml.network.batched_evaluator" in candidates_present, (
+        "yinsh_ml.network.batched_evaluator went missing. PR #12 Phase 0 "
+        "landed it; if the module moved, update IMPLEMENTATION_PLAN.md and "
+        "this test."
+    )
+    assert candidates_present == ["yinsh_ml.network.batched_evaluator"], (
+        f"Evaluator module appears to live in multiple locations: "
+        f"{candidates_present}. There should be exactly one canonical home; "
+        f"update the design docs."
     )
 
 
