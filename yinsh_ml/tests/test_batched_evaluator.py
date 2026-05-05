@@ -334,6 +334,65 @@ def test_mcts_with_evaluator_matches_direct_path():
     np.testing.assert_array_almost_equal(probs_direct, probs_eval, decimal=6)
 
 
+# --------------------------------------------------------------------------- #
+# T5 — threaded SelfPlay smoke test (Phase 2 integration)                     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.slow
+def test_threaded_selfplay_smoke():
+    """Phase 2: confirm `use_shared_evaluator=True` produces real games.
+
+    Smaller than `cloud_smoke.yaml` — 2 games, 2 threads, 8 sims/move —
+    to keep the test under ~30s on a Mac CPU. Asserts the threaded
+    path runs end-to-end and returns the expected per-game data shape.
+
+    Marked `@slow` because it spins up a real `BatchedEvaluator` and
+    builds a small `YinshNetwork` (a few seconds even on CPU). Skip
+    with `pytest -m "not slow"`.
+    """
+    from yinsh_ml.network.wrapper import NetworkWrapper
+    from yinsh_ml.training.self_play import SelfPlay
+
+    network = NetworkWrapper(device="cpu")  # Mac/CI: skip MPS/CUDA paths
+    sp = SelfPlay(
+        network=network,
+        num_workers=2,
+        evaluation_mode="pure_neural",
+        num_simulations=8,
+        late_simulations=8,
+        simulation_switch_ply=20,
+        c_puct=1.0,
+        dirichlet_alpha=0.0,
+        value_weight=1.0,
+        max_depth=200,
+        use_batched_mcts=True,
+        mcts_batch_size=8,
+        initial_temp=1.0,
+        final_temp=1.0,
+        annealing_steps=1,
+        enable_subtree_reuse=False,
+        epsilon_mix_start=0.0,
+        epsilon_mix_end=0.0,
+        epsilon_mix_taper_moves=0,
+        use_shared_evaluator=True,
+    )
+
+    games = sp.generate_games(num_games=2)
+
+    assert len(games) == 2, f"expected 2 games, got {len(games)}"
+    for i, (states, policies, values, history) in enumerate(games):
+        assert len(states) == len(policies) == len(values), (
+            f"game {i}: states/policies/values length mismatch — "
+            f"{len(states)}/{len(policies)}/{len(values)}"
+        )
+        assert len(states) > 0, f"game {i}: no states recorded"
+        # values are scalars in [-1, 1] per AlphaZero convention
+        assert all(-1.0 <= v <= 1.0 for v in values), (
+            f"game {i}: value out of [-1, 1] range — {values}"
+        )
+
+
 # Note on orphan-failure behavior:
 # `shutdown()` is supposed to fail any requests still in the queue with
 # RuntimeError("...shut down..."), so worker threads can't deadlock

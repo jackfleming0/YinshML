@@ -291,6 +291,8 @@ class TrainingSupervisor:
         # Extract batched MCTS parameters (Phase 2.1)
         use_batched_mcts = self.mode_settings.get('use_batched_mcts', True)
         mcts_batch_size = self.mode_settings.get('mcts_batch_size', 32)
+        # PR #12 Phase 2: shared evaluator across N threads, one model on GPU.
+        use_shared_evaluator = bool(self.mode_settings.get('use_shared_evaluator', False))
         # Subtree reuse: carry MCTS tree across moves within each self-play game
         # (Track A polish item). Default on — disable via config for A/B testing.
         enable_subtree_reuse = bool(self.mode_settings.get('enable_subtree_reuse', True))
@@ -327,6 +329,7 @@ class TrainingSupervisor:
             'max_depth': max_depth,
             'use_batched_mcts': use_batched_mcts,  # NEW: Enable batched MCTS
             'mcts_batch_size': mcts_batch_size,  # NEW: Batch size for leaf evaluation
+            'use_shared_evaluator': use_shared_evaluator,  # PR #12 Phase 2
             'initial_temp': initial_temp,
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,
