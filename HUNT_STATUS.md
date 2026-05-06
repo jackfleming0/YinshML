@@ -73,14 +73,50 @@ policy head's argmax over 7433 slots amplifies it.
 
 Tests pass: `pytest yinsh_ml/tests/test_supervisor_bn_preservation.py yinsh_ml/tests/test_augmentation.py` → 38 passed.
 
-## In-progress validation
+## Validation — post-fix smoke trajectory
 
-A 4-iter local smoke (`configs/smoke_post_fix.yaml`) is running to
-confirm the policy actually learns post-fix instead of collapsing.
-First-iter probe already shows healthy structure (entropy ≈ ln(N),
-32/128 unique argmax — fresh-init learning, not collapse). Expect
-entropy to *decrease* and unique-argmax to *grow* across the next
-iterations as the policy peakies up onto learned moves.
+`configs/smoke_post_fix.yaml`, 4 iterations, MPS, 5 games × 16 sims:
+
+| iter | entropy | unique top-1 / 128 | top-1 conf | BN keys |
+|---:|---:|---:|---:|---:|
+| 0 | 8.77 | 26 | 0.001 | 87 ✓ |
+| 1 | 7.89 | 11 | 0.008 | 87 ✓ |
+| 2 | 4.15 | 4  | 0.089 | 87 ✓ |
+| 3 | 7.34 | 10 | 0.005 | 87 ✓ |
+
+Compare buggy run (`runs/20260421_125023`):
+
+| iter | entropy | unique top-1 / 128 | top-1 conf | BN keys |
+|---:|---:|---:|---:|---:|
+| 0 | 3.06 | 95 | 0.32   | 87 ✓ |
+| 1 | **0.00** | **2**  | **1.00** | **0** ✗ |
+| 2 | **0.00** | **1**  | **1.00** | **0** ✗ |
+| 3 | 3.66 | 104 | 0.22   | 87 ✓ (post-`_reset_network_objects`) |
+| 4 | **8.91** | 6   | 0.0002 | **0** ✗ |
+| 5 | 4.05 | 105 | 0.18   | 87 ✓ |
+
+What to read in the post-fix table:
+- All four checkpoints retain the full 87 BN buffer keys. **The
+  primary bug is fixed.**
+- No iter shows the catastrophic-collapse signature (entropy ≈ 0,
+  confidence ≈ 1.0, ≤2 unique). Confidence is in the 0.001 - 0.09
+  range — the policy is normally low-confidence early.
+- Iter 2 shows transient peakiness (entropy 4.15, 4 unique argmax,
+  conf 8.9%) — most argmax mass landed on PLACE_RING slots even on
+  MAIN_GAME states. Iter 3 recovers (entropy back to 7.34, 10 unique).
+  Two plausible reads on iter 2: (a) the smoke trains too briefly per
+  iter (1 epoch, ~1.2K samples) for any monotonic trend to be
+  meaningful — this is below the noise floor; (b) hybrid eval +
+  RING_PLACEMENT phase weight 1.0 vs MAIN_GAME 2.0 imbalance is
+  visible as the network biasing toward ring-placement argmax. Either
+  way, the magnitude is mild and recipe-shaped, not the BN bug.
+
+The pre-fix run's iter-1/2 numbers are *literally impossible* without
+the BN bug: entropy 0.00 with confidence 1.00 means a deterministic
+single-move policy across all states, which doesn't happen from a
+training step on diverse data. It only happens if BN scrambles
+features identically across all inputs. We're now seeing an under-
+trained but normally-behaving policy.
 
 ## What to do next on cloud
 
