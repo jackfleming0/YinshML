@@ -1,16 +1,22 @@
 # cloud_run_v1.yaml — first sustained training run on a 4090 cloud box.
 #
-# Sized for an overnight ~8h run at ~$0.50/hr ($4-5 budget).
-# Throughput baseline: 1250 games/hr at num_workers=4 on the 2026-05-05
-# sweep. With BatchedEvaluator (target 3-5x), revisit the iteration
-# budget upward.
+# Throughput baseline: 702 games/hr at num_workers=0 (serial). Measured
+# 2026-05-06 on EPYC 7763 + 4090 cloud box. The 2026-05-06 sweep with
+# the shared BatchedEvaluator measured 470-541 games/hr across worker
+# counts 1, 4, 8, 16 — slower than serial. GIL contention in MCTS
+# Python code makes threading a net loss on this codebase. See
+# GPU_SCALING_RESULTS.md "Threaded evaluator: results vs prediction".
+#
+# Sizing: 25 iter × 200 games/iter = 5000 games. At 702 g/hr that's
+# ~7.1h of self-play, plus train+eval overhead → ~8h total.
+# At ~$0.50/hr that's $4 for the run.
 #
 # Differences vs cloud_smoke.yaml (which is a 1-iter perf-check):
-#   - 50 iterations instead of 2 — meaningful training horizon
+#   - 25 iterations instead of 2 — meaningful training horizon
 #   - 200 games/iter instead of 10 — enough for a stable buffer
 #   - Tournament games_per_match=20 instead of 6 — tighter ELO CIs
 #   - Buffer 100k instead of 50k — accommodates longer horizon
-#   - export_every=10 — periodic CoreML snapshots, not just at end
+#   - export_every=5 — periodic CoreML snapshots, not just at end
 #   - Anchor enabled — same defaults as smoke
 #
 # Knobs intentionally NOT changed from smoke:
@@ -18,13 +24,16 @@
 #   - heuristic schedule — proven decent in B1/B2
 #   - LR schedule + EMA — survived warmstart Phase D
 #
-# To turn on the BatchedEvaluator after Phase 3 validation lands:
-#   set `use_shared_evaluator: true` in self_play below; bump num_workers
-#   to 8 or 12 (it scales differently when the evaluator coalesces).
+# Why num_workers=0 instead of the threaded evaluator:
+#   The 2026-05-06 sweep measured serial > threaded for every
+#   (num_workers, max_wait_ms) combination tested. Once a future
+#   architectural change moves more MCTS work out of Python (more
+#   bitboard) or replaces threads with torch.multiprocessing shared-
+#   tensor processes, revisit. Until then, serial is the honest peak.
 
 version: 1
 device: auto
-num_iterations: 50
+num_iterations: 25
 save_dir: runs_cloud_v1
 
 self_play:
@@ -51,8 +60,8 @@ self_play:
   final_temp: 0.1
   annealing_steps: 30
   temp_clamp_fraction: 0.6
-  num_workers: 4                        # measured peak on 4090 (process pool); flip to 8 after Phase 3b
-  use_shared_evaluator: false           # toggle on once BatchedEvaluator is validated on the 4090
+  num_workers: 0                        # serial — measured peak on this hardware (702 g/hr). See header.
+  use_shared_evaluator: false           # threaded path is slower on this codebase; do not flip without re-measuring.
   games_per_iteration: 200
 
 trainer:
@@ -105,7 +114,7 @@ arena:
   revert_self_play_on_gate_failure: true
 
 export:
-  export_every: 10                      # periodic CoreML, not just final
+  export_every: 5                       # periodic CoreML — every 5/25 iterations
   coreml_dir: models/coreml
 
 difficulty_presets:
