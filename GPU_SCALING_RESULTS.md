@@ -156,3 +156,91 @@ Cudo Compute, RunPod *Community* Cloud, and unverified Vast.ai hosts
 are common offenders. RunPod *Secure* Cloud, Lambda Cloud, and
 Vast.ai's verified-host listings are safer. The probe above is the
 fastest way to detect the trap before burning sweep time.
+
+---
+
+## Threaded `BatchedEvaluator`: results vs. prediction (2026-05-06)
+
+> **Verdict**: the threaded shared-evaluator path lands at correctness
+> and robustness, but **does not deliver the predicted speedup**. On
+> the codebase as it stands, GIL contention in MCTS Python code makes
+> threads a net loss vs the serial path. Documented here so the next
+> person doesn't re-derive it.
+
+### What we predicted
+
+`BATCHED_EVALUATOR_DESIGN.md` and `IMPLEMENTATION_PLAN.md` Phase 3
+predicted **3-5× games/hr** from coalescing inference across N MCTS
+threads. The mental model: workers do CPU-side MCTS work, drain
+thread does GPU work, GPU usage rises from 15% to 50-70%.
+
+### What we measured
+
+Configuration: `cloud_smoke.yaml` (48 sims/move early, 32 late, 10
+games/iter, 1 iteration), EPYC 7763 (128 cores) + RTX 4090,
+driver 560.35.03 + torch 2.10.0+cu130. `gpu_probe` showed
+bare-metal-class single-stream throughput (3242 positions/sec,
+19.7ms/batch-64).
+
+| config                       | games/hr | sm_avg | sm_p95 |
+|---|---|---|---|
+| `num_workers=0` (serial)     | **702**  | 7.9    | n/a    |
+| `num_workers=1`, evaluator   | 541      | 6.4    | n/a    |
+| `num_workers=4`, evaluator   | 470      | 5.5    | 11     |
+| `num_workers=8`, evaluator   | 533*     | 5.1    | 17     |
+| `num_workers=16`, evaluator  | 489      | 5.2    | 18     |
+
+*`num_workers=8` measured at `max_wait_ms=10` (vs 1.0 default) — the
+single tunable knob that helped, +18% over the same-w default.
+
+### What we conclude
+
+**Serial wins.** Adding worker threads doesn't just fail to help — it
+*hurts* (470/489 vs 702). The threading and queue overhead costs more
+than the GPU/CPU overlap gains. Per-worker throughput drops linearly
+(`117 → 56 → 30 g/hr/worker`), the textbook signature of a serial
+wall.
+
+**The wall is the GIL.** The bitboard port moved a lot of MCTS
+compute to C++, but enough remains in Python (selection loop,
+valid-move enumeration, encoding, tree updates) that worker threads
+can't run in parallel — they serialize on the GIL.
+
+**The process pool isn't a clean baseline either.** On Python 3.12 +
+this cloud image, the spawn-context process pool dies during
+`_fixup_main_from_path` worker init before any games are generated.
+We didn't get a working `num_workers > 0` baseline with processes
+on this box. The 2026-05-05 sweep on the previous box (different
+CPU, Python 3.10) showed `num_workers=4` at 1250 g/hr with the
+process pool — that's the right number for "how fast can processes
+go on a different box", not directly comparable to today's
+threaded numbers.
+
+### What this changes
+
+- `cloud_run_v1.yaml` is now `num_workers: 0` and
+  `use_shared_evaluator: false`, sized at 25 iterations × 200 games
+  for ~5000 games / ~7h / ~$3.50 at the measured 702 g/hr.
+- `BATCHED_EVALUATOR_DESIGN.md` got a postscript flagging the
+  threaded shape as throughput-neutral on this codebase.
+- The shipped evaluator is **kept** in the codebase — it's correct
+  (7/7 unit tests, deterministic vs the direct path) and it's the
+  *only* parallel path that runs on Python 3.12 + this image. Future
+  bitboard work or a `torch.multiprocessing` rewrite may make it
+  worthwhile to re-measure.
+
+### What we'd try next, if speedup matters more
+
+1. **More bitboard.** Profile MCTS with the threaded path on; whatever
+   Python code shows up in `py-spy top` is what's holding the GIL.
+   Move it to C++ and re-measure threaded throughput.
+2. **`torch.multiprocessing` with shared model tensors.** Each worker
+   is a process (own GIL) but reads from a shared GPU tensor for the
+   network's parameters. Different shape than the threaded
+   evaluator.
+3. **Fix the Python 3.12 spawn issue.** Pin the launching script
+   structure so `_fixup_main_from_path` works in workers, recovering
+   the process-pool-with-cuda-init path that worked on the previous
+   box.
+
+None of these are in this PR. They're follow-ups, in the order above.

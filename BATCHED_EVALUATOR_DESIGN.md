@@ -1,10 +1,27 @@
 # Shared `BatchedEvaluator` — Design Sketch
 
-> **Status**: design. Not implemented. Companion to
-> `GPU_SCALING_PLAN.md` (PR #11) and `GPU_SCALING_RESULTS.md`. The
+> **2026-05-06 postscript — read this first.** The design below was
+> implemented in PR #12 and measured on a 4090 cloud box. **It does
+> not deliver the predicted 3-5× speedup.** Serial mode (no threads,
+> no evaluator) measured 702 games/hr; the threaded path measured
+> 470-541 across `num_workers ∈ {1, 4, 8, 16}` — slower, not faster.
+> Root cause: GIL contention in MCTS Python code that the bitboard
+> port did not eliminate. The shipped evaluator code itself is
+> correct (7/7 unit tests, deterministic vs the direct path) and
+> kept in-tree as a robustness path (it's the only parallel mode
+> that runs on Python 3.12 + the cloud image we tested), but the
+> design hypothesis below was wrong on this hardware. See "Threaded
+> BatchedEvaluator: results vs. prediction" in
+> `GPU_SCALING_RESULTS.md` for the post-mortem and the three forward
+> options (more bitboard, `torch.multiprocessing` with shared model,
+> or fix Python 3.12 spawn).
+
+> **Status**: implemented (PR #12), measured (negative result above).
+> Companion to `GPU_SCALING_PLAN.md` (PR #11) and
+> `GPU_SCALING_RESULTS.md`. The
 > 2026-05-05 sweep showed every other lever (`num_workers`,
-> `mcts_batch_size`) is exhausted; this is the next piece of work that
-> can plausibly move games/hr.
+> `mcts_batch_size`) is exhausted; this was the next piece of work
+> that *plausibly* could have moved games/hr — and it didn't.
 
 ## Why we need it
 
