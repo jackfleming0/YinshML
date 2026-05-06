@@ -1,0 +1,136 @@
+# ablation_policy_recovery.yaml — short probe to test if the policy
+# head can learn at all with the recipe changes proposed in
+# CLOUD_RUN_V1_POSTMORTEM.md.
+#
+# The 2026-05-06 cloud_run_v1 (25 iterations) produced a model whose
+# raw policy lost 60-0 vs HeuristicAgent(depth=1) at n=60. The value
+# head learned (50% with 400-sim MCTS); the policy head did not.
+#
+# This config changes only three knobs vs cloud_run_v1.yaml:
+#
+#   value_head_lr_factor:  5.0  ->  1.0   stop drowning out policy gradients
+#   num_simulations:        48  ->  100   cleaner MCTS visit-count targets
+#   late_simulations:       32  ->   80   same, late-game
+#   annealing_steps:        30  ->   60   keep self-play diverse longer
+#
+# Plus shrinks the run for cheap signal:
+#
+#   num_iterations:         25  ->    5   probe, not a full training run
+#   games_per_iteration:   200  ->   50   total runtime ~2h / ~$1
+#
+# Pass criterion (run after iter 5 against the latest promoted ckpt):
+#   raw_policy vs HeuristicAgent(depth=1) >= 0.20  (12/60 wins)
+#
+# Anything above zero proves the policy head is learning. If it
+# stays at 0%, the bug is in the trainer (target construction or
+# gradient routing), not the hyperparameters.
+#
+# Throughput at 100 sims/move will be slower than cloud_run_v1's
+# 714 g/hr (which used 48). Rough estimate: 100/48 = 2.1x more sims
+# per move -> ~340 g/hr. 5 iter * 50 games / 340 g/hr = ~45 min of
+# self-play, plus train+eval overhead -> ~1.5-2h wall clock.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_ablation_policy_recovery
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5  # match the run length
+  num_simulations: 100                   # was 48 — cleaner MCTS targets
+  late_simulations: 80                   # was 32 — same reasoning
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 60                    # was 30 — temperature stays high longer
+  temp_clamp_fraction: 0.6
+  num_workers: 0                         # serial; same as cloud_run_v1
+  use_shared_evaluator: false
+  games_per_iteration: 50                # was 200 — keep ablation cheap
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 1.0              # was 5.0 — THE big change
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  discrimination_weight: 0.5
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 25000                 # 5 iter * 50 games * ~95 moves ~= 24k
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 10
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+    policy_weight: 0.1
+    value_weight: 1.0
+    every_k_steps: 10
+    long_sims: 64
+    batch_size: 32
+    warmup_iters: 3
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  # Smaller arena than cloud_run_v1 (20 games/match) — this is a
+  # diagnostic, not a strength benchmark. We'll measure strength
+  # post-hoc with eval_vs_heuristic.py at n=60.
+  games_per_match: 6
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260507
+  revert_self_play_on_gate_failure: true
+
+export:
+  export_every: 5                        # one CoreML at the end if it doesn't crash
+  coreml_dir: models/coreml
+
+difficulty_presets:
+  easy:
+    num_simulations: 50
+    temperature: 1.0
+    c_puct: 1.0
+  medium:
+    num_simulations: 150
+    temperature: 0.5
+    c_puct: 1.25
+  hard:
+    num_simulations: 400
+    temperature: 0.1
+    c_puct: 1.5
+
+anchor:
+  enabled: true
+  num_games: 4
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
