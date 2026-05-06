@@ -42,6 +42,7 @@ def play_match(
     seed: int,
     pair_label: str,
     max_moves: int = 200,
+    temperature: float = 0.0,
 ) -> Tuple[int, int, int]:
     """Play N games between two networks. Returns (white_wins, black_wins, draws).
 
@@ -76,7 +77,7 @@ def play_match(
                 state_array = net.state_encoder.encode_state(game)
                 inp.copy_(torch.from_numpy(np.array(state_array)).unsqueeze(0))
                 move_probs, _ = net.predict(inp)
-                selected = net.select_move(move_probs, valid_moves, temperature=0.0)
+                selected = net.select_move(move_probs, valid_moves, temperature=temperature)
                 del move_probs
 
                 if selected is None or not game.make_move(selected):
@@ -104,6 +105,7 @@ def play_pair(
     b_net: NetworkWrapper,
     num_games_per_side: int,
     seed: int,
+    temperature: float = 0.0,
 ) -> dict:
     """Play `num_games_per_side` with A as white, then `num_games_per_side`
     with B as white. Returns aggregated W/L/D from A's perspective.
@@ -112,10 +114,12 @@ def play_pair(
     half_seed_b = seed + 100_000
 
     a_white_wins, b_black_wins, draws_aw = play_match(
-        a_net, b_net, num_games_per_side, half_seed_a, f"{a_label}_W_vs_{b_label}_B"
+        a_net, b_net, num_games_per_side, half_seed_a, f"{a_label}_W_vs_{b_label}_B",
+        temperature=temperature,
     )
     b_white_wins, a_black_wins, draws_bw = play_match(
-        b_net, a_net, num_games_per_side, half_seed_b, f"{b_label}_W_vs_{a_label}_B"
+        b_net, a_net, num_games_per_side, half_seed_b, f"{b_label}_W_vs_{a_label}_B",
+        temperature=temperature,
     )
 
     a_wins = a_white_wins + a_black_wins
@@ -156,6 +160,10 @@ def main():
     parser.add_argument("--max-moves", type=int, default=200)
     parser.add_argument("--output-json", type=Path, default=None,
                         help="Optional path to write results as JSON")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Sampling temperature for move selection (0.0 = argmax). "
+                             "Use >0 to test whether deterministic argmax is masking real "
+                             "policy differences (e.g. white-wins-only with similar policies).")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -200,6 +208,7 @@ def main():
             res = play_pair(
                 label_a, nets[ai], label_b, nets[bj],
                 num_games_per_side=half, seed=args.seed,
+                temperature=args.temperature,
             )
             total = res["a_wins"] + res["b_wins"] + res["draws"]
             ci_lo, ci_hi = wilson_ci_95(res["a_score"], total)
@@ -225,6 +234,25 @@ def main():
             f"{r['a_wins']:>7} {r['b_wins']:>7} {r['draws']:>6} "
             f"{r['a_score']:>8.3f}  "
             f"[{r['ci95_lo']:.3f},{r['ci95_hi']:.3f}]  {sig}"
+        )
+
+    # Per-color split — surfaces "white-wins-everything" pathology where the
+    # aggregate looks even but every game just goes to whoever moves first.
+    print("\n" + "-" * 64)
+    print("Per-color split (a_wins broken down by who was white):")
+    print("-" * 64)
+    print(f"{'pair':>20} {'a_W_wins':>10} {'a_B_wins':>10}  interpretation")
+    for r in pairs_results:
+        n_per_side = (r['a_wins'] + r['b_wins'] + r['draws']) // 2
+        a_w = r.get('a_white_wins', 0)
+        a_b = r.get('a_black_wins', 0)
+        # Flag the white-wins-only pattern: a wins almost all when white, almost none when black
+        white_dominance = (a_w / n_per_side if n_per_side else 0) - (a_b / n_per_side if n_per_side else 0)
+        flag = " ⚠ WHITE-WINS PATTERN" if white_dominance > 0.7 or white_dominance < -0.7 else ""
+        print(
+            f"{r['a_label']+' vs '+r['b_label']:>20} "
+            f"{a_w:>10} {a_b:>10}  "
+            f"(of {n_per_side} per side){flag}"
         )
 
     # Per-model aggregate.
