@@ -298,6 +298,9 @@ def main() -> None:
         'max_depth': int(sp.get('max_depth', 300)),
         'use_batched_mcts': bool(sp.get('use_batched_mcts', True)),
         'mcts_batch_size': int(sp.get('mcts_batch_size', 32)),
+        # PR #12 Phase 2: shared BatchedEvaluator across N MCTS threads.
+        # Default off — explicit opt-in per config (see cloud_run_v1.yaml).
+        'use_shared_evaluator': bool(sp.get('use_shared_evaluator', False)),
         # Opt-in to the C++ bitboard engine (yinsh_ml/game_cpp). Default off
         # until each training config has been A/B'd against the Python
         # engine. When true, the GameStatePool is bypassed because the

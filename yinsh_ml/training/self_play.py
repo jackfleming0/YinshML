@@ -176,6 +176,13 @@ class MCTS:
                  # Applied to root child priors BEFORE Dirichlet noise mixing.
                  # 1.0 is a no-op; default off so existing configs are unchanged.
                  root_policy_temp: float = 1.0,
+                 # --- Shared inference evaluator (PR #12, Phase 1) ---
+                 # When set, batched-MCTS leaf evaluation routes through this
+                 # evaluator instead of `network.predict_batch` directly. The
+                 # evaluator coalesces requests across MCTS instances, which
+                 # is the whole point — see BATCHED_EVALUATOR_DESIGN.md. None
+                 # = unchanged behavior (each MCTS calls predict_batch alone).
+                 evaluator=None,
                 ):
         """
         Initialize MCTS.
@@ -228,6 +235,11 @@ class MCTS:
         # Use network's encoder to ensure consistent encoding (basic or enhanced)
         self.state_encoder = network.state_encoder
         self.logger = logging.getLogger("MCTS") # Use module-level logger
+
+        # Optional shared evaluator. When non-None, batched leaf evaluation
+        # in `_evaluate_and_backup_batch` routes through it; otherwise it
+        # uses `network.predict_batch` directly (unchanged behavior).
+        self.evaluator = evaluator
 
         # Evaluation Mode Configuration
         self.evaluation_mode = evaluation_mode.lower()
@@ -885,8 +897,15 @@ class MCTS:
 
         # Batch evaluate all states
         if self.evaluation_mode in ["pure_neural", "hybrid"]:
-            # Use neural network for batch evaluation
-            policy_logits_batch, values_batch = self.network.predict_batch(states_to_evaluate)
+            # Route through the shared evaluator if one was provided
+            # (PR #12, Phase 1) — same return shape as predict_batch, so
+            # the only thing that changes is who actually runs the GPU
+            # call. When evaluator is None, fall back to the per-MCTS
+            # predict_batch call that's been there all along.
+            if self.evaluator is not None:
+                policy_logits_batch, values_batch = self.evaluator.evaluate_batch(states_to_evaluate)
+            else:
+                policy_logits_batch, values_batch = self.network.predict_batch(states_to_evaluate)
 
             # Convert to numpy
             policy_logits_batch = policy_logits_batch.cpu().numpy()
@@ -1274,6 +1293,14 @@ class SelfPlay:
                  root_policy_temp: float = 1.0,
                  # --- C++ bitboard engine ---
                  use_cpp_engine: bool = False,
+                 # --- Shared evaluator (PR #12, Phase 2) ---
+                 # When true and num_workers > 0, generate_games uses
+                 # a single parent-side BatchedEvaluator that owns the
+                 # only NetworkWrapper on the GPU; N threads play games
+                 # against the shared evaluator instead of N processes
+                 # each loading their own model. Default false keeps the
+                 # existing ProcessPoolExecutor path unchanged.
+                 use_shared_evaluator: bool = False,
                 ):
         """
         Initialize SelfPlay with explicit MCTS and temperature parameters.
@@ -1310,6 +1337,7 @@ class SelfPlay:
         # Store batched MCTS configuration
         self.use_batched_mcts = use_batched_mcts
         self.mcts_batch_size = mcts_batch_size
+        self.use_shared_evaluator = use_shared_evaluator
 
         # Store all parameters needed by MCTS and workers explicitly
         self.mcts_config = {
@@ -1443,6 +1471,83 @@ class SelfPlay:
             self.logger.info(f"- Final rate: {final_rate:.2f} games/second")
             return games_data
 
+        # ----- Threaded path: shared evaluator + ThreadPoolExecutor -----
+        # PR #12 Phase 2. One BatchedEvaluator owns the only model on the
+        # GPU; N threads play games against it. Coalesces inference
+        # across games — see GPU_SCALING_RESULTS.md and
+        # BATCHED_EVALUATOR_DESIGN.md for the rationale.
+        if self.use_shared_evaluator:
+            from concurrent.futures import ThreadPoolExecutor
+            from ..network.batched_evaluator import BatchedEvaluator
+
+            # Size max_batch to absorb every worker's per-game flush
+            # arriving simultaneously. Cap to avoid VRAM trouble on small
+            # GPUs; a 4090 can fit much more.
+            evaluator_max_batch = min(512, max(self.mcts_batch_size * self.num_workers, 64))
+            self.logger.info(
+                f"Threaded mode (shared evaluator) — workers={self.num_workers}, "
+                f"evaluator max_batch={evaluator_max_batch}, "
+                f"per-MCTS flush size={self.mcts_batch_size}"
+            )
+
+            try:
+                with BatchedEvaluator(
+                    self.network,
+                    max_batch=evaluator_max_batch,
+                    max_wait_ms=1.0,
+                ) as evaluator:
+                    with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                        thread_futures = [
+                            executor.submit(
+                                play_game_thread,
+                                self.network,
+                                evaluator,
+                                game_id,
+                                self.mcts_config,
+                            )
+                            for game_id in range(num_games)
+                        ]
+                        for future in concurrent.futures.as_completed(thread_futures):
+                            try:
+                                result = future.result()
+                                if result is not None:
+                                    states, policies, values, _, game_history = result
+                                    games_data.append((states, policies, values, game_history))
+                                    games_completed += 1
+                                    if (games_completed % max(1, num_games // 10) == 0
+                                            or games_completed == num_games):
+                                        elapsed = time.time() - start_time
+                                        rate = games_completed / elapsed if elapsed > 0 else 0
+                                        self.logger.info(
+                                            f"Games Generated: {games_completed}/{num_games} "
+                                            f"({rate:.2f} games/s)"
+                                        )
+                                else:
+                                    self.logger.warning("Thread returned None result for a game.")
+                            except Exception as e:
+                                self.logger.error(
+                                    f"Error processing game result from thread: {e}",
+                                    exc_info=True,
+                                )
+            except Exception as e:
+                self.logger.error(f"Error during threaded game generation: {e}", exc_info=True)
+            finally:
+                # Threaded path doesn't use the temp model file but the
+                # parent block created it unconditionally. Clean up.
+                if 'model_path' in locals() and os.path.exists(model_path):
+                    try:
+                        os.unlink(model_path)
+                    except OSError:
+                        pass
+
+            total_time = time.time() - start_time
+            final_rate = games_completed / total_time if total_time > 0 else 0
+            self.logger.info("\nGame generation complete:")
+            self.logger.info(f"- Games generated: {games_completed}/{num_games}")
+            self.logger.info(f"- Total time: {total_time:.1f} seconds")
+            self.logger.info(f"- Final rate: {final_rate:.2f} games/second")
+            return games_data
+
         # Parallel generation with workers > 0
         try:
             with ProcessPoolExecutor(
@@ -1525,6 +1630,150 @@ class SelfPlay:
     # Removed export_games method (can be handled by supervisor or runner if needed)
     # Removed _collect_phase_values (can be done by supervisor/runner from game history)
     # Removed _get_optimal_workers (now done by supervisor)
+
+
+def _run_game_loop(
+        mcts: "MCTS",
+        state_encoder,
+        use_cpp_engine: bool,
+        local_game_state_pool,
+        game_id: int,
+        worker_logger: logging.Logger,
+        use_batched_mcts: bool,
+        mcts_batch_size: int,
+):
+    """Inner per-game loop shared by `play_game_worker` and
+    `play_game_thread`.
+
+    Caller is responsible for setting up `mcts`, `state_encoder`, and
+    (optionally) `local_game_state_pool` — and for cleaning up resources
+    that are caller-owned (`network`, `mcts.network`, the pool itself).
+    This function only owns the GameState it acquires from the pool /
+    constructs.
+
+    Returns the same 5-tuple as `play_game_worker`:
+        (states, policies, values, temp_data, game_history)
+    or raises on game-loop failure (caller wraps in try/except).
+    """
+    # --- Initial state: pool-allocated GameState or fresh CppGameState ---
+    if use_cpp_engine:
+        from ..game_cpp import CppGameState
+        state = CppGameState()
+    else:
+        state = local_game_state_pool.get()
+        from ..memory import reset_game_state
+        reset_game_state(state)
+
+    states: List[np.ndarray] = []
+    policies: List[np.ndarray] = []
+    players = []
+    game_history: List[Dict] = []
+    temp_data: Dict = {'temperatures': [], 'entropies': [], 'search_times': []}
+
+    move_count = 0
+    max_game_moves = 300
+
+    while not state.is_terminal() and move_count < max_game_moves:
+        search_start = time.time()
+        if use_batched_mcts:
+            move_probs = mcts.search_batch(state, move_count, batch_size=mcts_batch_size)
+        else:
+            move_probs = mcts.search(state, move_count)
+        temp_data['search_times'].append(time.time() - search_start)
+
+        temp = mcts.get_temperature(move_count)
+        valid_moves = state.get_valid_moves()
+
+        if not valid_moves:
+            worker_logger.warning(f"No valid moves at move {move_count}. Ending game.")
+            break
+
+        valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
+        valid_move_probs = move_probs[valid_indices]
+        prob_sum = valid_move_probs.sum()
+        if prob_sum < 1e-6:
+            valid_move_probs = np.ones(len(valid_moves), dtype=np.float32) / len(valid_moves)
+        else:
+            valid_move_probs /= prob_sum
+
+        if temp == 0 or temp < 0.01:
+            selected_idx_in_valid = int(np.argmax(valid_move_probs))
+        else:
+            try:
+                selected_idx_in_valid = int(
+                    np.random.choice(len(valid_moves), p=valid_move_probs)
+                )
+            except ValueError as e:
+                worker_logger.error(f"Sampling error: {e}")
+                selected_idx_in_valid = int(np.argmax(valid_move_probs))
+
+        selected_move = valid_moves[selected_idx_in_valid]
+
+        encoded_state = state_encoder.encode_state(state).astype(np.float32)
+        states.append(encoded_state)
+        policies.append(move_probs)
+        players.append(state.current_player)
+
+        entropy = float(-np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9)))
+        temp_data['temperatures'].append(temp)
+        temp_data['entropies'].append(entropy)
+
+        if move_count % 5 == 0:
+            game_history.append({
+                'move_number': move_count,
+                'move': str(selected_move),
+                'phase': str(state.game_phase) if hasattr(state, 'game_phase') else "UNKNOWN",
+            })
+
+        state.make_move(selected_move)
+        mcts.advance_root(selected_move)
+        move_count += 1
+
+        if state.is_terminal():
+            worker_logger.debug(f"Terminal state reached after {move_count} moves")
+            break
+
+    # Final state
+    final_encoded_state = state_encoder.encode_state(state).astype(np.float32)
+    states.append(final_encoded_state)
+    dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(
+        state_encoder.total_moves, dtype=np.float32
+    )
+    policies.append(dummy_policy)
+    players.append(state.current_player)
+    game_history.append({
+        'move_number': move_count,
+        'final_state': True,
+        'white_score': state.white_score,
+        'black_score': state.black_score,
+    })
+
+    score_diff = state.white_score - state.black_score
+    outcome_white = float(np.clip(score_diff / 3.0, -1.0, 1.0))
+    from ..game.types import Player
+    values = [outcome_white if p == Player.WHITE else -outcome_white for p in players]
+
+    worker_logger.info(
+        f"Game {game_id} finished in {move_count} moves. "
+        f"Score: W={state.white_score}, B={state.black_score}. "
+        f"Outcome={outcome_white:.3f}"
+    )
+
+    if (mcts.heuristic_evaluator is not None
+            and hasattr(mcts.heuristic_evaluator, "cache_stats")):
+        cs = mcts.heuristic_evaluator.cache_stats()
+        if cs["hits"] + cs["misses"] > 0:
+            worker_logger.info(
+                f"Game {game_id} eval-cache: hit_rate={cs['hit_rate']:.1%} "
+                f"hits={cs['hits']} misses={cs['misses']} size={cs['size']}/{cs['capacity']}"
+            )
+
+    # Return the GameState to its pool if applicable. CppGameState path
+    # has no pool — those states fall out of scope and are GC'd.
+    if local_game_state_pool is not None and not use_cpp_engine:
+        local_game_state_pool.return_game_state(state)
+
+    return states, policies, values, temp_data, game_history
 
 
 def play_game_worker(
@@ -1615,198 +1864,124 @@ def play_game_worker(
 
         mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_init_config)
 
-        # --- Initial state: pool-allocated GameState or fresh CppGameState ---
-        if use_cpp_engine:
-            state = CppGameState()
-        else:
-            state = local_game_state_pool.get()  # Get initial state from pool
-            from ..memory import reset_game_state
-            reset_game_state(state)  # Ensure it's properly initialized
-
-        # Use lists instead of deques (less overhead)
-        states = []
-        policies = []
-        players = []  # Track which player is to move at each position (for outcome perspective)
-
-        # Keep minimal game history - just essentials for debugging
-        game_history = []
-
-        # Use a lightweight dict for temperature data
-        temp_data = {'temperatures': [], 'entropies': [], 'search_times': []}
-
-        move_count = 0
-        max_game_moves = 300  # Safety limit
-
-        # --- Main Game Loop ---
-        while not state.is_terminal() and move_count < max_game_moves:
-            # MCTS search with timing (use batched or serial based on configuration)
-            search_start = time.time()
-            if use_batched_mcts:
-                move_probs = mcts.search_batch(state, move_count, batch_size=mcts_batch_size)
-            else:
-                move_probs = mcts.search(state, move_count)
-            search_time = time.time() - search_start
-
-            # Record search time
-            temp_data['search_times'].append(search_time)
-
-            # --- Action Selection ---
-            temp = mcts.get_temperature(move_count)
-            valid_moves = state.get_valid_moves()
-
-            if not valid_moves:
-                worker_logger.warning(f"No valid moves at move {move_count}. Ending game.")
-                break
-
-            # Get valid move probabilities
-            valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
-            valid_move_probs = move_probs[valid_indices]
-
-            # Normalize probabilities
-            prob_sum = valid_move_probs.sum()
-            if prob_sum < 1e-6:
-                valid_move_probs = np.ones(len(valid_moves), dtype=np.float32) / len(valid_moves)
-            else:
-                valid_move_probs /= prob_sum
-
-            # Sample action based on temperature
-            if temp == 0 or temp < 0.01:  # Greedy selection for very low temp
-                selected_idx_in_valid = np.argmax(valid_move_probs)
-            else:
-                # Sample move based on probabilities
-                try:
-                    selected_idx_in_valid = np.random.choice(len(valid_moves), p=valid_move_probs)
-                except ValueError as e:
-                    worker_logger.error(f"Sampling error: {e}")
-                    selected_idx_in_valid = np.argmax(valid_move_probs)
-
-            selected_move = valid_moves[selected_idx_in_valid]
-
-            # --- Record State and Policy ---
-            # Store encoded state - using np.float32 instead of float64 reduces memory by half
-            encoded_state = state_encoder.encode_state(state).astype(np.float32)
-            states.append(encoded_state)
-            policies.append(move_probs)
-            players.append(state.current_player)  # Track player for outcome perspective
-
-            # Calculate entropy for temperature adaptation
-            entropy = -np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9))
-
-            # Record temperature data - just essentials
-            temp_data['temperatures'].append(temp)
-            temp_data['entropies'].append(entropy)
-
-            # Only store minimal state info in history to save memory
-            if move_count % 5 == 0:  # Only record every 5th move to history to save memory
-                game_history.append({
-                    'move_number': move_count,
-                    'move': str(selected_move),
-                    'phase': str(state.game_phase) if hasattr(state, 'game_phase') else "UNKNOWN",
-                })
-
-            # Make move
-            state.make_move(selected_move)
-            # Carry the MCTS tree across to next move: reseat the root on the
-            # subtree for the move just played, freeing siblings. No-op if
-            # subtree reuse is disabled.
-            mcts.advance_root(selected_move)
-            move_count += 1
-
-            # Perform occasional garbage collection during very long games
-            if move_count > 100 and move_count % 50 == 0:
-                pass  # Memory pools handle cleanup automatically
-
-            # Check for terminal state
-            if state.is_terminal():
-                worker_logger.debug(f"Terminal state reached after {move_count} moves")
-                break
-
-        # --- After Game Loop Ends ---
-        # Record final state
-        final_encoded_state = state_encoder.encode_state(state).astype(np.float32)
-        states.append(final_encoded_state)
-
-        # Add dummy policy for final state
-        dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(state_encoder.total_moves, dtype=np.float32)
-        policies.append(dummy_policy)
-        players.append(state.current_player)  # Track player for final state too
-
-        # Add final game info
-        game_history.append({
-            'move_number': move_count,
-            'final_state': True,
-            'white_score': state.white_score,
-            'black_score': state.black_score
-        })
-
-        # Calculate outcome from White's perspective (+1 = White wins, -1 = Black wins)
-        score_diff = state.white_score - state.black_score
-        outcome_white = float(np.clip(score_diff / 3.0, -1.0, 1.0))
-
-        # Backfill values for all positions based on game outcome
-        # Each position's value = outcome from that player's perspective
-        from ..game.types import Player
-        values = []
-        for player in players:
-            if player == Player.WHITE:
-                values.append(outcome_white)
-            else:
-                values.append(-outcome_white)  # Flip for Black's perspective
-
-        outcome = outcome_white  # For logging
-
-        # Log final summary - minimal logging to reduce overhead
-        worker_logger.info(
-            f"Game {game_id} finished in {move_count} moves. "
-            f"Score: W={state.white_score}, B={state.black_score}. Outcome={outcome:.3f}"
+        # Run the shared game loop. _run_game_loop owns the GameState
+        # lifecycle; this function still owns `network` and `mcts` and
+        # cleans them up below.
+        result = _run_game_loop(
+            mcts=mcts,
+            state_encoder=state_encoder,
+            use_cpp_engine=use_cpp_engine,
+            local_game_state_pool=local_game_state_pool,
+            game_id=game_id,
+            worker_logger=worker_logger,
+            use_batched_mcts=use_batched_mcts,
+            mcts_batch_size=mcts_batch_size,
         )
+        states, policies, values, temp_data, game_history = result
 
-        # Heuristic eval-cache hit-rate. Surfacing this alongside the game
-        # summary makes it easy to spot when the cache is misconfigured
-        # (e.g. evaluator getting reconstructed per-call) without re-running
-        # the cProfile script. See BITBOARD_FOLLOWUP_PLAN.md Candidate A.
-        if (mcts.heuristic_evaluator is not None
-                and hasattr(mcts.heuristic_evaluator, "cache_stats")):
-            cs = mcts.heuristic_evaluator.cache_stats()
-            if cs["hits"] + cs["misses"] > 0:
-                worker_logger.info(
-                    f"Game {game_id} eval-cache: hit_rate={cs['hit_rate']:.1%} "
-                    f"hits={cs['hits']} misses={cs['misses']} size={cs['size']}/{cs['capacity']}"
-                )
-
-        # Clean up memory before returning
-        # Release state if possible (CppGameState path runs without a pool)
-        if ('local_game_state_pool' in locals()
-                and local_game_state_pool is not None
-                and 'state' in locals() and state is not None):
-            local_game_state_pool.return_game_state(state)
-
-        # Free any retained MCTS search tree (subtree reuse holds it between moves).
+        # Free the per-process model copy + MCTS tree before returning.
         mcts.reset_tree()
         del network
-        del mcts.network  # Explicitly clear network reference
+        del mcts.network
         del mcts
-
-        # Memory pools handle cleanup automatically
-
-        # Return outcome-based values (standard AlphaZero approach)
-        # Each position's value = game outcome from that player's perspective
         return states, policies, values, temp_data, game_history
 
     except Exception as e:
         worker_logger.error(f"Error in game {game_id}: {e}", exc_info=True)
-        # Ensure cleanup even on error
         try:
-            # Release state if possible
-            if ('local_game_state_pool' in locals()
-                    and local_game_state_pool is not None
-                    and 'state' in locals() and state is not None):
-                local_game_state_pool.return_game_state(state)
             if 'mcts' in locals():
                 mcts.reset_tree()
-            del network
-            del mcts
-            # Memory pools handle cleanup automatically
-        except:
+            if 'network' in locals():
+                del network
+            if 'mcts' in locals():
+                del mcts
+        except Exception:
+            pass
+        return None
+
+
+def play_game_thread(
+        network: NetworkWrapper,
+        evaluator,
+        game_id: int,
+        mcts_config: Dict,
+) -> Optional[Tuple[List[np.ndarray], List[np.ndarray], List[float], Dict, List[Dict]]]:
+    """Thread-pool sibling of `play_game_worker`.
+
+    Differences vs the process-pool worker:
+
+      - **No model load.** Uses the parent's `network` directly. The
+        evaluator owns the only NetworkWrapper-on-GPU; this function
+        and its MCTS only ever touch the network for `state_encoder`
+        access (and never call its `predict_batch` because `evaluator`
+        is set).
+      - **No tensor pool / no spawn ceremony.** Plain thread.
+      - **Per-thread GameStatePool.** MCTS still benefits from pool
+        reuse within a game, and pools are not thread-safe — each
+        thread gets its own.
+      - **No `del network` at exit.** The network is caller-owned.
+
+    Args:
+        network: shared parent-side NetworkWrapper (read-only here —
+            only its `state_encoder` attribute is used).
+        evaluator: the shared `BatchedEvaluator`. Required; if None,
+            use `play_game_worker` instead.
+        game_id: integer game index for logging.
+        mcts_config: same dict shape `play_game_worker` consumes.
+    """
+    worker_logger = logging.getLogger(f"Thread-{game_id}")
+    worker_logger.setLevel(logging.INFO)
+
+    try:
+        use_cpp_engine = bool(mcts_config.get('use_cpp_engine', False))
+        if use_cpp_engine:
+            local_game_state_pool = None
+        else:
+            from ..memory import GameStatePool, GameStatePoolConfig
+            from ..game import GameState
+            pool_config = GameStatePoolConfig(
+                initial_size=50,
+                enable_statistics=False,
+                factory_func=GameState,
+            )
+            local_game_state_pool = GameStatePool(pool_config)
+
+        use_batched_mcts = mcts_config.get('use_batched_mcts', True)
+        mcts_batch_size = mcts_config.get('mcts_batch_size', 32)
+
+        mcts_init_config = {k: v for k, v in mcts_config.items()
+                            if k not in ['use_batched_mcts', 'mcts_batch_size',
+                                         'use_enhanced_encoding', 'use_cpp_engine']}
+
+        # The shared evaluator routes inference; MCTS still needs the
+        # network reference for its state_encoder.
+        mcts = MCTS(
+            network=network,
+            game_state_pool=local_game_state_pool,
+            evaluator=evaluator,
+            **mcts_init_config,
+        )
+
+        result = _run_game_loop(
+            mcts=mcts,
+            state_encoder=network.state_encoder,
+            use_cpp_engine=use_cpp_engine,
+            local_game_state_pool=local_game_state_pool,
+            game_id=game_id,
+            worker_logger=worker_logger,
+            use_batched_mcts=use_batched_mcts,
+            mcts_batch_size=mcts_batch_size,
+        )
+
+        # Free MCTS tree, but DO NOT del network — it's caller-owned.
+        mcts.reset_tree()
+        return result
+
+    except Exception as e:
+        worker_logger.error(f"Error in game {game_id}: {e}", exc_info=True)
+        try:
+            if 'mcts' in locals():
+                mcts.reset_tree()
+        except Exception:
             pass
         return None
