@@ -257,12 +257,42 @@ class NetworkWrapper:
             return random.choice(valid_moves)
 
     def save_model(self, path: str):
-        """Save model weights to file."""
+        """Save model weights to file.
+
+        Sanity-checks BatchNorm running stats before writing. The state
+        dict must include `running_mean` / `running_var` for every BN
+        layer; if any are missing, something upstream (e.g. a memory-
+        cleanup pass) deregistered the buffer, and the resulting file
+        will produce wildly wrong inference on reload — this was the
+        cloud_run_v1 50/0/0 failure mode (see CLOUD_RUN_V1_POSTMORTEM).
+        Refuse to write a corrupted checkpoint rather than silently
+        poison the next run that loads it.
+        """
         try:
-            torch.save(self.network.state_dict(), path)
+            sd = self.network.state_dict()
+
+            # Expected: every nn.BatchNorm{1,2}d module contributes a
+            # running_mean and running_var. Count BN modules and compare.
+            import torch.nn as nn
+            bn_count = sum(
+                1 for m in self.network.modules()
+                if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+            )
+            saved_running_mean = sum(1 for k in sd if k.endswith('.running_mean'))
+            saved_running_var = sum(1 for k in sd if k.endswith('.running_var'))
+            if bn_count > 0 and (saved_running_mean < bn_count or saved_running_var < bn_count):
+                raise RuntimeError(
+                    f"refusing to save checkpoint with missing BN running stats: "
+                    f"network has {bn_count} BN modules but state_dict has only "
+                    f"{saved_running_mean} running_mean / {saved_running_var} "
+                    f"running_var keys. The cloud_run_v1 50/0/0 bug. Don't save."
+                )
+
+            torch.save(sd, path)
             self.logger.info(f"Model saved to {path}")
         except Exception as e:
             self.logger.error(f"Error saving model: {str(e)}")
+            raise
 
     # def load_model(self, path: str):
     #     try:
