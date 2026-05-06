@@ -51,9 +51,8 @@ self_play:
   final_temp: 0.1
   annealing_steps: 30
   temp_clamp_fraction: 0.6
-  num_workers: 8                        # threaded mode scales further than process pool
-  use_shared_evaluator: true            # PR #12 Phase 2 — 4090 sweep validation lives in
-                                        # GPU_SCALING_RESULTS.md once the cloud sweep runs
+  num_workers: 4                        # measured peak on 4090 (process pool); flip to 8 after Phase 3b
+  use_shared_evaluator: false           # toggle on once BatchedEvaluator is validated on the 4090
   games_per_iteration: 200
 
 trainer:
