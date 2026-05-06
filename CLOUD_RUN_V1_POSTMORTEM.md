@@ -166,6 +166,78 @@ Read `yinsh_ml/training/trainer.py` for:
 - Whether `value_head_lr_factor` is actually scaling LR or scaling
   gradients (those have different consequences with momentum)
 
+---
+
+## Ablation result (2026-05-06 evening)
+
+The ablation completed. **Hyperparameter changes did nothing.** Same
+exact pattern as cloud_run_v1's iter 12:
+
+```
+ablation iter 3 (best promoted) vs HeuristicAgent(depth=1), n=60:
+  400-sim MCTS:   30/60  →  50%   CI95 [0.38, 0.62]
+  100-sim MCTS:    0/60  →   0%   CI95 [0.00, 0.06]
+  raw policy:      0/60  →   0%   CI95 [0.00, 0.06]
+
+iter 1 vs iter 3 (n=30, temp=0):
+  iter 1 wins 17-13  →  57%
+  per-color split: 9W/8B (balanced)
+```
+
+Wall clock: 1.39h, 5 iterations, 3 promotions. Cost ~$0.70.
+
+Two observations beyond "the fix didn't work":
+
+1. **Identical numbers.** Three knob changes — `value_head_lr_factor
+   5.0→1.0`, `num_simulations 48→100`, `annealing_steps 30→60` —
+   produced *exactly* the same 50% / 0% / 0% pattern. None of those
+   knobs are reachable from this hole.
+2. **iter 1 beats iter 3.** Earlier checkpoint outperforms later
+   one within the same run. The arena promotions are passing
+   noise. Even the gating signal is unreliable here.
+
+So the post-mortem's pass criterion (`raw policy ≥ 0.20`) failed.
+The bug is not at the hyperparameter layer. **The trainer is the
+next file to read.**
+
+## Tomorrow's reading list — `yinsh_ml/training/trainer.py`
+
+Five candidates worth grepping for, in priority order. First three
+are smoking-gun shaped; last two are subtler.
+
+| # | What to look for | Smoking gun if... |
+|---|---|---|
+| 1 | **Policy target normalization** — is `visit_counts / sum(visit_counts)` happening *after* invalid-move masking? | Targets put mass on illegal moves; policy trains on garbage. |
+| 2 | **Loss summation into `.backward()`** — is `(policy_loss + value_loss).backward()` actually how it's combined, or are they backwarded separately? | If separate, only one backwarded value reaches the optimizer. |
+| 3 | **Phase-weight application** — `RING_PLACEMENT=1.0, MAIN_GAME=2.0, RING_REMOVAL=0.5` — applied to value AND policy or only one? | Whole phases of training never reach the policy head. |
+| 4 | **Augmentation transformation** — does the policy target rotate/flip when the state does? | Policy is trained on mismatched (state, target) pairs — looks like noise. |
+| 5 | **`value_head_lr_factor` mechanism** — separate parameter group LR, or scaling gradients? With Adam, those are *very* different. | If implemented as gradient scaling on value only, the optimizer's running statistics get distorted in a way that interferes with policy learning across heads. |
+
+Suggested first command:
+
+```bash
+grep -nE "policy_loss|value_loss|backward|policy_target|visit_counts|phase_weight" \
+    yinsh_ml/training/trainer.py | head -40
+```
+
+That will scope the read to the relevant blocks. Then read those
+sections in full, top to bottom, before changing anything.
+
+### Validation pattern once a fix lands
+
+The same three-test eval is the regression guard. Re-run on
+whatever the new "iter 3" is after the trainer fix. Compare to the
+two reference points already saved on the cloud box:
+
+| reference | 400-sim | 100/48-sim | raw |
+|---|---|---|---|
+| cloud_run_v1 iter 12 | 50% | 0% | 0% |
+| ablation iter 3      | 50% | 0% | 0% |
+
+Anything that moves the **raw** column off zero is a real fix. The
+400-sim column is likely already saturated against this depth-1
+heuristic; don't read too much into it.
+
 ## How to reproduce the diagnosis
 
 ```bash
