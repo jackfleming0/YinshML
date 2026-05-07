@@ -48,39 +48,64 @@ last laptop session.
 
 ## 2. Pull the branch on the cloud box
 
-The repo should already exist from previous runs. If not, clone it
-first; either way end up at the right SHA.
+The repo lives at `/workspace/YinshML`. The Python environment is a
+conda env named `main` at `/venv/main`, set as the login default — so
+the prompt should already show `(main)` when you `ssh cloud`. If a
+fresh shell doesn't auto-activate, run:
+
+```bash
+conda activate main      # or:  source /venv/main/bin/activate
+```
+
+DNS may also need a one-time fix per session if it's broken:
+
+```bash
+cat /etc/resolv.conf      # if empty / no nameservers, run:
+echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
+```
+
+Then check out the branch:
 
 ```bash
 ssh cloud
-cd /workspace/YinshML  # or wherever you cloned it before
+cd /workspace/YinshML
 
-# If the repo isn't there yet:
+# If the repo is empty / needs (re-)clone:
 #   cd /workspace && git clone https://github.com/jackfleming0/YinshML.git && cd YinshML
 
 git fetch origin
 git checkout policy-collapse-hunt
 git pull
 
-# Activate the env you set up before.
-source venv/bin/activate  # or however you named it
-
-# Verify CUDA + branch
+# Verify CUDA + branch + package
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python -c "import yinsh_ml; print('yinsh_ml ok:', yinsh_ml.__file__)"
 git log --oneline -8
-# should include: 5441552 cdf71b0 260165d 7fcd9da fb6b328 d86b28e cd5f0d5 91b7d22
+# should include: 13991e6 5441552 cdf71b0 260165d 7fcd9da fb6b328 d86b28e cd5f0d5 91b7d22
 ```
 
-If `pip install -r requirements.txt` is needed (new deps since last
-visit), run it. The branch hasn't added any.
+If `import yinsh_ml` errors (`ModuleNotFoundError` / file not found),
+install the package into the active env:
+
+```bash
+pip install -e .
+# also run if requirements.txt has changed since last setup:
+pip install -r requirements.txt
+```
+
+(The branch hasn't added new deps; this is just for fresh boxes.)
 
 ## 3. Sync the heuristic weights (only if not already on the box)
 
-```bash
-# from laptop — check first whether it's already there:
-ssh cloud "ls -la /workspace/YinshML/analysis_output/heuristic_evaluator_model.pkl"
+The trained heuristic model is required for hybrid evaluation. On
+fresh clones `analysis_output/` is empty.
 
-# If missing, copy it up:
+```bash
+# from laptop — check first whether the file is there:
+ssh cloud "ls -la /workspace/YinshML/analysis_output/heuristic_evaluator_model.pkl 2>/dev/null || echo MISSING"
+
+# If MISSING (or stale), copy it up:
 rsync -avz --progress \
   analysis_output/heuristic_evaluator_model.pkl \
   cloud:/workspace/YinshML/analysis_output/
