@@ -1967,6 +1967,24 @@ class TrainingSupervisor:
                 self.self_play.network = self.network
                 self.trainer.network = self.network
 
+                # Rebind the EMA shadow's `module` reference to the new
+                # nn.Module. Without this, EMAShadow keeps tracking the
+                # OLD (now-orphaned) module: its state_dict iteration in
+                # `update()` reads frozen values, its `swap_into` puts
+                # those frozen values into the live network at checkpoint
+                # save time, and BN running stats appear to stop updating
+                # entirely — which is exactly the "nbt frozen at 2084
+                # since iter 5" symptom from the 2026-05-07 cloud rerun.
+                # See overnight_watch_log.md for the trace.
+                #
+                # Rebinding (rather than recreating the shadow) preserves
+                # the EMA accumulation history across the reset. Shadow
+                # tensor shapes are identical between OLD and NEW modules
+                # (same architecture), so the existing shadow dict still
+                # matches.
+                if getattr(self.trainer, 'ema', None) is not None:
+                    self.trainer.ema.module = new_network.network
+
                 os.unlink(temp_path)
 
                 # Also reinitialize optimizers after network recreation
