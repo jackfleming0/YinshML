@@ -1,0 +1,93 @@
+# scale_up_b.yaml — 25-iter scale-up of ablation B's winning recipe.
+#
+# Identical to cloud_run_v1.yaml EXCEPT:
+#   discrimination_weight:  0.5  ->  0.0
+#
+# Ablation B at 5 iter took raw policy from 0/60 to 60/60 (perfect)
+# vs HeuristicAgent(depth=1). Open question: does this scale to 25
+# iter? Plateau? Regress? Improve further?
+#
+# Also includes the BN-stat-trash fix (cd5f0d5) and the EMA-rebind
+# fix (60f33f9) as part of branch policy-collapse-hunt.
+#
+# Wall clock: 25 iter × ~22 min = ~9h. Cost ~$4.
+
+version: 1
+device: auto
+num_iterations: 25
+save_dir: runs_scale_up_b
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 25
+  num_simulations: 48
+  late_simulations: 32
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 0
+  use_shared_evaluator: false
+  games_per_iteration: 200
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0          # was 0.5 — THE KNOB. Ablation B winner.
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 10
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 20
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260507
+  revert_self_play_on_gate_failure: true
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 4
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
