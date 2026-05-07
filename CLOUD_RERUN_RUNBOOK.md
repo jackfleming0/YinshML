@@ -7,54 +7,83 @@ now actually load-bearing instead of every third.
 
 Total expected wall time: ~8h. Total spend: ~$4 at $0.40/hr.
 
-## 0. Push the branch (do this from laptop before you log out)
+## Cloud box
+
+Already provisioned. SSH:
 
 ```bash
-# from /Users/jackfleming/PycharmProjects/YinshML
+ssh -p 3310 root@63.143.59.21 -L 8080:localhost:8080
+```
+
+The `-L 8080:localhost:8080` forwards the dashboard port to your
+laptop (visit `http://localhost:8080` after launch if you want to
+watch live metrics).
+
+> **Note**: that IP/port pair is for *this* instance. If you reboot,
+> reprovision, or spin up a different one, update the SSH command and
+> the rsync `cloud:` references below.
+
+For convenience, drop this into `~/.ssh/config` on your laptop so the
+later `rsync cloud:` shortcuts work:
+
+```ssh-config
+Host cloud
+    HostName 63.143.59.21
+    Port 3310
+    User root
+    LocalForward 8080 localhost:8080
+```
+
+After that you can `ssh cloud` and `rsync … cloud:…` directly.
+
+## 1. Push the branch (already done — for reference)
+
+```bash
+# from /Users/jackfleming/PycharmProjects/YinshML on laptop
 git push origin policy-collapse-hunt
 ```
 
-If the branch already tracks a remote, just `git push`. If not,
-`git push -u origin policy-collapse-hunt`.
+Already pushed: `origin/policy-collapse-hunt` is current as of the
+last laptop session.
 
-## 1. Provision the cloud box
+## 2. Pull the branch on the cloud box
 
-Same provider as before (Vast.ai 4090 at ~$0.40/hr is the cheapest
-known-good option; RunPod 4090 is the alternative). Need:
-
-- CUDA 12.x, PyTorch ≥2.7
-- 24+ GB VRAM (4090 has 24)
-- 32+ GB RAM
-- ~50 GB disk
-
-## 2. Set up the repo on the cloud box
+The repo should already exist from previous runs. If not, clone it
+first; either way end up at the right SHA.
 
 ```bash
-# On cloud
-cd /workspace   # or wherever you keep code
-git clone <your-fork-url> YinshML
-cd YinshML
-git checkout policy-collapse-hunt
+ssh cloud
+cd /workspace/YinshML  # or wherever you cloned it before
 
-python3.10 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
+# If the repo isn't there yet:
+#   cd /workspace && git clone https://github.com/jackfleming0/YinshML.git && cd YinshML
+
+git fetch origin
+git checkout policy-collapse-hunt
+git pull
+
+# Activate the env you set up before.
+source venv/bin/activate  # or however you named it
 
 # Verify CUDA + branch
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-git log --oneline -5  # should show 91b7d22, cd5f0d5, fb6b328, 7fcd9da, 260165d, cdf71b0
+git log --oneline -8
+# should include: 5441552 cdf71b0 260165d 7fcd9da fb6b328 d86b28e cd5f0d5 91b7d22
 ```
 
-## 3. Sync the heuristic weights
+If `pip install -r requirements.txt` is needed (new deps since last
+visit), run it. The branch hasn't added any.
 
-The trained heuristic model is non-negotiable for hybrid evaluation:
+## 3. Sync the heuristic weights (only if not already on the box)
 
 ```bash
-# from laptop
+# from laptop — check first whether it's already there:
+ssh cloud "ls -la /workspace/YinshML/analysis_output/heuristic_evaluator_model.pkl"
+
+# If missing, copy it up:
 rsync -avz --progress \
   analysis_output/heuristic_evaluator_model.pkl \
-  user@cloud-box:/workspace/YinshML/analysis_output/
+  cloud:/workspace/YinshML/analysis_output/
 ```
 
 ## 4. Sanity check the fix landed (30 sec)
@@ -192,11 +221,12 @@ recipe at full 25-iter scale.
 ## 9. After the run — regardless of outcome
 
 ```bash
-# Pull artifacts back to laptop
+# from laptop, pull artifacts back
 rsync -avz cloud:/workspace/YinshML/runs_cloud_v1/ ./runs_cloud_v1_rerun/
 rsync -avz cloud:/workspace/YinshML/cloud_v1_rerun.log ./
 
-# Tear down the instance to stop the meter
+# Tear down the instance to stop the meter (do this from the
+# provider's web UI — Vast.ai/RunPod/etc.)
 ```
 
 Then:
