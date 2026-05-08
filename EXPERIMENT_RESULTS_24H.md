@@ -62,8 +62,11 @@ Confirmed via per-iter `eval_vs_heuristic.py --no-mcts --depth 1 --num-games 60`
 |---:|---:|
 | 0 (random) | 0/60 |
 | 1 | 0/60 |
-| 2 | **60/60** ← best by ELO; the 100% headline |
-| 3, 4 | (cloud went down before measured) |
+| 2 | **60/60** ← best by ELO; single-iter spike |
+| 3 | 0/60 ← lost it |
+| 4 | 0/60 ← still lost |
+
+The "60/60 winner" was iter 2 of one specific run with one specific seed, sandwiched between 0/60 iters. Not a property of the recipe.
 
 **Scale-up B (25 iter, runs_scale_up_b/20260507_201618):**
 
@@ -72,7 +75,12 @@ Confirmed via per-iter `eval_vs_heuristic.py --no-mcts --depth 1 --num-games 60`
 | 0 (random) | 30/60 | – |
 | 2 | 0/60 | – |
 | 5 | 0/60 | – |
+| 7 | 30/60 | – |
 | 9 (best by ELO) | 30/60 | 0/60 |
+| 15 | 0/60 | – |
+| 20 | 0/60 | – |
+
+Scale-up B reaches 50% raw briefly at iters 7-9 (the same window where ELO peaked at 1567-1590), bracketed by 0/60 iters before and after. 50% is "ties with depth-1 heuristic," not "beats." Otherwise: 0/60.
 
 Two runs of identical configuration (modulo num_iterations) produced wildly different raw-policy trajectories:
 
