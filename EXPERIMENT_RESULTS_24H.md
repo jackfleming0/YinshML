@@ -132,6 +132,15 @@ Re-ran ablation B with 3 additional seeds (b_s2/3/4 — different `eval_seed` an
 - **Best-by-ELO is the wrong selector**: across the 4 seeds, "best" was iter 4, iter 4, iter 0, iter 1 (per the chain log). Iter 2 was the strongest raw policy in 3 of 4 seeds but never selected.
 - **Random init varies hugely**: iter 0 EMA spans 0/60 to 30/60 just from the random init. The recipe builds on top of that, but the starting point dominates the 50% gap between "tied heuristic" and "swept heuristic" outcomes.
 
+### Depth-3 sanity check on iter-2 winners (n=20, time-limit 5s/move)
+
+| candidate | vs depth-1 (n=60) | vs depth-3 (n=20) |
+|---|---:|---:|
+| s1_iter2 EMA (original ablB) | 60/60 (100%) | 10/10 (50%) |
+| s2_iter2 EMA (b_s2) | 60/60 (100%) | 10/10 (50%) |
+
+The iter-2 sweet spot is **genuinely strong**, not depth-1-specific. Both winners tie depth-3 heuristic at 50%. That's a meaningfully strong model from 5 iters of training. The recipe (BN fix + EMA-rebind + discrimination=0) is producing real, useful models — not just exploiting weak opponents.
+
 ### Updated picture
 
 | outcome | rate across seeds |
