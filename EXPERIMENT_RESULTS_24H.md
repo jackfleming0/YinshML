@@ -111,6 +111,45 @@ The 100% raw of ablation B is **not a property of the discrimination=0 recipe** 
 3. **Shorter scale-ups with checkpointed best-raw** — train 5 iter, eval raw on EVERY iter, keep the iter with best raw. Then continue from there for 5 more, repeat. More expensive per-iter but converges to a meaningfully strong model.
 4. **Investigate iter 0 EMA performance variance**. Ablation B iter 0 EMA = 0/60, scale-up B iter 0 EMA = 30/60. Both are essentially random init wrapped in 1 epoch of EMA. Why such different behavior? Likely seed → random argmax → either matches or fights heuristic's preferred opening lines.
 
+## Multi-seed ablation B (2026-05-08 13:47–19:28 UTC, ~$2)
+
+Re-ran ablation B with 3 additional seeds (b_s2/3/4 — different `eval_seed` and `anchor_seed`) plus per-iter raw evals at n=60. Goal: distinguish recipe from lottery.
+
+### 4×5 raw policy matrix (all vs HeuristicAgent depth=1, n=60)
+
+| seed | iter 0 | iter 1 | iter 2 | iter 3 | iter 4 | peak |
+|---|---:|---:|---:|---:|---:|---|
+| s1 (original ablB) | 0/60 | 0/60 | **60/60** | 0/60 | 0/60 | iter 2: 100% |
+| s2 (b_s2) | 30/60 | 0/60 | **60/60** | 30/60 | 0/60 | iter 2: 100% |
+| s3 (b_s3) | 30/60 | 0/60 | **30/60** | 0/60 | 0/60 | iter 2: 50% |
+| s4 (b_s4) | 0/60 | **30/60** | 0/60 | 0/60 | 0/60 | iter 1: 50% |
+
+### Findings
+
+- **Iter-2 sweet spot is recipe-real, not full lottery**: 3 of 4 seeds peak at iter 2 (the 4th, s4, peaked one iter earlier).
+- **60/60 (perfect) magnitude is 50/50 across seeds**: 2 of 4 hit 100%, the other 2 only tied (50%) at peak.
+- **Universal collapse to 0/60 by iter 3-4**: every seed loses raw policy strength after the early peak. Continuing training is actively harmful for raw-policy strength under this recipe.
+- **Best-by-ELO is the wrong selector**: across the 4 seeds, "best" was iter 4, iter 4, iter 0, iter 1 (per the chain log). Iter 2 was the strongest raw policy in 3 of 4 seeds but never selected.
+- **Random init varies hugely**: iter 0 EMA spans 0/60 to 30/60 just from the random init. The recipe builds on top of that, but the starting point dominates the 50% gap between "tied heuristic" and "swept heuristic" outcomes.
+
+### Updated picture
+
+| outcome | rate across seeds |
+|---|---|
+| iter 2 sweet spot exists | 3/4 (75%) |
+| 60/60 perfect at sweet spot | 2/4 (50%) |
+| 30/60 (tie heuristic) at sweet spot | 4/4 (100%) — every seed at least ties at peak |
+| 0/60 by iter 4 | 4/4 (100%) — universal late collapse |
+
+The headline shifts from "ablation B 60/60 winner" to "ablation B reliably produces a model that ties depth-1 heuristic at iter 2; half the time it sweeps; all the time it collapses thereafter."
+
+### What this means for training
+
+1. **`discrimination_weight: 0.0` is robustly an improvement** — every seed reliably reaches 30/60+ at peak, vs the v1 baseline's hard 0/60.
+2. **Late training is destructive** under this recipe: peaks at iter 1-2, collapses by iter 3-4. The 25-iter scale-up "best-by-ELO at iter 9" succeeded at tournament play but was already past the raw-policy peak.
+3. **Need either**: (a) an early-stopping criterion that selects on raw_anchor not ELO, or (b) a recipe variant that prevents the post-peak collapse (e.g., LR decay tied to loss plateau, regularization changes).
+4. **Random-init sensitivity is real**: even with same recipe, network initialization determines ~50% of the eventual ceiling.
+
 ## Honest recommendation for ship
 
 If you want a model **right now** that beats depth-1 heuristic 100% of the time: **scale-up B's iter 9 EMA at 400 sims (`runs_scale_up_b/20260507_201618/iteration_9/checkpoint_iteration_9_ema.pt`)**. That's robust (n=60). Just don't claim "raw policy strength" — claim "policy + meaningful MCTS budget."
