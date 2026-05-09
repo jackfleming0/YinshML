@@ -159,6 +159,55 @@ The headline shifts from "ablation B 60/60 winner" to "ablation B reliably produ
 3. **Need either**: (a) an early-stopping criterion that selects on raw_anchor not ELO, or (b) a recipe variant that prevents the post-peak collapse (e.g., LR decay tied to loss plateau, regularization changes).
 4. **Random-init sensitivity is real**: even with same recipe, network initialization determines ~50% of the eventual ceiling.
 
+## Collapse-probe chain (2026-05-08 22:05 → 2026-05-09 04:05 UTC, ~$2)
+
+After multi-seed ablation B confirmed the iter-2 sweet spot is recipe-real (not pure lottery), the **collapse** that follows it became the open question. Three candidate fixes, each on top of B's recipe (BN fix + EMA-rebind + discrimination_weight=0):
+
+- **no_anneal**: hold `heuristic_weight: 0.5` constant (don't anneal to 0)
+- **big_buffer**: `max_buffer_size: 100k → 500k` (more diverse training data)
+- **low_lr**: `lr: 0.001 → 0.0003` (gentler weight updates)
+
+### 4-probe matrix (raw policy vs HeuristicAgent depth=1, n=60)
+
+| probe | iter 0 | iter 1 | iter 2 | iter 3 | iter 4 | peak | recipe difference |
+|---|---:|---:|---:|---:|---:|---|---|
+| ablation B (s1) | 0 | 0 | **60** | 0 | 0 | iter 2: 100% | baseline |
+| no_anneal | 30 | **60** | 0 | 0 | 0 | iter 1: 100% | constant heuristic |
+| big_buffer | **60** | 0 | 0 | 0 | 30 | iter 0: 100% | 5× buffer |
+| low_lr | 0 | 30 | 0 | 0 | 30 | iter 1: 50% | 3× smaller LR |
+
+### Findings
+
+1. **The peak SHIFTS EARLIER, never disappears**: ablation B at iter 2 → no_anneal iter 1 → big_buffer iter 0. Each candidate fix moved the peak 1 iter earlier rather than preventing the collapse.
+2. **`low_lr` produced a *weaker* peak (30/60), not a sustained one**. Slower learning didn't reach the heuristic-mimicry attractor that produces 60/60.
+3. **The collapse is not preventable by these knobs**. All 4 probes show 0/60 at iter 3-4 (with one mild recovery: big_buffer iter 4 = 30/60).
+4. **None of these fixes are the answer for a multi-day run**.
+
+### Refined hypothesis: the 60/60 is heuristic mimicry
+
+The pattern across probes is consistent with a specific mechanism:
+
+- iter 0 (random init): policy makes near-uniform moves; heuristic at depth-1 beats it.
+- Iters 1-2: training on heuristic-shaped MCTS visit-count targets pulls the network toward "mimic depth-1 heuristic." The network reaches a state where it picks the same moves the heuristic does on most positions, but **slightly noisier in a way that wins 60/60** (heuristic at d=1 commits to specific moves; the imitator can play subtly different moves that exploit the heuristic's deterministic responses).
+- Iters 2+: self-play moves the network away from heuristic-mimicry. Self-play opponents are similar mimicker networks, so the loss signal pushes toward "what defeats other imitators" — not "what's a strong general policy." The network drifts to strategies that beat itself but lose to the heuristic.
+
+Bigger buffer accelerates mimicry (peak at iter 0). No anneal keeps stronger heuristic guidance during MCTS (peak at iter 1). Lower LR is too slow to reach the mimicry attractor at all.
+
+If this hypothesis is right, the collapse isn't a bug — it's the recipe doing exactly what it's designed to do, and the 60/60 is the *halfway point* between random and "self-play-shaped attractor that's worse than heuristic."
+
+### What this means for a multi-day run
+
+Bad news: **none of the cheap knobs prevent collapse**. The recipe peaks early at "good imitation of depth-1 heuristic" and then degrades. Running it for 1000 iters would produce 998 iters of degradation.
+
+What might actually work (untested):
+
+1. **Higher training-time MCTS sims**: at 48 sims, MCTS can't discover moves that beat the heuristic; targets are dominated by the heuristic. At 200-400+ sims, MCTS could find non-heuristic moves and produce targets that pull the network past mimicry.
+2. **Curriculum lock**: keep `heuristic_weight ≥ 0.3` permanently, so the heuristic always provides signal, even if it caps the model at "heuristic plus epsilon."
+3. **Supervised pre-training from a 60/60 checkpoint, then RL**: take the iter-2 EMA, freeze it as a teacher, train against it for many iters before opening up to free self-play.
+4. **Different value head architecture**: the discrimination loss removal helped — maybe other value-head changes (smaller head, frozen value head, etc.) further unlock training.
+
+None of these are cheap to test. (1) is the most promising — `num_simulations: 200` with same recipe would test "is it the sim count?" but each iter would take 4-5× longer. ~$20 for a 5-iter probe at 200 sims.
+
 ## Honest recommendation for ship
 
 If you want a model **right now** that beats depth-1 heuristic 100% of the time: **scale-up B's iter 9 EMA at 400 sims (`runs_scale_up_b/20260507_201618/iteration_9/checkpoint_iteration_9_ema.pt`)**. That's robust (n=60). Just don't claim "raw policy strength" — claim "policy + meaningful MCTS budget."
