@@ -206,7 +206,32 @@ What might actually work (untested):
 3. **Supervised pre-training from a 60/60 checkpoint, then RL**: take the iter-2 EMA, freeze it as a teacher, train against it for many iters before opening up to free self-play.
 4. **Different value head architecture**: the discrimination loss removal helped — maybe other value-head changes (smaller head, frozen value head, etc.) further unlock training.
 
-None of these are cheap to test. (1) is the most promising — `num_simulations: 200` with same recipe would test "is it the sim count?" but each iter would take 4-5× longer. ~$20 for a 5-iter probe at 200 sims.
+### Tried (1) but couldn't complete
+
+Launched `ablation_more_sims.yaml` at `num_simulations: 200, late_simulations: 150, num_iterations: 4`. Killed after 40 min — only 10 of 200 games done. **At 200 sims, self-play takes ~4 min/game**, so a single iter at 200 games would take ~13h. Even at 30 games/iter the chain would take 5+ hours total.
+
+Lesson: testing the "more sims" hypothesis at meaningful scale on this hardware needs more wall time than a single overnight allows. A real test would be:
+
+- 100 sims (vs 200) + 50 games/iter + 4 iters — ~$5, ~12h. Doable in a future session.
+- Or batched-MCTS path that's been mentioned but not validated.
+
+## Final state and what's worth shipping
+
+**Code (committed and pushed, branch `policy-collapse-hunt`):**
+- BN-stat-trash fix in `clear_pytorch_memory`
+- EMA-rebind fix in `_reset_network_objects`
+- save_model BN-key guard
+- Three regression tests
+- Several ablation YAML configs
+- Probe diagnostic script
+- Multiple results docs
+
+**Models worth keeping (still on the cloud box):**
+- `runs_scale_up_b/20260507_201618/iteration_9/checkpoint_iteration_9_ema.pt` — best ELO from the 25-iter run, 100% at d1 with 400-sim MCTS
+- `runs_ablation_b/20260507_152617/iteration_2/checkpoint_iteration_2_ema.pt` — original 60/60-at-d1 winner, 50% at d3 raw
+- `runs_ablation_b_s2/<latest>/iteration_2/checkpoint_iteration_2_ema.pt` — second 60/60-at-d1 winner, also 50% at d3 raw
+
+**For the multi-day run, the gating question is no longer a knob — it's a recipe-level rethink.** Specifically: how do we make MCTS at training time discover moves the heuristic doesn't, so targets pull the network past heuristic mimicry rather than away from it? That requires either much higher sim budgets (with batched/parallelized MCTS to make wall-time tractable), or a different curriculum / loss structure. Both are >1-day code investigations, not knob ablations.
 
 ## Honest recommendation for ship
 
