@@ -536,6 +536,61 @@ What's NOT robust:
 
 For comparison purposes only. None ship as a strong agent without MCTS at 400+ sims, and even there the 60/60 measurements pre-determinism-correction are now suspect.
 
+## Combined-data supervised — disambiguating architecture vs data (2026-05-10 21:22–21:33 UTC, ~$0.10)
+
+After supervised-on-BGA showed ~5% held-out MAIN top-1 (matching RL), the question split: is the **architecture** the cap, or is the **data quantity/quality** the cap? Filtered boardspace to 861 human-only completed games (excluding all Dumbot / WeakBot / Bot games). Held out 100 boardspace games as a clean test set; trained supervised on BGA (436) + boardspace train (761) = 1197 games / 57333 positions. Same architecture as before (256×12).
+
+### Held-out comparison (boardspace 100-game holdout, never seen by either model)
+
+| metric | supervised_bga (BGA only, 436 games) | supervised_combined (1197 games) | lift |
+|---|---:|---:|---|
+| ALL top-1 | 12.8% | 13.1% | +0.3 pp |
+| ALL top-3 | 23.9% | 25.1% | +1.2 pp |
+| MAIN_GAME top-1 | **5.0%** | **5.5%** | **+0.5 pp** |
+| MAIN_GAME top-3 | 14.6% | 15.4% | +0.8 pp |
+| RING_PLACEMENT top-1 | 6.5% | 5.5% | -1.0 pp |
+| ROW_COMPLETION top-1 | 92.4% | 91.4% | -1.0 pp |
+| RING_REMOVAL top-1 | 28.9% | 31.3% | +2.4 pp |
+| value_mse | 1.26 | 1.05 | -0.21 (better) |
+
+### Findings
+
+1. **Doubling clean training data lifted MAIN top-1 by ~10% relative (5.0 → 5.5 pp).** Real but tiny. Doubling data again won't get us to 30%.
+2. **Value head responds to data scale better than policy head** — value_mse dropped from 1.26 → 1.05 with 2× data. The value head's "uniformly broken" finding earlier was partly a data-starvation issue, not solely an architecture issue.
+3. **Neither architecture nor data alone is the cap.** If architecture were the cap, more data wouldn't help (it did, marginally). If data were the cap, more data should help substantially (it didn't). Both axes are constraints simultaneously.
+4. **The held-out picture is consistent across all three trained models** (supervised_bga, supervised_combined, ablation_b iter2): MAIN top-1 ~4-6%. There's no single knob that takes us out of this range.
+
+### What this means for the multi-day path forward
+
+The "fix collapse" frame from the writeup above is technically right but it's optimization-of-noise. The bigger question — how do we move from 5% to 30% MAIN top-1 — needs all three of:
+
+- **Larger network**: 256→512 channels, 12→18 blocks. The current 256×12 has ~5M params; a 7433-class policy head on a deep board game probably wants ~30M.
+- **More high-quality data**: 1200 games is small. The original AlphaZero approach generates millions of self-play games. We have a few hundred human + a few hundred passable boardspace. This is the main bottleneck for supervised pretraining specifically.
+- **Different loss / target**: visit-count targets at 48 sims are heuristic-mimicry-shaped. Either much higher sim budgets (batched MCTS) or different value/policy targets (e.g., distillation from a strong frozen anchor, or KL-to-prior to slow drift).
+
+Each of these is a 1-3 day code investment. None unlocks the others on its own. The RL probes in the upper sections of this doc were exploring a recipe space whose ceiling is below where we want to operate; the right next session is **architecture work + data scaling**, not more recipe ablation.
+
+### Honest summary for ship
+
+What we have:
+- BN-stat-trash fix + EMA-rebind fix shipped on `policy-collapse-hunt`
+- Two regression-test files covering both
+- Three eval scripts (`eval_vs_expert.py`, `expert_eval_trajectory.py`, `eval_vs_heuristic.py`) — `eval_vs_expert` is the new non-circular metric to use going forward
+- 1197 cleaned human games (BGA + filtered boardspace) ready to train against
+- Three trained checkpoints at the same ~5% MAIN top-1 ceiling: `models/supervised_bga_post_fix/best_supervised.pt`, `models/supervised_combined/best_supervised.pt` (best by held-out val_loss), and the iter-2 EMA candidates from RL
+- A *correctly framed* understanding of what's happening: the architecture is undersized for the task, the data is small, and raw-policy evals are dominated by determinism artifacts
+
+What's not worth shipping yet:
+- Any model claiming meaningful play strength. Best held-out MAIN top-1 across the entire experiment is 5.5%. Still too weak.
+- Any conclusion about RL recipes that depends on a "60/60 vs depth-1" reading. Those numbers are deterministic-side artifacts, not skill ceilings. Re-run with `temperature ≥ 0.5` or under MCTS at 200+ sims to get real reads.
+
+### Next session, prioritized
+
+1. **Bigger network + combined data, supervised pretrain.** Edit `run_supervised_pretraining.py` to expose `--num-channels` and `--num-blocks`. Train 512×18 on the combined 1197 games. If held-out MAIN top-1 jumps to 10%+, capacity was a real (additional) constraint.
+2. **Add stochastic-temperature option to `eval_vs_heuristic.py`** so raw-policy evals aren't determinism-dominated. Re-baseline the iter-2 RL winners.
+3. **Investigate getting more high-quality data.** Boardspace had 23k games but only 861 were human-only completed. There are other potential sources (online tournaments, additional BGA scrapes if rate limit allows). The data ceiling is real.
+4. **Once we have a 10%+ held-out model from (1)**, attempt warm-start RL from it with frozen-anchor curriculum. Only then does the recipe work in the upper sections of this doc become relevant again.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
