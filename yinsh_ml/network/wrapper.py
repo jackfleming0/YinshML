@@ -55,16 +55,27 @@ class NetworkWrapper:
         self.use_enhanced_encoding = use_enhanced_encoding
         input_channels = 15 if use_enhanced_encoding else 6
 
-        # Auto-detect capacity from checkpoint when not explicitly given. Lets
-        # supervised pretrains with custom --num-channels / --num-blocks load
-        # without callers needing to know the dims in advance.
-        if (num_channels is None or num_blocks is None) and model_path and os.path.exists(model_path):
+        # Auto-detect capacity (and encoding) from checkpoint when not
+        # explicitly given. Lets supervised pretrains with custom
+        # --num-channels / --num-blocks / --use-enhanced-encoding load without
+        # callers needing to know the dims in advance.
+        if model_path and os.path.exists(model_path):
             sd = torch.load(model_path, map_location='cpu', weights_only=True)
-            if num_channels is None:
-                # input_conv.0 is Conv2d(input_channels -> num_channels)
-                w = sd.get('input_conv.0.weight')
-                if w is not None:
-                    num_channels = int(w.shape[0])
+            w = sd.get('input_conv.0.weight')
+            if num_channels is None and w is not None:
+                # Conv2d(input_channels -> num_channels)
+                num_channels = int(w.shape[0])
+            if w is not None:
+                # input_channels lives in dim 1; override use_enhanced_encoding
+                # to match what the checkpoint actually has, so subsequent
+                # encoder construction is consistent.
+                ckpt_input_ch = int(w.shape[1])
+                if ckpt_input_ch == 15:
+                    self.use_enhanced_encoding = True
+                    input_channels = 15
+                elif ckpt_input_ch == 6:
+                    self.use_enhanced_encoding = False
+                    input_channels = 6
             if num_blocks is None:
                 # Count main_blocks.{i}.* prefixes
                 block_ids = set()
