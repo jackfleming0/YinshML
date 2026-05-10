@@ -569,6 +569,7 @@ class ModelTournament:
         use_mcts: bool = False,
         mcts_simulations: int = 64,
         heuristic_time_limit_seconds: float = 0.0,
+        candidate_temperature: float = 0.0,
     ) -> Dict:
         """Play the candidate network against a fixed HeuristicAgent baseline.
 
@@ -776,7 +777,7 @@ class ModelTournament:
                                     candidate_network.device
                                 )
                                 selected_move = candidate_network.select_move(
-                                    visit_probs_t, valid_moves, temperature=0.0
+                                    visit_probs_t, valid_moves, temperature=candidate_temperature
                                 )
                                 del visit_probs_t
                             else:
@@ -785,9 +786,10 @@ class ModelTournament:
                                     torch.from_numpy(np.array(state_array)).unsqueeze(0)
                                 )
                                 move_probs, _ = candidate_network.predict(cand_input_tensor)
-                                # temperature=0 → argmax, fully deterministic given seeds
+                                # candidate_temperature=0 (default) → argmax (deterministic given seeds).
+                                # >0 → sample from softmax(logits / temperature) over valid moves.
                                 selected_move = candidate_network.select_move(
-                                    move_probs, valid_moves, temperature=0.0
+                                    move_probs, valid_moves, temperature=candidate_temperature
                                 )
                                 del move_probs
                         else:
