@@ -253,6 +253,35 @@ At 100 sims, MCTS visit counts include moves the heuristic doesn't pick (search 
 
 **Tier-1 #1 hypothesis is dead.** Higher train-time sims doesn't unlock past-mimicry strength — it just degrades the mimicry without providing alternative skill.
 
+## Tier-1 #2: pure_neural mode (2026-05-10 02:02–03:31 UTC, ~$1)
+
+After more_sims hypothesis died, ran pure_neural variant: same as ablation B but `evaluation_mode: pure_neural`, `heuristic_weight: 0.0`. Removes heuristic from MCTS leaf eval entirely — network drives all decisions.
+
+### Result
+
+| iter | pure_neural raw |
+|---:|---:|
+| 0 | 0/60 |
+| 1 | **60/60 (100%)** |
+| 2 | **60/60 (100%)** ← TWO sustained iters |
+| 3 | 0/60 |
+| 4 | 0/60 |
+
+**First probe to extend the peak past one iteration.** ablation B was 0/0/60/0/0 (single iter at 60/60); pure_neural is 0/60/60/0/0 (two consecutive iters at 60/60).
+
+### Why this matters
+
+- The heuristic in MCTS leaf eval was doing two things simultaneously: (1) bootstrapping the network's training signal early, and (2) anchoring the network to heuristic-shaped policies, which made the network fragile when its own play diverged from heuristic-shape.
+- Removing the heuristic loses (1) — but the network apparently doesn't need it as much as we thought. By iter 1, pure_neural reaches 60/60 (one iter earlier than ablation B!).
+- And it gains stability. Two iters at peak instead of one. The collapse mechanism is delayed but not eliminated.
+
+### Followup — pure_neural_long (10 iters, in flight)
+
+Launched 03:32 UTC, ETA done ~07:30 UTC. **The strategic question for multi-day**: does the peak window extend further as we keep training, or is "two iters" the cap?
+
+- If iters 1-5 all at 60/60 → pure_neural is THE recipe for multi-day. Train until plateau plus regression test, eval frequently.
+- If still cap at 2 iters → we have a small-but-real improvement and need a different attack on the remaining 8-iter degradation.
+
 ## Final state and what's worth shipping
 
 **Code (committed and pushed, branch `policy-collapse-hunt`):**
