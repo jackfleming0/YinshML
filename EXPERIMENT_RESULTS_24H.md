@@ -282,6 +282,25 @@ Launched 03:32 UTC, ETA done ~07:30 UTC. **The strategic question for multi-day*
 - If iters 1-5 all at 60/60 → pure_neural is THE recipe for multi-day. Train until plateau plus regression test, eval frequently.
 - If still cap at 2 iters → we have a small-but-real improvement and need a different attack on the remaining 8-iter degradation.
 
+## Tier-1 #2 follow-up: pure_neural at 10 iters (2026-05-10 03:32–06:36)
+
+Wanted to test if the 2-iter sustained peak from pure_neural (5-iter) extends to more iters. Result with a different seed:
+
+| iter | pure_neural_long raw |
+|---:|---:|
+| 0-2 | 0/60 |
+| 3 | **30/60 (50%)** ← only spike |
+| 4-9 | 0/60 |
+
+Lottery again. Two seeds, two completely different trajectories:
+
+- pure_neural (seed A): 0 / 60 / 60 / 0 / 0 — spike iters 1+2, 100% magnitude, sustained 2 iters
+- pure_neural_long (seed B): 0 / 0 / 0 / 30 / 0 / 0 / 0 / 0 / 0 / 0 — single iter at 50%
+
+Same recipe. Random init dominates outcome. Cannot conclude pure_neural is reliably better than hybrid from n=1.
+
+Launched 3 more pure_neural seeds (5-iter each, ~4.5h total) to settle the question. ETA done ~11:15 UTC.
+
 ## Final state and what's worth shipping
 
 **Code (committed and pushed, branch `policy-collapse-hunt`):**
