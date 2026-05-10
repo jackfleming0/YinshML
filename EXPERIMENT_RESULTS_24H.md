@@ -346,6 +346,40 @@ The collapse appears to be a structural property of the recipe + dataset:
 
 **For a multi-day run today**: the right move is to ship what works (5-iter ablation B / pure_neural recipe + iter 2 EMA) and pursue code-level work (batched MCTS, distillation, anchor-curriculum) before committing more compute to the same recipe space. A 1000-iter run on the current recipe would produce 998 iters of degradation regardless of which knob we chose.
 
+## Decisive experiment: warm_start from a 60/60 winner (2026-05-10 11:16–13:07, ~$1)
+
+Used `--init-checkpoint runs_ablation_b/20260507_152617/iteration_2/checkpoint_iteration_2_ema.pt` (the original 60/60 winner) as starting weights for a fresh 5-iter run with the same recipe (ablation B / discrimination=0).
+
+### Result
+
+| iter | warm_start raw |
+|---:|---:|
+| 0 (warm-start + 1 iter training) | 0/60 |
+| 1 | 30/60 (50%) |
+| 2 | 0/60 |
+| 3 | 0/60 |
+| 4 | 0/60 |
+
+**One iteration of training on top of a 60/60 model dropped it to 0/60.** Then a partial recovery at iter 1 (30/60), then collapse.
+
+### What this proves
+
+The training dynamics actively destroy strong policies. The "iter 2 spike" we've been chasing isn't the recipe building toward something — it's the model briefly visiting good-policy space before training pulls it elsewhere. Random-init runs spike at iter 2 because that's how long it takes to drift INTO the good region from random; warm-started runs spike at iter 1 because they start near it but get drifted OUT.
+
+This is the cleanest evidence we have. **Continued self-play training under this recipe is not just "fails to improve" — it actively destroys strong policies.**
+
+### What this means for multi-day
+
+Multi-day training under the current recipe is structurally impossible. No yaml knob fixes this. Code-level changes required:
+
+1. **Anchor curriculum**: train against frozen best-of-prior-iters mixed with self-play. Forces the network to keep beating its own past versions, preventing the drift that destroys strong policies.
+2. **Distillation phase**: alternate between RL self-play (which destroys) and supervised distillation against frozen best (which restores).
+3. **Aggressive early stopping**: train until peak (typically iter 1-3), evaluate against absolute anchor at high n, stop, hard-restart with the best checkpoint when ready to push further.
+4. **Reduce LR drastically after iter 2**: e.g., LR ÷ 100 after the first peak. Most experiments showed lower LR weakens the spike, but that was at the START of training. After the spike, gentler updates might preserve rather than destroy.
+5. **Different target distribution**: visit counts at 48 sims are a noisy student-teacher signal. Move to KL-to-prior or Bradley-Terry-style targets that don't pull as hard.
+
+All of these are ~1-2 day code investigations. None are yaml-tweakable.
+
 ## Final state and what's worth shipping
 
 **Code (committed and pushed, branch `policy-collapse-hunt`):**
