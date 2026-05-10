@@ -301,6 +301,51 @@ Same recipe. Random init dominates outcome. Cannot conclude pure_neural is relia
 
 Launched 3 more pure_neural seeds (5-iter each, ~4.5h total) to settle the question. ETA done ~11:15 UTC.
 
+## Multi-seed pure_neural confirms the lottery (2026-05-10 06:45–11:12, ~$3)
+
+Ran 4 pure_neural seeds (5-iter each) plus the 10-iter pure_neural_long.
+
+### 5-seed pure_neural matrix (iters 0-4, raw vs heuristic d=1, n=60)
+
+| seed | i0 | i1 | i2 | i3 | i4 | peak | sustained? |
+|---|---:|---:|---:|---:|---:|---|---|
+| pure_neural (s1) | 0 | **60** | **60** | 0 | 0 | 100% | yes (2 iters) |
+| pure_neural_long (s2) | 0 | 0 | 0 | 30 | 0 | 50% | no |
+| pn_s2 (s3) | 30 | 0 | 30 | 30 | 0 | 50% | yes (2 iters at peak) |
+| pn_s3 (s4) | 0 | 0 | 0 | 30 | 0 | 50% | no |
+| pn_s4 (s5) | 30 | 0 | 0 | **60** | 0 | 100% | no |
+
+### Compare to hybrid (ablation B, 4 seeds)
+
+|  | pure_neural | hybrid (ablation B) |
+|---|---:|---:|
+| Hit 60/60 at peak | 2/5 (40%) | 2/4 (50%) |
+| Hit ≥30/60 at peak | 5/5 (100%) | 4/4 (100%) |
+| Sustained ≥2 iters at peak | 2/5 (40%) | 0/4 (0%) |
+| Collapsed to 0/60 by iter 4 | 5/5 | 4/4 |
+
+**Pure_neural's only advantage over hybrid is sustainability**: when it works, the peak holds across 2 iterations instead of collapsing immediately. Both are equally lottery-prone on magnitude. Both universally collapse by iter 4.
+
+## Final verdict on the multi-day knob question
+
+**No knob in the explored space prevents the late-iter collapse.** Tested:
+- value_head_lr_factor (null)
+- discrimination_weight (positive — shipping)
+- final_temp (negative)
+- heuristic_weight curriculum (just shifts the spike)
+- max_buffer_size (just shifts the spike)
+- learning_rate (lower weakens, higher destabilizes)
+- num_simulations (more sims actively *weaken* the model on both d1 and d3)
+- evaluation_mode (pure_neural marginally improves sustainability, doesn't prevent collapse)
+- num_iterations (no change — collapse persists across 5/10/25 iters)
+
+The collapse appears to be a structural property of the recipe + dataset:
+- Self-play data evolves with the network. Once the network drifts past heuristic-mimicry, it's playing against itself in increasingly weird ways. Targets become "what beats this particular network's quirks" rather than "good general policy."
+- 48-200 simulation budgets are insufficient for MCTS to discover genuinely strong moves the network doesn't already prefer. The search amplifies the network's prior, doesn't correct it.
+- Either the search budget needs to be much higher (hundreds of sims at game-tractable wall time → batched MCTS) or the data distribution needs to be anchored against something stronger than the network itself (distillation, frozen anchor opponents, curriculum that doesn't drift).
+
+**For a multi-day run today**: the right move is to ship what works (5-iter ablation B / pure_neural recipe + iter 2 EMA) and pursue code-level work (batched MCTS, distillation, anchor-curriculum) before committing more compute to the same recipe space. A 1000-iter run on the current recipe would produce 998 iters of degradation regardless of which knob we chose.
+
 ## Final state and what's worth shipping
 
 **Code (committed and pushed, branch `policy-collapse-hunt`):**
