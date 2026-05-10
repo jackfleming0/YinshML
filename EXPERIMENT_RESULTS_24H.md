@@ -247,7 +247,11 @@ At 100 sims, MCTS visit counts include moves the heuristic doesn't pick (search 
 
 ### Cross-checking against depth-3
 
-Pending: depth-3 raw eval on more_sims_full iter 2 EMA. If it still hits 50% (matching ablation B's 50% at d3), then more_sims_full actually has equivalent strength as ablation B — just measured worse at d1. If it's lower, more sims actively *weakened* the model.
+**Result: 0/20 (0%) at depth-3.** more_sims_full iter 2 EMA loses every single game. Compared to ablation B's iter 2 = 10/10 (50%) at d3, this is a brutal drop.
+
+**Conclusion**: more sims actively WEAKENED the model on both d1 and d3 metrics. The 60/60 at d1 from ablation B isn't pure mimicry illusion — it's the model's actual ceiling, which deeper-search training erodes without offering replacement signal. The 60/60 model had real play-strength (50% at d3); the more_sims_full model has neither (30/60 at d1, 0/20 at d3).
+
+**Tier-1 #1 hypothesis is dead.** Higher train-time sims doesn't unlock past-mimicry strength — it just degrades the mimicry without providing alternative skill.
 
 ## Final state and what's worth shipping
 
