@@ -591,6 +591,40 @@ What's not worth shipping yet:
 3. **Investigate getting more high-quality data.** Boardspace had 23k games but only 861 were human-only completed. There are other potential sources (online tournaments, additional BGA scrapes if rate limit allows). The data ceiling is real.
 4. **Once we have a 10%+ held-out model from (1)**, attempt warm-start RL from it with frozen-anchor curriculum. Only then does the recipe work in the upper sections of this doc become relevant again.
 
+## Discovery run, batch 1: capacity sweep (2026-05-10 22:04–23:21 UTC, ~$0.40)
+
+After the prior writeup concluded "neither architecture nor data alone is the cap," the natural follow-up is: *which* axis of architecture matters? Trained 5 supervised variants on combined-data (BGA + 761 boardspace human, 57k positions), 30 epochs each, evaluated on the same 100-game boardspace holdout used in the prior section.
+
+### Held-out MAIN_GAME results
+
+| variant | MAIN top-1 | MAIN top-3 | ALL top-1 | val_mse | RING_PLACEMENT top-1 |
+|---|---:|---:|---:|---:|---:|
+| ctrl_256x12 (baseline) | 4.9% | 15.0% | 13.2% | 1.16 | 6.8% |
+| wide_384x12 | 3.5% | 9.6% | 10.3% | 1.75 | 0.4% |
+| **deep_256x18** | **6.2%** | 15.2% | 14.0% | **0.98** | 6.8% |
+| big_512x18 | 3.3% | 10.4% | 10.7% | 1.84 | 1.0% |
+| **enh_256x12** (15-ch enc) | **6.4%** | **15.8%** | 14.0% | 1.17 | **7.6%** |
+
+### Findings
+
+1. **Depth helps; width hurts; combining them hurts more.** ctrl→deep (+1.3 pp MAIN top-1, +25% relative). ctrl→wide (−1.4 pp, −29%). ctrl→big (−1.6 pp, −33%). On 80k positions, extra width spends parameters on memorization; extra depth spends them on expressiveness. Big_512x18 has ~20M params trying to memorize 80k positions — predictable disaster.
+2. **deep_256x18 is the only variant that beats the value-head baseline.** val_mse 0.976 < 1.0 (always-predict-0). Every other model has a value head worse than baseline. The depth scaling helps the value path more than the policy path.
+3. **Enhanced encoding (15-channel) matches the depth result on policy alone.** Without adding parameters or compute, richer input features (row threats, partial rows, ring mobility, center distance, ring influence, turn number, score differential) match what depth gives. Value head doesn't benefit from richer input — only from more layers.
+4. **The two winners are independent axes.** Depth helps value head, enhanced encoding helps policy head, and both improve MAIN top-1 by similar amounts. **Combining them is the obvious next experiment** (deep_enh_256x18) — should give the value head's depth benefit PLUS the policy head's richer-input benefit.
+5. **The ceiling is moving.** Prior writeup framed 5% as the ceiling. With architecture + encoding moves, we're at 6.4% with no extra parameters and no extra data. The ceiling appears soft, not hard. Worth pushing further before declaring "architecture is the cap" definitively.
+
+### Why each variant failed/succeeded (mechanistic readings)
+
+- **Wide failed because of RING_PLACEMENT.** Wide's RP top-1 = 0.4% vs ctrl's 6.8% — a 17× regression on the simplest decision in the game. Width amplifies whatever the network learned to attend to in the placement phase, which appears to be wrong. Possibly because placement positions are sparse and the wider conv layers see lots of "padding-like" zeros that overfit.
+- **Big failed for the same reason.** RP top-1 = 1.0%. The 512-wide layers cement the bad RP pattern early; deeper layers can't recover.
+- **Deep avoided this because its width is the same as ctrl.** It learned the same RP representation, just with more refinement on top.
+- **Enhanced fixed RP at the source.** Richer encoding includes "center distance" and "ring influence" features — these are exactly what matters for ring placement decisions. Enh's RP top-1 (7.6%) is the best of all variants.
+
+### Next experiments
+
+- **Batch 1b (queued)**: combine the winners. `deep_enh_256x18` (depth + enhanced encoding) should be the dominant supervised model on this data. Also `super_deep_256x24` (continue depth scaling — is 18 the sweet spot, or is more depth better?) and `deep_256x18` re-run at 60 epochs (does training longer with the best architecture help?).
+- **Batch 4 (planned)**: use deep_enh_256x18 as the iter-0 init for an RL warm-start probe with frozen-anchor curriculum. Tests whether the supervised → RL handoff destroys the architecture lift (as warm_start showed it does for raw position quality).
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
