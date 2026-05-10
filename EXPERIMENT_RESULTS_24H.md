@@ -410,6 +410,61 @@ Box went unreachable. SSH timeouts. May have been reclaimed or had a network iss
 
 If cloud comes back, those probes are still queued via `traj_probes.sh` (didn't get to launch — connection failed before script copy). Re-launch manually if needed.
 
+## Expert-game eval sweep (2026-05-10 19:29–19:35 UTC, ~$0.20)
+
+The user stepped away. Every prior probe in this doc compared the network to its training target (depth-1 heuristic via `eval_vs_heuristic.py`). The results above all share that target. **One layer up the onion**: build a fixed, non-circular metric from the BGA expert-game holdout (`expert_games/bga/parsed/`) — top-1/top-3 policy agreement and value MSE bucketed by phase — and rerun the full trajectory matrix under it.
+
+Wired up `scripts/eval_vs_expert.py` (loads 28910 positions from 436 BGA games, 0 parse failures) and `scripts/expert_eval_trajectory.py` (batched across many checkpoints). 55 checkpoints across ablation_b s1-s4, pure_neural s1-s4, pure_neural_long, warm_start. ~5s/checkpoint on the 4090.
+
+### MAIN_GAME top-1 (% agreement with expert moves on non-trivial positions)
+
+Random baseline ≈ 1.5% (1/65 avg legal moves). Strong play ≈ 30%+.
+
+| run | i0 | i1 | i2 | i3 | i4 | i5 | i6 | i7 | i8 | i9 | peak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| ablation_b (s1) | 3.7 | 4.6 | 4.2 | 2.4 | 2.3 |  |  |  |  |  | iter1: 4.6% |
+| ablation_b_s2 | 3.2 | 4.1 | **5.0** | 3.6 | 2.8 |  |  |  |  |  | iter2: 5.0% |
+| ablation_b_s3 | 3.3 | 4.2 | 4.1 | 3.4 | 3.1 |  |  |  |  |  | iter1: 4.2% |
+| ablation_b_s4 | 3.1 | 3.3 | 2.7 | 2.1 | 2.8 |  |  |  |  |  | iter1: 3.3% |
+| pure_neural | 3.3 | 4.0 | 3.4 | 3.3 | 3.6 |  |  |  |  |  | iter1: 4.0% |
+| pure_neural_pn_s2 | 3.4 | 4.3 | 4.3 | 4.0 | 3.8 |  |  |  |  |  | iter1: 4.3% |
+| pure_neural_pn_s3 | 3.4 | 3.9 | 2.8 | 2.5 | 2.9 |  |  |  |  |  | iter1: 3.9% |
+| pure_neural_pn_s4 | 3.7 | 4.0 | 3.7 | 3.9 | 3.3 |  |  |  |  |  | iter1: 4.0% |
+| pure_neural_long | 3.1 | 4.0 | 3.9 | 3.6 | 3.1 | 3.0 | 2.6 | 2.7 | 3.0 | 3.1 | iter1: 4.0% |
+| warm_start | 3.1 | 3.8 | 2.6 | 2.5 | 2.3 |  |  |  |  |  | iter1: 3.8% |
+
+### Findings — and they sting
+
+1. **The iter-1/2 spike + late-iter decline IS real, not an artifact of vs-d1 measurement.** 8 of 10 runs peak at iter 1 or 2 on MAIN_GAME top-1 against expert moves. The shape we've been chasing is genuine model behavior, not a metric quirk. The `EXPERIMENT_RESULTS_24H.md` writeup conclusion is independently confirmed.
+
+2. **The peak is microscopic.** Iter 0 baseline (random-ish init) = 3.1-3.7% MAIN top-1. Iter 2 peak = 4.2-5.0%. Lift of **~1 percentage point** on a metric where chance is ~1.5%. The "60/60 vs depth-1 heuristic" was reading this tiny absolute improvement amplified by heuristic-mimicry alignment with the eval target. **Best checkpoint anywhere in the 55-checkpoint matrix is 5.0% MAIN top-1 (ablation_b_s2 iter 2)**. Nothing in this sweep is close to "well-trained."
+
+3. **Value head is uniformly broken.** All-phase value MSE ranges 0.99-1.33 across checkpoints; baseline (always-predict-0 on -1/+1 outcomes) is ~1.0. **No checkpoint, anywhere, has a value head that beats trivial baseline.** Several are notably worse (`runs_pure_neural_pn_s2` iter 3 = 1.33, `runs_ablation_b_s4` iter 3 = 1.17). The value head is contributing noise.
+
+4. **ROW_COMPLETION ~91-92% across all 55 checkpoints**, with no iter-trajectory variation. This is "which 5-row to capture" — a forced choice. The encoding/decoding works. The network learns this from initialization (random init also passes). It's uninformative as a quality signal.
+
+5. **Pure_neural's "stability" is real but trivial.** `pure_neural_long` over 10 iters: peaks at iter 1 (4.0%), bottoms at iter 6 (2.6%), settles to ~3.1% by iter 9. Translation: it doesn't crash, but it doesn't go anywhere. The 10-iter trajectory is a return to iter-0 baseline.
+
+6. **Warm-start finding holds**: `warm_start` (iter 0 = 60/60 winner + 1 iter training) starts at 3.1% MAIN top-1, briefly rises to 3.8% at iter 1, then drops to 2.3% at iter 4. Training actively destroys the (already weak) policy structure.
+
+### What this changes about the multi-day question
+
+The writeup conclusion ("no yaml knob fixes collapse, need code-level changes") is right, but the framing was wrong. **It's not that the network reaches a good state and then collapses.** The network never reaches a good state. The "iter-2 spike" is ~5% expert agreement vs ~3% at iter 0. There's no plateau of strong play to preserve. The collapse-prevention framing makes the problem sound smaller than it is.
+
+The real bottleneck question becomes: **does this architecture + this data have the capacity to learn good play at all, or are we hitting a ceiling that's not training-dynamics-related?**
+
+That question is answerable. Supervised training on the BGA games (28910 positions, ~30 min run) gives a clean upper bound:
+- If supervised tops out at ~5% MAIN top-1, the architecture/encoding is the cap and no RL recipe will help.
+- If supervised reaches 20-40%, RL is failing to use the data and the problem is in the loss/curriculum.
+
+Launching that experiment as the next probe. The result is binary, fast, and dispositive.
+
+### Models worth keeping (revised)
+
+The "models worth keeping" list higher up — `runs_scale_up_b/iteration_9_ema.pt`, `runs_ablation_b/iteration_2_ema.pt`, `runs_ablation_b_s2/iteration_2_ema.pt` — are still the best of what we have, but only by a hair. Best of the bunch (ablation_b_s2 iter 2) reaches 5.0% expert agreement on MAIN_GAME. These are useful as comparison anchors, not as ship-able models.
+
+Per-checkpoint JSONs and summary CSV in `expert_eval_reports/` (not committed; regeneratable). Smoke output for the 60/60 winner shows ROW_COMPLETION top-1 = 0.914 (90% of forced-choice positions) but MAIN_GAME top-1 = 4.2% (15× chance, but small absolute number).
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
