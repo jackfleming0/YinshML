@@ -26,7 +26,9 @@ class NetworkWrapper:
     def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None,
                  tensor_pool: Optional[TensorPool] = None,
                  value_mode: str = 'classification', num_value_classes: int = 7,
-                 use_enhanced_encoding: bool = False):
+                 use_enhanced_encoding: bool = False,
+                 num_channels: Optional[int] = None,
+                 num_blocks: Optional[int] = None):
         """
         Initialize the network wrapper.
 
@@ -37,6 +39,8 @@ class NetworkWrapper:
             value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
             num_value_classes: Number of discrete outcome classes for classification mode
             use_enhanced_encoding: If True, use 15-channel enhanced encoding. If False, use basic 6-channel.
+            num_channels: ResNet channel count. If None and model_path given, auto-detect from state_dict.
+            num_blocks: Number of residual/attention blocks. If None and model_path given, auto-detect.
         """
         if device:
             self.device = torch.device(device)
@@ -51,9 +55,35 @@ class NetworkWrapper:
         self.use_enhanced_encoding = use_enhanced_encoding
         input_channels = 15 if use_enhanced_encoding else 6
 
+        # Auto-detect capacity from checkpoint when not explicitly given. Lets
+        # supervised pretrains with custom --num-channels / --num-blocks load
+        # without callers needing to know the dims in advance.
+        if (num_channels is None or num_blocks is None) and model_path and os.path.exists(model_path):
+            sd = torch.load(model_path, map_location='cpu', weights_only=True)
+            if num_channels is None:
+                # input_conv.0 is Conv2d(input_channels -> num_channels)
+                w = sd.get('input_conv.0.weight')
+                if w is not None:
+                    num_channels = int(w.shape[0])
+            if num_blocks is None:
+                # Count main_blocks.{i}.* prefixes
+                block_ids = set()
+                for k in sd.keys():
+                    if k.startswith('main_blocks.'):
+                        try:
+                            block_ids.add(int(k.split('.')[1]))
+                        except (ValueError, IndexError):
+                            continue
+                if block_ids:
+                    num_blocks = len(block_ids)
+        if num_channels is None:
+            num_channels = 256
+        if num_blocks is None:
+            num_blocks = 12
+
         self.network = YinshNetwork(
-            num_channels=256,
-            num_blocks=12,
+            num_channels=num_channels,
+            num_blocks=num_blocks,
             value_mode=value_mode,
             num_value_classes=num_value_classes,
             input_channels=input_channels

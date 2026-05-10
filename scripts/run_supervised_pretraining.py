@@ -95,8 +95,8 @@ def create_model(args) -> tuple:
 
     input_channels = 15 if args.use_enhanced_encoding else 6
     model = YinshNetwork(
-        num_channels=256,
-        num_blocks=12,
+        num_channels=args.num_channels,
+        num_blocks=args.num_blocks,
         input_channels=input_channels,
     ).to(device)
 
@@ -323,6 +323,10 @@ def main():
     parser.add_argument('--use-enhanced-encoding', action='store_true',
                        help='Use 15-channel enhanced encoding (default: 6-channel basic). '
                             'Must match the channel count of any --checkpoint loaded.')
+    parser.add_argument('--num-channels', type=int, default=256,
+                       help='ResNet channel width (default: 256)')
+    parser.add_argument('--num-blocks', type=int, default=12,
+                       help='Number of residual/attention blocks (default: 12)')
 
     # Output options
     parser.add_argument('--output-dir', type=str, default='models/supervised',
