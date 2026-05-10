@@ -465,6 +465,77 @@ The "models worth keeping" list higher up — `runs_scale_up_b/iteration_9_ema.p
 
 Per-checkpoint JSONs and summary CSV in `expert_eval_reports/` (not committed; regeneratable). Smoke output for the 60/60 winner shows ROW_COMPLETION top-1 = 0.914 (90% of forced-choice positions) but MAIN_GAME top-1 = 4.2% (15× chance, but small absolute number).
 
+## Supervised pretraining + the deterministic-side artifact (2026-05-10 20:02–21:18 UTC, ~$0.30)
+
+After the expert-eval sweep showed the RL trajectory caps at ~5% MAIN top-1, the question became: **is the architecture the cap, or is the RL signal the bottleneck?** Quick supervised pretrain on the same data answers it. `scripts/run_supervised_pretraining.py --games-dir expert_games/bga/parsed --epochs 40 --batch-size 256 --lr 0.001` then auto-chained eval_vs_expert + eval_vs_heuristic (d1 n=60, d3 n=20).
+
+### Training trajectory (40 epochs, ~4 min on 4090)
+
+- Best ckpt = epoch 5 by val_loss (cosine LR, val_loss U-shape)
+- By epoch 40: train PAcc=96%, val PAcc=13% (heavy overfit on 23129 train / 2569 val)
+- Val P-loss minimum at epoch 5 (4.99), climbs steadily to 7.9 by epoch 40
+
+### Three eval surfaces, three different pictures
+
+| metric | supervised (best, epoch 5) | ablation_b iter2 | ablation_b_s2 iter2 |
+|---|---:|---:|---:|
+| BGA full (mostly train, with mask) MAIN top-1 | **48.2%** | 4.2% | 5.0% |
+| BGA full value_mse | 0.077 | 1.13 | 0.99 |
+| Boardspace 500 holdout MAIN top-1 | **4.7%** | 3.8% | 3.9% |
+| Boardspace 500 holdout ALL top-1 | 11.5% | 10.5% | 10.7% |
+| Boardspace 500 holdout value_mse | 1.35 | 1.12 | 0.98 |
+| d1 raw policy (n=60 vs HeuristicAgent depth=1) | 30/60 (50%) | 60/60 (100%) | 60/60 (100%) |
+| d3 raw policy (n=20 vs HeuristicAgent depth=3, 5s/move) | 10/20 (50%) | 10/10 (50%, n=10) | 10/10 (50%, n=10) |
+
+**The 48% is contaminated** (90% of those positions were in the training set). On boardspace held-out, supervised is 4.7% MAIN top-1 vs RL's 3.8-3.9%. ~1 pp lift. Within noise of the iter-2 RL spike. **The architecture is at or near its cap on the data we have.**
+
+### The deterministic-side artifact
+
+Examining the d1 / d3 game-by-game logs revealed something the writeup above missed:
+
+- d1 games 1-30 (cand=White): cand wins all 30, every game 105 moves
+- d1 games 31-60 (cand=Black): cand loses all 30, every game 83 moves
+- d3 games 1-10 (cand=White): cand wins all 10, every game 103 moves
+- d3 games 11-20 (cand=Black): cand loses all 10, every game 81 moves
+
+Same exact move count every time = **fully deterministic raw-policy + deterministic heuristic** = same game played 30 / 10 times.
+
+This reframes the entire prior "60/60 winner" narrative:
+- "60/60 vs depth-1" actually means "deterministically wins as both White and Black"
+- "30/60" means "deterministically wins as White, deterministically loses as Black" — i.e., what supervised does
+- "0/60" means "deterministically loses as White, deterministically loses as Black"
+
+The 60/60 winners weren't 2× stronger than 30/60 results — they happened to find a deterministic line that beats the heuristic from both sides. The 30/60 results aren't "tied" — they're "first-mover advantage realized once, against the heuristic's deterministic responses."
+
+Implication: **most of the raw-policy strength results in this writeup are not measuring strength**. They're measuring "does this checkpoint's argmax line happen to win as White and/or Black against this specific heuristic's argmax line." A real strength signal needs either (a) stochastic policy (temperature > 0), (b) MCTS at training-time-realistic sim count, or (c) a non-deterministic opponent.
+
+The 400-sim MCTS results that showed scale_up_b iter9 hitting 60/60 are still meaningful — MCTS naturally breaks ties, so that result is a real strength signal at high search budget. But 48-sim and raw-policy numbers should be discounted.
+
+### Updated picture
+
+What's robust:
+- **Architecture is at or near its cap on this data.** Supervised pretraining on BGA tops out at ~4.7% MAIN top-1 on held-out boardspace, vs ~3.8% from RL training-from-scratch. ~1pp lift is real but tiny.
+- **Value head is broken on held-out.** Supervised value_mse on boardspace = 1.35 (worse than always-predict-0). RL's value_mse = 1.0 (matches baseline). Both heads are roughly noise out-of-sample.
+- **First-move advantage dominates raw-policy evals.** A model that wins as White but not as Black against a deterministic heuristic is the *expected* behavior; calling it 30/60 = "tied" overstates the deficit and 60/60 = "perfect" overstates the strength.
+
+What's NOT robust:
+- **Most raw-policy comparison numbers in the writeup above.** The "60/60 vs depth-1" measurements are deterministic-vs-deterministic — they bin into 0/30/60 by side-coverage, not by underlying skill.
+
+### What should change
+
+1. **Re-run all raw-policy evals with `temperature ≥ 0.5`** so determinism breaks and we get a real distribution. Not done in this session — flagging for next pass.
+2. **Network capacity is the cap until proven otherwise.** Before any more RL recipe work, run a scale test: 256→512 channels and 12→18 blocks, supervised on BGA + boardspace combined (~32k games). If held-out top-1 goes from ~5% to ~15%, capacity was the constraint and we should ship that bigger network as the iter-0 init for all future RL.
+3. **The expert-eval metric is the right primary signal going forward.** Non-circular, fixed, deterministic-side-immune (since it scores agreement on individual positions, not full games), reproducible across runs. `scripts/expert_eval_trajectory.py` makes it cheap (~5s/checkpoint).
+4. **The "iter-2 spike" pattern is real model behavior** but it's a 1-1.5 percentage-point lift on a metric capped around 4-5%. The "fix collapse" framing is technically right but it's optimization-of-noise. The real question is "what gets us from 5% to 30%."
+
+### Models worth keeping (revised again)
+
+- `models/supervised_bga_post_fix/best_supervised.pt` — supervised baseline, ~5% MAIN top-1 on held-out, deterministic 30/60 vs d1, 50% vs d3 by side
+- `runs_ablation_b/iteration_2_ema.pt`, `runs_ablation_b_s2/iteration_2_ema.pt` — RL iter-2 spikes, ~4% MAIN top-1 on held-out
+- `runs_scale_up_b/iteration_9_ema.pt` — best by ELO, untested on held-out expert metric
+
+For comparison purposes only. None ship as a strong agent without MCTS at 400+ sims, and even there the 60/60 measurements pre-determinism-correction are now suspect.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
