@@ -215,6 +215,40 @@ Lesson: testing the "more sims" hypothesis at meaningful scale on this hardware 
 - 100 sims (vs 200) + 50 games/iter + 4 iters — ~$5, ~12h. Doable in a future session.
 - Or batched-MCTS path that's been mentioned but not validated.
 
+## Tier-1 #1 follow-up: more sims didn't help (2026-05-09 ~21:00)
+
+The leading hypothesis after the collapse-probe chain was: at 48 sims, MCTS targets are heuristic-shaped → mimicry attractor → collapse. Higher sims should let MCTS find non-heuristic moves and pull the network past mimicry.
+
+Two probes:
+
+### more_sims_v2 (100 sims, 50 games/iter, 5 iter)
+
+All five iters at **0/60 raw vs depth-1 heuristic**. Never reached even the mimicry-spike. Could be data starvation (50 games is too few) or actual disruption of the mimicry path. Ran more_sims_full to disambiguate.
+
+### more_sims_full (100 sims, **200 games/iter**, 5 iter)
+
+| iter | raw vs d1 |
+|---:|---:|
+| 0 | 0/60 |
+| 1 | 0/60 |
+| 2 | **30/60 (50%)** ← peak |
+| 3 | 0/60 |
+| 4 | 0/60 |
+
+Same shape as ablation B (spike at iter 2, collapse) but **half the magnitude** — 30/60 vs 60/60. So data starvation wasn't the issue; the deeper search is changing what the network is learning.
+
+### What that means
+
+**The "60/60 perfect raw" was actually achieved by aligning to depth-1 heuristic specifically.** At 48 sims, MCTS visit counts are dominated by the heuristic's preferred moves (because the network is initially uniform, so heuristic guides everything). Network learns to pick exactly those moves. Beats depth-1 heuristic 60/60 because the heuristic is deterministic and the imitator can play subtly different moves that exploit it.
+
+At 100 sims, MCTS visit counts include moves the heuristic doesn't pick (search finds them). Targets are a *mix* of heuristic-shaped and search-shaped. Network learns a worse imitation of either → 30/60 instead of 60/60.
+
+**More sims → less mimicry, but no replacement signal.** Within 5 iters, the network can't learn enough from the richer search-shaped signal to compensate for losing the easy mimicry path.
+
+### Cross-checking against depth-3
+
+Pending: depth-3 raw eval on more_sims_full iter 2 EMA. If it still hits 50% (matching ablation B's 50% at d3), then more_sims_full actually has equivalent strength as ablation B — just measured worse at d1. If it's lower, more sims actively *weakened* the model.
+
 ## Final state and what's worth shipping
 
 **Code (committed and pushed, branch `policy-collapse-hunt`):**
