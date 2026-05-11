@@ -152,6 +152,23 @@ def main():
     print(f"  Win rate:       {rate:.3f}  CI95=[{ci_lo:.3f}, {ci_hi:.3f}]")
     print(f"  Avg game length: {result.get('avg_game_length', 0):.1f} moves")
     print(f"  Wall-clock:     {elapsed:.0f}s ({elapsed/max(games,1):.1f}s/game)")
+    # Per-side breakdown + deterministic-collapse flag
+    per_side = result.get("per_side") or {}
+    for side, ss in per_side.items():
+        print(
+            f"  side={side}: cand_wins={ss['cand_wins']}/{ss['games']} "
+            f"({ss['cand_win_rate']:.1%}); game_length "
+            f"min/avg/max = {ss['game_length_min']}/{ss['avg_game_length']:.1f}/"
+            f"{ss['game_length_max']}"
+        )
+    det_sides = result.get("deterministic_sides") or []
+    if det_sides:
+        print(
+            f"  ⚠️  DETERMINISTIC-COLLAPSE on {', '.join(det_sides)} — every "
+            f"game on those sides replayed the same line. The win rate "
+            f"measures side-coverage, not skill. Re-run with --temperature 0.5+ "
+            f"or with MCTS to break determinism."
+        )
     print("=" * 72)
 
     # Verdict line — friendly for the "intermediate player?" question.
@@ -171,6 +188,7 @@ def main():
             "checkpoint": str(args.checkpoint),
             "mode": mode,
             "depth": args.depth,
+            "temperature": args.temperature,
             "mcts_simulations": args.mcts_simulations if args.use_mcts else 0,
             "num_games": games,
             "candidate_wins": wins,
@@ -180,6 +198,8 @@ def main():
             "ci95": [ci_lo, ci_hi],
             "elapsed_seconds": elapsed,
             "verdict": verdict,
+            "per_side": result.get("per_side"),
+            "deterministic_sides": result.get("deterministic_sides"),
         }
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w") as f:

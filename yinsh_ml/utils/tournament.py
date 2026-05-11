@@ -711,6 +711,16 @@ class ModelTournament:
         draws = 0
         games_played = 0
         total_moves = 0
+        # Per-side bookkeeping so we can detect the deterministic-side artifact:
+        # when both candidate and heuristic play argmax, every game on a given
+        # side replays the same line, so the eval splits {0/half, half/half}
+        # by side-coverage rather than by skill. We surface that as a warning
+        # so callers don't read a 50% win rate as "tied" when it's really
+        # "wins all white, loses all black, deterministically."
+        per_side_stats = {
+            'white': {'cand_wins': 0, 'games': 0, 'move_counts': []},
+            'black': {'cand_wins': 0, 'games': 0, 'move_counts': []},
+        }
 
         # Pre-allocate a reusable input tensor for the candidate network.
         cand_input_tensor = candidate_network._acquire_input_tensor(batch_size=1)
@@ -833,6 +843,17 @@ class ModelTournament:
                 games_played += 1
                 total_moves += move_count
 
+                # Per-side bookkeeping
+                side_key = 'white' if candidate_is_white else 'black'
+                per_side_stats[side_key]['games'] += 1
+                per_side_stats[side_key]['move_counts'].append(move_count)
+                cand_won = (
+                    (winner == Player.WHITE and candidate_is_white)
+                    or (winner == Player.BLACK and not candidate_is_white)
+                )
+                if cand_won:
+                    per_side_stats[side_key]['cand_wins'] += 1
+
                 # Per-game completion log — running totals so the user can
                 # estimate ETA and track win rate as the eval progresses.
                 game_dt = time.time() - game_t0
@@ -859,6 +880,33 @@ class ModelTournament:
             candidate_network._release_tensor(cand_input_tensor)
 
         win_rate = (candidate_wins / games_played) if games_played > 0 else 0.0
+
+        # Per-side aggregation + deterministic-collapse detection.
+        side_summary = {}
+        deterministic_sides = []
+        for side, s in per_side_stats.items():
+            if s['games'] == 0:
+                continue
+            mc = s['move_counts']
+            length_min = min(mc)
+            length_max = max(mc)
+            length_range = length_max - length_min
+            side_summary[side] = {
+                'games': s['games'],
+                'cand_wins': s['cand_wins'],
+                'cand_win_rate': s['cand_wins'] / s['games'],
+                'avg_game_length': sum(mc) / len(mc),
+                'game_length_min': length_min,
+                'game_length_max': length_max,
+                'game_length_range': length_range,
+            }
+            # If 2+ games on a side and ALL games have identical length, the
+            # candidate's argmax + anchor's argmax replayed the same line every
+            # time on that side. That's the deterministic-collapse fingerprint
+            # — the win rate doesn't measure skill, it measures side-coverage.
+            if s['games'] >= 2 and length_range == 0:
+                deterministic_sides.append(side)
+
         result = {
             'games_played': games_played,
             'candidate_wins': candidate_wins,
@@ -870,12 +918,32 @@ class ModelTournament:
             'avg_game_length': (total_moves / games_played) if games_played > 0 else 0.0,
             'mode': mode_label,
             'mcts_simulations': mcts_simulations if use_mcts else 0,
+            'per_side': side_summary,
+            'deterministic_sides': deterministic_sides,
         }
         self.logger.info(
             f"Anchor eval [{mode_label}]: {candidate_label} vs {anchor_label} → "
             f"W/L/D = {candidate_wins}/{anchor_wins}/{draws} "
             f"({win_rate:.1%} win rate over {games_played} games)"
         )
+        # Per-side breakdown — helps catch the deterministic-collapse case
+        # where overall win rate hides a 100% / 0% side split.
+        for side, ss in side_summary.items():
+            self.logger.info(
+                f"  side={side}: cand_wins={ss['cand_wins']}/{ss['games']} "
+                f"({ss['cand_win_rate']:.1%})  "
+                f"game_length min/avg/max = "
+                f"{ss['game_length_min']}/{ss['avg_game_length']:.1f}/{ss['game_length_max']}"
+            )
+        if deterministic_sides:
+            self.logger.warning(
+                f"⚠️  Deterministic-collapse detected on side(s): "
+                f"{', '.join(deterministic_sides)}. Every game on these sides "
+                f"had identical move counts — candidate's argmax + anchor's "
+                f"argmax replayed the same line. The win rate measures "
+                f"side-coverage, not skill. Re-run with candidate_temperature "
+                f">= 0.5 or use_mcts=True to break the determinism."
+            )
         return result
 
     def run_anchor_eval_batch(
