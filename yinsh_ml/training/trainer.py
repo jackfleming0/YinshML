@@ -1057,6 +1057,26 @@ class YinshTrainer:
                 batch_entropy = -(policy_probs * log_probs).sum(dim=1).mean()
                 self.last_policy_entropy = float(batch_entropy.item())
 
+                # B3 telemetry: TARGET policy entropy (the entropy of the
+                # MCTS-derived training target itself), distinct from the
+                # predicted policy entropy above. Diagnoses target-side
+                # collapse — if MCTS visit distributions get too peaked too
+                # early, the policy head learns a narrow distribution even
+                # before training converges. Filtering: target_probs has the
+                # full 7433-slot policy support, but only valid moves get
+                # nonzero mass; using log(p+eps) on zero-mass entries cleanly
+                # contributes 0·log(eps) ≈ 0 (eps small but >0), so no need
+                # to mask explicitly.
+                eps = 1e-12
+                target_entropy = -(target_probs * torch.log(target_probs + eps)).sum(dim=1).mean()
+                self.last_policy_target_entropy = float(target_entropy.item())
+                if self.metrics_logger is not None:
+                    self.metrics_logger.log_scalar(
+                        'train/policy_target_entropy_mean',
+                        self.last_policy_target_entropy,
+                        step=self.current_iteration,
+                    )
+
             # ---- Value loss (reuses `pred_values` from the joint forward) ----
             # Classification-based value head (AlphaZero approach).
             # Uses cross-entropy loss on discrete outcome distribution.

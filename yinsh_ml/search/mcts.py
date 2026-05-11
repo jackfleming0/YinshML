@@ -21,6 +21,13 @@ from ..network.wrapper import NetworkWrapper
 from ..heuristics import YinshHeuristics
 from .training_tracker import TrainingTracker
 
+# Optional MetricsLogger for telemetry safeguard B1 (effective child visits).
+# Imported under TYPE_CHECKING to avoid the matplotlib pull-in cost on
+# consumers that don't need metrics.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..utils.metrics_logger import MetricsLogger
+
 
 class EvaluationMode(Enum):
     """Evaluation mode for MCTS leaf nodes."""
@@ -139,21 +146,34 @@ class MCTS:
                  config: Optional[MCTSConfig] = None,
                  mcts_metrics: Optional[MCTSMetrics] = None,
                  game_state_pool: Optional[GameStatePool] = None,
-                 training_tracker: Optional[TrainingTracker] = None):
+                 training_tracker: Optional[TrainingTracker] = None,
+                 metrics_logger: Optional["MetricsLogger"] = None):
         """
         Initialize MCTS with heuristic integration.
-        
+
         Args:
             network: The neural network wrapper
             config: MCTS configuration (uses defaults if None)
             mcts_metrics: Optional metrics collector
             game_state_pool: Optional memory pool for game states
             training_tracker: Optional training progress tracker for adaptive weights
+            metrics_logger: Optional MetricsLogger for telemetry safeguard B1
+                (effective child visits). When provided, every `search()` call
+                logs ``mcts/effective_child_visits`` so the W1-NEW batched-MCTS
+                regression detector has a signal to read.
         """
         self.network = network
         self.config = config or MCTSConfig()
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS")
+        # B1 telemetry plumbing — None-safe; everywhere we emit, we guard.
+        self.metrics_logger = metrics_logger
+        # Per-instance call counter; used as the `step` for log_scalar when
+        # no outer step is plumbed in.
+        self._search_call_count = 0
+        # Most recent effective_child_visits value, exposed for tests / probes
+        # that don't depend on metrics_logger being wired up.
+        self.last_effective_child_visits: Optional[float] = None
         
         # Memory pool management
         self.game_state_pool = game_state_pool
@@ -610,6 +630,9 @@ class MCTS:
                     move_idx = self.state_encoder.move_to_index(move)
                     if 0 <= move_idx < len(move_probs):
                         move_probs[move_idx] = prob
+            # B1: emit zero on the empty-root early-return path so the metric
+            # series doesn't silently drop samples when something has gone wrong.
+            self._log_effective_child_visits(root, budget)
             return move_probs
         
         # Get visit counts and apply temperature
@@ -645,5 +668,33 @@ class MCTS:
         # Store root value for use as training target (Fix #1)
         self.last_root_value = root.value() if root.visit_count > 0 else 0.0
 
+        # B1 telemetry: effective child visits ratio. After Wave 0, the W1-NEW
+        # workstream is fixing the batched-MCTS bug where many sims dead-end
+        # before reaching root.children — this metric is the regression
+        # detector. ~1.0 means every sim landed under a root child; <0.95
+        # means a non-trivial fraction of the sim budget was wasted on selection
+        # errors / max-depth bailouts.
+        self._log_effective_child_visits(root, budget)
+
         return move_probs
+
+    def _log_effective_child_visits(self, root, budget: int) -> None:
+        """Compute and log B1's effective_child_visits scalar.
+
+        Always sets ``last_effective_child_visits`` and bumps
+        ``_search_call_count`` so the step value stays monotonic even when
+        ``metrics_logger`` is None.
+        """
+        budget_for_metric = max(1, int(budget))  # guard against budget==0 in tests
+        try:
+            total = sum(c.visit_count for c in root.children.values()) if root.children else 0
+        except AttributeError:
+            total = 0
+        eff = float(total) / float(budget_for_metric)
+        self.last_effective_child_visits = eff
+        self._search_call_count += 1
+        if self.metrics_logger is not None:
+            self.metrics_logger.log_scalar(
+                'mcts/effective_child_visits', eff, step=self._search_call_count
+            )
 

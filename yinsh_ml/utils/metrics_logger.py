@@ -55,6 +55,12 @@ class MetricsLogger:
             'games': [],
             'training': [],
             'tournament': None,
+            # Generic time-series scalars logged via `log_scalar()`. Keyed by
+            # metric name, each entry is a list of {step, value} dicts. Used
+            # by the W1-NEW telemetry safeguards (B1 effective_child_visits,
+            # B2 value_outcome_correlation, B3 policy_target_entropy_mean) so
+            # callers don't have to thread through dataclass schemas.
+            'scalars': defaultdict(list),
             'summary_stats': {
                 'game_lengths': {
                     'mean': 0.0,
@@ -74,6 +80,125 @@ class MetricsLogger:
                 }
             }
         }
+
+    def log_scalar(self, name: str, value: float, step: Optional[int] = None) -> None:
+        """Log a scalar metric value at a given step.
+
+        Used by the W1-NEW telemetry safeguards (B1/B2/B3). Storage is
+        in-memory keyed by metric name in
+        ``self.current_metrics['scalars'][name]`` and serialized in
+        ``save_iteration()``.
+
+        Non-finite values (NaN, +/-inf) are dropped to None so the JSON
+        survives. Non-numeric values are dropped entirely with a warning so
+        a malformed call site doesn't poison the whole log.
+
+        Args:
+            name: Metric path, e.g. ``"mcts/effective_child_visits"``.
+            value: Scalar value (will be coerced to float).
+            step: Optional global step (training step, iteration, etc.).
+        """
+        # Lazy-init storage so callers don't have to call start_iteration()
+        # first (e.g. focused unit tests that exercise only the logging path).
+        if 'scalars' not in self.current_metrics:
+            self.current_metrics['scalars'] = defaultdict(list)
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            self.logger.warning(f"log_scalar({name}): non-numeric value {value!r}, dropping")
+            return
+        if not np.isfinite(v):
+            self.logger.warning(f"log_scalar({name}): non-finite value {v}, storing as None")
+            stored: Optional[float] = None
+        else:
+            stored = v
+        self.current_metrics['scalars'][name].append({'step': step, 'value': stored})
+        self.logger.debug(f"scalar/{name} @ {step}: {stored}")
+
+    # ---- B2: value-outcome correlation ------------------------------------
+    # The intent: per evaluation pass, collect (root_value_at_position_start,
+    # terminal_outcome_in_position_pov) pairs across the eval games, then
+    # Pearson r → log as ``eval/value_outcome_correlation``.
+    #
+    # Why it lives here and not in `enhanced_metrics.py`: that collector
+    # already computes a CONFIDENCE-vs-error correlation per game phase; the
+    # B2 safeguard needs a fundamentally different aggregation (across all
+    # eval positions, not per-phase), so a separate buffer keeps the two
+    # signals independent.
+    #
+    # See `compute_and_log_value_outcome_correlation()` for the aggregation
+    # entry point. `log_eval_value_pair()` is the per-position append; both
+    # are no-ops if the caller never wired them up.
+
+    def log_eval_value_pair(self, root_value: float, terminal_outcome: float) -> None:
+        """Append a (root_value, terminal_outcome) pair for B2 correlation.
+
+        Both arguments are expected in the same POV — typically the side
+        whose move it was at position start. Non-finite values are skipped
+        with a debug log (don't poison Pearson with NaN).
+
+        TODO(W1e): wire the actual call sites in tournament eval and/or the
+        per-iteration validation pass. Until then this method is callable
+        but uncalled; the unit test exercises it directly so the math is
+        proven before the plumbing lands. The integration point is
+        ``ModelTournament.run_anchor_eval`` (after each game completes,
+        you have access to ``terminal_outcome`` from the game runner and
+        the MCTS's ``last_root_value`` from the candidate's first move) —
+        but doing so cleanly requires touching the eval loop that W1e is
+        also restructuring, so we coordinate via the W1e workstream.
+        """
+        if not hasattr(self, '_eval_value_pairs'):
+            self._eval_value_pairs: List[Tuple[float, float]] = []
+        try:
+            rv = float(root_value)
+            to = float(terminal_outcome)
+        except (TypeError, ValueError):
+            self.logger.debug(f"log_eval_value_pair: non-numeric inputs {(root_value, terminal_outcome)}, skipping")
+            return
+        if not (np.isfinite(rv) and np.isfinite(to)):
+            self.logger.debug(f"log_eval_value_pair: non-finite inputs {(rv, to)}, skipping")
+            return
+        self._eval_value_pairs.append((rv, to))
+
+    def compute_and_log_value_outcome_correlation(
+        self, step: Optional[int] = None, clear: bool = True
+    ) -> Optional[float]:
+        """Pearson r over the buffered eval pairs; logged as
+        ``eval/value_outcome_correlation``.
+
+        Returns the computed r (None if too few points). When ``clear`` is
+        True (default), the buffer is reset so each eval pass produces one
+        scalar. Set ``clear=False`` if you want a running correlation across
+        a multi-pass eval.
+
+        Edge cases:
+          * Fewer than 2 pairs → returns None, logs nothing.
+          * Zero variance on either side (degenerate eval where every game
+            had the same outcome) → returns None, logs nothing, debug-warn.
+        """
+        pairs = getattr(self, '_eval_value_pairs', [])
+        if len(pairs) < 2:
+            self.logger.debug(
+                f"value_outcome_correlation: only {len(pairs)} pair(s) buffered, skipping"
+            )
+            if clear:
+                self._eval_value_pairs = []
+            return None
+        arr = np.asarray(pairs, dtype=np.float64)
+        x, y = arr[:, 0], arr[:, 1]
+        if np.std(x) == 0.0 or np.std(y) == 0.0:
+            self.logger.debug(
+                "value_outcome_correlation: zero variance on one side, skipping"
+            )
+            if clear:
+                self._eval_value_pairs = []
+            return None
+        # np.corrcoef returns a 2x2 matrix; we want the off-diagonal Pearson r.
+        r = float(np.corrcoef(x, y)[0, 1])
+        self.log_scalar('eval/value_outcome_correlation', r, step=step)
+        if clear:
+            self._eval_value_pairs = []
+        return r
 
     # def record_game_history(self, game_history: List[Dict]):
     #     """Record the history of a single game for later analysis."""

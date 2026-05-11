@@ -558,6 +558,34 @@ class ModelTournament:
     #
     # Kept as a separate call (not folded into the round-robin) so it
     # survives any future changes to the Elo / promotion-gate logic.
+    # TODO(W1-NEW B2 / W1e): Wire B2 value-outcome correlation here.
+    #
+    # The safeguard wants, per evaluation pass, a Pearson r between:
+    #   (a) MCTS root value at the start of each evaluated position, in the
+    #       POV of the player to move there
+    #   (b) terminal outcome of that game in the same POV (+1 candidate win,
+    #       -1 candidate loss, 0 draw, with sign-flip for white/black-as-
+    #       candidate symmetry)
+    # logged via ``metrics_logger.compute_and_log_value_outcome_correlation()``
+    # at the end of the eval pass.
+    #
+    # Integration points when W1e lands:
+    #   1. Plumb a `MetricsLogger` into `ModelTournament` (constructor arg),
+    #      or set it on the instance from the supervisor right before the
+    #      anchor eval call.
+    #   2. In `run_anchor_eval` (use_mcts=True branch only — raw-policy mode
+    #      has no MCTS root value), after each game:
+    #        rv = game_mcts.last_root_value  # root value at game start
+    #        outcome_in_pov = +1 if winner == candidate_color else -1 if winner else 0
+    #        metrics_logger.log_eval_value_pair(rv, outcome_in_pov)
+    #   3. After the game loop, call
+    #        metrics_logger.compute_and_log_value_outcome_correlation(step=current_iteration)
+    #
+    # NOT done here yet: the W1e workstream is restructuring exactly the
+    # game-loop block where (2) lands, and doing it twice is worse than
+    # waiting. The MetricsLogger API for B2 IS in place (see
+    # ``log_eval_value_pair`` / ``compute_and_log_value_outcome_correlation``)
+    # and is unit-tested, so wiring is a 5-line change once W1e is stable.
     def run_anchor_eval(
         self,
         candidate_network: NetworkWrapper,
