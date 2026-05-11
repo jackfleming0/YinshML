@@ -688,6 +688,75 @@ The original 24-hour writeup conclusion ("the RL recipe peaks at heuristic-mimic
 
 The remaining batch 2 v2 cells (deep_256x18 t=0.3-1.0, enh_256x12 all temps) will land in ~30 min and will all have per-side data with the warning system live.
 
+## Discovery run, batch 1b: combining winners + scaling axes (2026-05-11 01:08–02:17 UTC, ~$0.45)
+
+After batch 1 found two independent winners (depth=18, enhanced 15-ch encoding), batch 1b combined them and pushed each axis further. 6 variants, same combined-data training setup as batch 1, same boardspace 100-game holdout.
+
+### Full batch 1 + 1b holdout table
+
+| variant | MAIN top1 | MAIN top3 | val_mse | RP top1 | note |
+|---|---:|---:|---:|---:|---|
+| ctrl_256x12 (basic) | 4.9% | 15.0% | 1.16 | 6.8% | baseline |
+| wide_384x12 | 3.5% | 9.6% | 1.75 | 0.4% | width: hurts |
+| deep_256x18 | 6.2% | 15.2% | 0.98 | 6.8% | depth winner |
+| big_512x18 | 3.3% | 10.4% | 1.84 | 1.0% | big: hurts more |
+| **enh_256x12** | **6.4%** | 15.8% | 1.17 | 7.6% | encoding winner |
+| deep_enh_256x18 | 6.3% | **16.8%** | 0.98 | 5.3% | combined: no compound |
+| superdeep_256x24 | 5.7% | 15.2% | 1.06 | 6.7% | deeper hurts |
+| deep_enh_256x24 | 6.0% | 15.2% | **0.87** | 6.5% | best value head |
+| deep_256x18_60ep | 5.6% | 16.6% | 1.04 | 7.9% | longer training hurts |
+| tiny_128x8 | 5.5% | 15.1% | 1.19 | 3.0% | floor: 4× smaller, barely worse |
+| tiny_enh_128x8 | 5.8% | 16.3% | 1.15 | 7.4% | tiny + encoding: solid |
+
+### Findings — the 6% ceiling is a data ceiling, not an architecture ceiling
+
+1. **The MAIN top-1 ceiling holds at ~6%.** No variant in either batch crosses 6.4%. Combining the two batch 1 winners doesn't compound. Scaling depth past 18 hurts. Scaling width hurts everywhere. Longer training hurts.
+
+2. **Tiny network (128×8, ~1.5M params) reaches 5.5% MAIN top-1.** Roughly half a percentage point below the 256×12 / 256×18 family. **At 80k positions, a 4× smaller network gets nearly the same generalization.** This is the cleanest possible evidence that the architecture isn't the bottleneck — we're saturated on data, not capacity.
+
+3. **Different axes feed different heads.** Depth → value head benefits (val_mse 1.16 → 0.87 for deep_enh_256x24). Encoding → policy head benefits (RP top-1 0.4-3% basic-encoding → 6-7.6% enhanced-encoding). They're independent because they're solving different subproblems.
+
+4. **Top-3 separates better than top-1.** deep_enh_256x18 has the best MAIN top-3 (16.8%), 1.6 pp above ctrl. Combined model isn't picking a better single move but is ranking the top several moves more accurately. Top-3 is the metric to track when comparing future architectures.
+
+5. **60 epochs is past the sweet spot for the depth winner.** deep_256x18 at 30 epochs: 6.2% / val_mse 0.98. Same arch at 60 epochs: 5.6% / val_mse 1.04. Cosine LR + small dataset means longer training memorizes more without generalizing. The val_loss minimum was at epoch ~5 in batch 1; by epoch 60 we're deep in overfit territory.
+
+6. **Tiny + enhanced (1.5M params, 15-ch) gets 5.8%.** Three iterations of "what helps":
+   - 256×12 basic: 4.9% (overparameterized + basic input)
+   - 128×8 enhanced: 5.8% (right-sized + rich input)
+   - 256×18 basic: 6.2% (overparameterized + extra depth saves it)
+   
+   The right move is "match capacity to data" + "richer input." Bigger isn't better.
+
+### Three lines of evidence converge
+
+Across batches 1, 1b, and the supervised baseline from before this discovery run:
+
+- Doubling data (28k BGA → 57k BGA+boardspace): +0.5 pp MAIN top-1 (5.0 → 5.5)
+- Doubling depth (256×12 → 256×18): +1.3 pp MAIN top-1 (4.9 → 6.2)
+- Switching encoding (6-ch → 15-ch): +1.5 pp MAIN top-1 (4.9 → 6.4)
+- Combining depth + encoding: ~0 pp on top-1, +1.6 pp on top-3
+- Halving capacity (256×12 → 128×8 + enhanced): -0.6 pp MAIN top-1
+
+So: data and architecture moves give 0.5-1.5 pp each, with no compounding, and capacity barely matters once enough is present. The 6% ceiling is structural to the dataset+task at hand.
+
+### What this changes about the path forward
+
+Prior writeup framing said "next-session priorities" were:
+1. Larger network
+2. More high-quality data
+3. Different loss / target
+
+After batch 1+1b, priorities reorder to:
+1. **More data** is the only thing that will move the ceiling beyond 6%. Capacity is already sufficient — overfit signal is everywhere.
+2. **Different loss / target** is still important and untested. The visit-count target at 48 sims is the original RL signal problem; supervised has its own (cross-entropy on expert moves doesn't account for "all of these moves are reasonable" — top-3 of 17% suggests the model knows but can't commit).
+3. **Larger network is the wrong move.** Demoted from priority 1 to anti-priority. Going bigger amplifies overfit. The tiny + enhanced result is the most informative data point we have on this.
+
+### Open questions tested next
+
+- Does **MCTS at 48/200/400 sims** lift the 6% ceiling? Search adds a non-network correction; should rescue the brittle argmax. Batch 3 staged.
+- Does the **deep_enh_256x18 ranking advantage** (best top-3) show up as a real strength advantage under MCTS or stochastic-temp play?
+- What does **enh_256x12 stochastic-temp** look like? Batch 2 v2 missed this due to the wrapper bug. Retry running now.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
