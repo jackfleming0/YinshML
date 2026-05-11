@@ -1257,7 +1257,9 @@ class YinshTrainer:
           1. Decode tensor → GameState (move_number is recovered from the
              `move_numbers` deque, since `decode_state` can't reconstruct it).
           2. Run long-search MCTS with the live network as the leaf evaluator.
-             Visit-distribution → π_long. `mcts.last_root_value` → v_long.
+             Visit-distribution → π_long. The buffered per-position terminal
+             outcome (`self.experience.values[idx]`, leaf-player POV) → v_long.
+             (Pre-T1.2 this used `mcts.last_root_value`, a self-bootstrap loop.)
           3. Forward the network on the encoded state with grad enabled to
              produce (policy_logits, v_pred).
           4. Loss = λ_π · CE(π_long, softmax(logits)) + λ_v · MSE(v_long, v_pred).
@@ -1366,7 +1368,15 @@ class YinshTrainer:
                         self._sc_last_exc = f"{type(e).__name__}: {e}"
                     mcts.reset_tree()
                     continue
-                v_long = float(getattr(mcts, 'last_root_value', 0.0))
+                # T1.2 fix: use the buffered per-position terminal outcome
+                # (leaf-player POV, written by `_run_game_loop` at
+                # self_play.py:1751-1754) as the value-head training target.
+                # Previously this used `mcts.last_root_value`, which made the
+                # value head distill from its own bootstrapped predictions —
+                # a pure self-bootstrap loop with no external grounding signal.
+                # `last_root_value` is preserved for W1b telemetry (correlation
+                # of root value vs. realized outcome).
+                v_long = float(self.experience.values[idx])
                 mcts.reset_tree()  # independent positions
 
                 # MCTS returned a normalized visit distribution; defend against
