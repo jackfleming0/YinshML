@@ -1339,6 +1339,12 @@ class SelfPlay:
         self.mcts_batch_size = mcts_batch_size
         self.use_shared_evaluator = use_shared_evaluator
 
+        # T4.10: cumulative count of worker / thread crashes observed by
+        # the parent across all calls to generate_games. Bumped from the
+        # `as_completed` exception handler. Used by tests + ops dashboards
+        # to verify worker robustness.
+        self.worker_crash_count: int = 0
+
         # Store all parameters needed by MCTS and workers explicitly
         self.mcts_config = {
             'evaluation_mode': evaluation_mode,
@@ -1454,7 +1460,14 @@ class SelfPlay:
                     else:
                         self.logger.warning(f"Game {game_id} returned None result.")
                 except Exception as e:
-                    self.logger.error(f"Error generating game {game_id}: {e}", exc_info=True)
+                    # T4.10: bump the same crash counter the parallel paths
+                    # use so callers can monitor failures uniformly.
+                    self.worker_crash_count += 1
+                    self.logger.error(
+                        f"Error generating game {game_id} "
+                        f"(crash #{self.worker_crash_count}): {e}",
+                        exc_info=True,
+                    )
 
             # Cleanup temp model file
             if 'model_path' in locals() and os.path.exists(model_path):
@@ -1525,8 +1538,13 @@ class SelfPlay:
                                 else:
                                     self.logger.warning("Thread returned None result for a game.")
                             except Exception as e:
+                                # T4.10: count crashed thread workers so the
+                                # supervisor / tests can see infra failures
+                                # rather than silently dropping games.
+                                self.worker_crash_count += 1
                                 self.logger.error(
-                                    f"Error processing game result from thread: {e}",
+                                    f"Error processing game result from thread "
+                                    f"(crash #{self.worker_crash_count}): {e}",
                                     exc_info=True,
                                 )
             except Exception as e:
@@ -1598,8 +1616,18 @@ class SelfPlay:
                              self.logger.warning(f"Worker returned None result for a game.")
 
                     except Exception as e:
-                        # Log errors from worker processes
-                        self.logger.error(f"Error processing game result from worker: {e}", exc_info=True)
+                        # T4.10: count crashed process workers (e.g. worker
+                        # raised, was killed by OOM, or exited via os._exit).
+                        # Pool resources inside the dead worker process die
+                        # with it — there's nothing for the parent to
+                        # release — but we still want the crash to be
+                        # observable rather than swallowed.
+                        self.worker_crash_count += 1
+                        self.logger.error(
+                            f"Error processing game result from worker "
+                            f"(crash #{self.worker_crash_count}): {e}",
+                            exc_info=True,
+                        )
 
         except Exception as e:
              self.logger.error(f"Error during parallel game generation: {e}", exc_info=True)
@@ -1649,7 +1677,8 @@ def _run_game_loop(
     (optionally) `local_game_state_pool` — and for cleaning up resources
     that are caller-owned (`network`, `mcts.network`, the pool itself).
     This function only owns the GameState it acquires from the pool /
-    constructs.
+    constructs and is responsible for releasing it on every exit path,
+    including exceptions (T4.10: pool-resource leak hardening).
 
     Returns the same 5-tuple as `play_game_worker`:
         (states, policies, values, temp_data, game_history)
@@ -1664,6 +1693,48 @@ def _run_game_loop(
         from ..memory import reset_game_state
         reset_game_state(state)
 
+    # T4.10: ensure the GameState is returned to its pool on every exit
+    # path (normal return, raised exception). The process-pool worker
+    # creates its pool inside the worker process so a crashed worker
+    # can't leak into the parent — but the thread-pool path shares the
+    # parent process, and any future caller that reuses a pool across
+    # games will leak GameStates without this guard.
+    try:
+        return _run_game_loop_inner(
+            state=state,
+            mcts=mcts,
+            state_encoder=state_encoder,
+            game_id=game_id,
+            worker_logger=worker_logger,
+            use_batched_mcts=use_batched_mcts,
+            mcts_batch_size=mcts_batch_size,
+        )
+    finally:
+        # CppGameState path has no pool — those states fall out of scope
+        # and are GC'd. Only return pool-allocated states.
+        if local_game_state_pool is not None and not use_cpp_engine:
+            try:
+                local_game_state_pool.return_game_state(state)
+            except Exception as cleanup_err:  # pragma: no cover - defensive
+                worker_logger.warning(
+                    f"Game {game_id}: failed to return GameState to pool: "
+                    f"{cleanup_err}"
+                )
+
+
+def _run_game_loop_inner(
+        state,
+        mcts: "MCTS",
+        state_encoder,
+        game_id: int,
+        worker_logger: logging.Logger,
+        use_batched_mcts: bool,
+        mcts_batch_size: int,
+):
+    """Body of the per-game loop. Split from `_run_game_loop` so the
+    GameState-return-to-pool finally block in the outer function has a
+    single ownership boundary regardless of how the loop exits.
+    """
     states: List[np.ndarray] = []
     policies: List[np.ndarray] = []
     players = []
@@ -1768,11 +1839,8 @@ def _run_game_loop(
                 f"hits={cs['hits']} misses={cs['misses']} size={cs['size']}/{cs['capacity']}"
             )
 
-    # Return the GameState to its pool if applicable. CppGameState path
-    # has no pool — those states fall out of scope and are GC'd.
-    if local_game_state_pool is not None and not use_cpp_engine:
-        local_game_state_pool.return_game_state(state)
-
+    # GameState is returned to its pool by `_run_game_loop`'s finally
+    # block (T4.10), so this body just produces the result tuple.
     return states, policies, values, temp_data, game_history
 
 

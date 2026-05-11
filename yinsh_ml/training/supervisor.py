@@ -463,6 +463,14 @@ class TrainingSupervisor:
         self.best_model_path: Optional[Path] = None
         # Save best model directly in the run directory for simplicity
         self.best_model_save_path: Path = self.save_dir / "best_model.pt"
+        # T4.11: filesystem mtimes recorded the last time we wrote the
+        # best-model checkpoints. Compared against the on-disk mtimes
+        # before a gate revert to detect corruption / stale state files.
+        # `None` means "no record yet" — older state files written before
+        # T4.11 will load with these as None and the revert check
+        # silently skips (backward compatible).
+        self.best_model_path_mtime: Optional[float] = None
+        self.best_model_save_path_mtime: Optional[float] = None
         self._iteration_counter: int = 0 # Initialize iteration counter
 
         # --- Checkpoint Retention ---
@@ -491,6 +499,26 @@ class TrainingSupervisor:
         self.reset_optimizer_on_revert: bool = bool(
             self.mode_settings.get('reset_optimizer_on_revert', True)
         )
+
+        # T4.11: behavior when the recorded best_model mtime doesn't match
+        # what's on disk at revert time. Three modes:
+        #   'fail'           - log + raise so the corruption is loud (default)
+        #   'keep_rejected'  - log + skip the revert; keep current weights
+        #   'force_revert'   - log a warning + revert anyway (legacy behavior)
+        # Picked for the warm-start regime where a silent stale revert can
+        # quietly destroy a run; fail-fast surfaces the disk inconsistency
+        # before further iterations bake it in.
+        self.gate_revert_on_mtime_mismatch: str = str(
+            self.mode_settings.get('gate_revert_on_mtime_mismatch', 'fail')
+        )
+        if self.gate_revert_on_mtime_mismatch not in {
+            'fail', 'keep_rejected', 'force_revert'
+        }:
+            raise ValueError(
+                f"gate_revert_on_mtime_mismatch must be one of "
+                f"'fail' | 'keep_rejected' | 'force_revert', got "
+                f"{self.gate_revert_on_mtime_mismatch!r}"
+            )
 
         # --- Absolute Evaluation Anchor (CLOUD_TRAINING_PLAN §1.3) ---
         # Fixed opponent per iteration so we can track absolute strength
@@ -1444,6 +1472,10 @@ class TrainingSupervisor:
             self.best_model_path = checkpoint_path
             if self.best_model_path.exists():
                 self.network.save_model(str(self.best_model_save_path))
+                # T4.11: snapshot the on-disk mtimes immediately after
+                # the writes so a later gate-revert can detect drift.
+                # Read AFTER the save so we capture the post-write value.
+                self._record_best_model_mtimes()
                 self.logger.info(f"✅ NEW BEST: Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
             else:
                 self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
@@ -1496,22 +1528,33 @@ class TrainingSupervisor:
                     f"Reloading best model (iter {self.best_model_iteration}) "
                     f"for next self-play iteration."
                 )
-                try:
-                    self.network.load_model(str(self.best_model_path))
-                    self.logger.info(f"   ✓ Loaded best weights from {self.best_model_path.name}")
-                    if self.reset_optimizer_on_revert:
-                        # Momentum was building in the direction of the rejected
-                        # weights — that direction was bad by definition (gate
-                        # failed), so resetting prevents the next training step
-                        # from immediately marching back into the rejected zone.
-                        self._reinitialize_optimizers()
-                except Exception as exc:
-                    # Don't crash the whole run on a revert failure. Fall back
-                    # to continuous-training behavior with a loud warning.
-                    self.logger.error(
-                        f"Revert failed ({exc}); continuing with rejected weights. "
-                        f"This iteration's self-play data may be poor."
-                    )
+
+                # T4.11: validate the on-disk best-model mtime against the
+                # value we recorded at promotion time. A mismatch means
+                # `best_model.pt` (or the per-iteration checkpoint) was
+                # rewritten or corrupted out from under us, so the bytes
+                # we're about to load may not be the "best" model the
+                # state file is pointing at. Behavior is configurable.
+                # `_check_best_model_mtime_for_revert` raises in 'fail'
+                # mode and returns False in 'keep_rejected' mode.
+                proceed = self._check_best_model_mtime_for_revert()
+                if proceed:
+                    try:
+                        self.network.load_model(str(self.best_model_path))
+                        self.logger.info(f"   ✓ Loaded best weights from {self.best_model_path.name}")
+                        if self.reset_optimizer_on_revert:
+                            # Momentum was building in the direction of the rejected
+                            # weights — that direction was bad by definition (gate
+                            # failed), so resetting prevents the next training step
+                            # from immediately marching back into the rejected zone.
+                            self._reinitialize_optimizers()
+                    except Exception as exc:
+                        # Don't crash the whole run on a revert failure. Fall back
+                        # to continuous-training behavior with a loud warning.
+                        self.logger.error(
+                            f"Revert failed ({exc}); continuing with rejected weights. "
+                            f"This iteration's self-play data may be poor."
+                        )
             else:
                 if self.revert_on_gate_failure:
                     # Flag was on but we couldn't actually revert (no best
@@ -2158,6 +2201,19 @@ class TrainingSupervisor:
                 self.best_model_iteration = state.get('best_model_iteration', -1)
                 best_path_str = state.get('best_model_path')
                 self._iteration_counter = state.get('_iteration_counter', 0) # Load counter
+                # T4.11: optional fields. Missing (legacy state file) →
+                # None → mtime guard skips the check on the first revert
+                # after resume and logs a warning. Subsequent promotions
+                # in this run will populate them.
+                self.best_model_path_mtime = state.get('best_model_path_mtime')
+                self.best_model_save_path_mtime = state.get('best_model_save_path_mtime')
+                if self.best_model_path_mtime is None and best_path_str:
+                    self.logger.warning(
+                        "T4.11: best_model_state.json has no "
+                        "'best_model_path_mtime' field (legacy / pre-T4.11 "
+                        "state file). Mtime guard will skip until the next "
+                        "promotion in this run."
+                    )
 
                 if best_path_str:
                     # Interpret stored path as relative to save_dir (portable across moves).
@@ -2213,7 +2269,11 @@ class TrainingSupervisor:
             'best_model_elo': self.best_model_elo,
             'best_model_iteration': self.best_model_iteration,
             'best_model_path': relative_best_path, # Store relative path or filename
-            '_iteration_counter': self._iteration_counter # Save counter
+            '_iteration_counter': self._iteration_counter, # Save counter
+            # T4.11: filesystem-mtime guard for the gate-revert path. May
+            # be null when no promotion has happened in this run yet.
+            'best_model_path_mtime': self.best_model_path_mtime,
+            'best_model_save_path_mtime': self.best_model_save_path_mtime,
         }
         state_path = self.save_dir / "best_model_state.json"
         try:
@@ -2228,8 +2288,136 @@ class TrainingSupervisor:
         self.best_model_elo = -float('inf')
         self.best_model_iteration = -1
         self.best_model_path = None
+        self.best_model_path_mtime = None
+        self.best_model_save_path_mtime = None
         self._iteration_counter = 0 # Reset counter too
         self.logger.info("Reset best model tracking state.")
+
+    # ------------------------------------------------------------------ #
+    # T4.11 helpers — best-model mtime tracking for the gate-revert path.
+    # ------------------------------------------------------------------ #
+    def _record_best_model_mtimes(self) -> None:
+        """Snapshot on-disk mtimes for the best-model artifacts.
+
+        Called immediately after a successful promotion writes
+        ``best_model.pt`` and reflects the per-iteration checkpoint
+        ``best_model_path``. Read AFTER the writes so the recorded
+        value is the post-write mtime — used later by
+        ``_check_best_model_mtime_for_revert`` to detect drift.
+        """
+        try:
+            if self.best_model_path is not None and self.best_model_path.exists():
+                self.best_model_path_mtime = self.best_model_path.stat().st_mtime
+            else:
+                self.best_model_path_mtime = None
+            if self.best_model_save_path is not None and self.best_model_save_path.exists():
+                self.best_model_save_path_mtime = self.best_model_save_path.stat().st_mtime
+            else:
+                self.best_model_save_path_mtime = None
+        except OSError as e:
+            # Filesystem error reading mtime — clear so the next revert
+            # check goes the "missing record" path rather than a stale
+            # value masquerading as fresh.
+            self.logger.warning(
+                f"T4.11: failed to record best-model mtimes ({e}); "
+                f"skipping mtime guard until next promotion."
+            )
+            self.best_model_path_mtime = None
+            self.best_model_save_path_mtime = None
+
+    def _check_best_model_mtime_for_revert(self) -> bool:
+        """Validate the on-disk best-model mtime against the recorded value.
+
+        Returns True if the caller should proceed with the revert,
+        False if the caller should skip it (keep rejected weights).
+        Raises ``RuntimeError`` when ``gate_revert_on_mtime_mismatch ==
+        'fail'`` and a mismatch is detected.
+
+        Backward compatibility: if no mtime is recorded (e.g. state file
+        was written by a pre-T4.11 supervisor, or the run has never
+        promoted yet), the check is skipped and we proceed.
+        """
+        # Nothing recorded yet → nothing to check. Common on the first
+        # revert of a freshly resumed run from a legacy state file.
+        if self.best_model_path_mtime is None:
+            self.logger.warning(
+                "T4.11: no best_model_path_mtime recorded — skipping the "
+                "mtime guard. (Likely a pre-T4.11 state file or a run "
+                "that has never promoted.)"
+            )
+            return True
+        if self.best_model_path is None or not self.best_model_path.exists():
+            # The .exists() check at the call site already gated this,
+            # but be defensive — a vanished checkpoint is itself a
+            # revert-blocking condition.
+            self.logger.error(
+                "T4.11: best_model_path is missing on disk at revert "
+                "time. Cannot trust the source bytes."
+            )
+            return self._handle_mtime_mismatch(
+                actual=None, recorded=self.best_model_path_mtime,
+                reason="best_model_path missing",
+            )
+        try:
+            actual_mtime = self.best_model_path.stat().st_mtime
+        except OSError as e:
+            self.logger.error(
+                f"T4.11: failed to stat {self.best_model_path} during "
+                f"revert check: {e}"
+            )
+            return self._handle_mtime_mismatch(
+                actual=None, recorded=self.best_model_path_mtime,
+                reason=f"stat() failed: {e}",
+            )
+
+        # Use a tight tolerance — any rewrite advances mtime by far more
+        # than a microsecond. Equality with a small epsilon catches any
+        # filesystem-precision quirks without masking real changes.
+        if abs(actual_mtime - self.best_model_path_mtime) <= 1e-6:
+            return True
+        return self._handle_mtime_mismatch(
+            actual=actual_mtime, recorded=self.best_model_path_mtime,
+            reason="mtime drift",
+        )
+
+    def _handle_mtime_mismatch(
+        self,
+        *,
+        actual: Optional[float],
+        recorded: float,
+        reason: str,
+    ) -> bool:
+        """Apply the ``gate_revert_on_mtime_mismatch`` policy.
+
+        Returns True iff the caller should proceed with the revert.
+        Raises ``RuntimeError`` in 'fail' mode.
+        """
+        actual_str = f"{actual:.6f}" if actual is not None else "<missing>"
+        msg = (
+            f"T4.11: best-model mtime mismatch — "
+            f"recorded={recorded:.6f}, actual={actual_str}, reason={reason}. "
+            f"best_model_path={self.best_model_path}, "
+            f"best_model_iteration={self.best_model_iteration}"
+        )
+        if self.gate_revert_on_mtime_mismatch == 'fail':
+            self.logger.error(msg)
+            raise RuntimeError(
+                f"{msg} | gate_revert_on_mtime_mismatch='fail' — "
+                f"refusing to load potentially corrupted/stale weights."
+            )
+        if self.gate_revert_on_mtime_mismatch == 'keep_rejected':
+            self.logger.error(
+                f"{msg} | gate_revert_on_mtime_mismatch='keep_rejected' — "
+                f"skipping revert; keeping current (rejected) weights."
+            )
+            return False
+        # 'force_revert'
+        self.logger.warning(
+            f"{msg} | gate_revert_on_mtime_mismatch='force_revert' — "
+            f"reverting anyway. Bytes loaded may not match the recorded "
+            f"best model."
+        )
+        return True
 
     def _maybe_sync_run_dir(self) -> None:
         """Shell out to scripts/sync_run.sh if SYNC_RUN_DEST is set.
