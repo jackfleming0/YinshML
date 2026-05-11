@@ -76,6 +76,17 @@ class MCTSConfig:
     epsilon_mix_end: float = 0.0
     epsilon_mix_taper_moves: int = 20
 
+    # Iteration-aware Dirichlet noise tapering (Tier 3 #6). When the caller
+    # passes `iteration_progress` ∈ [0,1] into `search`, the move-number-derived
+    # epsilon is additionally multiplied by a factor that linearly interpolates
+    # from `epsilon_mix_iteration_start` (at progress 0) to
+    # `epsilon_mix_iteration_end` (at progress 1). Defaults of 1.0 / 1.0 are
+    # opt-in: with both at 1.0 OR when iteration_progress is None, the final
+    # epsilon equals the move-number taper alone (current behavior preserved).
+    # Example: end=0.3 → 70% noise reduction by the last iteration.
+    epsilon_mix_iteration_start: float = 1.0
+    epsilon_mix_iteration_end: float = 1.0
+
 
 class MCTSNode:
     """MCTS node with heuristic evaluation caching."""
@@ -235,16 +246,40 @@ class MCTS:
         """
         return MCTSNode(None, parent=parent, prior_prob=prior_prob, c_puct=self.config.c_puct)
     
-    def _compute_epsilon_mix(self, move_number: int) -> float:
+    def _compute_epsilon_mix(
+        self,
+        move_number: int,
+        iteration_progress: Optional[float] = None,
+    ) -> float:
         """Linearly taper root-noise mixing fraction from `epsilon_mix_start`
         at move 0 to `epsilon_mix_end` at `epsilon_mix_taper_moves`, then
-        clamped at end. Returns start value if taper is disabled."""
+        clamped at end. Returns start value if taper is disabled.
+
+        When `iteration_progress` is supplied (∈ [0,1]), the result is
+        additionally multiplied by a factor that linearly interpolates from
+        `epsilon_mix_iteration_start` (at 0.0) to `epsilon_mix_iteration_end`
+        (at 1.0). Default config (both knobs at 1.0) AND the legacy callsite
+        (`iteration_progress=None`) preserve identical pre-change behavior.
+        """
         if self.config.epsilon_mix_taper_moves <= 0:
-            return self.config.epsilon_mix_start
-        alpha = min(max(move_number, 0) / self.config.epsilon_mix_taper_moves, 1.0)
-        return self.config.epsilon_mix_start + alpha * (
-            self.config.epsilon_mix_end - self.config.epsilon_mix_start
+            base = self.config.epsilon_mix_start
+        else:
+            alpha = min(max(move_number, 0) / self.config.epsilon_mix_taper_moves, 1.0)
+            base = self.config.epsilon_mix_start + alpha * (
+                self.config.epsilon_mix_end - self.config.epsilon_mix_start
+            )
+
+        if iteration_progress is None:
+            return base
+
+        # Clamp progress into [0,1] defensively — callers may divide by an
+        # off-by-one total or pass progress for a "bonus" iteration.
+        p = min(max(float(iteration_progress), 0.0), 1.0)
+        iter_factor = self.config.epsilon_mix_iteration_start + p * (
+            self.config.epsilon_mix_iteration_end
+            - self.config.epsilon_mix_iteration_start
         )
+        return base * iter_factor
 
     def _get_simulation_budget(self, move_number: int) -> int:
         """Get simulation budget based on move number."""
@@ -445,14 +480,23 @@ class MCTS:
             return (self.config.initial_temp - 
                    (self.config.initial_temp - self.config.final_temp) * progress)
     
-    def search(self, state: GameState, move_number: int) -> np.ndarray:
+    def search(
+        self,
+        state: GameState,
+        move_number: int,
+        iteration_progress: Optional[float] = None,
+    ) -> np.ndarray:
         """
         Perform MCTS search with heuristic integration.
-        
+
         Args:
             state: Current game state
             move_number: Current move number for temperature calculation
-            
+            iteration_progress: Optional training progress in [0,1]. When set,
+                feeds into `_compute_epsilon_mix` so root Dirichlet noise can
+                additionally taper across training iterations (Tier 3 #6).
+                None preserves the legacy move-number-only schedule.
+
         Returns:
             Policy vector over all possible moves
         """
@@ -528,9 +572,12 @@ class MCTS:
                         
                         # Apply Dirichlet noise at root. Mixing fraction tapers
                         # with move_number so late-game positions lose root
-                        # randomness — see `_compute_epsilon_mix`.
+                        # randomness — and additionally with iteration_progress
+                        # when supplied (Tier 3 #6) — see `_compute_epsilon_mix`.
                         if node is root and not hasattr(root, "dirichlet_applied"):
-                            epsilon_mix = self._compute_epsilon_mix(move_number)
+                            epsilon_mix = self._compute_epsilon_mix(
+                                move_number, iteration_progress=iteration_progress
+                            )
                             if self.config.dirichlet_alpha > 0 and len(valid_moves) > 0 and epsilon_mix > 0:
                                 noise = np.random.dirichlet([self.config.dirichlet_alpha] * len(valid_moves))
                                 for i, move in enumerate(valid_moves):

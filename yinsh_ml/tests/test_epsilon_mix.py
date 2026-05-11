@@ -227,3 +227,237 @@ class TestConstructorDefaults:
             a = search_mcts._compute_epsilon_mix(mn)
             b = train_mcts._compute_epsilon_mix(mn)
             assert a == pytest.approx(b), f"diverged at move {mn}: search={a}, train={b}"
+
+
+# --------------------------------------------------------------------------- #
+# Iteration-aware Dirichlet tapering (Tier 3 #6)                             #
+# --------------------------------------------------------------------------- #
+
+
+def _baseline_for(mcts: MCTS, move_number: int) -> float:
+    """Compute the expected move-number-only epsilon (no iteration factor)
+    by temporarily clearing iteration_progress."""
+    saved = mcts.iteration_progress
+    mcts.iteration_progress = None
+    try:
+        return mcts._compute_epsilon_mix(move_number)
+    finally:
+        mcts.iteration_progress = saved
+
+
+class TestIterationAwareTaperTrainingMCTS:
+    """Iteration tapering on the training-path MCTS (`yinsh_ml.training.self_play.MCTS`)."""
+
+    def test_default_constructor_has_iteration_no_op(self):
+        """Defaults must preserve current behavior — both knobs at 1.0,
+        iteration_progress at None."""
+        mcts = _build_mcts()
+        assert mcts.epsilon_mix_iteration_start == pytest.approx(1.0)
+        assert mcts.epsilon_mix_iteration_end == pytest.approx(1.0)
+        assert mcts.iteration_progress is None
+
+    def test_iteration_progress_none_preserves_baseline(self):
+        """`iteration_progress=None` short-circuits the iteration factor
+        even when both knobs are non-default."""
+        mcts = _build_mcts(
+            epsilon_mix_start=0.4, epsilon_mix_end=0.1, epsilon_mix_taper_moves=20,
+        )
+        mcts.epsilon_mix_iteration_start = 1.0
+        mcts.epsilon_mix_iteration_end = 0.3  # Aggressive taper
+        mcts.iteration_progress = None  # But disabled
+
+        for mn in [0, 5, 20, 40]:
+            assert mcts._compute_epsilon_mix(mn) == pytest.approx(_baseline_for(mcts, mn))
+
+    @pytest.mark.parametrize(
+        "move_number,iter_start,iter_end,progress,scale",
+        [
+            # (move=40, progress=0.0) — start of training, factor=iter_start
+            (40, 1.0, 0.3, 0.0, 1.0),
+            # (move=40, progress=0.9, end=0.3) — far through training, factor ≈ 0.37
+            (40, 1.0, 0.3, 0.9, 1.0 + 0.9 * (0.3 - 1.0)),
+            # End of training: factor exactly = iter_end
+            (10, 1.0, 0.3, 1.0, 0.3),
+            # Mid-training with default iter_start=1.0, iter_end=0.5:
+            (5, 1.0, 0.5, 0.5, 1.0 + 0.5 * (0.5 - 1.0)),
+            # Defaults at any progress: scale = 1.0 (no-op)
+            (12, 1.0, 1.0, 0.5, 1.0),
+            # Increasing taper (iter_start < iter_end): also supported
+            (15, 0.5, 1.0, 0.4, 0.5 + 0.4 * (1.0 - 0.5)),
+        ],
+    )
+    def test_parametrized_scaling(
+        self, move_number, iter_start, iter_end, progress, scale
+    ):
+        """The iteration factor is a multiplicative scalar on the
+        move-number baseline. (move=40, progress=0.0) → noise unchanged.
+        (move=40, progress=0.9, end=0.3) → noise ~37% of baseline."""
+        mcts = _build_mcts(
+            epsilon_mix_start=0.25, epsilon_mix_end=0.0, epsilon_mix_taper_moves=20,
+        )
+        mcts.epsilon_mix_iteration_start = iter_start
+        mcts.epsilon_mix_iteration_end = iter_end
+
+        mcts.iteration_progress = None
+        baseline = mcts._compute_epsilon_mix(move_number)
+
+        mcts.iteration_progress = progress
+        actual = mcts._compute_epsilon_mix(move_number)
+
+        assert actual == pytest.approx(baseline * scale, abs=1e-9), (
+            f"move={move_number}, progress={progress}, "
+            f"start={iter_start}, end={iter_end}: "
+            f"expected {baseline * scale}, got {actual}"
+        )
+
+    def test_progress_clamped_to_unit_interval(self):
+        """Progress > 1.0 or < 0.0 is clamped — defensive against
+        off-by-one bugs in the supervisor."""
+        mcts = _build_mcts(
+            epsilon_mix_start=0.25, epsilon_mix_end=0.0, epsilon_mix_taper_moves=20,
+        )
+        mcts.epsilon_mix_iteration_start = 1.0
+        mcts.epsilon_mix_iteration_end = 0.3
+
+        mcts.iteration_progress = 0.0
+        e0 = mcts._compute_epsilon_mix(10)
+        mcts.iteration_progress = -0.5
+        e_neg = mcts._compute_epsilon_mix(10)
+        assert e_neg == pytest.approx(e0)
+
+        mcts.iteration_progress = 1.0
+        e1 = mcts._compute_epsilon_mix(10)
+        mcts.iteration_progress = 5.0
+        e_big = mcts._compute_epsilon_mix(10)
+        assert e_big == pytest.approx(e1)
+
+    def test_target_acceptance_baseline_unchanged(self):
+        """Acceptance test: (move_number=40, iteration_progress=0.0) →
+        noise unchanged from baseline. Verifies progress=0.0 also yields
+        the same result as not specifying progress at all (since the
+        factor at progress=0 is iter_start=1.0)."""
+        mcts = _build_mcts(
+            epsilon_mix_start=0.25, epsilon_mix_end=0.0, epsilon_mix_taper_moves=20,
+        )
+        mcts.epsilon_mix_iteration_start = 1.0
+        mcts.epsilon_mix_iteration_end = 0.3
+
+        mcts.iteration_progress = None
+        baseline = mcts._compute_epsilon_mix(40)
+        mcts.iteration_progress = 0.0
+        with_progress = mcts._compute_epsilon_mix(40)
+        assert with_progress == pytest.approx(baseline)
+
+    def test_target_acceptance_late_iteration_reduction(self):
+        """Acceptance test: (move_number=40, iteration_progress=0.9,
+        end=0.3) → noise ~37% of baseline (1 + 0.9*(0.3-1) = 0.37)."""
+        mcts = _build_mcts(
+            epsilon_mix_start=0.25, epsilon_mix_end=0.0, epsilon_mix_taper_moves=20,
+        )
+        mcts.epsilon_mix_iteration_start = 1.0
+        mcts.epsilon_mix_iteration_end = 0.3
+
+        mcts.iteration_progress = None
+        baseline = mcts._compute_epsilon_mix(40)
+        mcts.iteration_progress = 0.9
+        with_progress = mcts._compute_epsilon_mix(40)
+
+        # Factor = 1.0 + 0.9 * (0.3 - 1.0) = 0.37
+        assert with_progress == pytest.approx(baseline * 0.37, abs=1e-9)
+
+    def test_set_iteration_progress_setter_round_trip(self):
+        mcts = _build_mcts()
+        mcts.set_iteration_progress(0.5)
+        assert mcts.iteration_progress == pytest.approx(0.5)
+        mcts.set_iteration_progress(None)
+        assert mcts.iteration_progress is None
+
+
+class TestIterationAwareTaperSearchMCTS:
+    """Iteration tapering on the search-path MCTS (`yinsh_ml.search.mcts.MCTS`)."""
+
+    def _build_search_mcts(self, **cfg_overrides):
+        from yinsh_ml.search.mcts import MCTS as SearchMCTS, MCTSConfig
+        from unittest.mock import MagicMock
+
+        cfg_kwargs = dict(
+            num_simulations=4, dirichlet_alpha=0.3, use_heuristic_evaluation=False,
+            epsilon_mix_start=0.25, epsilon_mix_end=0.0, epsilon_mix_taper_moves=20,
+        )
+        cfg_kwargs.update(cfg_overrides)
+        cfg = MCTSConfig(**cfg_kwargs)
+        network = MagicMock()
+        encoder = StateEncoder()
+        network.predict = lambda _s: (
+            np.ones(encoder.total_moves) / encoder.total_moves, 0.0
+        )
+        return SearchMCTS(network=network, config=cfg)
+
+    def test_default_config_has_iteration_no_op(self):
+        from yinsh_ml.search.mcts import MCTSConfig
+        c = MCTSConfig()
+        assert c.epsilon_mix_iteration_start == pytest.approx(1.0)
+        assert c.epsilon_mix_iteration_end == pytest.approx(1.0)
+
+    def test_no_progress_arg_preserves_baseline(self):
+        """Calling `_compute_epsilon_mix(move_number)` (no
+        iteration_progress kwarg) preserves the legacy behavior
+        identically — even with non-default iteration knobs."""
+        mcts = self._build_search_mcts(
+            epsilon_mix_iteration_start=1.0, epsilon_mix_iteration_end=0.3,
+        )
+        # No iteration_progress kwarg → no scaling.
+        for mn in [0, 5, 20, 40]:
+            no_arg = mcts._compute_epsilon_mix(mn)
+            explicit_none = mcts._compute_epsilon_mix(mn, iteration_progress=None)
+            assert no_arg == pytest.approx(explicit_none)
+
+    @pytest.mark.parametrize(
+        "move_number,progress,iter_end,scale",
+        [
+            (40, 0.0, 0.3, 1.0),
+            (40, 0.9, 0.3, 1.0 + 0.9 * (0.3 - 1.0)),
+            (10, 1.0, 0.3, 0.3),
+            (12, 0.5, 1.0, 1.0),
+        ],
+    )
+    def test_parametrized_scaling(self, move_number, progress, iter_end, scale):
+        mcts = self._build_search_mcts(
+            epsilon_mix_iteration_start=1.0, epsilon_mix_iteration_end=iter_end,
+        )
+        baseline = mcts._compute_epsilon_mix(move_number)
+        actual = mcts._compute_epsilon_mix(move_number, iteration_progress=progress)
+        assert actual == pytest.approx(baseline * scale, abs=1e-9)
+
+    def test_search_helper_matches_training_helper_with_iteration(self):
+        """Both MCTS implementations must produce identical iteration-aware
+        tapers — just like the move-number taper. Drift between training
+        and arena/eval would silently distort the noise curve."""
+        from yinsh_ml.search.mcts import MCTS as SearchMCTS, MCTSConfig
+        from unittest.mock import MagicMock
+
+        cfg = MCTSConfig(
+            num_simulations=4, dirichlet_alpha=0.3, use_heuristic_evaluation=False,
+            epsilon_mix_start=0.3, epsilon_mix_end=0.05, epsilon_mix_taper_moves=15,
+            epsilon_mix_iteration_start=1.0, epsilon_mix_iteration_end=0.4,
+        )
+        network = MagicMock()
+        encoder = StateEncoder()
+        network.predict = lambda _s: (np.ones(encoder.total_moves) / encoder.total_moves, 0.0)
+        search_mcts = SearchMCTS(network=network, config=cfg)
+
+        train_mcts = _build_mcts(
+            epsilon_mix_start=0.3, epsilon_mix_end=0.05, epsilon_mix_taper_moves=15,
+        )
+        train_mcts.epsilon_mix_iteration_start = 1.0
+        train_mcts.epsilon_mix_iteration_end = 0.4
+
+        for mn in [0, 5, 10, 15, 30]:
+            for prog in [0.0, 0.25, 0.5, 0.75, 1.0]:
+                a = search_mcts._compute_epsilon_mix(mn, iteration_progress=prog)
+                train_mcts.iteration_progress = prog
+                b = train_mcts._compute_epsilon_mix(mn)
+                assert a == pytest.approx(b), (
+                    f"diverged at move={mn}, prog={prog}: "
+                    f"search={a}, train={b}"
+                )

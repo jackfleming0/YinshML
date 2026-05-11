@@ -302,6 +302,20 @@ class TrainingSupervisor:
         epsilon_mix_start = float(self.mode_settings.get('epsilon_mix_start', 0.25))
         epsilon_mix_end = float(self.mode_settings.get('epsilon_mix_end', 0.0))
         epsilon_mix_taper_moves = int(self.mode_settings.get('epsilon_mix_taper_moves', 20))
+        # Iteration-aware Dirichlet noise tapering (Tier 3 #6). Defaults of
+        # 1.0 / 1.0 are a no-op; set `epsilon_mix_iteration_end < 1.0` (e.g.
+        # 0.3 for 70% noise reduction at the last iteration) to opt in.
+        # `total_iterations` is read so `train_iteration` can compute progress
+        # without depending on the runner pushing the value in.
+        epsilon_mix_iteration_start = float(
+            self.mode_settings.get('epsilon_mix_iteration_start', 1.0)
+        )
+        epsilon_mix_iteration_end = float(
+            self.mode_settings.get('epsilon_mix_iteration_end', 1.0)
+        )
+        self._total_iterations: int = int(
+            self.mode_settings.get('total_iterations', 0)
+        )
         # Probabilistic fast/slow sim split. Default off; opt-in via config when
         # you want to spend less compute on the bulk of moves and concentrate
         # search where it matters. RiverNewbury default: fast=20, prob=0.75.
@@ -339,6 +353,8 @@ class TrainingSupervisor:
             'epsilon_mix_start': epsilon_mix_start,
             'epsilon_mix_end': epsilon_mix_end,
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,
+            'epsilon_mix_iteration_start': epsilon_mix_iteration_start,
+            'epsilon_mix_iteration_end': epsilon_mix_iteration_end,
             'root_policy_temp': root_policy_temp,
             'use_cpp_engine': use_cpp_engine,
         }
@@ -782,6 +798,23 @@ class TrainingSupervisor:
         self.self_play.network = self.network
         # Pass the number of games for this iteration
         self.self_play.current_iteration = current_iteration
+
+        # Iteration-aware Dirichlet noise tapering (Tier 3 #6). Push the
+        # current progress into SelfPlay so MCTS workers can multiply the
+        # move-number-derived epsilon by the iteration factor. Only fires
+        # when total_iterations > 0; otherwise we leave it at None and the
+        # downstream `_compute_epsilon_mix` short-circuits to today's
+        # behavior. Use (current + 1) / total so the LAST iteration gets
+        # progress=1.0 (full reduction), not progress=(N-1)/N.
+        if self._total_iterations > 0:
+            iter_progress = min(
+                1.0, (current_iteration + 1) / float(self._total_iterations)
+            )
+            self.self_play.set_iteration_progress(iter_progress)
+        else:
+            # Be explicit: clear any stale value if total_iterations was
+            # set on a prior run and unset on this one.
+            self.self_play.set_iteration_progress(None)
 
         previous_hw = self.self_play.mcts.heuristic_weight
         hw = self._apply_heuristic_curriculum(current_iteration)

@@ -428,6 +428,10 @@ def main() -> None:
     # Compute the cosine horizon from the outer training loop's full epoch count
     # so the LR curve is scaled to the run, not to a single iteration.
     mode_settings['total_epochs'] = num_iterations * epochs_per_iteration
+    # Tier 3 #6: Supervisor needs total_iterations to compute iteration_progress
+    # for iteration-aware Dirichlet noise tapering. Stored in mode_settings so
+    # the runner stays the only seat that knows the loop bounds.
+    mode_settings['total_iterations'] = num_iterations
 
     # Instantiate network and supervisor
     network = NetworkWrapper(device=device, use_enhanced_encoding=use_enhanced_encoding)
