@@ -625,6 +625,69 @@ After the prior writeup concluded "neither architecture nor data alone is the ca
 - **Batch 1b (queued)**: combine the winners. `deep_enh_256x18` (depth + enhanced encoding) should be the dominant supervised model on this data. Also `super_deep_256x24` (continue depth scaling — is 18 the sweet spot, or is more depth better?) and `deep_256x18` re-run at 60 epochs (does training longer with the best architecture help?).
 - **Batch 4 (planned)**: use deep_enh_256x18 as the iter-0 init for an RL warm-start probe with frozen-anchor curriculum. Tests whether the supervised → RL handoff destroys the architecture lift (as warm_start showed it does for raw position quality).
 
+## Discovery run, batch 2: stochastic-temperature re-evals + random baseline (2026-05-11 00:01 UTC, ~$0.30, partial)
+
+After hardening `run_anchor_eval` to surface per-side win rate and a `deterministic_sides` warning (commit 8a5cbbd, 5 regression tests), reran the iter-2 RL "60/60 winners" and several supervised baselines at four temperatures (0.0, 0.3, 0.5, 1.0) vs HeuristicAgent(d=1), n=30 games per cell.
+
+### Random baseline (calibration)
+
+`scripts/eval_baselines_vs_expert.py --agents random` on the 100-game boardspace human holdout:
+
+| phase | random top-1 |
+|---|---:|
+| ALL | 10.3% |
+| RING_PLACEMENT | 0.4% |
+| **MAIN_GAME** | **2.7%** |
+| ROW_COMPLETION | 93.1% |
+| RING_REMOVAL | 29.9% |
+
+Notes: `ROW_COMPLETION` ~93% even from random play — it's a forced-choice-among-very-few (usually 1) valid moves, so the "ALL top-1 = 10-13%" numbers in the supervised sweeps are dominated by this. The honest signal is MAIN_GAME, where random = 2.7%. Supervised models at 4-6% MAIN top-1 are 1.5-2.3× random — real but small.
+
+### Temperature sweep vs HeuristicAgent(d=1), n=30 games per cell
+
+| model | t=0.0 (argmax) | t=0.3 | t=0.5 | t=1.0 |
+|---|---:|---:|---:|---:|
+| ablB_s1_iter2 (canonical 60/60) | **30/30 (100%)** | 7/30 (23%) | 4/30 (13%) | 3/30 (10%) |
+| ablB_s2_iter2 (second 60/60) | **30/30 (100%)** | 4/30 (13%) | 4/30 (13%) | 2/30 (7%) |
+| pure_neural_iter2 (different recipe) | **30/30 (100%)** | 4/30 (13%) | 1/30 (3%) | 4/30 (13%) |
+| supervised_bga | 15/30 (50%) | 7/30 (23%) | 10/30 (33%) | 3/30 (10%) |
+| supervised_combined | 0/30 (0%) | 9/30 (30%) | 5/30 (17%) | 8/30 (27%) |
+| deep_256x18 (batch 1 winner) | 30/30 (100%) | *in flight* | *in flight* | *in flight* |
+
+### Findings — much stronger than the prior reframing
+
+The prior writeup framed the 60/60 results as "deterministic-side artifact — would be ~50% if measured stochastically." **The actual data is much more damning.** Under stochastic play:
+
+1. **All three "60/60 winners" collapse from 100% → 5-15% win rate.** This is a >85 percentage-point drop. They're not "tied stochastically" — they're getting **crushed** by depth-1 heuristic the moment any move-selection noise is added. Including small noise: temp=0.3 already drops them to 13-23%.
+
+2. **The RL recipe produces pathologically narrow models.** The 60/60 represents one specific argmax game line that beats the heuristic's argmax line. Move one notch off that line in either direction and the model loses. This isn't a policy that "knows YINSH" — it's a policy that memorized one fragile sequence.
+
+3. **Supervised models are slightly more robust but still poor.** supervised_bga: 50% at t=0 → 10-33% at t>0, similar magnitude drop. supervised_combined: 0% at t=0 (worst case of determinism — loses both sides deterministically) but stochastically reaches 17-30%, paradoxically *better* than RL winners at temp>0.
+
+4. **deep_256x18's determinism is now automatically flagged.** Its t=0.0 JSON has `det_sides=['white', 'black']` and the warning fired. The hardening works — future evals won't bury this artifact.
+
+5. **A surprising rank reversal under noise.** At temp=0, the "ranking" is RL winners (100%) > supervised_bga (50%) > supervised_combined (0%). At temp=0.5, it's roughly supervised_combined (17%) > supervised_bga (33%) > RL winners (3-13%). **Supervised generalizes; RL doesn't.**
+
+6. **The "RL is failing to use the data" hypothesis from the prior writeup gets sharper.** It's not just that RL underperforms supervised — RL produces actively brittle models. The iter-2 spike isn't a "halfway point to good policy" as I speculated in the original writeup; it's a degenerate optimum that the RL gradient happens to find quickly and that breaks the moment you stop playing into its one deterministic line.
+
+### What this changes about the recipe
+
+The original 24-hour writeup conclusion ("the RL recipe peaks at heuristic-mimicry then collapses") needs to be re-stated:
+
+- **It's not the model that collapses — it's the model that never had general competence in the first place.** The iter-2 "spike" is one deterministic line that beats a deterministic baseline; subsequent self-play training moves the model off that line, which is why later iters look like "collapse." But the iter-2 model wasn't strong, just lucky in its argmax sequence.
+
+- **Strong supervised models need RL evaluation that breaks determinism by construction.** Any future RL ablation should evaluate (a) at temp≥0.5 raw policy AND (b) under MCTS, n≥40 games. Single-temperature 0 argmax measurements are uninformative for ranking models.
+
+- **The supervised-pretrain → RL handoff probably destroys generalization fast.** This is testable: warm-start RL from deep_256x18 supervised and watch the temp=0.5 win rate iter-over-iter. If it goes from ~30% → 60% deterministic in 1-2 iters, the RL recipe is selecting for the same brittleness.
+
+### Open questions to test next
+
+- Does **MCTS at 200+ sims** break the deterministic collapse on the RL winners? MCTS introduces visit-count-based selection that has natural variance.
+- Does **deep_256x18's** stochastic performance match supervised_combined's 17-30%, or does the depth lift hold up under stochastic eval?
+- What does the **per-side breakdown** look like for the remaining models? Hardening only fired on deep_256x18 t=0.0 since earlier JSONs predate the commit.
+
+The remaining batch 2 v2 cells (deep_256x18 t=0.3-1.0, enh_256x12 all temps) will land in ~30 min and will all have per-side data with the warning system live.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
