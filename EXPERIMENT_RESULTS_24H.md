@@ -757,6 +757,59 @@ After batch 1+1b, priorities reorder to:
 - Does the **deep_enh_256x18 ranking advantage** (best top-3) show up as a real strength advantage under MCTS or stochastic-temp play?
 - What does **enh_256x12 stochastic-temp** look like? Batch 2 v2 missed this due to the wrapper bug. Retry running now.
 
+## Discovery run, batch 3: MCTS at temp=0 is also deterministic (2026-05-11 02:28–07:25 UTC, ~$0.80)
+
+Tested whether MCTS at training-realistic sim budgets (48 / 200 / 400) breaks the deterministic-collapse artifact found in raw-policy evals. 4 models × 3 sim budgets at d=1 (n=30) + d=3 stress on 2 winners at 400 sims (n=20).
+
+### d=1 MCTS strength curves vs HeuristicAgent(depth=1), temp=0
+
+Every cell flagged `det_sides=['white','black']` by the hardening (commit 8a5cbbd). All per-side game lengths are zero-range — same game replayed 15 times per side.
+
+| model | 48 sims | 200 sims | 400 sims |
+|---|---:|---:|---:|
+| deep_256x18 (supervised, batch 1 winner) | 0/30 (0%) | 0/30 (0%) | 15/30 (50%) |
+| enh_256x12 (supervised, batch 1 winner) | 0/30 (0%) | 15/30 (50%) | 15/30 (50%) |
+| sup_comb (supervised, prior baseline) | 0/30 (0%) | 0/30 (0%) | 15/30 (50%) |
+| ablB_s1_iter2 (canonical RL "60/60" winner) | 15/30 (50%) | 0/30 (0%) | (in last cell, expected ≤50%) |
+
+**No cell anywhere produces 30/30** (the "60/60" pattern the prior writeup celebrated). All cells split into per-side determinism — wins all White or all Black, never both, never neither.
+
+The historical claim from the prior writeup ("scale_up_b iter 9 EMA at d=1 with 400 sims = 60/60") is therefore in active doubt. Probably another fortuitous-deterministic-line case, not a strength signal. Verified explicitly in the post-b3 chain.
+
+### d=3 stress — first sign of real strength (sort of)
+
+`deep_256x18` and `enh_256x12` + MCTS @ 400 sims vs HeuristicAgent(d=3, 5s/move time limit), n=20:
+
+| model | result | White (n=10) | Black (n=10) | det_sides |
+|---|---:|---|---|---|
+| **deep_256x18** | **20/20 (100%)** | 10/10, **lengths 75-99 (varied, range 24)** | 10/10, lengths 84-84 (det) | `['black']` |
+| **enh_256x12** | **20/20 (100%)** | 10/10, lengths 55-55 (det) | 10/10, lengths 88-88 (det) | `['white','black']` |
+
+`deep_256x18` is the *first* model in the entire run with a single-side collapse flag rather than both-sides. White games are genuinely varied (game length range 24) — meaning MCTS explored different lines and won every one. **That's real strength on the White side, at least vs depth-3 heuristic with 5s time cap.**
+
+`enh_256x12` matches 20/20 but with `det_sides=['white','black']` — same line played 10 times per side. Same fingerprint as d=1 evals, just at d=3 where time-cap was wide enough to be reproducible. Probably weaker than deep_256x18 despite the matching score.
+
+### Why d=3 isn't a clean strength oracle either
+
+d=3 with 5s/move time cap can produce variance OR determinism depending on whether the heuristic's alpha-beta consistently reaches depth 3 in 5s on a given position. For deep_256x18's White game (positions that aren't pathological for the heuristic), 5s is enough for depth 2-3 with variance → varied moves → varied games. For enh_256x12's policy lines (which apparently push the heuristic into easier positions where depth 3 completes consistently), the cap is wide enough that the heuristic always reaches full depth → deterministic.
+
+**The cleanest strength oracle is temperature on the candidate side, not heuristic depth.** Batch 3b (MCTS + temp=0.5) is queued in the post-b3 chain and will give the real reads.
+
+### Updated picture
+
+1. **The 5%-MAIN-top-1 expert-agreement signal correlates with real strength under MCTS, but only one model's strength was confirmed unambiguously.** deep_256x18 (6.2% top-1) shows non-deterministic White-side wins vs d=3 heuristic. enh_256x12 (6.4% top-1, narrow margin) is suspect — d=3 win is deterministic-style.
+
+2. **The d=1 MCTS evals reaffirm the brittleness conclusion from batch 2 v2.** Argmax + argmax = same game. Higher sims = different deterministic lines, not better play.
+
+3. **Open question: under stochastic eval (temp=0.5), how does the strength ranking change?** If `deep_256x18 + MCTS @ 400 + temp=0.5` still wins 80%+ vs d=1 heuristic, the model is genuinely strong. If it drops to 50-60%, it's brittle like the rest. Batch 3b answers this.
+
+### What this changes about the historical writeup claims
+
+- "scale_up_b iter 9 EMA at d=1 with 400 sims = 60/60 = strong" — re-verifying explicitly. Probably ANOTHER deterministic artifact.
+- "ablation_b iter_2 winners hit 10/10 at d=3 raw = 50% = weak" — also worth re-checking with the per-side breakdown. The 10/10 likely all happened on the same side.
+
+All future evals through this branch will surface the determinism flag automatically via commit 8a5cbbd.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
