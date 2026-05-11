@@ -171,6 +171,16 @@ class MCTS:
                  epsilon_mix_start: float = 0.25,
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
+                 # Iteration-aware multiplicative tapering (Tier 3 #6). When
+                 # `iteration_progress` is set (via constructor or
+                 # `set_iteration_progress`), the move-number-derived epsilon
+                 # is multiplied by a factor interpolating from
+                 # `epsilon_mix_iteration_start` (at progress 0.0) to
+                 # `epsilon_mix_iteration_end` (at progress 1.0). Defaults of
+                 # 1.0 / 1.0 mean iteration tapering is a no-op (opt-in).
+                 epsilon_mix_iteration_start: float = 1.0,
+                 epsilon_mix_iteration_end: float = 1.0,
+                 iteration_progress: Optional[float] = None,
                  # --- Root policy temperature (alphazero-general style) ---
                  # T > 1 flattens root prior (more exploration); T < 1 sharpens.
                  # Applied to root child priors BEFORE Dirichlet noise mixing.
@@ -303,6 +313,16 @@ class MCTS:
         self.epsilon_mix_end = float(epsilon_mix_end)
         self.epsilon_mix_taper_moves = int(epsilon_mix_taper_moves)
 
+        # Iteration-aware multiplicative taper (Tier 3 #6). `iteration_progress`
+        # is mutable across an MCTS lifetime — supervisor sets it per
+        # iteration before generating self-play games. Defaults of 1.0/1.0
+        # AND `iteration_progress is None` both preserve pre-change behavior.
+        self.epsilon_mix_iteration_start = float(epsilon_mix_iteration_start)
+        self.epsilon_mix_iteration_end = float(epsilon_mix_iteration_end)
+        self.iteration_progress: Optional[float] = (
+            None if iteration_progress is None else float(iteration_progress)
+        )
+
         # Root policy temperature: re-shape priors at root before noise mixing.
         # T > 1 flattens (more exploration); T < 1 sharpens; 1.0 is no-op.
         self.root_policy_temp = float(root_policy_temp)
@@ -420,15 +440,46 @@ class MCTS:
             delattr(kept, "policy_temp_applied")
         self._cached_root = kept
 
+    def set_iteration_progress(self, progress: Optional[float]) -> None:
+        """Set the training-iteration progress used for iteration-aware
+        Dirichlet noise tapering (Tier 3 #6). Pass None to disable iteration
+        tapering for subsequent searches; pass a float in [0,1] otherwise.
+        """
+        self.iteration_progress = (
+            None if progress is None else float(progress)
+        )
+
     def _compute_epsilon_mix(self, move_number: int) -> float:
         """Linearly interpolate `epsilon_mix` from start → end over
         `epsilon_mix_taper_moves`. Returns `epsilon_mix_start` if the taper
         is disabled (taper_moves ≤ 0) so callers never have to special-case
-        the no-taper path."""
+        the no-taper path.
+
+        When `self.iteration_progress` is not None, the result is
+        additionally multiplied by a factor that linearly interpolates from
+        `epsilon_mix_iteration_start` (at progress 0.0) to
+        `epsilon_mix_iteration_end` (at progress 1.0). Default config
+        (both knobs at 1.0) AND a None iteration_progress preserve the
+        pre-Tier-3-#6 behavior identically.
+        """
         if self.epsilon_mix_taper_moves <= 0:
-            return self.epsilon_mix_start
-        alpha = min(max(move_number, 0) / self.epsilon_mix_taper_moves, 1.0)
-        return self.epsilon_mix_start + alpha * (self.epsilon_mix_end - self.epsilon_mix_start)
+            base = self.epsilon_mix_start
+        else:
+            alpha = min(max(move_number, 0) / self.epsilon_mix_taper_moves, 1.0)
+            base = self.epsilon_mix_start + alpha * (
+                self.epsilon_mix_end - self.epsilon_mix_start
+            )
+
+        if self.iteration_progress is None:
+            return base
+
+        # Clamp progress into [0,1] defensively — callers may divide by an
+        # off-by-one total or pass progress for a "bonus" iteration.
+        p = min(max(self.iteration_progress, 0.0), 1.0)
+        iter_factor = self.epsilon_mix_iteration_start + p * (
+            self.epsilon_mix_iteration_end - self.epsilon_mix_iteration_start
+        )
+        return base * iter_factor
 
     def _apply_root_policy_temperature(self, root: 'Node') -> None:
         """Re-shape root child priors with temperature T = ``root_policy_temp``.
@@ -1344,6 +1395,15 @@ class SelfPlay:
                  epsilon_mix_start: float = 0.25,
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
+                 # --- Iteration-aware Dirichlet tapering (Tier 3 #6) ---
+                 # Defaults of 1.0 / 1.0 disable iteration tapering (opt-in).
+                 # When the supervisor calls `set_iteration_progress(p)` per
+                 # iteration, the move-number-derived epsilon is multiplied by
+                 # a factor interpolating from `..._iteration_start` (at p=0)
+                 # to `..._iteration_end` (at p=1). End=0.3 → 70% noise cut by
+                 # the last iteration.
+                 epsilon_mix_iteration_start: float = 1.0,
+                 epsilon_mix_iteration_end: float = 1.0,
                  root_policy_temp: float = 1.0,
                  # --- C++ bitboard engine ---
                  use_cpp_engine: bool = False,
@@ -1425,6 +1485,14 @@ class SelfPlay:
             'epsilon_mix_start': epsilon_mix_start,  # Root Dirichlet mixing fraction at move 0
             'epsilon_mix_end': epsilon_mix_end,  # Root mixing fraction after taper (0 = no late-game noise)
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,  # Linear taper horizon
+            # Iteration-aware tapering knobs (Tier 3 #6). 1.0/1.0 = opt-out.
+            'epsilon_mix_iteration_start': epsilon_mix_iteration_start,
+            'epsilon_mix_iteration_end': epsilon_mix_iteration_end,
+            # `iteration_progress` defaults to None and is updated per
+            # iteration by the supervisor before generate_games(); see
+            # `set_iteration_progress` below. Workers read this from the
+            # mcts_config dict at MCTS-construction time.
+            'iteration_progress': None,
             'root_policy_temp': root_policy_temp,  # Reshape root prior; >1 flattens, <1 sharpens
             'use_cpp_engine': use_cpp_engine,  # Opt-in to game_cpp engine in workers
         }
@@ -1454,6 +1522,24 @@ class SelfPlay:
         self.logger.info(f"  Batched MCTS: {'ENABLED' if self.use_batched_mcts else 'DISABLED'} (batch_size={self.mcts_batch_size})")
         self.logger.info(f"  Enhanced Encoding: {'ENABLED (15 channels)' if self.mcts_config.get('use_enhanced_encoding', False) else 'DISABLED (6 channels)'}")
         self.logger.info(f"  MCTS Config: {self.mcts_config}")
+
+    def set_iteration_progress(self, progress: Optional[float]) -> None:
+        """Update the iteration-progress signal used by MCTS for iteration-
+        aware Dirichlet noise tapering (Tier 3 #6).
+
+        Mutates both the in-process MCTS instance (used by single-thread
+        callers) AND the `mcts_config` dict that gets pickled into worker
+        processes — the workers reconstruct MCTS from the dict, so this is
+        the only seat the value lives. Callers (e.g., `Supervisor`) must
+        invoke this BEFORE calling `generate_games` for the iteration whose
+        progress they want to apply.
+
+        Pass None to disable iteration tapering for subsequent searches.
+        """
+        normalized = None if progress is None else float(progress)
+        self.mcts_config['iteration_progress'] = normalized
+        if hasattr(self, 'mcts') and self.mcts is not None:
+            self.mcts.set_iteration_progress(normalized)
 
 
     def generate_games(self, num_games: int) -> List[Tuple[List[np.ndarray], List[np.ndarray], List[float], List[Dict]]]:
