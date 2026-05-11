@@ -274,14 +274,21 @@ def test_batch_search_applies_dirichlet_exactly_once():
         f"`search_batch` called np.random.dirichlet {dir_calls} times — expected exactly 1. "
         f"If >1, the `dirichlet_applied` flag is not gating noise correctly (T1.1 partial)."
     )
-    # 48 sims, batch_size=8: first batch (8 sims) all see root unexpanded and
-    # backprop to root only — Σ child visits = 48 - 8 = 40. (This isn't the
-    # ideal contract — the ideal is Σ = 47 like the serial path — but that's
-    # exactly what T1.1 is about; this assertion just pins current behavior so
-    # we know if a fix lands and shifts it.)
-    assert total == 40, (
-        f"Expected 40 child visits (48 sims - batch_size 8 = 40), got {total}. "
-        f"If this changed to 47, T1.1 was fixed and this assertion needs updating."
+    # 48 sims, batch_size=8 — POST-T1.1-FIX semantics: when the root (or any
+    # internal leaf) is already in-flight, `search_batch` flushes the batch
+    # and retries the sim against the now-expanded tree. Net effect: only
+    # the very first sim of the entire search lands at the unexpanded root
+    # and backprops to root only (Σ child visits += 0). The remaining 47 sims
+    # all descend at least one ply and add 1 to some child's visit count.
+    # So Σ child visits = N - 1 = 47, matching the serial contract.
+    #
+    # Pre-fix behavior was `Σ = N - batch_size = 40` (B sims wasted on every
+    # fresh root). If this assertion ever drops back to 40, T1.1 has
+    # regressed.
+    assert total == 47, (
+        f"Expected 47 child visits (48 sims - 1 root-leaf sim) post-T1.1-fix, "
+        f"got {total}. If this dropped to 40, the duplicate-leaf guard in "
+        f"search_batch has regressed."
     )
 
 
@@ -297,3 +304,65 @@ def test_serial_search_applies_dirichlet_exactly_once():
         f"`search` called np.random.dirichlet {dir_calls} times — expected exactly 1."
     )
     assert total == 47, f"Expected 47 child visits (48 sims - 1 root-leaf sim), got {total}"
+
+
+# --------------------------------------------------------------------------- #
+# T1.1 visit-loss regression test                                             #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "num_sims,batch_size",
+    [
+        (16, 4),    # bug was worst when batch_size << num_sims
+        (16, 8),
+        (16, 16),   # equal: pre-fix this lost 16-1=15 sims (everything wasted)
+        (32, 1),    # batch_size=1 is effectively serial — should never have lost sims
+        (32, 8),
+        (48, 12),
+        (48, 32),
+        (48, 48),   # extreme: pre-fix lost ALL but 1 sim worth of child visits
+    ],
+)
+def test_no_visit_loss_on_fresh_tree(num_sims: int, batch_size: int):
+    """Visit-count contract: a fresh-tree `search_batch(N)` produces exactly
+    N - 1 child visits at the root, regardless of batch_size.
+
+    The "minus 1" is an intentional convention: the very first sim of any
+    search lands at the unexpanded root, expands it, and backprops the value
+    to root only — adding zero child visits. Sims 2..N each descend at
+    least one ply through the now-expanded root and add 1 to some child's
+    visit count. Total root.visit_count = N. Total Σ child visits = N - 1.
+
+    Pre-T1.1-fix, the batched path lost up to `batch_size - 1` extra sims
+    because every sim in the first batch saw the unexpanded root and
+    backed up to `[root]` only. After the fix, the duplicate-leaf guard
+    flushes the batch as soon as a contended leaf is detected, so only
+    sim 1 of the entire search ever lands at root-as-leaf.
+
+    This is the canonical regression test for T1.1. If it fails, batch GPU
+    self-play is throwing away a fraction of every search's compute.
+    """
+    _seed_all(0)
+    state = GameState()
+    mcts = _build_mcts(num_simulations=num_sims, dirichlet_alpha=0.0)
+    visits, total_child_visits, _ = _run_and_capture_visits(
+        mcts, state, move_number=0, use_batch=True, batch_size=batch_size
+    )
+
+    expected = num_sims - 1
+    assert total_child_visits == expected, (
+        f"T1.1 regression: search_batch(num_sims={num_sims}, batch_size={batch_size}) "
+        f"yielded Σ child visits = {total_child_visits}, expected {expected}. "
+        f"Pre-fix bug pattern: Σ = num_sims - batch_size when batch_size <= num_sims. "
+        f"Got {total_child_visits} which suggests "
+        f"{num_sims - total_child_visits - 1} sims were wasted on root-only backprops."
+    )
+
+    # Cross-check: root.visit_count should equal num_sims (root is touched
+    # by every sim's backup, including the root-as-leaf sim 1).
+    root = mcts._cached_root
+    assert root.visit_count == num_sims, (
+        f"root.visit_count = {root.visit_count}, expected {num_sims}. "
+        f"Some sim's backup didn't reach root."
+    )
