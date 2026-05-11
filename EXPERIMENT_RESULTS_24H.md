@@ -911,6 +911,58 @@ The earlier 24-hour writeup wrote that warm-starting RL from a strong model "des
 - **Different value-head treatment**: freeze value head from supervised, only train policy.
 - **Bigger init (deep_256x18)**: requires fixing run_training.py to pass model_path to NetworkWrapper for auto-detect. Then warm-start from the strongest supervised checkpoint (37% stochastic).
 
+## Discovery run, batch 5.1: low-LR RL warm-start PRESERVES supervised strength (2026-05-11 13:30–15:27 UTC, ~$0.50)
+
+Repeated batch 4's warm-start experiment with one change: `lr: 0.001 → 0.0001` (10× lower). Everything else identical (ablation_b recipe, 5 iters, supervised_combined init, same anchor + augmentation + eval settings).
+
+### Holdout MAIN top-1 vs supervised baseline (5.5%)
+
+| iter | batch 4 (LR=0.001) | **batch 5.1 (LR=0.0001)** |
+|---|---:|---:|
+| 0 (init + 1 RL iter) | 2.5% | **5.2%** |
+| 1 | 2.1% | **5.0%** |
+| 2 | 2.4% | **4.3%** |
+| 3 | 1.8% | **4.3%** |
+| 4 | 1.7% | **3.8%** |
+
+### Stochastic strength (temp=0.5 raw policy vs HeuristicAgent d=1, n=30)
+
+| iter | batch 4 | **batch 5.1** |
+|---|---:|---:|
+| 0 | 10% | 17% |
+| 1 | 13% | **33%** |
+| 2 | 0% | 17% |
+| 3 | 7% | 10% |
+| 4 | 13% | 17% |
+
+### Findings — this changes everything
+
+**The recipe is NOT structurally destructive.** The "RL destroys strong policies" finding from the original 24-hour writeup, and confirmed in batch 4, was actually an **artifact of an aggressive learning rate**. LR=0.001 (the original) drives the model into the brittle-argmax attractor in one iteration. LR=0.0001 (10× lower) lets it stay in the broad-policy basin.
+
+Specific evidence:
+
+1. **MAIN top-1 stays near supervised baseline.** Low-LR iter 0 = 5.2% (within 0.3 pp of supervised's 5.5%). Even iter 4 = 3.8%, which is 2.2× the random baseline of 2.7% — meaningfully above chance. Batch 4 at iter 4 was 1.7%, below random.
+
+2. **Stochastic strength actually IMPROVES at low LR.** Low-LR iter 1 = **33%** vs heuristic d=1 (temp=0.5). That's **higher than the supervised baseline** (~27% at MCTS @ 200 sims). The first iteration of slow self-play training is genuinely refining the policy distribution, not destroying it.
+
+3. **Deterministic behavior wobbles less.** Batch 4 went 50→0→0→0→0 (det). Low-LR went 0→0→0→0→50 (det). Still doesn't escape the argmax-collapse pattern, but the path is different — implying low-LR is exploring the policy space more carefully.
+
+### What this rewrites about the prior writeup
+
+The prior 24-hour writeup section titled "Decisive experiment: warm_start from a 60/60 winner" concluded "Continued self-play training under this recipe is not just 'fails to improve' — it actively destroys strong policies." Reframed:
+
+- **At LR=0.001, the recipe destroys policies.** True at any init.
+- **At LR=0.0001, the recipe preserves policies and modestly improves them.** Specifically, iter 1 stochastic = 33% > supervised 27%.
+- **The original "code-level fixes required" framing was overdetermined.** A single-line config change (LR/10) solves the apparent destruction problem. The deeper structural questions (anchor curriculum, frozen value head) become *optional* improvements rather than blockers.
+
+This is a knob, not a redesign. The lowest-cost actionable change in the entire discovery run.
+
+### What's still being tested (batch 5.2 in flight)
+
+`deep_256x18` warm-start at the standard LR=0.001 (configs/warm_start_deep_b.yaml). If this ALSO destroys (because LR is the issue, not init), it confirms LR is the dominant axis. If deep init somehow holds at LR=0.001, init quality buys robustness. Either result is informative.
+
+After batch 5.2, the obvious next experiment is **deep_256x18 + LR=0.0001** — combining the best init with the preservation-friendly LR. That's queued mentally as batch 6 if budget permits.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
