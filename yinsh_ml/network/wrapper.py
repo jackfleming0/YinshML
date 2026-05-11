@@ -61,9 +61,11 @@ class NetworkWrapper:
         # callers needing to know the dims in advance.
         if model_path and os.path.exists(model_path):
             sd = torch.load(model_path, map_location='cpu', weights_only=True)
-            w = sd.get('input_conv.0.weight')
+            # The entry layer is nn.Sequential(conv, bn, relu) named conv_block;
+            # the first Conv2d's weight is at conv_block.0.weight. Shape is
+            # (num_channels, input_channels, 3, 3).
+            w = sd.get('conv_block.0.weight')
             if num_channels is None and w is not None:
-                # Conv2d(input_channels -> num_channels)
                 num_channels = int(w.shape[0])
             if w is not None:
                 # input_channels lives in dim 1; override use_enhanced_encoding
