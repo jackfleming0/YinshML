@@ -963,6 +963,45 @@ This is a knob, not a redesign. The lowest-cost actionable change in the entire 
 
 After batch 5.2, the obvious next experiment is **deep_256x18 + LR=0.0001** — combining the best init with the preservation-friendly LR. That's queued mentally as batch 6 if budget permits.
 
+## Discovery run, batch 5.2: deep_256x18 warm-start at standard LR (2026-05-11 15:27–17:27 UTC, ~$0.50)
+
+Same recipe as batch 4 (ablation_b at LR=0.001) but init from `deep_256x18` (the strongest supervised model, 37% stochastic at MCTS @ 400). Tests whether init quality alone can resist the LR=0.001 destruction.
+
+### Three-way warm-start comparison
+
+| iter | batch 4 (sup, hi-LR=0.001) | batch 5.1 (sup, lo-LR=0.0001) | batch 5.2 (deep, hi-LR=0.001) |
+|---|---|---|---|
+| 0 MAIN top-1 | 2.5% | **5.2%** | **5.2%** |
+| 0 stochastic (t=0.5) | 10% | 17% | **33%** |
+| 1 MAIN top-1 | 2.1% | 5.0% | 3.3% |
+| 1 stochastic | 13% | **33%** | 10% |
+| 2 MAIN top-1 | 2.4% | 4.3% | 2.8% |
+| 3 MAIN top-1 | 1.8% | 4.3% | 2.5% |
+| 4 MAIN top-1 | 1.7% | **3.8%** | 2.4% |
+| 4 det collapse | wobbling | wobbling | **30/30 W:15/B:0** |
+
+### Findings
+
+1. **`deepb_iter0` is the strongest single per-iter checkpoint in the entire discovery run.** 33% stochastic vs heuristic d=1, MAIN top-1 = 5.2%. That's the deep_256x18 supervised model with 1 iteration of self-play training on top — it briefly inherits both the depth-architecture strength AND adds a small RL refinement.
+
+2. **Strong init buys ~1 iteration of preservation at high LR.** deep_256x18 + LR=0.001 holds at iter 0 then collapses by iter 1 (stochastic drops 33% → 10%, MAIN top-1 5.2% → 3.3%). By iter 4 it's 100% deterministic at temp=0 (full collapse) and 2.4% MAIN top-1.
+
+3. **Low LR holds across all iterations regardless of init quality.** sup_combined + LR=0.0001 stays at MAIN 3.8-5.2% across all 5 iters. The init was weaker (5.5% baseline vs deep's 6.2%) but the LR=0.0001 preservation is the dominant factor.
+
+4. **LR is the dominant axis. Init quality is secondary.** Even the strongest possible init (deep_256x18, the best of all our supervised models) gets destroyed in 2 iterations at LR=0.001. The weakest preservation-LR variant (sup_combined at LR=0.0001) holds across all 5.
+
+### Implications for the multi-day question
+
+The path forward is now genuinely clear:
+
+- **For a shippable model right now**: `deepb_iter0` checkpoint — deep_256x18 supervised + 1 RL iter at standard LR. Best stochastic strength (33%) and best MAIN top-1 (5.2%) of any warm-start cell. Stop training at iter 0.
+- **For multi-day RL**: combine the winners. Use deep_256x18 init + LR=0.0001 (batch 6, queued and running). The combined recipe should preserve the strong deep-init strength for all 5 iters, not just iter 0. Predicted: iter 1+ stochastic ≥ 33%, MAIN top-1 ≥ 4%.
+- **The "recipe is structurally broken" framing from the prior writeup is now decisively wrong.** Two single-line config changes (init from supervised + LR/10) convert the recipe from destructive to preservative.
+
+### What's still being tested (batch 6, in flight at 17:39 UTC)
+
+Combine the two winners: deep_256x18 init + LR=0.0001. ETA done ~20:00 UTC. If the prediction holds (iter 1+ stochastic ≥ 33%), this is the **deployable multi-day RL recipe**. If iter 1+ collapses despite both knobs, init and LR are not additively protective and the recipe has a different structural ceiling.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
