@@ -756,8 +756,29 @@ class MCTS:
 
         # Collect leaves for batched evaluation
         batch_leaves = []  # List of (node, search_path, current_state, depth)
+        # Set of `id(node)` for every node currently sitting in batch_leaves.
+        # Used by the duplicate-leaf guard (T1.1 fix): if a sim's selection
+        # bottoms out at a node already queued for evaluation, we MUST flush
+        # the batch first — otherwise the second sim either (a) clobbers the
+        # first sim's expansion (pre-fix bug, see commit "make
+        # _evaluate_and_backup_batch expansion idempotent"), or (b) backs up
+        # to a stale path. The most common case is the very first batch on a
+        # fresh tree: every sim sees the unexpanded root, all B sims would
+        # land at root with `search_path=[root]`, root would be expanded once
+        # and then B-1 backups would touch only the root with no children.
+        # Net effect: 30-60% of sims wasted at every fresh root.
+        in_flight_node_ids = set()
 
-        for sim in range(budget):
+        # Sim counter advances only when we successfully consume a budget slot
+        # (terminal-backup, selection-error, or successful batch enqueue).
+        # The duplicate-leaf branch flushes and `continue`s WITHOUT
+        # incrementing — the same sim retries against the now-expanded tree.
+        # Worst case: every sim queues uniquely; best case: first sim of every
+        # fresh batch races (first batch retries once). Either way the loop
+        # terminates because flush + expansion makes the duplicated leaf
+        # `is_expanded`, so the retry's selection descends past it.
+        sim = 0
+        while sim < budget:
             node = root
             search_path = [node]
             current_state = self._acquire_state_copy(state)
@@ -790,6 +811,7 @@ class MCTS:
             # comment in `search()` — the old `action is None` guard was a bug
             # that silently skipped first-sim expansion.
             if action is not None and action not in node.children and node.is_expanded and node.children:
+                sim += 1  # Selection error consumes a sim slot (matches old `for` loop semantics).
                 continue
 
             # 2. Check if this is a terminal state
@@ -797,6 +819,25 @@ class MCTS:
             if terminal_value is not None:
                 # Terminal state - backpropagate immediately
                 self._backpropagate(search_path, players_path, terminal_value)
+                sim += 1
+                continue
+
+            # 2b. Duplicate-leaf guard (T1.1 fix). If this leaf is already in
+            #     the in-flight batch, flush the batch first so it gets
+            #     expanded, then retry this sim against the updated tree.
+            #     Without this guard, B sims on a fresh root would all queue
+            #     `[root]` and only one would do useful work — see commit msg.
+            if id(node) in in_flight_node_ids:
+                # Release the per-sim state copy and retry — we're going to
+                # rebuild from `state` once root (or the contended internal
+                # node) is expanded.
+                self._release_state(current_state)
+                simulation_states.pop()  # we just appended this; pop to keep set tidy
+                # Flush the in-flight batch — this expands the contended leaf.
+                self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
+                batch_leaves = []
+                in_flight_node_ids = set()
+                # IMPORTANT: do not increment sim — we have to redo this attempt.
                 continue
 
             # 3. Check if we hit max depth
@@ -810,15 +851,20 @@ class MCTS:
                 node.add_virtual_loss()  # Mark as in-flight
                 batch_leaves.append((node, search_path, players_path, current_state, depth, True))
 
-            # 4. Process batch when it's full or we're at the end
-            if len(batch_leaves) >= batch_size or sim == budget - 1:
-                if batch_leaves:
-                    self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
-                    batch_leaves = []
+            in_flight_node_ids.add(id(node))
+            sim += 1
+
+            # 4. Process batch when it's full
+            if len(batch_leaves) >= batch_size:
+                self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
+                batch_leaves = []
+                in_flight_node_ids = set()
 
         # Process any remaining leaves
         if batch_leaves:
             self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
+            batch_leaves = []
+            in_flight_node_ids = set()
 
         # Clean up simulation states
         for s in simulation_states:
