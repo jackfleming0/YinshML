@@ -49,12 +49,23 @@ class MetricsLogger:
         self.value_accuracy_history = defaultdict(list)
         self.training_curves = defaultdict(list)
 
+        # Optional experiment tracker handle for forwarding log_event /
+        # log_scalar calls. Set via set_experiment_tracker(). Not required —
+        # events still land in the JSON sidecar when this is None.
+        self._experiment_tracker = None
+        self._experiment_id: Optional[int] = None
+
     def _init_metrics_storage(self) -> Dict:
         """Initialize metrics storage with all necessary fields."""
         return {
             'games': [],
             'training': [],
             'tournament': None,
+            # Event/scalar streams populated by log_event / log_scalar. Both
+            # routed into the same per-iteration JSON so dashboards reading
+            # iteration_<N>.json see them alongside other metrics.
+            'events': [],
+            'scalars': [],
             'summary_stats': {
                 'game_lengths': {
                     'mean': 0.0,
@@ -74,6 +85,130 @@ class MetricsLogger:
                 }
             }
         }
+
+    def log_event(self,
+                  event_name: str,
+                  severity: str = 'info',
+                  iteration: Optional[int] = None,
+                  details: Optional[Dict] = None) -> None:
+        """Log a discrete event (alert / warning / milestone) into the metrics
+        stream.
+
+        Events are stored in ``current_metrics['events']`` so they persist into
+        ``iteration_<N>.json`` and can be picked up by dashboards. Also forwarded
+        to a connected experiment tracker (when set via
+        :meth:`set_experiment_tracker`) as a counter metric
+        ``event/<event_name>`` so it shows up as a scalar series.
+
+        Args:
+            event_name: Stable identifier (e.g. ``'deterministic_collapse_alert'``).
+                Used as a metric key in the experiment tracker so keep it
+                lowercase, snake_case, and namespaced.
+            severity: One of ``info | warning | error``. Passed to the Python
+                logger so operators see the alert in the run log.
+            iteration: Training iteration where the event fired. Defaults to
+                the current iteration if one has been started.
+            details: Arbitrary JSON-serializable payload for context (e.g.
+                ``{'sides': ['white', 'black']}``).
+        """
+        it = iteration if iteration is not None else self.current_iteration
+        entry = {
+            'name': event_name,
+            'severity': severity,
+            'iteration': it,
+            'timestamp': datetime.now().isoformat(),
+            'details': details or {},
+        }
+
+        # Always log to the Python logger so the event appears in the run log
+        # even when no iteration has been started (e.g. eval-only invocations).
+        log_msg = f"[event:{event_name}] iter={it} details={details}"
+        if severity == 'error':
+            self.logger.error(log_msg)
+        elif severity == 'warning':
+            self.logger.warning(log_msg)
+        else:
+            self.logger.info(log_msg)
+
+        # Buffer the event for the next save_iteration() if we have an active
+        # iteration. If not, fall back to a sidecar events file so the alert
+        # isn't silently dropped.
+        if self.current_iteration is not None:
+            self.current_metrics.setdefault('events', []).append(entry)
+        else:
+            try:
+                events_file = self.metrics_dir / 'events.jsonl'
+                with open(events_file, 'a') as f:
+                    f.write(json.dumps(entry) + '\n')
+            except Exception as e:
+                self.logger.warning(f"Failed to write event to sidecar: {e}")
+
+        # Forward to experiment tracker as a counter so it shows up alongside
+        # other metrics in the experiment DB / dashboards. We log the count
+        # of times this event has fired this iteration (always 1 per call,
+        # so plotting "sum by iteration" gives you the count).
+        if self._experiment_tracker is not None and self._experiment_id is not None:
+            try:
+                self._experiment_tracker.log_metric(
+                    self._experiment_id,
+                    f'event/{event_name}',
+                    1.0,
+                    it,
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to forward event '{event_name}' to tracker: {e}"
+                )
+
+    def log_scalar(self,
+                   name: str,
+                   value: float,
+                   iteration: Optional[int] = None) -> None:
+        """Log a scalar metric (gauge / counter) into the metrics stream.
+
+        Scalars persist into ``iteration_<N>.json`` under ``scalars`` and are
+        forwarded to a connected experiment tracker.
+        """
+        it = iteration if iteration is not None else self.current_iteration
+        entry = {
+            'name': name,
+            'value': float(value),
+            'iteration': it,
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        if self.current_iteration is not None:
+            self.current_metrics.setdefault('scalars', []).append(entry)
+        else:
+            try:
+                scalars_file = self.metrics_dir / 'scalars.jsonl'
+                with open(scalars_file, 'a') as f:
+                    f.write(json.dumps(entry) + '\n')
+            except Exception as e:
+                self.logger.warning(f"Failed to write scalar to sidecar: {e}")
+
+        if self._experiment_tracker is not None and self._experiment_id is not None:
+            try:
+                self._experiment_tracker.log_metric(
+                    self._experiment_id,
+                    name,
+                    float(value),
+                    it,
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to forward scalar '{name}' to tracker: {e}"
+                )
+
+    def set_experiment_tracker(self, tracker, experiment_id: Optional[int]) -> None:
+        """Attach an experiment tracker so log_event / log_scalar forward to it.
+
+        Optional — when not set, events and scalars only land in the JSON
+        sidecar / iteration file. The supervisor wires this up after creating
+        the tracker so collapse alerts surface in dashboards.
+        """
+        self._experiment_tracker = tracker
+        self._experiment_id = experiment_id
 
     # def record_game_history(self, game_history: List[Dict]):
     #     """Record the history of a single game for later analysis."""

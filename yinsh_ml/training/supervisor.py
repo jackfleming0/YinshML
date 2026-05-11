@@ -62,6 +62,51 @@ if not logging.getLogger().hasHandlers():
      logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
+class _SupervisorMetricsProxy:
+    """Lightweight duck-typed metrics-logger surface that the tournament module
+    can call to route deterministic-collapse alerts (T5.4) into the existing
+    supervisor metrics path. Exposes ``log_event`` and ``log_scalar``; both
+    forward to the supervisor's python logger AND its experiment tracker so
+    alerts appear in dashboards.
+
+    Implemented as a separate class (not the supervisor itself) so we don't
+    accidentally enlarge ``TrainingSupervisor``'s public surface or create a
+    circular dep with ``yinsh_ml.utils.tournament``.
+    """
+
+    def __init__(self, supervisor: "TrainingSupervisor"):
+        self._supervisor = supervisor
+
+    def log_event(self, event_name: str, severity: str = 'info',
+                  iteration: Optional[int] = None,
+                  details: Optional[Dict] = None) -> None:
+        # Always log to python logger so the event lands in the run log.
+        msg = f"[event:{event_name}] iter={iteration} details={details}"
+        log = self._supervisor.logger
+        if severity == 'error':
+            log.error(msg)
+        elif severity == 'warning':
+            log.warning(msg)
+        else:
+            log.info(msg)
+        # Forward as a counter to the experiment tracker (1.0 per emission).
+        try:
+            self._supervisor._log_metric_safe(
+                f'event/{event_name}', 1.0, iteration
+            )
+        except Exception as e:  # never fail eval on metrics routing
+            log.warning(f"Failed to forward event '{event_name}' to tracker: {e}")
+
+    def log_scalar(self, name: str, value: float,
+                   iteration: Optional[int] = None) -> None:
+        try:
+            self._supervisor._log_metric_safe(name, float(value), iteration)
+        except Exception as e:
+            self._supervisor.logger.warning(
+                f"Failed to forward scalar '{name}' to tracker: {e}"
+            )
+
+
 class TrainingSupervisor:
     """
     Supervises the AlphaZero-style training loop: self-play → training → evaluation.
@@ -490,6 +535,24 @@ class TrainingSupervisor:
         # strength metric since it matches deployment behavior.
         self.anchor_mcts_enabled: bool = bool(self.mode_settings.get('anchor_mcts_enabled', False))
         self.anchor_mcts_simulations: int = int(self.mode_settings.get('anchor_mcts_simulations', 64))
+        # T4.9: candidate move-selection temperature for the raw-policy eval.
+        # Default 0.5 — argmax (0.0) silently produces the deterministic-side
+        # artifact where every game on a side replays the same line. 0.5 is
+        # enough variance to surface real strength while still being heavily
+        # skewed toward the network's preferred move. The MCTS-vs-anchor
+        # eval ignores this (it uses temperature=0.0 on the visit-distribution
+        # by design, which is the deployment behavior).
+        self.anchor_eval_temperature: float = float(
+            self.mode_settings.get('anchor_eval_temperature', 0.5)
+        )
+        # T4.9 dual-mode eval: when True, every anchor pass runs BOTH
+        # raw-policy and MCTS against the same anchor slate so dashboards
+        # see both Elo numbers. Default True (the spec defaults canonical
+        # recipes ON) — doubles anchor eval cost but the observability
+        # win is big and anchor eval is bounded (minutes, not hours).
+        self.anchor_dual_eval_enabled: bool = bool(
+            self.mode_settings.get('anchor_dual_eval_enabled', True)
+        )
         # Most recent candidate anchor win rate — consumed by
         # run_training.py → finalize_manifest at the end of the run.
         # Set from MCTS eval when enabled, else from raw-policy eval.
@@ -498,6 +561,14 @@ class TrainingSupervisor:
         # --- Experiment Tracking ---
         self.experiment_tracker = None
         self.experiment_id = None
+
+        # T5.4: lightweight metrics-logger proxy that exposes log_event /
+        # log_scalar to the tournament module. Forwards events into the
+        # experiment tracker (counter scalars) and the python logger so
+        # deterministic-collapse alerts surface in dashboards. Created
+        # lazily so callers that don't set a tracker still see the events
+        # in the run log.
+        self._tournament_metrics_proxy = _SupervisorMetricsProxy(self)
 
         self._load_best_model_state() # Load previous state if exists for this run directory
         self.logger.info("=== Training Supervisor Initialized ===")
@@ -1192,16 +1263,25 @@ class TrainingSupervisor:
                         prev_ckpt,
                     ))
 
+                # T4.9: dual_eval forces MCTS on so dashboards see both
+                # raw and mcts Elo every iteration. When dual_eval is off
+                # we honor anchor_mcts_enabled as before.
+                run_mcts_pass = self.anchor_mcts_enabled or self.anchor_dual_eval_enabled
                 self.logger.info(
                     f"Running anchor eval: {len(anchor_models)} model(s) vs "
                     f"HeuristicAgent(depth={self.anchor_depth}) x {self.anchor_num_games} games "
-                    f"(seed={self.anchor_seed}, mcts={'on' if self.anchor_mcts_enabled else 'off'})"
+                    f"(seed={self.anchor_seed}, temp={self.anchor_eval_temperature}, "
+                    f"mcts={'on' if run_mcts_pass else 'off'}, "
+                    f"dual_eval={'on' if self.anchor_dual_eval_enabled else 'off'})"
                 )
                 candidate_label = _canon(str(checkpoint_path))
                 # Raw-policy diagnostic. Always runs — fast, isolates the
                 # policy head from search. Print result as soon as it's
                 # available so the operator sees progress before MCTS
                 # eval (which can be 5-10× slower) finishes.
+                # T5.4: pass metrics proxy + iteration so collapse alerts
+                # land in dashboards. T4.9: candidate_temperature=0.5 by
+                # default breaks the deterministic-side mirage.
                 anchor_results = self.tournament_manager.run_anchor_eval_batch(
                     models=anchor_models,
                     num_games=self.anchor_num_games,
@@ -1209,6 +1289,9 @@ class TrainingSupervisor:
                     seed=self.anchor_seed,
                     max_moves_per_game=self.anchor_max_moves_per_game,
                     use_mcts=False,
+                    candidate_temperature=self.anchor_eval_temperature,
+                    metrics_logger=self._tournament_metrics_proxy,
+                    iteration=current_iteration,
                 ) or {}
                 cand_res = anchor_results.get(candidate_label)
                 if cand_res and cand_res.get('games_played', 0) > 0:
@@ -1227,7 +1310,7 @@ class TrainingSupervisor:
                 # labels in metrics.json so both series persist for plotting.
                 anchor_results_mcts: Dict[str, Dict] = {}
                 cand_res_mcts: Optional[Dict] = None
-                if self.anchor_mcts_enabled:
+                if run_mcts_pass:
                     anchor_results_mcts = self.tournament_manager.run_anchor_eval_batch(
                         models=anchor_models,
                         num_games=self.anchor_num_games,
@@ -1236,6 +1319,9 @@ class TrainingSupervisor:
                         max_moves_per_game=self.anchor_max_moves_per_game,
                         use_mcts=True,
                         mcts_simulations=self.anchor_mcts_simulations,
+                        candidate_temperature=self.anchor_eval_temperature,
+                        metrics_logger=self._tournament_metrics_proxy,
+                        iteration=current_iteration,
                     ) or {}
                     cand_res_mcts = anchor_results_mcts.get(candidate_label)
                     if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
@@ -1271,7 +1357,7 @@ class TrainingSupervisor:
                             f"{res['candidate_wins']}/{res['games_played']} "
                             f"= {res['win_rate']:.1%}"
                         )
-                if self.anchor_mcts_enabled:
+                if run_mcts_pass:
                     for lbl, res in anchor_results_mcts.items():
                         if lbl == candidate_label:
                             continue
@@ -1287,19 +1373,28 @@ class TrainingSupervisor:
                 # `anchor_win_rate` tracks the primary metric (MCTS when
                 # enabled, raw-policy otherwise); raw and MCTS are also
                 # logged under explicit suffixes so both series are available.
+                # T4.9: also log anchor_elo_raw / anchor_elo_mcts so
+                # dashboards have a unified Elo axis for both modes.
                 if (
                     candidate_anchor_win_rate is not None
                     and self.experiment_tracker
                     and self.experiment_id
                 ):
                     try:
+                        from ..utils.tournament import win_rate_to_elo_delta
                         iteration_1b = current_iteration + 1
                         self._log_metric_safe(
                             'anchor_win_rate', candidate_anchor_win_rate, iteration_1b
                         )
                         if cand_res and cand_res.get('games_played', 0) > 0:
+                            raw_wr = float(cand_res['win_rate'])
                             self._log_metric_safe(
-                                'anchor_win_rate_raw', float(cand_res['win_rate']), iteration_1b
+                                'anchor_win_rate_raw', raw_wr, iteration_1b
+                            )
+                            self._log_metric_safe(
+                                'anchor_elo_raw',
+                                win_rate_to_elo_delta(raw_wr),
+                                iteration_1b,
                             )
                             self._log_metric_safe(
                                 'anchor_games_played',
@@ -1315,9 +1410,13 @@ class TrainingSupervisor:
                                 'anchor_draws', int(cand_res['draws']), iteration_1b
                             )
                         if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
+                            mcts_wr = float(cand_res_mcts['win_rate'])
                             self._log_metric_safe(
-                                'anchor_win_rate_mcts',
-                                float(cand_res_mcts['win_rate']),
+                                'anchor_win_rate_mcts', mcts_wr, iteration_1b,
+                            )
+                            self._log_metric_safe(
+                                'anchor_elo_mcts',
+                                win_rate_to_elo_delta(mcts_wr),
                                 iteration_1b,
                             )
                     except Exception as e:
@@ -1578,7 +1677,10 @@ class TrainingSupervisor:
         # inspectable after the run without rerunning eval. Both raw and
         # MCTS variants persist under separate keys.
         anchor_payload = {'anchor_eval': anchor_results}
-        if self.anchor_mcts_enabled:
+        # T4.9: persist MCTS variant whenever it ran (dual_eval ON or
+        # legacy anchor_mcts_enabled). Without this gate the MCTS payload
+        # would silently disappear from metrics.json under dual-eval.
+        if self.anchor_mcts_enabled or self.anchor_dual_eval_enabled:
             anchor_payload['anchor_eval_mcts'] = anchor_results_mcts
         self._save_metrics(iteration_dir, extra_payload=anchor_payload)
 

@@ -66,10 +66,13 @@ def main():
                         help="(default) Candidate plays via MCTS")
     parser.add_argument("--no-mcts", dest="use_mcts", action="store_false",
                         help="Candidate plays via raw policy argmax instead")
-    parser.add_argument("--temperature", type=float, default=0.0,
-                        help="Move-selection temperature for the candidate. 0.0 (default) "
-                             "is argmax — deterministic, fragile to side-of-board artifacts. "
-                             "Use 0.5–1.0 for stochastic reads of true strength.")
+    parser.add_argument("--temperature", type=float, default=0.5,
+                        help="Move-selection temperature for the candidate. Default 0.5 "
+                             "(matches the in-training anchor eval default — T4.9). "
+                             "Pass 0.0 to force argmax — deterministic and fragile to "
+                             "side-of-board artifacts; only useful for diagnosing "
+                             "deterministic behavior. Use 0.5–1.0 for stochastic reads "
+                             "of true strength.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
