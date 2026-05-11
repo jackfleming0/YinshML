@@ -1002,6 +1002,46 @@ The path forward is now genuinely clear:
 
 Combine the two winners: deep_256x18 init + LR=0.0001. ETA done ~20:00 UTC. If the prediction holds (iter 1+ stochastic ≥ 33%), this is the **deployable multi-day RL recipe**. If iter 1+ collapses despite both knobs, init and LR are not additively protective and the recipe has a different structural ceiling.
 
+## Discovery run, batch 6: combining the winners — deep_256x18 + LR/10 (2026-05-11 17:39–19:44 UTC, ~$0.50)
+
+The obvious follow-up: combine batch 5.1's preservation LR (0.0001) with batch 5.2's strong init (deep_256x18). Predicted iter 1+ stochastic ≥ 33% across all 5 iters.
+
+### 4-way warm-start comparison (full)
+
+| iter | b4 sup hi-LR | b5.1 sup lo-LR | b5.2 deep hi-LR | **b6 deep lo-LR** |
+|---|---:|---:|---:|---:|
+| 0 MAIN top-1 | 2.5% | 5.2% | 5.2% | **5.8%** |
+| 0 stochastic (t=0.5) | 10% | 17% | **33%** | 27% |
+| 0 anchor n=4 det | 50% | 0% | 0% | **100%** |
+| 1 MAIN top-1 | 2.1% | 5.0% | 3.3% | 4.8% |
+| 1 stochastic | 13% | **33%** | 10% | 30% |
+| 4 MAIN top-1 | 1.7% | **3.8%** | 2.4% | 2.6% |
+| 4 stochastic | 13% | 17% | 20% | 10% |
+
+### Findings — three different winners by metric
+
+1. **Best peak MAIN top-1: `deeplr_iter0` at 5.8%** (b6 iter 0). The combined recipe starts strongest of any warm-start cell. Same iter at the 4-game training anchor eval hit 4/4 (100%) — the first warm-start cell to win both colors deterministically.
+
+2. **Best peak stochastic strength: `deepb_iter0` at 33%** (b5.2 iter 0). Same init as b6 but at standard LR. The high LR produces a different argmax line (wins 0/4 deterministic) but the broader stochastic distribution is actually stronger than b6's at iter 0.
+
+3. **Best stability across iters: `lowlr` (b5.1)**. Stays at 3.8-5.2% MAIN top-1 across all 5 iters. b6 starts higher (5.8% iter 0) but decays faster, dropping to 2.6% by iter 4.
+
+4. **Bigger network drifts faster.** b6 (deep + lo-LR) decays MAIN top-1 5.8 → 2.6 across 5 iters. b5.1 (sup + lo-LR) decays only 5.2 → 3.8. **Larger architecture has more capacity to drift toward the argmax-mimicry attractor**, even at the preservation LR.
+
+### What this changes about ship-ability
+
+We now have multiple deployable warm-start checkpoints:
+
+- **`runs_warm_start_deep_lowlr/iteration_0/checkpoint_iteration_0_ema.pt`** — strongest MAIN top-1 (5.8%) plus solid stochastic (27%). Deep init + 1 RL iter at LR/10. **Recommended ship candidate.**
+- **`runs_warm_start_sup_lowlr/iteration_1/checkpoint_iteration_1_ema.pt`** — strongest stochastic strength at preservation LR (33%). Smaller arch, more stable across iters. **Recommended for stability over peak.**
+- **`runs_warm_start_deep_b/iteration_0/checkpoint_iteration_0_ema.pt`** — strongest stochastic single cell (33%) but only iter 0. Standard LR. **Only ships if a single-iter warm-start is acceptable.**
+
+### Open question for batch 7 (running now)
+
+Does MCTS amplify the warm-start advantage further? Batch 7 runs MCTS strength curves (sims=48/200/400 at temp=0.5) on `deeplr_iter0`, `deeplr_iter1`, `deepb_iter0` plus d=3 stress on the best.
+
+Predicted: deeplr_iter0 + MCTS @ 400 + temp=0.5 > 37% (which was the pure supervised `deep_256x18` ceiling). If so, the 1 RL iter genuinely refines the policy beyond what supervised alone provided.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
