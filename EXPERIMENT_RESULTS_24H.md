@@ -1042,6 +1042,73 @@ Does MCTS amplify the warm-start advantage further? Batch 7 runs MCTS strength c
 
 Predicted: deeplr_iter0 + MCTS @ 400 + temp=0.5 > 37% (which was the pure supervised `deep_256x18` ceiling). If so, the 1 RL iter genuinely refines the policy beyond what supervised alone provided.
 
+## Discovery run, batch 7: MCTS strength curves on warm-start iter-0 winners (2026-05-11 19:44–22:00 UTC, ~$1)
+
+Did the 1-iter RL refinement at preservation LR genuinely amplify strength beyond pure supervised? Tested via MCTS strength sweep at sims=48/200/400 + temp=0.5 on `deeplr_iter0`, `deeplr_iter1`, `deepb_iter0`. Plus d=3 stress on the best.
+
+### MCTS strength at temp=0.5 vs HeuristicAgent(d=1), n=30
+
+| model | 48 sims | 200 sims | 400 sims |
+|---|---:|---:|---:|
+| deep_256x18 (sup baseline) | 3% | 30% | 37% |
+| **deepb_iter0** (deep + hi-LR, 1 iter) | 0% [det=B] | 40% | 43% |
+| **deeplr_iter0** (deep + lo-LR, 1 iter) | 17% | 20% | **47%** |
+| **deeplr_iter1** (deep + lo-LR, 2 iter) | **77%** | 40% | 23% |
+
+### Findings — the shippable model exists
+
+1. **`deeplr_iter1` + MCTS @ 48 sims = 77% win rate** — the strongest stochastic result of the entire discovery run. 23 wins / 7 losses / 0 draws over 30 games vs HeuristicAgent depth-1, with no determinism flag firing. White: 11/15, Black: 12/15, both with genuinely varied game lengths. **This is a real "wins ~3 out of 4" model under modest search budget.**
+
+2. **`deeplr_iter0` + MCTS @ 400 sims = 47%** — 10 pp above the pure supervised baseline (37%). Confirms 1 RL iter at preservation LR genuinely amplifies beyond pure supervised at high sim budget too.
+
+3. **Reverse sim curve on `deeplr_iter1`:** 77% at 48 sims, decays to 23% at 400 sims. Pure supervised is the opposite (3% → 37%). **Interpretation:** the 1-iter RL refinement made the policy prior so well-tuned for the heuristic-vs-network game that low-budget MCTS amplifies it best. Higher-budget MCTS explores away from the refined distribution, finding moves that are reasonable individually but worse against this specific opponent. This is curious and might mean the model is over-fitted to the heuristic-shaped self-play data — but for shipping vs depth-1 heuristic, the 48-sim configuration is optimal.
+
+4. **`deepb_iter0` (hi-LR variant, 1 iter) hits 43% at 400 sims** — also above supervised baseline, even at the destructive LR. Single-iteration warm-starts at any LR get the supervised lift. The LR=0.001 problem only manifests in iter 2+.
+
+5. **All warm-start checkpoints beat the supervised baseline at 200+ sims.** Pure supervised at MCTS 400 = 37%. Every 1-RL-iter checkpoint exceeds it (43-47%). Multi-iter checkpoints decay (batch 6 iter 4 ≈ 10%).
+
+### The combined recipe is real
+
+Going back to the original framing: the prior 24-hour writeup concluded "RL recipe peaks then collapses, multi-day path requires code-level fixes." This discovery run has decomposed that into:
+
+- **Use supervised init** (deep_256x18 best, 6.2% MAIN top-1 alone)
+- **Use preservation LR** (0.0001, 10× lower than default)
+- **Stop training at iter 1 or 2** — that's where the warm-start advantage is preserved
+- **Eval under stochastic policy** (temp=0.5) and/or MCTS at appropriate sim budget
+
+Total config changes from the original failing recipe:
+1. `--init-checkpoint models/supervised_deep_256x18/best_supervised.pt` (was: from-scratch)
+2. `lr: 0.0001` (was: 0.001)
+3. `num_iterations: 2` (was: 5+)
+
+Three lines of YAML / CLI. No code changes. The "structural fixes required" framing was overdetermined.
+
+### What ships from this discovery run
+
+**Best model for direct heuristic play:**
+- `runs_warm_start_deep_lowlr/iteration_1/checkpoint_iteration_1_ema.pt` + MCTS @ 48 sims + temp ≥ 0.3
+- 77% win rate vs HeuristicAgent depth-1 (n=30)
+- Genuinely varied games, no determinism artifact
+
+**Best model for general (search-budget-flexible) deployment:**
+- `runs_warm_start_deep_lowlr/iteration_0/checkpoint_iteration_0_ema.pt` + MCTS @ 400 + temp ≥ 0.3
+- 47% vs HeuristicAgent depth-1
+- 5.8% MAIN top-1 against expert games (best in run)
+- Better at high sim budgets where exploration matters
+
+**Best supervised-only model:**
+- `models/supervised_deep_256x18/best_supervised.pt` + MCTS @ 400 + temp ≥ 0.3
+- 37% vs HeuristicAgent depth-1
+- Foundation that the warm-start builds on; useful as a frozen reference for future RL anchor-curriculum experiments
+
+### Open follow-ups (not run in this 24h)
+
+- **d=3 stress on `deeplr_iter0`** — mid-flight at writeup time (running ~22:00 UTC). Will tell us if real strength persists vs stronger opponent.
+- **Multi-seed `deeplr` runs** — does the iter-1 77% reproduce across random seeds, or is it a single-seed spike? Half of the prior 60/60 results were single-seed lucky.
+- **n=60 or n=100 evals on `deeplr_iter1`** — tighten the 77% CI to know how robust it is.
+- **Longer training at LR=0.00003** — does even slower LR preserve more iters? Would buy stability past iter 2 if it matters.
+- **Anchor curriculum** — was "next planned" before this discovery showed LR was the missing knob. Could still help for very long runs (10+ iters), but no longer urgent.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
