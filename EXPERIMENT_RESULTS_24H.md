@@ -810,6 +810,57 @@ d=3 with 5s/move time cap can produce variance OR determinism depending on wheth
 
 All future evals through this branch will surface the determinism flag automatically via commit 8a5cbbd.
 
+## Discovery run, batch 3b: MCTS + temp=0.5 = real strength curve (2026-05-11 08:41–11:11 UTC, ~$1.20)
+
+Re-ran the same MCTS strength matrix as batch 3 but with `--temperature 0.5` on the candidate, breaking the argmax determinism that contaminated every prior eval. 5 models (4 supervised + 2 RL plus a check on scale_up_b iter 9 from the earlier writeup) × 3 sim budgets × 30 games each.
+
+### Full stochastic MCTS strength curve vs HeuristicAgent(d=1), temp=0.5, n=30
+
+| model | 48 sims | 200 sims | 400 sims | profile |
+|---|---:|---:|---:|---|
+| **deep_256x18** (supervised, batch 1 winner) | 3% | 30% | **37%** | monotone climb |
+| enh_256x12 (supervised, batch 1 winner) | 3% | 17% | 30% | monotone climb |
+| sup_comb (supervised, prior baseline) | 0% | 30% | 27% | plateau at 200 |
+| scaleupB_i9 (historical RL "60/60 champion") | 30% | 23% | 27% | flat ~25% |
+| ablB_s1_iter2 (canonical RL "60/60") | **43%** | 10% | 20% | spike-then-collapse |
+
+### Findings — the picture is finally clean
+
+1. **No model reaches 50%.** Best stochastic strength across the entire matrix is `deep_256x18 + MCTS @ 400 sims = 37%`. That's well above random but well below "ties heuristic." All "100% wins vs heuristic" claims in prior writeup sections are deterministic-collapse artifacts, definitively.
+
+2. **Two distinct model profiles emerged.** Supervised models start near 0% at 48 sims (policy prior is broadly distributed; needs search budget to lock in good moves) and climb monotonically with more sims. RL "winners" hit ~25-43% at low sims (heuristic-mimicry policy prior gives quick gains) but plateau or decline with deeper search (mimicry breaks when search overrides the prior).
+
+3. **deep_256x18 is the strongest model end-to-end.** 37% at 400 sims vs scaleupB's 27%. The depth-scaling lift on the supervised side translates to real MCTS strength, not just expert-agreement. **This is the model worth shipping** (with MCTS @ 400 + temp ≥ 0.3 for diversity).
+
+4. **ablB_s1 spike at 48 sims (43%) is the heuristic-mimicry exploit.** At 48 sims, MCTS visit counts are dominated by the policy prior, which for ablB_s1 happens to weight moves close to depth-1 heuristic's preferences. So at low sims it "wins" by matching the heuristic's deterministic line just well enough to exploit ties. At 200 sims, search starts overriding the prior — ablB_s1 collapses to 10% because the actual underlying policy is bad. **Confirms the iter-2 RL "winners" are mimicry models, not strong policies.**
+
+5. **The scale_up_b iter 9 historical claim is debunked.** Prior writeup: "scale_up_b iter 9 EMA at d=1 with 400 sims = 60/60 (100%)." Reality: 100% at temp=0 (fully deterministic both sides, lengths 87-87 and 94-94) → **27% at temp=0.5**. This was the strongest claim in the prior 24-hour writeup; turns out to have been a fortuitous argmax line, not strength. The 73-percentage-point correction maps directly to "what does breaking the determinism artifact look like."
+
+### scale_up_b iter 9 verification (the historical claim, checked end-to-end)
+
+| sims | temp=0.0 | temp=0.5 |
+|---:|---:|---:|
+| 48 | 15/30 (50%) det | 9/30 (30%) |
+| 200 | 0/30 (0%) det | 7/30 (23%) |
+| 400 | **30/30 (100%) det** | **8/30 (27%)** |
+
+The two interesting cells:
+- @ 200 sims: argmax LOSES every game (deterministic line is bad). Stochastic eval wins 23%. **The model is strictly better than its own argmax** at this sim budget.
+- @ 400 sims: argmax WINS every game (60/60). Stochastic drops to 27%. **The 100% result was the lucky argmax line; the policy itself only beats heuristic 27% of the time**.
+
+### What this changes about the multi-day question
+
+The prior 24-hour writeup's entire framing — "RL recipe peaks at iter-2 spike then collapses" — was based on win-rate-vs-heuristic measurements that turned out to be determinism artifacts. The actual picture:
+
+- **The recipe never produced a strong policy.** What looked like "60/60 winners" were brittle argmax lines that happen to beat the heuristic's argmax in deterministic play. Under any noise, they're at 5-30%.
+- **Supervised training produces broader, weaker policies that amplify well under MCTS.** deep_256x18 at MCTS @ 400 hits 37%, climbing with sims. RL "winners" plateau at 25%.
+- **The right starting point for multi-day RL is `deep_256x18`, not `ablation_b iter 2`.** Both are below "ties heuristic" but the supervised model has a path forward (climbing curve) while RL winners have already saturated (flat curve).
+
+### What's still being tested (post-b3 chain stage 4-5)
+
+- **Batch 4 (in flight at 11:11 UTC):** 5-iter RL warm-start from `supervised_combined` using ablation_b recipe. Hypothesis: RL will pull the supervised model toward the same brittle argmax mode that ablation_b produces from scratch. If iter-1 stochastic eval drops from supervised's ~5-30% to RL's <15%, the recipe is reducing the model. If it stays or improves, RL is genuinely building on supervised strength.
+- **Per-iter raw + holdout evals (after batch 4):** trajectory of MAIN_GAME top-1 + stochastic win rate iter-over-iter on the warm-start run.
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
