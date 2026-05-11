@@ -265,6 +265,15 @@ class TrainingSupervisor:
             'RING_REMOVAL': 1.0
         })
         self.logger.info(f"Phase weights: {self.phase_weights}")
+        # T3.7: optional cap on per-phase sampling weight. ``None`` (default)
+        # preserves legacy uncapped behavior. A typical safe value is 4.0:
+        # at 5% RING_PLACEMENT frequency the inverse-frequency multiplier
+        # in the mmap buffer path would otherwise hit ~20×, collapsing the
+        # effective batch onto rare-phase positions.
+        max_oversampling_cfg = self.mode_settings.get('max_oversampling', None)
+        max_oversampling = (
+            float(max_oversampling_cfg) if max_oversampling_cfg is not None else None
+        )
 
         # ==================================================================
         # 2. Instantiate Components with Extracted Parameters
@@ -302,6 +311,20 @@ class TrainingSupervisor:
         epsilon_mix_start = float(self.mode_settings.get('epsilon_mix_start', 0.25))
         epsilon_mix_end = float(self.mode_settings.get('epsilon_mix_end', 0.0))
         epsilon_mix_taper_moves = int(self.mode_settings.get('epsilon_mix_taper_moves', 20))
+        # Iteration-aware Dirichlet noise tapering (Tier 3 #6). Defaults of
+        # 1.0 / 1.0 are a no-op; set `epsilon_mix_iteration_end < 1.0` (e.g.
+        # 0.3 for 70% noise reduction at the last iteration) to opt in.
+        # `total_iterations` is read so `train_iteration` can compute progress
+        # without depending on the runner pushing the value in.
+        epsilon_mix_iteration_start = float(
+            self.mode_settings.get('epsilon_mix_iteration_start', 1.0)
+        )
+        epsilon_mix_iteration_end = float(
+            self.mode_settings.get('epsilon_mix_iteration_end', 1.0)
+        )
+        self._total_iterations: int = int(
+            self.mode_settings.get('total_iterations', 0)
+        )
         # Probabilistic fast/slow sim split. Default off; opt-in via config when
         # you want to spend less compute on the bulk of moves and concentrate
         # search where it matters. RiverNewbury default: fast=20, prob=0.75.
@@ -339,6 +362,8 @@ class TrainingSupervisor:
             'epsilon_mix_start': epsilon_mix_start,
             'epsilon_mix_end': epsilon_mix_end,
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,
+            'epsilon_mix_iteration_start': epsilon_mix_iteration_start,
+            'epsilon_mix_iteration_end': epsilon_mix_iteration_end,
             'root_policy_temp': root_policy_temp,
             'use_cpp_engine': use_cpp_engine,
         }
@@ -386,6 +411,7 @@ class TrainingSupervisor:
             search_consistency_long_sims=search_consistency_long_sims,
             search_consistency_batch_size=search_consistency_batch_size,
             search_consistency_warmup_iters=search_consistency_warmup_iters,
+            max_oversampling=max_oversampling,
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,
             # lr_schedule = lr_schedule,

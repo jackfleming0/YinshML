@@ -25,11 +25,32 @@ from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 logger = logging.getLogger(__name__)
 
 
+def _effective_batch_size_from_probs(weights: np.ndarray) -> float:
+    """Kish-style effective sample size of a non-negative weight vector.
+
+    n_eff = (Σ w_i)² / Σ (w_i)²
+
+    Interpretation: how many equally-weighted samples this set of weights
+    is informationally equivalent to. Equal weights → n_eff == len(weights).
+    A single weight dominating → n_eff → 1.
+    Returns 0.0 for empty input or degenerate (all-zero) weights.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    if w.size == 0:
+        return 0.0
+    ssq = float((w * w).sum())
+    if ssq <= 0.0:
+        return 0.0
+    s = float(w.sum())
+    return (s * s) / ssq
+
+
 class GameExperience:
     """Stores game states and outcomes for training, with optimized memory usage."""
 
     def __init__(self, max_size: int = 100000, subsample_long_games: bool = True,
-                 enable_augmentation: bool = False, max_augmentations: int = 12):
+                 enable_augmentation: bool = False, max_augmentations: int = 12,
+                 max_oversampling: Optional[float] = None):
         """Initialize GameExperience replay buffer.
 
         Args:
@@ -37,7 +58,22 @@ class GameExperience:
             subsample_long_games: Whether to subsample games >100 moves
             enable_augmentation: If True, apply D6 symmetry augmentation to training data
             max_augmentations: Maximum number of augmented samples per original (1-12)
+            max_oversampling: Optional cap on the per-phase sampling multiplier
+                applied in `sample_batch` (T3.7). ``None`` (default) preserves
+                legacy behavior — phase_weights flow through unmodified. A
+                positive float clips each ``phase_weights[phase]`` to at most
+                ``max_oversampling`` before per-sample probabilities are
+                materialized. Pairs with the inverse-frequency cap on
+                `MemoryMappedExperienceBuffer._weighted_sample_by_phase` so
+                both sampling paths share the same semantic.
         """
+        if max_oversampling is not None and max_oversampling <= 0:
+            raise ValueError(
+                f"max_oversampling must be positive or None, got {max_oversampling}"
+            )
+        self.max_oversampling: Optional[float] = (
+            float(max_oversampling) if max_oversampling is not None else None
+        )
         self.states = deque(maxlen=max_size)
         self.move_probs = deque(maxlen=max_size)
         self.values = deque(maxlen=max_size)
@@ -365,6 +401,19 @@ class GameExperience:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample a random batch of experiences, weighting certain phases more/less.
+
+        Side effect: writes the Kish-style effective batch size of the
+        sampling distribution restricted to the selected indices into
+        ``self.last_effective_batch_size`` (T5.5). With ``replace=False``
+        the bincount-of-indices approach used in the spec always yields
+        ``batch_size`` (each index appears once), so the truthful metric is
+        computed from the per-sample probabilities of the selected items
+        renormalized to a distribution. When all selected items have equal
+        sampling probability → metric == ``batch_size``; when the
+        sampling distribution is dominated by a handful of items the
+        metric collapses toward 1, signaling that nominal batch size has
+        decoupled from the diversity of information actually flowing into
+        the gradient.
         """
         n = len(self.states)
         if n == 0:
@@ -376,6 +425,18 @@ class GameExperience:
                 "RING_PLACEMENT": 1.0,
                 "MAIN_GAME": 1.0,
                 "RING_REMOVAL": 1.0
+            }
+
+        # T3.7: cap per-phase weights before materializing per-sample probs.
+        # A user who configures `RING_PLACEMENT: 8.0` to fight under-sampling
+        # gets clipped to `max_oversampling` here. The cap is intentionally
+        # applied to the user-supplied dict (post-default-fill) so it shows
+        # up identically across batches even if `phase_weights` is rebuilt
+        # each call from config.
+        if self.max_oversampling is not None:
+            cap = self.max_oversampling
+            phase_weights = {
+                phase: min(weight, cap) for phase, weight in phase_weights.items()
             }
 
         # Initialize equal probabilities for each sample
@@ -390,6 +451,18 @@ class GameExperience:
 
         # Sample without replacement (faster with numpy choice)
         indices = np.random.choice(n, batch_size, replace=False, p=p)
+
+        # T5.5: compute Kish-style effective batch size from the sampling
+        # distribution restricted to the selected indices.
+        #   n_eff = (Σ p_i)² / Σ (p_i)²
+        # where p_i are the unnormalized weights of the selected items
+        # (renormalization cancels). This is the inverse-participation-ratio
+        # of the *probability mass that produced this batch*: equal weights
+        # → n_eff == batch_size; concentrated weights → n_eff << batch_size.
+        # (The spec's bincount-of-indices form assumed sampling with
+        # replacement; with replace=False bincount is identically all-ones,
+        # so this probability-space form is the truthful translation.)
+        self.last_effective_batch_size = float(_effective_batch_size_from_probs(p[indices]))
 
         # Create tensors from selected indices
         states = torch.stack([torch.from_numpy(self.states[i]).float() for i in indices])
@@ -435,7 +508,8 @@ class YinshTrainer:
                  search_consistency_every_k_steps: int = 10,
                  search_consistency_long_sims: int = 64,
                  search_consistency_batch_size: int = 32,
-                 search_consistency_warmup_iters: int = 3):
+                 search_consistency_warmup_iters: int = 3,
+                 max_oversampling: Optional[float] = None):
         """
         Initialize the trainer.
 
@@ -518,6 +592,15 @@ class YinshTrainer:
                 until iteration N. Early iterations have a noisy network
                 whose long-search outputs are themselves unreliable
                 targets; warming up lets the policy stabilize first.
+            max_oversampling: Optional cap on per-phase sampling weights
+                (T3.7). Default ``None`` preserves legacy behavior — config
+                must opt in (e.g. ``max_oversampling: 4.0``) to enable the
+                cap. When set, both replay-buffer paths
+                (`GameExperience.sample_batch` and the mmap buffer's
+                `_weighted_sample_by_phase`) clip per-phase weights to this
+                value, preventing rare phases like RING_PLACEMENT from
+                receiving 10–20× oversampling and collapsing the effective
+                batch size onto a tiny rare-phase manifold.
         """
         self.state_encoder = network.state_encoder
         self.batch_size = batch_size
@@ -629,9 +712,16 @@ class YinshTrainer:
         self.experience = GameExperience(
             max_size=max_buffer_size,
             enable_augmentation=enable_augmentation,
-            max_augmentations=max_augmentations
+            max_augmentations=max_augmentations,
+            max_oversampling=max_oversampling,
         )
         self.logger.info(f"Replay buffer capped at {max_buffer_size:,} samples")
+        if max_oversampling is not None:
+            self.logger.info(
+                f"Phase oversampling capped at {float(max_oversampling):.2f}x (T3.7)"
+            )
+        else:
+            self.logger.info("Phase oversampling cap disabled (legacy behavior)")
         if enable_augmentation:
             self.logger.info(f"Augmentation enabled: up to {max_augmentations}x data expansion")
         if replay_buffer_path is not None:
@@ -1611,6 +1701,11 @@ class YinshTrainer:
             'gradient_norm': 0,
             'loss_improvement': 0
         }
+        # T5.5: per-batch effective batch size (Kish ESS of the sampling
+        # distribution restricted to the selected indices). Averaged at end
+        # of epoch and surfaced in the epoch summary log so collapse
+        # (eff_bs / nominal_bs ≪ 1) is visible at a glance.
+        effective_batch_sizes: List[float] = []
 
         prev_total_loss = float('inf')
         current_policy_lr = float(self.policy_optimizer.param_groups[0]['lr'])
@@ -1649,6 +1744,10 @@ class YinshTrainer:
                 batch_size,
                 phase_weights=phase_weights
             )
+            # Capture this batch's effective batch size (set by sample_batch).
+            ebs = getattr(self.experience, 'last_effective_batch_size', None)
+            if ebs is not None:
+                effective_batch_sizes.append(float(ebs))
 
             # Search-consistency probe (Track B §5). Gated by `enable_search_
             # consistency` and a warmup-iter check inside the step itself; this
@@ -1700,6 +1799,11 @@ class YinshTrainer:
         # Add average value confidence and variance
         stats_accum['value_confidence'] = np.mean(value_confidences) if value_confidences else 0.0
         stats_accum['value_variance'] = np.mean(value_variances) if value_variances else 0.0
+        # T5.5: epoch-mean effective batch size (np.nan if unavailable, e.g.
+        # when train_step short-circuited on an under-filled buffer).
+        stats_accum['effective_batch_size'] = (
+            float(np.mean(effective_batch_sizes)) if effective_batch_sizes else float('nan')
+        )
 
         # MEMORY FIX: Track losses for supervisor reporting
         # Keep only recent history to prevent unbounded growth
@@ -1758,6 +1862,18 @@ class YinshTrainer:
         if self.metrics_logger is not None:
             self.metrics_logger.log_training(metrics)
 
+        # T5.5: surface effective batch size in epoch summary so that
+        # phase-weight collapse onto a tiny rare-phase manifold is visible
+        # at a glance. Reported as `eff_bs / nominal_bs` ratio + raw value.
+        ebs_mean = stats_accum.get('effective_batch_size', float('nan'))
+        if not np.isnan(ebs_mean):
+            ebs_str = (
+                f"eff_bs={ebs_mean:.1f}/{batch_size} "
+                f"({ebs_mean / batch_size:.0%})"
+            )
+        else:
+            ebs_str = f"eff_bs=n/a/{batch_size}"
+
         self.logger.info(
             f"\n{'=' * 20} Epoch Summary {'=' * 20}\n"
             f"Policy: loss={metrics.policy_loss:.4f}, lr={metrics.learning_rates['policy']:.2e}\n"
@@ -1767,6 +1883,7 @@ class YinshTrainer:
             f"Moves:  acc={metrics.move_accuracies['top_1_accuracy']:.2%}, "
             f"top3={metrics.move_accuracies['top_3_accuracy']:.2%}\n"
             f"Grad norm: {metrics.gradient_norm:.2e}, Loss improvement: {metrics.loss_improvement:.2%}\n"
+            f"Sampling: {ebs_str}\n"
             f"{'=' * 50}"
         )
 
