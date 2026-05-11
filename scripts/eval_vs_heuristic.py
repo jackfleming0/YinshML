@@ -89,8 +89,11 @@ def main():
     label = args.label or args.checkpoint.stem
     logger.info(f"Loading checkpoint as '{label}': {args.checkpoint}")
 
-    net = NetworkWrapper(device=device)
-    net.load_model(str(args.checkpoint))
+    # Pass model_path to constructor so the auto-detect (input_channels,
+    # num_channels, num_blocks) runs against the checkpoint state_dict.
+    # Calling load_model AFTER construction misses the auto-detect path
+    # and breaks on 15-channel enhanced-encoding checkpoints.
+    net = NetworkWrapper(model_path=str(args.checkpoint), device=device)
 
     # Use the supervisor's tournament infra so eval path matches what training
     # uses — just instantiated standalone here.
