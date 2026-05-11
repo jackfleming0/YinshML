@@ -959,8 +959,16 @@ class MCTS:
                 policy = policy_nn
                 value = value_nn
 
-            # Expand node if allowed
-            if can_expand and not current_state.is_terminal():
+            # Expand node if allowed.
+            #
+            # The `not node.is_expanded` guard is load-bearing: without it, two
+            # entries in `batch_leaves` that happen to point at the same node
+            # (which can happen if a future change re-introduces duplicate-leaf
+            # batching, or if multiple sims race to the same internal node)
+            # would re-create `node.children` from scratch on the second pass,
+            # silently clobbering visit counts and priors set by the first
+            # pass. Guarding by `is_expanded` makes expansion idempotent.
+            if can_expand and not node.is_expanded and not current_state.is_terminal():
                 valid_moves = current_state.get_valid_moves()
                 if valid_moves:
                     node.is_expanded = True
