@@ -1,0 +1,79 @@
+# smoke_post_fix.yaml — 4-iter post-fix sanity smoke.
+#
+# Goal: confirm the BN-stat-trash fix (cd5f0d5) lets the policy head
+# actually learn instead of collapsing in iteration 1. Pre-fix, local
+# run 20260421_125023 showed entropy=0.00 / 2-of-128 unique argmax at
+# iter 1; this should now show monotonically increasing structure.
+#
+# Cheap by design — 5 games/iter at 16 sims, no augmentation, 1 epoch.
+# Total wall-clock ~10-15 minutes on Apple Silicon.
+
+version: 1
+device: auto
+num_iterations: 4
+save_dir: runs_smoke_post_fix
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 4
+  num_simulations: 16
+  late_simulations: 16
+  simulation_switch_ply: 8
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 100
+  use_batched_mcts: true
+  mcts_batch_size: 16
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 10
+  initial_temp: 1.0
+  final_temp: 0.5                # less peaky than production (0.1) for clearer signal
+  annealing_steps: 12
+  temp_clamp_fraction: 0.6
+  num_workers: 0
+  use_shared_evaluator: false
+  games_per_iteration: 5
+
+trainer:
+  batch_size: 64
+  l2_reg: 0.0
+  lr: 0.001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.5
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 5000
+  ema_decay: 0.9                 # fast EMA for visible signal in 4 iters
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: false
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: false                 # off so we isolate the BN fix from any aug interaction
+
+arena:
+  games_per_match: 4
+  promotion_threshold: 0.55
+  tournament_sliding_window: 2
+  eval_seed: 99
+  revert_self_play_on_gate_failure: false
+
+anchor:
+  enabled: false                 # too slow for tiny smoke
