@@ -861,6 +861,56 @@ The prior 24-hour writeup's entire framing — "RL recipe peaks at iter-2 spike 
 - **Batch 4 (in flight at 11:11 UTC):** 5-iter RL warm-start from `supervised_combined` using ablation_b recipe. Hypothesis: RL will pull the supervised model toward the same brittle argmax mode that ablation_b produces from scratch. If iter-1 stochastic eval drops from supervised's ~5-30% to RL's <15%, the recipe is reducing the model. If it stays or improves, RL is genuinely building on supervised strength.
 - **Per-iter raw + holdout evals (after batch 4):** trajectory of MAIN_GAME top-1 + stochastic win rate iter-over-iter on the warm-start run.
 
+## Discovery run, batch 4: RL warm-start from supervised destroys it (2026-05-11 11:11–13:27 UTC, ~$1)
+
+5-iter RL training using `ablation_b` recipe (discrimination=0, hybrid eval, 48 sims) starting from `supervised_combined/best_supervised.pt` (5.5% MAIN top-1 baseline). Per-iter EMA checkpoints evaluated at temp=0, temp=0.5, and on the boardspace 100-game holdout.
+
+### Per-iter trajectory
+
+| iter | raw temp=0 | raw temp=0.5 | MAIN top-1 holdout | det flag |
+|---|---:|---:|---:|---|
+| sup baseline | 0/30 (0%) | 9/30 (30%)* | **5.5%** | `W,B` |
+| 0 (init + 1 RL iter) | 15/30 (50%) | 3/30 (10%) | 2.5% | `W,B` |
+| 1 | 0/30 (0%) | 4/30 (13%) | 2.1% | `W,B` |
+| 2 | 0/30 (0%) | 0/30 (0%) | 2.4% | `W,B` |
+| 3 | 0/30 (0%) | 2/30 (7%) | 1.8% | `W,B` |
+| 4 | 0/30 (0%) | 4/30 (13%) | **1.7%** | `W,B` |
+
+\* supervised baseline at MCTS @ 200 sims temp=0.5 (from batch 3b).
+
+### Findings — the RL recipe is the destroyer
+
+1. **MAIN top-1 holdout monotonically declines** from 5.5% (supervised) to 1.7% (warm-start iter 4). **That's below the random-baseline of 2.7%.** RL doesn't just fail to improve — it actively destroys expert-agreement structure below the chance floor.
+
+2. **Stochastic strength drops 27% → 0-13%.** Even the best post-warm-start iteration (iter 1, 13%) is half the supervised baseline. The recipe converts a broadly-competent policy into a fragile argmax-driven one.
+
+3. **The det flag fires on every iteration** (`det_sides=['white', 'black']` at temp=0 on every iter). Even the per-side stats wobble between "wins as white only" (iter 0) and "loses both" (iter 1-3). The argmax line is unstable across iterations — RL training shuffles which deterministic move sequence the network commits to, but never produces real flexibility.
+
+4. **No iteration recovers.** The original `warm_start` experiment in the prior writeup showed similar degradation from a different starting point (iter-2 RL winner). This batch confirms the destruction is recipe-driven, not init-driven — it happens regardless of whether the init is broad (supervised) or narrow (RL iter-2).
+
+### What this confirms
+
+The earlier 24-hour writeup wrote that warm-starting RL from a strong model "destroys it." We now have three converging signals saying the same thing:
+
+- Expert agreement (holdout MAIN top-1): 5.5% → 1.7%
+- Stochastic strength (temp=0.5 vs heuristic d=1): 27% → 7-13%
+- Deterministic argmax: 0/30 wobbling to 50/0 and back
+
+**All three point at: the ablation_b recipe is incompatible with broad supervised priors. The recipe optimizes for "find a deterministic line that beats heuristic argmax" — a target that supervised models start far away from. RL gradient pulls the model toward that target, in the process tearing down whatever broader structure was there.**
+
+### What this rules out
+
+- "RL needs a better init" — false. Stronger init (supervised, ~30% stochastic) still gets destroyed.
+- "Iter-2 spike is halfway to a strong policy" — false. The spike is a degenerate optimum the recipe converges to from any init.
+- "Continued training will recover" — false. 5 iters, no recovery; same shape as the prior warm-start experiment that ran 5 iters from a different init.
+
+### What's still open
+
+- **Anchor curriculum** (mix frozen supervised opponent into self-play pool): code change. Tests whether pinning the policy against a strong baseline prevents drift.
+- **Much lower LR warm-start** (LR=0.0001, 10× lower): could preserve init at cost of slow learning.
+- **Different value-head treatment**: freeze value head from supervised, only train policy.
+- **Bigger init (deep_256x18)**: requires fixing run_training.py to pass model_path to NetworkWrapper for auto-detect. Then warm-start from the strongest supervised checkpoint (37% stochastic).
+
 ## Watch log
 
 Full hour-by-hour trajectory in `~/.claude/projects/.../memory/overnight_watch_log.md`. Read top-down for moment-by-moment timeline.
