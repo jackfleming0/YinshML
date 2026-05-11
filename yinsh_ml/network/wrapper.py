@@ -127,8 +127,12 @@ class NetworkWrapper:
 
         self.network.eval()  # Set to evaluation mode by default
 
-        # Initialize appropriate encoder based on configuration
-        if use_enhanced_encoding:
+        # Initialize appropriate encoder based on configuration. Use
+        # self.use_enhanced_encoding so the auto-detect path above (which
+        # may have flipped this flag based on the checkpoint state_dict)
+        # actually takes effect. Reading the local arg here would leave
+        # the encoder mismatched with the network and produce 0-move games.
+        if self.use_enhanced_encoding:
             from ..utils.enhanced_encoding import EnhancedStateEncoder
             self.state_encoder = EnhancedStateEncoder()
             self.logger.info("Using enhanced 15-channel encoding")
