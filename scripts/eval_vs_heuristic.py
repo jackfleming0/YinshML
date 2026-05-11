@@ -66,6 +66,10 @@ def main():
                         help="(default) Candidate plays via MCTS")
     parser.add_argument("--no-mcts", dest="use_mcts", action="store_false",
                         help="Candidate plays via raw policy argmax instead")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Move-selection temperature for the candidate. 0.0 (default) "
+                             "is argmax — deterministic, fragile to side-of-board artifacts. "
+                             "Use 0.5–1.0 for stochastic reads of true strength.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -85,8 +89,11 @@ def main():
     label = args.label or args.checkpoint.stem
     logger.info(f"Loading checkpoint as '{label}': {args.checkpoint}")
 
-    net = NetworkWrapper(device=device)
-    net.load_model(str(args.checkpoint))
+    # Pass model_path to constructor so the auto-detect (input_channels,
+    # num_channels, num_blocks) runs against the checkpoint state_dict.
+    # Calling load_model AFTER construction misses the auto-detect path
+    # and breaks on 15-channel enhanced-encoding checkpoints.
+    net = NetworkWrapper(model_path=str(args.checkpoint), device=device)
 
     # Use the supervisor's tournament infra so eval path matches what training
     # uses — just instantiated standalone here.
@@ -117,6 +124,7 @@ def main():
         use_mcts=args.use_mcts,
         mcts_simulations=args.mcts_simulations,
         heuristic_time_limit_seconds=args.time_limit_per_move,
+        candidate_temperature=args.temperature,
     )
     elapsed = time.time() - t0
 
@@ -147,6 +155,23 @@ def main():
     print(f"  Win rate:       {rate:.3f}  CI95=[{ci_lo:.3f}, {ci_hi:.3f}]")
     print(f"  Avg game length: {result.get('avg_game_length', 0):.1f} moves")
     print(f"  Wall-clock:     {elapsed:.0f}s ({elapsed/max(games,1):.1f}s/game)")
+    # Per-side breakdown + deterministic-collapse flag
+    per_side = result.get("per_side") or {}
+    for side, ss in per_side.items():
+        print(
+            f"  side={side}: cand_wins={ss['cand_wins']}/{ss['games']} "
+            f"({ss['cand_win_rate']:.1%}); game_length "
+            f"min/avg/max = {ss['game_length_min']}/{ss['avg_game_length']:.1f}/"
+            f"{ss['game_length_max']}"
+        )
+    det_sides = result.get("deterministic_sides") or []
+    if det_sides:
+        print(
+            f"  ⚠️  DETERMINISTIC-COLLAPSE on {', '.join(det_sides)} — every "
+            f"game on those sides replayed the same line. The win rate "
+            f"measures side-coverage, not skill. Re-run with --temperature 0.5+ "
+            f"or with MCTS to break determinism."
+        )
     print("=" * 72)
 
     # Verdict line — friendly for the "intermediate player?" question.
@@ -166,6 +191,7 @@ def main():
             "checkpoint": str(args.checkpoint),
             "mode": mode,
             "depth": args.depth,
+            "temperature": args.temperature,
             "mcts_simulations": args.mcts_simulations if args.use_mcts else 0,
             "num_games": games,
             "candidate_wins": wins,
@@ -175,6 +201,8 @@ def main():
             "ci95": [ci_lo, ci_hi],
             "elapsed_seconds": elapsed,
             "verdict": verdict,
+            "per_side": result.get("per_side"),
+            "deterministic_sides": result.get("deterministic_sides"),
         }
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w") as f:

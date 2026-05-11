@@ -1790,28 +1790,21 @@ class TrainingSupervisor:
         except Exception as e:
             self.logger.warning(f"Error clearing gradients/optimizer state: {e}")
 
-        # CRITICAL: Clear all tensor containers (del in loop doesn't work due to Python references)
+        # Clear loss-tracking lists (hold tensor refs); never touch the
+        # model's _buffers. Earlier code unconditionally set every module
+        # buffer to None — including BatchNorm's running_mean / running_var
+        # / num_batches_tracked, which silently destroyed inference: the
+        # next saved checkpoint had no BN stats, so on reload BN fell back
+        # to mean=0 / var=1 and the policy head's effective output became
+        # nonsense (mode collapse to 1-2 logits, or near-uniform). That was
+        # the cloud_run_v1 50/0/0 failure mode. Do NOT reintroduce.
         try:
-            # Clear model's internal buffers and caches
-            if hasattr(self.network, 'network'):
-                # Clear buffers (running stats in BatchNorm, etc.)
-                for module in self.network.network.modules():
-                    if hasattr(module, '_buffers'):
-                        for key in list(module._buffers.keys()):
-                            buffer = module._buffers[key]
-                            if buffer is not None and torch.is_tensor(buffer):
-                                # Re-register as zeros to clear cached tensors
-                                module._buffers[key] = None
-
-            # Clear any cached forward/backward hooks
             if hasattr(self.trainer, 'experience'):
-                # Clear the loss tracking lists which hold tensor references
                 self.trainer.policy_losses.clear()
                 self.trainer.value_losses.clear()
-
-            self.logger.info(f"Cleared model buffers and caches")
+            self.logger.info("Cleared loss-history caches")
         except Exception as e:
-            self.logger.warning(f"Error clearing tensor containers: {e}")
+            self.logger.warning(f"Error clearing loss history: {e}")
 
         # Force garbage collection before empty_cache
         for _ in range(3):
@@ -1973,6 +1966,24 @@ class TrainingSupervisor:
                 self.network = new_network
                 self.self_play.network = self.network
                 self.trainer.network = self.network
+
+                # Rebind the EMA shadow's `module` reference to the new
+                # nn.Module. Without this, EMAShadow keeps tracking the
+                # OLD (now-orphaned) module: its state_dict iteration in
+                # `update()` reads frozen values, its `swap_into` puts
+                # those frozen values into the live network at checkpoint
+                # save time, and BN running stats appear to stop updating
+                # entirely — which is exactly the "nbt frozen at 2084
+                # since iter 5" symptom from the 2026-05-07 cloud rerun.
+                # See overnight_watch_log.md for the trace.
+                #
+                # Rebinding (rather than recreating the shadow) preserves
+                # the EMA accumulation history across the reset. Shadow
+                # tensor shapes are identical between OLD and NEW modules
+                # (same architecture), so the existing shadow dict still
+                # matches.
+                if getattr(self.trainer, 'ema', None) is not None:
+                    self.trainer.ema.module = new_network.network
 
                 os.unlink(temp_path)
 

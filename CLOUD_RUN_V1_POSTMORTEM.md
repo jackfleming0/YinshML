@@ -260,3 +260,98 @@ python scripts/eval_vs_heuristic.py \
 Expected on the existing iter 12 checkpoint: 50% / 0% / 0%.
 Different numbers there mean the model has changed since this
 post-mortem was written.
+
+---
+
+## Resolution (2026-05-06 evening)
+
+The bug is **not** any of the five trainer candidates listed above.
+None of them fire in the training path; the audit of each came back
+clean (joint backward via `total_loss = policy_loss + value_loss`
+landed in `6c77ee7` on 2026-04-27, well before cloud_run_v1).
+
+The actual bug is in `TrainingSupervisor.clear_pytorch_memory`.
+End-of-iteration cleanup walked every module's `_buffers` and set each
+tensor to `None` "to free memory":
+
+```python
+for module in self.network.network.modules():
+    if hasattr(module, '_buffers'):
+        for key in list(module._buffers.keys()):
+            buffer = module._buffers[key]
+            if buffer is not None and torch.is_tensor(buffer):
+                module._buffers[key] = None    # ← deregisters BN running stats
+```
+
+That deregistered every BatchNorm's `running_mean`, `running_var`, and
+`num_batches_tracked`. The next saved checkpoint was missing 87 of 238
+state-dict keys — every BN running stat across the 12 res blocks plus
+the heads. On reload (`strict=False`), BN initialised to defaults
+(`mean=0`, `var=1`), the conv stack normalised by the wrong statistics,
+and the policy head's effective output collapsed.
+
+### How it was found
+
+Probing iter 0..5 of a local pre-cloud run (`runs/20260421_125023`,
+same recipe as cloud_run_v1 modulo sims/workers) showed an unmistakable
+trajectory:
+
+| iter | entropy | unique top-1 / 128 | top-1 conf | signature |
+|---:|---:|---:|---:|:---|
+| 0 | 3.06 | 95 | 0.32 | normal early |
+| 1 | 0.00 | 2  | 1.00 | mode collapse |
+| 2 | 0.00 | 1  | 1.00 | mode collapse, worse |
+| 3 | 3.66 | 104 | 0.22 | recovered (post-`_reset_network_objects()`) |
+| 4 | 8.91 | 6  | 0.0002 | uniform reset |
+| 5 | 4.05 | 105 | 0.18 | re-learning |
+
+Checkpoint file sizes alternated by exactly 84 KB, matching the BN
+running-stat tensor footprint. Iters 0, 3, 5 had the full state dict;
+iters 1, 2, 4 didn't. `iteration_counter % 3 == 0` triggers
+`_reset_network_objects()` — which builds a fresh `NetworkWrapper` and
+loads the saved state — re-registering BN buffers from scratch with
+default values. That's why the trajectory thrashes every three
+iterations rather than monotonically degrading.
+
+### Why the cloud_run_v1 / ablation 50% / 0% / 0% pattern matches
+
+- 400-sim MCTS at eval can search past a broken policy: visit counts
+  dominated by tree expansion overcome the wrong prior, recovering to a
+  coin flip vs depth-1 heuristic.
+- 48-sim or 100-sim MCTS doesn't have enough rollouts to escape the
+  prior. Every move it picks is steered by a policy head whose features
+  came out of a wrong-BN forward pass.
+- Raw policy is the broken policy with no MCTS scaffold at all → 0/60
+  vs the heuristic, deterministically.
+
+The "value head learned, policy head didn't" framing in the original
+diagnosis was wrong — both heads were broken at inference. The value
+head only *appears* to work because expected value over a 7-class soft
+distribution averages out errors, while the policy head's argmax over
+7433 slots amplifies them.
+
+### Fix
+
+Remove the buffer-mutation block from `clear_pytorch_memory`. Replace
+with a small loss-history clear (the only cache that actually holds
+non-trivial tensor refs from training). Add
+`yinsh_ml/tests/test_supervisor_bn_preservation.py` to lock the
+invariant.
+
+Commits: `91b7d22` (probe diagnostic), `cd5f0d5` (fix + regression
+test) — branch `policy-collapse-hunt`.
+
+### Validation
+
+Post-fix smoke (`configs/smoke.yaml`, 2 iter): both checkpoints have
+the full 238-key state dict including all 87 BN buffer keys, and
+neither shows mode-collapse or uniform-reset signatures. The pre-fix
+broken pattern is gone.
+
+The right next move on cloud is **not** another ablation under the
+same recipe — that just confirms the fix and burns budget. With BN
+preserved, the cloud_run_v1 hyperparameters were probably already
+fine; the model is worth retraining on the same recipe to find out.
+The "Forward — what comes after the ablation" plan above (50 iter,
+larger buffer, mid-run policy-norm checkpoint) is the right direction
+once the fix is on cloud.

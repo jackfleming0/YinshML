@@ -322,3 +322,132 @@ def test_self_play_puct_q_for_capture_child_has_correct_sign():
     )
     # Concretely:
     assert mid.value() == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------- #
+# Sign-convention canned set (folded W0b)                                     #
+#                                                                             #
+# Belt-and-suspenders coverage for the "good for side-to-move = positive"     #
+# convention documented at self_play.py:1142-1163. Above tests pin individual #
+# states; this set walks a small mixed table and asserts the Pearson          #
+# correlation between `_get_value(state)` and the leaf-player-POV outcome     #
+# computed independently is essentially perfect (>0.95). If a future refactor #
+# accidentally drops the WHITE/BLACK negation (or flips it), the canned-set   #
+# correlation drops below threshold even when individual edge cases happen    #
+# to still align.                                                             #
+# --------------------------------------------------------------------------- #
+
+
+_SIGN_CONVENTION_CANNED_TERMINALS = [
+    # (white_score, black_score, current_player, expected_leaf_pov_outcome)
+    (3, 0, Player.WHITE, 1.0),    # W winning, W to move
+    (3, 0, Player.BLACK, -1.0),   # W winning, B to move
+    (0, 3, Player.BLACK, 1.0),    # B winning, B to move (mirror of #1)
+    (0, 3, Player.WHITE, -1.0),   # B winning, W to move (mirror of #2)
+    (3, 1, Player.WHITE, 2.0 / 3.0),
+    (3, 1, Player.BLACK, -2.0 / 3.0),
+    (1, 3, Player.WHITE, -2.0 / 3.0),
+    (1, 3, Player.BLACK, 2.0 / 3.0),
+    (3, 2, Player.WHITE, 1.0 / 3.0),
+    (3, 2, Player.BLACK, -1.0 / 3.0),
+]
+
+
+def _terminal_state_mock(white_score, black_score, current_player):
+    state = MagicMock()
+    state.is_terminal.return_value = True
+    state.white_score = white_score
+    state.black_score = black_score
+    state.current_player = current_player
+    state.get_winner.return_value = (
+        Player.WHITE if white_score > black_score
+        else Player.BLACK if black_score > white_score
+        else None
+    )
+    return state
+
+
+def test_self_play_get_value_canned_set_correlates_with_leaf_pov_outcome():
+    """Walk 10 mixed terminal states and assert _get_value tracks the
+    independently-computed leaf-player-POV outcome with corrcoef > 0.95.
+
+    The expected outcomes encode the convention: positive = good for the
+    side currently to move. If a refactor flips the WHITE/BLACK branch in
+    `_get_value`, the correlation collapses to ~-1.0 — caught here.
+    """
+    mcts = _selfplay_mcts()
+    actual = []
+    expected = []
+    for ws, bs, p, expected_v in _SIGN_CONVENTION_CANNED_TERMINALS:
+        state = _terminal_state_mock(ws, bs, p)
+        v = mcts._get_value(state)
+        actual.append(v)
+        expected.append(expected_v)
+
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+
+    # Element-wise sanity (each row of the canned table should match exactly,
+    # since `_get_value` is deterministic and clipped to [-1, 1]).
+    np.testing.assert_allclose(actual, expected, atol=1e-9)
+
+    corr = np.corrcoef(actual, expected)[0, 1]
+    assert corr > 0.95, (
+        f"_get_value sign convention regressed: corrcoef(actual, expected)"
+        f"={corr:.4f}. Convention is 'positive = good for side-to-move' "
+        f"(self_play.py:1142-1163)."
+    )
+
+
+def test_self_play_get_value_winning_side_to_move_always_positive():
+    """For every canned terminal where the side to move is winning, _get_value
+    must be > 0. Conversely, when the side to move is losing, _get_value < 0.
+
+    This is the literal restatement of the convention — if any single row
+    here flips sign, the convention is broken at that edge case even if the
+    overall correlation looks ok.
+    """
+    mcts = _selfplay_mcts()
+    for ws, bs, p, _expected in _SIGN_CONVENTION_CANNED_TERMINALS:
+        state = _terminal_state_mock(ws, bs, p)
+        v = mcts._get_value(state)
+        side_score = ws if p == Player.WHITE else bs
+        opp_score = bs if p == Player.WHITE else ws
+        if side_score > opp_score:
+            assert v > 0, (
+                f"Side {p.name} is winning ({side_score}-{opp_score}) but "
+                f"_get_value={v}. Sign convention broken."
+            )
+        elif side_score < opp_score:
+            assert v < 0, (
+                f"Side {p.name} is losing ({side_score}-{opp_score}) but "
+                f"_get_value={v}. Sign convention broken."
+            )
+        else:
+            assert v == pytest.approx(0.0)
+
+
+def test_search_mcts_get_terminal_value_canned_set_correlates():
+    """Same canned set, applied to ``search/mcts.py::MCTS._get_terminal_value``.
+
+    That implementation reads ``state.get_winner()`` rather than scores, so
+    it can only return {-1, 0, +1} — we collapse the expected outcomes to
+    sign and assert exact match plus positive correlation.
+    """
+    mcts = _search_mcts()
+    actual = []
+    expected_sign = []
+    for ws, bs, p, expected_v in _SIGN_CONVENTION_CANNED_TERMINALS:
+        state = _terminal_state_mock(ws, bs, p)
+        v = mcts._get_terminal_value(state)
+        actual.append(v)
+        expected_sign.append(np.sign(expected_v))
+
+    actual = np.asarray(actual, dtype=np.float64)
+    expected_sign = np.asarray(expected_sign, dtype=np.float64)
+
+    # _get_terminal_value returns ±1 (no draw rows in this canned set).
+    np.testing.assert_allclose(actual, expected_sign, atol=1e-9)
+    # Trivially correlated (exact match), but pin it as the W0b contract.
+    corr = np.corrcoef(actual, expected_sign)[0, 1]
+    assert corr > 0.95

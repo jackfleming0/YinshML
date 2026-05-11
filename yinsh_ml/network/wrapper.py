@@ -26,7 +26,9 @@ class NetworkWrapper:
     def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None,
                  tensor_pool: Optional[TensorPool] = None,
                  value_mode: str = 'classification', num_value_classes: int = 7,
-                 use_enhanced_encoding: bool = False):
+                 use_enhanced_encoding: bool = False,
+                 num_channels: Optional[int] = None,
+                 num_blocks: Optional[int] = None):
         """
         Initialize the network wrapper.
 
@@ -37,6 +39,8 @@ class NetworkWrapper:
             value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
             num_value_classes: Number of discrete outcome classes for classification mode
             use_enhanced_encoding: If True, use 15-channel enhanced encoding. If False, use basic 6-channel.
+            num_channels: ResNet channel count. If None and model_path given, auto-detect from state_dict.
+            num_blocks: Number of residual/attention blocks. If None and model_path given, auto-detect.
         """
         if device:
             self.device = torch.device(device)
@@ -51,9 +55,48 @@ class NetworkWrapper:
         self.use_enhanced_encoding = use_enhanced_encoding
         input_channels = 15 if use_enhanced_encoding else 6
 
+        # Auto-detect capacity (and encoding) from checkpoint when not
+        # explicitly given. Lets supervised pretrains with custom
+        # --num-channels / --num-blocks / --use-enhanced-encoding load without
+        # callers needing to know the dims in advance.
+        if model_path and os.path.exists(model_path):
+            sd = torch.load(model_path, map_location='cpu', weights_only=True)
+            # The entry layer is nn.Sequential(conv, bn, relu) named conv_block;
+            # the first Conv2d's weight is at conv_block.0.weight. Shape is
+            # (num_channels, input_channels, 3, 3).
+            w = sd.get('conv_block.0.weight')
+            if num_channels is None and w is not None:
+                num_channels = int(w.shape[0])
+            if w is not None:
+                # input_channels lives in dim 1; override use_enhanced_encoding
+                # to match what the checkpoint actually has, so subsequent
+                # encoder construction is consistent.
+                ckpt_input_ch = int(w.shape[1])
+                if ckpt_input_ch == 15:
+                    self.use_enhanced_encoding = True
+                    input_channels = 15
+                elif ckpt_input_ch == 6:
+                    self.use_enhanced_encoding = False
+                    input_channels = 6
+            if num_blocks is None:
+                # Count main_blocks.{i}.* prefixes
+                block_ids = set()
+                for k in sd.keys():
+                    if k.startswith('main_blocks.'):
+                        try:
+                            block_ids.add(int(k.split('.')[1]))
+                        except (ValueError, IndexError):
+                            continue
+                if block_ids:
+                    num_blocks = len(block_ids)
+        if num_channels is None:
+            num_channels = 256
+        if num_blocks is None:
+            num_blocks = 12
+
         self.network = YinshNetwork(
-            num_channels=256,
-            num_blocks=12,
+            num_channels=num_channels,
+            num_blocks=num_blocks,
             value_mode=value_mode,
             num_value_classes=num_value_classes,
             input_channels=input_channels
@@ -84,8 +127,12 @@ class NetworkWrapper:
 
         self.network.eval()  # Set to evaluation mode by default
 
-        # Initialize appropriate encoder based on configuration
-        if use_enhanced_encoding:
+        # Initialize appropriate encoder based on configuration. Use
+        # self.use_enhanced_encoding so the auto-detect path above (which
+        # may have flipped this flag based on the checkpoint state_dict)
+        # actually takes effect. Reading the local arg here would leave
+        # the encoder mismatched with the network and produce 0-move games.
+        if self.use_enhanced_encoding:
             from ..utils.enhanced_encoding import EnhancedStateEncoder
             self.state_encoder = EnhancedStateEncoder()
             self.logger.info("Using enhanced 15-channel encoding")
@@ -257,12 +304,42 @@ class NetworkWrapper:
             return random.choice(valid_moves)
 
     def save_model(self, path: str):
-        """Save model weights to file."""
+        """Save model weights to file.
+
+        Sanity-checks BatchNorm running stats before writing. The state
+        dict must include `running_mean` / `running_var` for every BN
+        layer; if any are missing, something upstream (e.g. a memory-
+        cleanup pass) deregistered the buffer, and the resulting file
+        will produce wildly wrong inference on reload — this was the
+        cloud_run_v1 50/0/0 failure mode (see CLOUD_RUN_V1_POSTMORTEM).
+        Refuse to write a corrupted checkpoint rather than silently
+        poison the next run that loads it.
+        """
         try:
-            torch.save(self.network.state_dict(), path)
+            sd = self.network.state_dict()
+
+            # Expected: every nn.BatchNorm{1,2}d module contributes a
+            # running_mean and running_var. Count BN modules and compare.
+            import torch.nn as nn
+            bn_count = sum(
+                1 for m in self.network.modules()
+                if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+            )
+            saved_running_mean = sum(1 for k in sd if k.endswith('.running_mean'))
+            saved_running_var = sum(1 for k in sd if k.endswith('.running_var'))
+            if bn_count > 0 and (saved_running_mean < bn_count or saved_running_var < bn_count):
+                raise RuntimeError(
+                    f"refusing to save checkpoint with missing BN running stats: "
+                    f"network has {bn_count} BN modules but state_dict has only "
+                    f"{saved_running_mean} running_mean / {saved_running_var} "
+                    f"running_var keys. The cloud_run_v1 50/0/0 bug. Don't save."
+                )
+
+            torch.save(sd, path)
             self.logger.info(f"Model saved to {path}")
         except Exception as e:
             self.logger.error(f"Error saving model: {str(e)}")
+            raise
 
     # def load_model(self, path: str):
     #     try:
