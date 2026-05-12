@@ -39,6 +39,7 @@ from ..utils.encoding import StateEncoder
 from ..game.constants import Player, PieceType
 from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics # Keep if used for internal tracking
+from ..utils.metrics_logger import MetricsLogger
 from ..utils.tournament import ModelTournament, _canon # Import _canon if used directly
 from ..utils.manifest import (
     build_launch_manifest,
@@ -63,19 +64,36 @@ if not logging.getLogger().hasHandlers():
 
 
 class _SupervisorMetricsProxy:
-    """Lightweight duck-typed metrics-logger surface that the tournament module
-    can call to route deterministic-collapse alerts (T5.4) into the existing
-    supervisor metrics path. Exposes ``log_event`` and ``log_scalar``; both
-    forward to the supervisor's python logger AND its experiment tracker so
-    alerts appear in dashboards.
+    """Duck-typed metrics-logger surface used by the tournament module.
 
-    Implemented as a separate class (not the supervisor itself) so we don't
-    accidentally enlarge ``TrainingSupervisor``'s public surface or create a
-    circular dep with ``yinsh_ml.utils.tournament``.
+    Wave-1 T5.4 introduced this proxy to route deterministic-collapse alerts
+    (``log_event`` / ``log_scalar``) into the supervisor's experiment-tracker
+    path. Wave-2 (#12 / #13) extends it to also delegate the B2
+    value-outcome-correlation API (``log_eval_value_pair`` /
+    ``compute_and_log_value_outcome_correlation``) plus iteration-boundary
+    calls (``start_iteration`` / ``save_iteration``) so the tournament can
+    treat the proxy as a complete MetricsLogger.
+
+    Architecture: experiment-tracker forwarding stays on the proxy (it owns
+    the tracker handle via the supervisor), while everything else is
+    delegated to the real ``MetricsLogger`` instance the supervisor created
+    in ``__init__``. The same scalar/event is also mirrored to the real
+    logger so it persists into ``metrics/iteration_<N>.json`` alongside the
+    B1/B3 streams. A bare proxy without a backing logger still works (used
+    only by older unit tests) — the delegating methods no-op in that case.
+
+    Implemented as a separate class (not the supervisor itself) to avoid
+    enlarging ``TrainingSupervisor``'s public surface or creating a circular
+    dep with ``yinsh_ml.utils.tournament``.
     """
 
-    def __init__(self, supervisor: "TrainingSupervisor"):
+    def __init__(self, supervisor: "TrainingSupervisor",
+                 metrics_logger: Optional[MetricsLogger] = None):
         self._supervisor = supervisor
+        # Backing MetricsLogger; bound by the supervisor once the real
+        # logger is constructed. May be None in older tests that don't wire
+        # one up — delegating methods guard for that.
+        self._metrics_logger = metrics_logger
 
     def log_event(self, event_name: str, severity: str = 'info',
                   iteration: Optional[int] = None,
@@ -96,6 +114,18 @@ class _SupervisorMetricsProxy:
             )
         except Exception as e:  # never fail eval on metrics routing
             log.warning(f"Failed to forward event '{event_name}' to tracker: {e}")
+        # Mirror to the real MetricsLogger so the event lands in the JSON
+        # sidecar (events list) for post-run inspection.
+        if self._metrics_logger is not None:
+            try:
+                self._metrics_logger.log_event(
+                    event_name, severity=severity,
+                    iteration=iteration, details=details,
+                )
+            except Exception as e:
+                log.warning(
+                    f"Failed to mirror event '{event_name}' to MetricsLogger: {e}"
+                )
 
     def log_scalar(self, name: str, value: float,
                    iteration: Optional[int] = None) -> None:
@@ -105,6 +135,45 @@ class _SupervisorMetricsProxy:
             self._supervisor.logger.warning(
                 f"Failed to forward scalar '{name}' to tracker: {e}"
             )
+        # Mirror to the real MetricsLogger so this scalar lands in the JSON
+        # sidecar alongside B1/B3 streams.
+        if self._metrics_logger is not None:
+            try:
+                self._metrics_logger.log_scalar(name, float(value), iteration=iteration)
+            except Exception as e:
+                self._supervisor.logger.warning(
+                    f"Failed to mirror scalar '{name}' to MetricsLogger: {e}"
+                )
+
+    # -- Delegating methods (#12 fix) -------------------------------------
+    # The tournament's anchor-eval path (ecc49e9) calls these directly on
+    # whatever metrics_logger the supervisor passed. Pre-fix the proxy
+    # didn't expose them and the call raised AttributeError mid-eval.
+
+    def log_eval_value_pair(self, root_value: float,
+                            terminal_outcome: float) -> None:
+        if self._metrics_logger is None:
+            return
+        self._metrics_logger.log_eval_value_pair(root_value, terminal_outcome)
+
+    def compute_and_log_value_outcome_correlation(
+        self, step: Optional[int] = None, clear: bool = True
+    ) -> Optional[float]:
+        if self._metrics_logger is None:
+            return None
+        return self._metrics_logger.compute_and_log_value_outcome_correlation(
+            step=step, clear=clear,
+        )
+
+    def start_iteration(self, iteration: int) -> None:
+        if self._metrics_logger is None:
+            return
+        self._metrics_logger.start_iteration(iteration)
+
+    def save_iteration(self) -> None:
+        if self._metrics_logger is None:
+            return
+        self._metrics_logger.save_iteration()
 
 
 class TrainingSupervisor:
@@ -324,6 +393,18 @@ class TrainingSupervisor:
         # 2. Instantiate Components with Extracted Parameters
         # ==================================================================
 
+        # MetricsLogger (#13 fix): central B1/B2/B3 telemetry sink. Wired
+        # into SelfPlay → MCTS (B1 effective_child_visits), trainer (B3
+        # policy_target_entropy), and the tournament path via the proxy
+        # (B2 value-outcome correlation, deterministic-collapse routing).
+        # save_dir=self.save_dir → creates self.save_dir/metrics/iteration_<N>.json.
+        # Created here (before SelfPlay / YinshTrainer ctors) so we can hand
+        # the same instance to every downstream consumer.
+        self.metrics_logger = MetricsLogger(save_dir=self.save_dir, debug=False)
+        self.logger.info(
+            f"Initialized MetricsLogger at {self.save_dir / 'metrics'}"
+        )
+
         # Extract evaluation mode parameters
         evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
         heuristic_weight = self.mode_settings.get('heuristic_weight', 0.7)
@@ -417,8 +498,8 @@ class TrainingSupervisor:
             network=self.network,
             num_workers=self._compute_num_workers(),
             game_state_pool=self.game_state_pool,  # Pass memory pool
+            metrics_logger=self.metrics_logger,  # #13: B1 telemetry sink
             **_mcts_config_for_init # Pass the explicitly constructed dict
-            # metrics_logger=... , mcts_metrics=... # Add if needed
         )
 
         self.logger.info(f"SelfPlay Initialized with Evaluation Mode: {evaluation_mode} (heuristic_weight={heuristic_weight:.3f})")
@@ -461,7 +542,7 @@ class TrainingSupervisor:
             # base_lr = base_lr,
             # lr_schedule = lr_schedule,
             # warmup_steps = warmup_steps
-            # metrics_logger=self.metrics_logger, # If using a shared logger instance
+            metrics_logger=self.metrics_logger,  # #13: B3 telemetry sink
         )
 
         self.logger.info(f"Trainer initialized with buffer size: {max_buffer_size:,} samples "
@@ -616,13 +697,15 @@ class TrainingSupervisor:
         self.experiment_tracker = None
         self.experiment_id = None
 
-        # T5.4: lightweight metrics-logger proxy that exposes log_event /
-        # log_scalar to the tournament module. Forwards events into the
-        # experiment tracker (counter scalars) and the python logger so
-        # deterministic-collapse alerts surface in dashboards. Created
-        # lazily so callers that don't set a tracker still see the events
-        # in the run log.
-        self._tournament_metrics_proxy = _SupervisorMetricsProxy(self)
+        # T5.4 + #12 fix: metrics-logger proxy passed to the tournament
+        # module. log_event / log_scalar forward to the experiment tracker
+        # AND mirror to the real MetricsLogger; the B2 correlation API
+        # (log_eval_value_pair / compute_and_log_value_outcome_correlation)
+        # and iteration-boundary calls (start_iteration / save_iteration)
+        # delegate to the real MetricsLogger instance constructed above.
+        self._tournament_metrics_proxy = _SupervisorMetricsProxy(
+            self, metrics_logger=self.metrics_logger,
+        )
 
         self._load_best_model_state() # Load previous state if exists for this run directory
         self.logger.info("=== Training Supervisor Initialized ===")
@@ -804,6 +887,15 @@ class TrainingSupervisor:
         """
         self.experiment_tracker = tracker
         self.experiment_id = experiment_id
+        # Forward to the real MetricsLogger so its own log_scalar / log_event
+        # also fan out to the tracker (B1 / B3 streams that bypass the proxy).
+        if self.metrics_logger is not None:
+            try:
+                self.metrics_logger.set_experiment_tracker(tracker, experiment_id)
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to forward experiment tracker to MetricsLogger: {e}"
+                )
         self.logger.info(f"Experiment tracker set with experiment ID: {experiment_id}")
 
     def _log_metric_safe(self, metric_name: str, value: float, iteration: int = None):
@@ -870,6 +962,13 @@ class TrainingSupervisor:
         # Memory pools handle resource management now - no need for manual GC
         current_iteration = self._iteration_counter
         self.logger.info(f"\n{'=' * 15} Starting Iteration {current_iteration} {'=' * 15}")
+
+        # #13: open the MetricsLogger iteration so B1/B2/B3 scalars + events
+        # land in this iteration's bucket and get flushed at end-of-iteration.
+        try:
+            self.metrics_logger.start_iteration(current_iteration)
+        except Exception as e:
+            self.logger.warning(f"metrics_logger.start_iteration failed: {e}")
 
         # Detailed memory diagnostics at iteration start
         try:
@@ -1899,6 +1998,15 @@ class TrainingSupervisor:
         self.logger.info(f"│   Breakdown: SelfPlay={game_time:.0f}s, Train={train_time:.0f}s, "
                          f"Other={other_time:.0f}s (tournament, eval, etc.)")
         self.logger.info("="*80 + "\n")
+
+        # #13: flush this iteration's MetricsLogger buffer to
+        # save_dir/metrics/iteration_<N>.json. Failure is non-fatal — the
+        # supervisor's experiment-tracker forwarding already captured the
+        # scalars; the JSON sidecar is the secondary persistence path.
+        try:
+            self.metrics_logger.save_iteration()
+        except Exception as e:
+            self.logger.warning(f"metrics_logger.save_iteration failed: {e}")
 
         # ------------------------------------------------------------------ #
         # 8. RETURN SUMMARY

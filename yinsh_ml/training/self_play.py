@@ -1573,6 +1573,7 @@ class SelfPlay:
             network=self.network,
             mcts_metrics=self.mcts_metrics, # Pass metrics instance
             game_state_pool=self.game_state_pool, # Pass memory pool
+            metrics_logger=self.metrics_logger,  # #13: B1 telemetry sink for parent-process MCTS
             **mcts_init_config # Unpack the filtered config dict
         )
 
