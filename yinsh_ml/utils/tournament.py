@@ -828,6 +828,11 @@ class ModelTournament:
                 # Map color → side
                 candidate_is_white = (cand_color == 'white')
 
+                # B2 telemetry buffer: per-move (root_value, terminal_outcome)
+                # pairs collected during the MCTS path; resolved to terminal
+                # outcome after the game ends and pushed to metrics_logger.
+                game_root_values: List[float] = []
+
                 try:
                     while not game_state.is_terminal() and move_count < max_moves_per_game:
                         valid_moves = game_state.get_valid_moves()
@@ -850,6 +855,14 @@ class ModelTournament:
                                 visit_probs = game_mcts.search_batch(
                                     game_state, move_count, batch_size=32
                                 )
+                                # B2 (W1b): capture root value at this position
+                                # in the side-to-move POV. The MCTS encoder
+                                # is side-normalized so last_root_value is
+                                # already in current-player POV — which is
+                                # the candidate when cand_to_move is True.
+                                rv = getattr(game_mcts, 'last_root_value', None)
+                                if rv is not None and np.isfinite(rv):
+                                    game_root_values.append(float(rv))
                                 visit_probs_t = torch.from_numpy(np.asarray(visit_probs)).to(
                                     candidate_network.device
                                 )
@@ -920,6 +933,23 @@ class ModelTournament:
                 )
                 if cand_won:
                     per_side_stats[side_key]['cand_wins'] += 1
+
+                # B2 (W1b): resolve per-position root values to terminal
+                # outcome in candidate POV and push to metrics_logger. Skip
+                # when no metrics_logger or no MCTS root values were captured
+                # (raw-policy mode, or candidate never moved). Outcome is
+                # +1 candidate-win, -1 candidate-loss, 0 draw — all root
+                # values were captured in candidate POV (see the cand_to_move
+                # branch above), so no per-color sign flip is needed here.
+                if metrics_logger is not None and game_root_values:
+                    if cand_won:
+                        outcome_in_pov = 1.0
+                    elif winner is None:
+                        outcome_in_pov = 0.0
+                    else:
+                        outcome_in_pov = -1.0
+                    for rv in game_root_values:
+                        metrics_logger.log_eval_value_pair(rv, outcome_in_pov)
 
                 # Per-game completion log — running totals so the user can
                 # estimate ETA and track win rate as the eval progresses.
@@ -1038,6 +1068,21 @@ class ModelTournament:
                     self.logger.warning(
                         f"Failed to route deterministic_collapse_alert: {e}"
                     )
+
+        # B2 (W1b): aggregate buffered (root_value, terminal_outcome) pairs
+        # into eval/value_outcome_correlation for this iteration. Only
+        # meaningful in MCTS mode (raw-policy mode never appends pairs).
+        # The helper handles too-few-pairs / zero-variance internally; we
+        # just call it unconditionally and let it no-op when appropriate.
+        if metrics_logger is not None and use_mcts:
+            try:
+                metrics_logger.compute_and_log_value_outcome_correlation(
+                    step=iteration
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to log value_outcome_correlation: {e}"
+                )
         return result
 
     def run_anchor_eval_batch(
