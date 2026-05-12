@@ -9,6 +9,14 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# Module-level throttle for the "System memory pressure detected" warning.
+# Without this it fires once per AdaptivePoolSizer instance (and there are
+# 100+ pools across self-play/training); with throttling, it fires at most
+# once per ``_MEMORY_PRESSURE_WARN_COOLDOWN_S`` seconds across ALL sizers.
+_MEMORY_PRESSURE_WARN_COOLDOWN_S = 600.0  # 10 minutes
+_last_memory_pressure_warn_time: float = 0.0
+_last_memory_pressure_relief_time: float = 0.0
+
 
 @dataclass
 class AdaptiveMetrics:
@@ -240,7 +248,11 @@ class AdaptivePoolSizer:
                 # Only log if size actually changed; otherwise it's logspam
                 # for a no-op (e.g. already at max).
                 if new_size != old_size:
-                    logger.info(f"Adaptive pool growth triggered: {old_size} -> {new_size} "
+                    # Demoted to DEBUG: pool growth/shrink fires every few
+                    # seconds during steady-state training. Future per-iter
+                    # batched summary belongs in the supervisor's iteration
+                    # summary block instead.
+                    logger.debug(f"Adaptive pool growth triggered: {old_size} -> {new_size} "
                                f"(miss rate: {miss_rate:.3f})")
                 return new_size
 
@@ -256,7 +268,8 @@ class AdaptivePoolSizer:
                 # Only log if size actually changed (most common case at the
                 # floor: 50 -> 50 fires every ~30s otherwise).
                 if new_size != old_size:
-                    logger.info(f"Adaptive pool shrink triggered: {old_size} -> {new_size} "
+                    # Demoted to DEBUG (see growth note above).
+                    logger.debug(f"Adaptive pool shrink triggered: {old_size} -> {new_size} "
                                f"(miss rate: {miss_rate:.3f})")
                 return new_size
         else:
@@ -298,12 +311,26 @@ class AdaptivePoolSizer:
             self.under_memory_pressure = memory_pressure > self.memory_pressure_threshold
             
             if self.under_memory_pressure and not was_under_pressure:
-                logger.warning(f"System memory pressure detected: {memory_pressure:.1%}")
+                # Throttle module-globally so the warning doesn't fire once
+                # per pool instance — there are 100+ sizers.
+                global _last_memory_pressure_warn_time
+                now = time.time()
+                if now - _last_memory_pressure_warn_time >= _MEMORY_PRESSURE_WARN_COOLDOWN_S:
+                    logger.warning(f"System memory pressure detected: {memory_pressure:.1%}")
+                    _last_memory_pressure_warn_time = now
+                else:
+                    logger.debug(f"System memory pressure detected: {memory_pressure:.1%} (suppressed)")
                 # Adjust thresholds to be more conservative
                 self.high_pressure_threshold = 0.8
                 self.required_consecutive_signals = 5
             elif not self.under_memory_pressure and was_under_pressure:
-                logger.info("System memory pressure relieved")
+                global _last_memory_pressure_relief_time
+                now = time.time()
+                if now - _last_memory_pressure_relief_time >= _MEMORY_PRESSURE_WARN_COOLDOWN_S:
+                    logger.info("System memory pressure relieved")
+                    _last_memory_pressure_relief_time = now
+                else:
+                    logger.debug("System memory pressure relieved (suppressed)")
                 # Restore normal thresholds
                 self.high_pressure_threshold = 0.7
                 self.required_consecutive_signals = 3

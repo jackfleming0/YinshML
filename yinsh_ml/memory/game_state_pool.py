@@ -198,6 +198,9 @@ def validate_reset_game_state(game_state: GameState) -> bool:
 
 class GameStatePool(MemoryPool[GameState]):
     """Specialized memory pool for GameState objects.
+
+    Note: ``_init_logged`` is a class-level flag — the verbose init banner
+    fires at INFO on the first construction; per-game re-inits log at DEBUG.
     
     This pool provides optimized allocation and recycling of GameState objects
     with game-specific reset logic. It's designed for high-frequency allocation
@@ -210,7 +213,10 @@ class GameStatePool(MemoryPool[GameState]):
     - Validation for debugging reset logic
     - Training-mode optimizations
     """
-    
+
+    # Class-level flag for one-time INFO emission of the init banner.
+    _init_logged: bool = False
+
     def __init__(self, config: Optional[GameStatePoolConfig] = None):
         """Initialize the GameState pool.
         
@@ -259,8 +265,13 @@ class GameStatePool(MemoryPool[GameState]):
         self._concurrent_usage = 0
         self._reset_times: List[float] = []
         
-        logger.info(f"GameStatePool initialized with adaptive_sizing: {self.config.enable_adaptive_sizing}, "
+        # Per-game re-init logspam: one GameStatePool is created per MCTS in
+        # self-play. Log at INFO the first time, DEBUG thereafter.
+        _level = logging.INFO if not GameStatePool._init_logged else logging.DEBUG
+        logger.log(_level,
+                   f"GameStatePool initialized with adaptive_sizing: {self.config.enable_adaptive_sizing}, "
                    f"training_mode: {self.config.training_mode}")
+        GameStatePool._init_logged = True
         
     def get_game_state(self) -> GameState:
         """Get a GameState from the pool.

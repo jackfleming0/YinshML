@@ -249,6 +249,21 @@ class TrainingSupervisor:
         self.mode_settings = mode_settings  # <<< STORE mode_settings AS INSTANCE VARIABLE
         self.full_config = full_config
 
+        # `verbose_logging` knob: when True, flip the noisy YinshML loggers
+        # to DEBUG so per-game MCTS init / pool resize / Value Diagnostics
+        # detail / [Memory] / Cache-cleared lines all become visible. Default
+        # False = trim noise (~10x volume reduction). Read from mode_settings.
+        if self.mode_settings.get("verbose_logging", False):
+            for name in (
+                "MCTS",
+                "SelfPlay",
+                "YinshTrainer",
+                "yinsh_ml.memory.adaptive",
+                "yinsh_ml.memory.tensor_pool",
+                "yinsh_ml.memory.game_state_pool",
+            ):
+                logging.getLogger(name).setLevel(logging.DEBUG)
+
         self.logger.info(f"Initializing TrainingSupervisor in '{self.save_dir}'")
 
         # ==================================================================
@@ -764,7 +779,7 @@ class TrainingSupervisor:
         self.logger.info(f"  TensorPool: {tensor_pool_size} initial, {tensor_pool_size * 2} max")
         self.logger.info(f"  Workers: {num_workers}")
 
-    def _log_mps_memory(self, phase_name: str = ""):
+    def _log_mps_memory(self, phase_name: str = "", level: Optional[int] = None):
         """Log a one-line memory snapshot: RSS + MPS driver/current + buffer size.
 
         Consolidates process RSS, MPS allocator state, and replay-buffer size so
@@ -772,6 +787,10 @@ class TrainingSupervisor:
 
         Args:
             phase_name: Name of the phase for logging context
+            level: explicit logging level. ``None`` honours the supervisor's
+                ``verbose_logging`` mode_setting — INFO when verbose, else
+                DEBUG (so only the end-of-iter snapshot called explicitly with
+                ``logging.INFO`` survives the trim).
         """
         parts = []
         try:
@@ -798,7 +817,13 @@ class TrainingSupervisor:
             pass
 
         if parts:
-            self.logger.info(f"[Memory] {phase_name}: {', '.join(parts)}")
+            if level is None:
+                level = (
+                    logging.INFO
+                    if self.mode_settings.get("verbose_logging", False)
+                    else logging.DEBUG
+                )
+            self.logger.log(level, f"[Memory] {phase_name}: {', '.join(parts)}")
 
     def _clear_memory_cache(self, phase_name: str = ""):
         """Clear PyTorch memory caches to free up memory with aggressive tensor cleanup.
@@ -852,10 +877,17 @@ class TrainingSupervisor:
                 tensor_count_after = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
                 tensors_freed = tensor_count_before - tensor_count_after
                 if phase_name:
-                    self.logger.info(f"Cache cleared after {phase_name}: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
+                    # Demoted: fires multiple times per iteration. Use
+                    # `verbose_logging: true` to surface.
+                    _level = (
+                        logging.INFO
+                        if self.mode_settings.get("verbose_logging", False)
+                        else logging.DEBUG
+                    )
+                    self.logger.log(_level, f"Cache cleared after {phase_name}: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
         except:
             if phase_name:
-                self.logger.info(f"Memory cache cleared after {phase_name}")
+                self.logger.debug(f"Memory cache cleared after {phase_name}")
 
     def cleanup_memory_pools(self):
         """Clean up memory pools and release all resources."""
@@ -970,28 +1002,29 @@ class TrainingSupervisor:
         except Exception as e:
             self.logger.warning(f"metrics_logger.start_iteration failed: {e}")
 
-        # Detailed memory diagnostics at iteration start
+        # Detailed memory diagnostics at iteration start. Compacted from a
+        # 4-5 line block into a single line — full breakdown still available
+        # at DEBUG via `verbose_logging: true`.
         try:
             import gc
-            self.logger.info(f"Memory Diagnostics at Iteration {current_iteration} Start:")
-            self.logger.info(f"  Process Memory: {initial_memory_mb:.1f} MB")
-            self.logger.info(f"  Python Objects: {len(gc.get_objects())} objects tracked")
-
-            # Log PyTorch tensor count and memory
+            parts = [f"rss={initial_memory_mb:.0f}MB"]
             if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated() / (1024 * 1024)
                 cached = torch.cuda.memory_reserved() / (1024 * 1024)
-                self.logger.info(f"  CUDA Memory: {allocated:.1f} MB allocated, {cached:.1f} MB cached")
+                parts.append(f"cuda_alloc={allocated:.0f}MB cuda_cached={cached:.0f}MB")
             elif torch.backends.mps.is_available():
-                # MPS doesn't have detailed memory stats, but we can count tensors
                 tensor_count = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
-                self.logger.info(f"  MPS Tensors: {tensor_count} tensors in memory")
-
-            # Log buffer size
+                parts.append(f"mps_tensors={tensor_count}")
             if hasattr(self.trainer, 'experience'):
                 buffer_size = self.trainer.experience.size()
                 max_buffer = self.trainer.experience.max_size
-                self.logger.info(f"  Replay Buffer: {buffer_size:,}/{max_buffer:,} samples ({100*buffer_size/max_buffer:.1f}% full)")
+                parts.append(f"buffer={buffer_size:,}/{max_buffer:,} ({100*buffer_size/max_buffer:.0f}%)")
+            self.logger.info(
+                f"Memory @ iter {current_iteration} start: {', '.join(parts)}"
+            )
+            self.logger.debug(
+                f"  Python Objects: {len(gc.get_objects())} objects tracked"
+            )
         except Exception as e:
             self.logger.warning(f"Failed to collect memory diagnostics: {e}")
 

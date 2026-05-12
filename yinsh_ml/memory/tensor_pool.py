@@ -116,7 +116,12 @@ class TensorPool:
     Memory pool for PyTorch tensors with shape-based indexing, device management,
     and adaptive sizing capabilities.
     """
-    
+
+    # Class-level flag — only emit the verbose init banner at INFO on the
+    # first construction; per-game re-inits log at DEBUG to avoid logspam.
+    _init_logged: bool = False
+    _device_logged: bool = False
+
     def __init__(self, config: Optional[TensorPoolConfig] = None):
         """Initialize TensorPool with configuration."""
         self.config = config or TensorPoolConfig()
@@ -157,9 +162,13 @@ class TensorPool:
             
         self.compatibility_checker = TensorCompatibilityChecker()
         
-        logger.info(f"TensorPool initialized with device: {self._default_device}, "
+        # Per-game re-init logspam: one TensorPool is created per MCTS in
+        # self-play. Log at INFO the first time, DEBUG thereafter.
+        _level = logging.INFO if not TensorPool._init_logged else logging.DEBUG
+        logger.log(_level, f"TensorPool initialized with device: {self._default_device}, "
                    f"adaptive_sizing: {self.config.enable_adaptive_sizing}, "
                    f"tensor_reshaping: {self.config.enable_tensor_reshaping}")
+        TensorPool._init_logged = True
     
     def get(self, 
             shape: Union[List[int], Tuple[int, ...]], 
@@ -515,17 +524,22 @@ class TensorPool:
     
     def _detect_default_device(self) -> torch.device:
         """Detect the best available device for tensor allocation."""
+        # Per-game re-init: only log device once at INFO.
+        _level = logging.INFO if not TensorPool._device_logged else logging.DEBUG
         if torch.cuda.is_available():
             device = torch.device('cuda')
-            logger.info(f"CUDA available: {torch.cuda.get_device_name()}")
+            logger.log(_level, f"CUDA available: {torch.cuda.get_device_name()}")
+            TensorPool._device_logged = True
             return device
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device('mps')
-            logger.info("MPS (Apple Silicon) acceleration available")
+            logger.log(_level, "MPS (Apple Silicon) acceleration available")
+            TensorPool._device_logged = True
             return device
         else:
             device = torch.device('cpu')
-            logger.info("Using CPU for tensor operations")
+            logger.log(_level, "Using CPU for tensor operations")
+            TensorPool._device_logged = True
             return device
     
     def clear_all(self) -> int:
@@ -570,7 +584,9 @@ class TensorPool:
             with self._tensor_lock:
                 total_tensors = sum(len(tensors) for tensors in self._tensor_pools.values())
                 if total_tensors > 0:
-                    logger.info(f"TensorPool cleanup: releasing {total_tensors} pooled tensors")
+                    # Fires on every TensorPool destruction (1 per MCTS / game).
+                    # Useful for leak detection but too chatty for normal runs.
+                    logger.debug(f"TensorPool cleanup: releasing {total_tensors} pooled tensors")
                 self._tensor_pools.clear()
                 self._in_use_tensors.clear()
                 self._creation_times.clear()

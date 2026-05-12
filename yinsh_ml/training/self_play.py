@@ -132,6 +132,12 @@ class Node:
 class MCTS:
     """Monte-Carlo Tree-Search with temperature annealing and ply-adaptive rollouts."""
 
+    # Class-level flag so the multi-line "MCTS Initialized" / Configuration
+    # Debug blocks only emit at INFO on the FIRST construction. Per-game
+    # re-inits (one per self-play game) log at DEBUG. Flip the YinshML
+    # loggers to DEBUG via `verbose_logging: true` in mode_settings.
+    _init_logged: bool = False
+
     def __init__(self,
                  network: NetworkWrapper,
                  # --- Evaluation Mode ---
@@ -341,36 +347,47 @@ class MCTS:
         # T > 1 flattens (more exploration); T < 1 sharpens; 1.0 is no-op.
         self.root_policy_temp = float(root_policy_temp)
 
-        self.logger.info(f"MCTS Initialized:")
-        self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
-        self.logger.info(f"  Memory: Pool enabled={self._pool_enabled}")
-        self.logger.info(f"  Subtree Reuse: {'ENABLED' if self.enable_subtree_reuse else 'DISABLED'}")
-        self.logger.info(f"  FPU Reduction: {self.fpu_reduction:.3f}")
-        self.logger.info(
+        # Per-game re-init logspam fix: emit the full block at INFO only
+        # on the first construction; per-game re-inits log at DEBUG.
+        _init_level = logging.INFO if not type(self)._init_logged else logging.DEBUG
+        self.logger.log(_init_level, f"MCTS Initialized:")
+        self.logger.log(_init_level, f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
+        self.logger.log(_init_level, f"  Memory: Pool enabled={self._pool_enabled}")
+        self.logger.log(_init_level, f"  Subtree Reuse: {'ENABLED' if self.enable_subtree_reuse else 'DISABLED'}")
+        self.logger.log(_init_level, f"  FPU Reduction: {self.fpu_reduction:.3f}")
+        self.logger.log(
+            _init_level,
             f"  Epsilon Mix: {self.epsilon_mix_start:.3f} → {self.epsilon_mix_end:.3f} "
             f"over {self.epsilon_mix_taper_moves} moves"
         )
-        self.logger.info(f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
+        self.logger.log(_init_level, f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
         if self.fast_sim_prob > 0.0 and self.fast_simulations > 0:
-            self.logger.info(
+            self.logger.log(
+                _init_level,
                 f"  Fast-sim split: fast={self.fast_simulations} sims with p={self.fast_sim_prob:.2f}"
             )
-        self.logger.info(f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
-        self.logger.info(f"  Temperature: Initial={self.initial_temp:.2f}, Final={self.final_temp:.2f}, Steps={self.annealing_steps}, Clamp Frac={self.temp_clamp_frac:.2f}")
+        self.logger.log(_init_level, f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
+        self.logger.log(_init_level, f"  Temperature: Initial={self.initial_temp:.2f}, Final={self.final_temp:.2f}, Steps={self.annealing_steps}, Clamp Frac={self.temp_clamp_frac:.2f}")
 
-        self.debug_config()
+        self.debug_config(level=_init_level)
+        type(self)._init_logged = True
 
-    def debug_config(self):
-        """Log all configuration parameters to verify they're being set correctly."""
-        self.logger.info("====== MCTS Configuration Debug ======")
-        self.logger.info(f"Early Simulations: {self.early_simulations}")
-        self.logger.info(f"Late Simulations: {self.late_simulations}")
-        self.logger.info(f"Switch Ply: {self.switch_ply}")
-        self.logger.info(f"c_puct: {self.c_puct}")
-        self.logger.info(f"Dirichlet Alpha: {self.dirichlet_alpha}")
-        self.logger.info(f"Value Weight: {self.value_weight}")
-        self.logger.info(f"Max Depth: {self.max_depth}")
-        self.logger.info("======================================")
+    def debug_config(self, level: int = logging.INFO):
+        """Log all configuration parameters to verify they're being set correctly.
+
+        Args:
+            level: logging level. Defaults to INFO; per-game re-inits pass
+                DEBUG to suppress per-game logspam (see `__init__`).
+        """
+        self.logger.log(level, "====== MCTS Configuration Debug ======")
+        self.logger.log(level, f"Early Simulations: {self.early_simulations}")
+        self.logger.log(level, f"Late Simulations: {self.late_simulations}")
+        self.logger.log(level, f"Switch Ply: {self.switch_ply}")
+        self.logger.log(level, f"c_puct: {self.c_puct}")
+        self.logger.log(level, f"Dirichlet Alpha: {self.dirichlet_alpha}")
+        self.logger.log(level, f"Value Weight: {self.value_weight}")
+        self.logger.log(level, f"Max Depth: {self.max_depth}")
+        self.logger.log(level, "======================================")
 
     def _acquire_state_copy(self, original_state: GameState) -> GameState:
         """Get a GameState copy from pool or create new one."""
@@ -1657,7 +1674,10 @@ class SelfPlay:
                         if games_completed % max(1, num_games // 10) == 0 or games_completed == num_games:
                             elapsed = time.time() - start_time
                             rate = games_completed / elapsed if elapsed > 0 else 0
-                            self.logger.info(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
+                            # Demoted to DEBUG: redundant with per-worker
+                            # "Game N finished" lines + the supervisor's
+                            # "Completed N/N games" summary.
+                            self.logger.debug(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
                     else:
                         self.logger.warning(f"Game {game_id} returned None result.")
                 except Exception as e:
@@ -1732,7 +1752,8 @@ class SelfPlay:
                                             or games_completed == num_games):
                                         elapsed = time.time() - start_time
                                         rate = games_completed / elapsed if elapsed > 0 else 0
-                                        self.logger.info(
+                                        # Demoted to DEBUG: see note above.
+                                        self.logger.debug(
                                             f"Games Generated: {games_completed}/{num_games} "
                                             f"({rate:.2f} games/s)"
                                         )
@@ -1802,7 +1823,9 @@ class SelfPlay:
                              if games_completed % max(1, num_games // 10) == 0 or games_completed == num_games:
                                  elapsed = time.time() - start_time
                                  rate = games_completed / elapsed if elapsed > 0 else 0
-                                 self.logger.info(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
+                                 # Demoted to DEBUG: redundant with per-worker
+                                 # "Game N finished" + supervisor "Completed N/N".
+                                 self.logger.debug(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
                                  # Log CPU usage (optional)
                                  # cpu_percent = psutil.cpu_percent(percpu=True)
                                  # avg_cpu = sum(cpu_percent) / len(cpu_percent) if cpu_percent else 0

@@ -1928,9 +1928,14 @@ class YinshTrainer:
                 # explicit `discrimination=` alias so the §5 search-consistency
                 # bake-off can grep for plateau-break events without parsing a
                 # second name. The two are identical by construction.
+                # One-line summary at INFO; full target/pred class
+                # distribution moved to DEBUG (use `verbose_logging: true`
+                # to surface).
                 self.logger.info(
                     f"[Value Diagnostics] discrimination={mean_conf:.4f} "
-                    f"(mean_abs_value={mean_conf:.4f})\n"
+                    f"(mean_abs_value={mean_conf:.4f})"
+                )
+                self.logger.debug(
                     f"  Target class %: [{', '.join(target_pct)}] (classes 0-{num_classes-1})\n"
                     f"  Pred class %:   [{', '.join(pred_pct)}]"
                 )
@@ -1941,7 +1946,9 @@ class YinshTrainer:
             if 'ece_bin_count' in diag:
                 ece_report = self._summarize_ece(diag)
                 if ece_report is not None:
-                    self.logger.info(f"[Value Diagnostics] {ece_report}")
+                    # Demoted: ECE + reliability sparkline + bin counts is
+                    # diagnostic detail; keep at DEBUG by default.
+                    self.logger.debug(f"[Value Diagnostics] {ece_report}")
 
             # Reset diagnostics for next epoch
             self._epoch_value_diagnostics = {

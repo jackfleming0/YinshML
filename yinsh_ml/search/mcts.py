@@ -140,7 +140,13 @@ class MCTSNode:
 
 class MCTS:
     """Monte Carlo Tree Search with YinshHeuristics integration."""
-    
+
+    # Class-level flag so the verbose per-instance "MCTS Initialized" block
+    # only fires at INFO the FIRST time. Re-inits (one per self-play game)
+    # log at DEBUG. Flip the YinshML loggers to DEBUG via the supervisor's
+    # `verbose_logging: true` to see them all.
+    _init_logged: bool = False
+
     def __init__(self,
                  network: NetworkWrapper,
                  config: Optional[MCTSConfig] = None,
@@ -212,10 +218,16 @@ class MCTS:
         if self.config.auto_reduce_heuristic_weight and self.training_tracker is not None:
             self._update_heuristic_weight_from_tracker()
         
-        self.logger.info(f"MCTS Initialized:")
-        self.logger.info(f"  Evaluation Mode: {self.config.evaluation_mode.value}")
-        self.logger.info(f"  Heuristic Weight: {self.config.heuristic_weight}")
-        self.logger.info(f"  Use Heuristic: {self.config.use_heuristic_evaluation}")
+        # Per-game re-init logspam fix: only emit the full init block at INFO
+        # the FIRST time any MCTS instance is constructed (class-level flag).
+        # Subsequent constructions log at DEBUG so the noise can be enabled
+        # via the supervisor `verbose_logging` knob.
+        _init_level = logging.INFO if not type(self)._init_logged else logging.DEBUG
+        self.logger.log(_init_level, f"MCTS Initialized:")
+        self.logger.log(_init_level, f"  Evaluation Mode: {self.config.evaluation_mode.value}")
+        self.logger.log(_init_level, f"  Heuristic Weight: {self.config.heuristic_weight}")
+        self.logger.log(_init_level, f"  Use Heuristic: {self.config.use_heuristic_evaluation}")
+        type(self)._init_logged = True
     
     def _update_heuristic_weight_from_tracker(self):
         """Update heuristic weight based on training progress."""
