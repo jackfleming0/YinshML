@@ -164,15 +164,24 @@ def test_iteration_json_contains_all_safeguards(tmp_path: Path):
     # supports multiple).
     ml.log_scalar('mcts/effective_child_visits', 3.2, step=iteration)
 
+    # B2 (W2): trainer's effective batch size — the wiring fix added to
+    # train_iteration so the Wave 2 gate stops reading None.
+    ml.log_scalar('train/effective_batch_size', 248.0, step=iteration)
+
     # B3: policy-target entropy from the trainer.
     ml.log_scalar('train/policy_target_entropy_mean', 0.55, step=iteration)
 
-    # B2: via the proxy — exercises the #12 wiring.
+    # B2: via the proxy — exercises the #12 wiring. Pass a per-candidate
+    # metric_name (W2 B3 fix) and verify both the candidate series and the
+    # backwards-compat canonical mirror are present.
     proxy.log_eval_value_pair(1.0, 1.0)
     proxy.log_eval_value_pair(-1.0, -1.0)
     proxy.log_eval_value_pair(0.0, 0.0)
     proxy.log_eval_value_pair(0.5, 0.5)
-    proxy.compute_and_log_value_outcome_correlation(step=iteration)
+    proxy.compute_and_log_value_outcome_correlation(
+        step=iteration,
+        metric_name='eval/value_outcome_correlation/candidate_iteration_7',
+    )
 
     ml.save_iteration()
 
@@ -182,21 +191,31 @@ def test_iteration_json_contains_all_safeguards(tmp_path: Path):
     scalars = payload['metrics']['scalars']
 
     assert 'mcts/effective_child_visits' in scalars
+    assert 'train/effective_batch_size' in scalars
     assert 'train/policy_target_entropy_mean' in scalars
     assert 'eval/value_outcome_correlation' in scalars
+    assert 'eval/value_outcome_correlation/candidate_iteration_7' in scalars
 
     # Sanity on the values themselves.
     b1 = scalars['mcts/effective_child_visits'][0]
     assert b1['value'] == pytest.approx(3.2)
     assert b1['step'] == iteration
 
+    ebs = scalars['train/effective_batch_size'][0]
+    assert ebs['value'] == pytest.approx(248.0)
+    assert ebs['step'] == iteration
+
     b3 = scalars['train/policy_target_entropy_mean'][0]
     assert b3['value'] == pytest.approx(0.55)
 
-    b2 = scalars['eval/value_outcome_correlation'][0]
-    # Pairs were perfectly correlated → r ≈ 1.0.
-    assert b2['value'] == pytest.approx(1.0, abs=1e-6)
-    assert b2['step'] == iteration
+    # The per-candidate series is the source-of-truth read site (W2 B3).
+    b2_cand = scalars['eval/value_outcome_correlation/candidate_iteration_7'][0]
+    assert b2_cand['value'] == pytest.approx(1.0, abs=1e-6)
+    assert b2_cand['step'] == iteration
+    # Canonical series is mirrored for backwards-compat.
+    b2_mirror = scalars['eval/value_outcome_correlation'][0]
+    assert b2_mirror['value'] == pytest.approx(1.0, abs=1e-6)
+    assert b2_mirror['step'] == iteration
 
 
 if __name__ == '__main__':

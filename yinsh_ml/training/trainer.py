@@ -1881,6 +1881,18 @@ class YinshTrainer:
 
         if self.metrics_logger is not None:
             self.metrics_logger.log_training(metrics)
+            # W2 B2: surface per-epoch effective batch size as a scalar series
+            # so the Wave 2 gate (`train/effective_batch_size`) reads a real
+            # value instead of None. NaN guard mirrors the log-summary branch
+            # below (short-circuited / under-filled buffer epochs).
+            if effective_batch_sizes:
+                ebs_value = float(np.mean(effective_batch_sizes))
+                if np.isfinite(ebs_value):
+                    self.metrics_logger.log_scalar(
+                        'train/effective_batch_size',
+                        ebs_value,
+                        iteration=self.current_iteration,
+                    )
 
         # T5.5: surface effective batch size in epoch summary so that
         # phase-weight collapse onto a tiny rare-phase manifold is visible

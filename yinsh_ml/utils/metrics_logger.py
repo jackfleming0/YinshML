@@ -195,15 +195,24 @@ class MetricsLogger:
         self._eval_value_pairs.append((rv, to))
 
     def compute_and_log_value_outcome_correlation(
-        self, step: Optional[int] = None, clear: bool = True
+        self,
+        step: Optional[int] = None,
+        clear: bool = True,
+        metric_name: str = 'eval/value_outcome_correlation',
     ) -> Optional[float]:
-        """Pearson r over the buffered eval pairs; logged as
-        ``eval/value_outcome_correlation``.
+        """Pearson r over the buffered eval pairs; logged as ``metric_name``
+        (default ``eval/value_outcome_correlation``).
 
         Returns the computed r (None if too few points). When ``clear`` is
         True (default), the buffer is reset so each eval pass produces one
         scalar. Set ``clear=False`` if you want a running correlation across
         a multi-pass eval.
+
+        ``metric_name`` lets callers disambiguate per-checkpoint series — the
+        runbook's gate-check was reading ``entries[-1]`` from a shared series
+        and silently picking up the oldest historical entry (W2 B3). Passing
+        e.g. ``eval/value_outcome_correlation/<candidate_label>`` makes the
+        candidate's correlation its own series and removes the read ambiguity.
 
         Edge cases:
           * Fewer than 2 pairs → returns None, logs nothing.
@@ -229,7 +238,12 @@ class MetricsLogger:
             return None
         # np.corrcoef returns a 2x2 matrix; we want the off-diagonal Pearson r.
         r = float(np.corrcoef(x, y)[0, 1])
-        self.log_scalar('eval/value_outcome_correlation', r, step=step)
+        self.log_scalar(metric_name, r, step=step)
+        # Backwards-compat: mirror to the canonical series so existing
+        # dashboards keep working. The custom (per-candidate) series is the
+        # source of truth for new readers.
+        if metric_name != 'eval/value_outcome_correlation':
+            self.log_scalar('eval/value_outcome_correlation', r, step=step)
         if clear:
             self._eval_value_pairs = []
         return r

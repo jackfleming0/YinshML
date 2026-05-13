@@ -795,7 +795,18 @@ class MCTS:
         # Store root value for use as training target (mirrors search_batch).
         # Search-consistency probe (and any future caller) needs both `search()`
         # and `search_batch()` to expose the root value the same way.
-        self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+        #
+        # W2 sign-flip fix: `_backpropagate` stores root's `value_sum` from the
+        # *opposite*-of-root POV (legacy convention — see comments in
+        # `_backpropagate` and `test_self_play_backprop_root_only_path`). PUCT
+        # only ever reads `child.value()` (parent-POV), so the legacy storage
+        # at the root is invisible to selection. But consumers of
+        # `last_root_value` want the AlphaZero-standard "side-to-move POV"
+        # (positive = current player winning). Negate at the assignment so the
+        # public contract matches that convention. The Wave 2 tournament B2
+        # gate was reading the un-negated value and seeing -0.07 to -0.31
+        # correlations that should have been positive.
+        self.last_root_value = -root.value() if root.visit_count > 0 else 0.0
 
         # B1 telemetry: effective child visits ratio. After Wave 0, the W1-NEW
         # workstream is fixing the batched-MCTS bug where many sims dead-end
@@ -1007,8 +1018,13 @@ class MCTS:
             if 0 <= move_idx < len(move_probs):
                 move_probs[move_idx] = prob
 
-        # Store root value for use as training target (Fix #1)
-        self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+        # Store root value for use as training target (Fix #1).
+        # W2 sign-flip fix: see the matching comment in `search()` above —
+        # root's value_sum is stored in opposite-of-root POV by legacy
+        # backprop convention, so we negate at assignment to make
+        # `last_root_value` agree with the AlphaZero "side-to-move POV"
+        # contract documented in `tournament.py`.
+        self.last_root_value = -root.value() if root.visit_count > 0 else 0.0
 
         # B1 telemetry — see `search()` for the long form. Mirrored here so
         # the batched and serial paths emit the same scalar series; that's
@@ -1664,6 +1680,7 @@ class SelfPlay:
                         model_path=model_path,
                         game_id=game_id,
                         mcts_config=self.mcts_config,
+                        metrics_logger=self.metrics_logger,
                     )
                     if result is not None:
                         states, policies, values, temp_data, game_history = result
@@ -1738,6 +1755,7 @@ class SelfPlay:
                                 evaluator,
                                 game_id,
                                 self.mcts_config,
+                                self.metrics_logger,
                             )
                             for game_id in range(num_games)
                         ]
@@ -2072,9 +2090,15 @@ def play_game_worker(
         model_path: str,
         game_id: int,
         mcts_config: Dict,
+        metrics_logger=None,
 ) -> Optional[Tuple[List[np.ndarray], List[np.ndarray], float, Dict, List[Dict]]]:
     """
     Memory-optimized worker function for self-play game generation.
+
+    ``metrics_logger`` is only honoured when this function runs in the parent
+    process (sequential mode, ``num_workers=0``). In process-pool dispatch the
+    parent must not pass a logger — it isn't picklable and the worker lives
+    in another process.
     """
     # Configure minimal logging to reduce memory overhead
     worker_logger = logging.getLogger(f"Worker-{game_id}")
@@ -2154,7 +2178,14 @@ def play_game_worker(
                            if k not in ['use_batched_mcts', 'mcts_batch_size',
                                         'use_enhanced_encoding', 'use_cpp_engine']}
 
-        mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_init_config)
+        # W2 B1: only the in-process (sequential) caller can pass a logger
+        # safely; process-pool callers pass None to avoid a pickling error.
+        mcts = MCTS(
+            network=network,
+            game_state_pool=local_game_state_pool,
+            metrics_logger=metrics_logger,
+            **mcts_init_config,
+        )
 
         # Run the shared game loop. _run_game_loop owns the GameState
         # lifecycle; this function still owns `network` and `mcts` and
@@ -2197,6 +2228,7 @@ def play_game_thread(
         evaluator,
         game_id: int,
         mcts_config: Dict,
+        metrics_logger=None,
 ) -> Optional[Tuple[List[np.ndarray], List[np.ndarray], List[float], Dict, List[Dict]]]:
     """Thread-pool sibling of `play_game_worker`.
 
@@ -2220,6 +2252,12 @@ def play_game_thread(
             use `play_game_worker` instead.
         game_id: integer game index for logging.
         mcts_config: same dict shape `play_game_worker` consumes.
+        metrics_logger: optional parent-process MetricsLogger (or
+            `_SupervisorMetricsProxy`). Threads share memory with the
+            parent, so the per-MCTS B1 telemetry (`mcts/effective_child_visits`)
+            can be logged straight into the parent's sidecar. None ⇒ no
+            scalar logging from this worker (back-compat for callers that
+            don't have a logger to share).
     """
     worker_logger = logging.getLogger(f"Thread-{game_id}")
     worker_logger.setLevel(logging.INFO)
@@ -2247,10 +2285,15 @@ def play_game_thread(
 
         # The shared evaluator routes inference; MCTS still needs the
         # network reference for its state_encoder.
+        # W2 B1: forward the parent's metrics_logger so this worker's MCTS
+        # actually emits mcts/effective_child_visits (the threaded-path
+        # MCTS was previously created without a logger, which is why the
+        # Wave 2 sidecar showed 0 entries despite 4 call sites).
         mcts = MCTS(
             network=network,
             game_state_pool=local_game_state_pool,
             evaluator=evaluator,
+            metrics_logger=metrics_logger,
             **mcts_init_config,
         )
 

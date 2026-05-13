@@ -856,10 +856,14 @@ class ModelTournament:
                                     game_state, move_count, batch_size=32
                                 )
                                 # B2 (W1b): capture root value at this position
-                                # in the side-to-move POV. The MCTS encoder
-                                # is side-normalized so last_root_value is
-                                # already in current-player POV — which is
-                                # the candidate when cand_to_move is True.
+                                # in side-to-move POV. The MCTS post-Wave-2
+                                # negates `root.value()` at assignment so
+                                # `last_root_value` agrees with the
+                                # AlphaZero "side-to-move POV" contract
+                                # (positive = current player winning). Since
+                                # `cand_to_move` is True here, that's the
+                                # candidate's POV — directly comparable to
+                                # `outcome_in_pov` below without a sign flip.
                                 rv = getattr(game_mcts, 'last_root_value', None)
                                 if rv is not None and np.isfinite(rv):
                                     game_root_values.append(float(rv))
@@ -1076,8 +1080,13 @@ class ModelTournament:
         # just call it unconditionally and let it no-op when appropriate.
         if metrics_logger is not None and use_mcts:
             try:
+                # W2 B3: name the series after the candidate so each checkpoint
+                # in the sliding-window eval lands on its own series. The
+                # canonical ``eval/value_outcome_correlation`` is still
+                # populated as a mirror for backwards-compat.
                 metrics_logger.compute_and_log_value_outcome_correlation(
-                    step=iteration
+                    step=iteration,
+                    metric_name=f'eval/value_outcome_correlation/{candidate_label}',
                 )
             except Exception as e:
                 self.logger.warning(

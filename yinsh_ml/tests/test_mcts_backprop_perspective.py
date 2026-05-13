@@ -325,6 +325,90 @@ def test_self_play_puct_q_for_capture_child_has_correct_sign():
 
 
 # --------------------------------------------------------------------------- #
+# last_root_value sign contract (W2 fix)                                       #
+#                                                                             #
+# The legacy backprop convention stores root's value_sum from the *opposite*  #
+# of-root POV ("store -running" at the root branch in `_backpropagate`).      #
+# PUCT only reads `child.value()` so the root storage is invisible to         #
+# selection, but `last_root_value` is consumed externally (e.g. the tournament #
+# B2 value-outcome correlation gate) and the consumers want the AlphaZero-     #
+# standard "side-to-move POV". The Wave 2 cloud run surfaced this as -0.07 to #
+# -0.31 correlations that should have been positive.                          #
+#                                                                             #
+# Post-fix: `search()` and `search_batch()` negate `root.value()` at          #
+# assignment so the public `last_root_value` contract is:                     #
+#                                                                             #
+#     positive  ⇔ side-to-move at the root is winning at the leaves           #
+#                                                                             #
+# These tests pin that contract directly against `_backpropagate` — running   #
+# the full search would also work but is far more expensive.                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_last_root_value_contract_chess_alternating():
+    """Two-ply alternating path. Leaf v=+0.5 in BLACK POV (BLACK is winning
+    at the leaf). After backprop, the public `-root.value()` contract must
+    be NEGATIVE — root's side-to-move (WHITE) is losing.
+
+    Internal state we're checking against (per the legacy convention):
+      i=1 leaf (BLACK): same as parent? i>0 and players[1]==players[0]?
+          BLACK==WHITE → False. value_sum += -running = -0.5.
+          Then players[1]!=players[0] → running flips: running = -0.5.
+      i=0 root (WHITE): no parent. value_sum += -running = -(-0.5) = +0.5.
+
+    So root.value() = +0.5 (opposite-of-root POV — value is high for BLACK).
+    The fix at the assignment site flips this: last_root_value = -0.5,
+    correctly saying "WHITE (side to move) is losing".
+    """
+    mcts = _selfplay_mcts()
+    root, leaf = _make_node(), _make_node()
+    mcts._backpropagate([root, leaf], [Player.WHITE, Player.BLACK], 0.5)
+    # Raw root.value() is in opposite-of-root POV by legacy convention.
+    assert root.value() == pytest.approx(0.5)
+    # The public last_root_value contract negates this.
+    last_root_value = -root.value() if root.visit_count > 0 else 0.0
+    assert last_root_value == pytest.approx(-0.5), (
+        "last_root_value must be in side-to-move POV — WHITE losing means "
+        "last_root_value < 0."
+    )
+
+
+def test_last_root_value_contract_capture_sequence_same_player():
+    """Three-ply same-player path (YINSH capture continuation). Leaf v=+0.7
+    in WHITE POV (WHITE has executed a winning capture sequence). Root is
+    also WHITE. `last_root_value` must be POSITIVE (root's side is winning).
+    """
+    mcts = _selfplay_mcts()
+    root, mid, leaf = _make_node(), _make_node(), _make_node()
+    mcts._backpropagate(
+        [root, mid, leaf],
+        [Player.WHITE, Player.WHITE, Player.WHITE],
+        0.7,
+    )
+    # Legacy: root stores -running = -0.7 (per
+    # test_self_play_backprop_capture_sequence_same_player above).
+    assert root.value() == pytest.approx(-0.7)
+    last_root_value = -root.value() if root.visit_count > 0 else 0.0
+    assert last_root_value == pytest.approx(0.7), (
+        "last_root_value must be in side-to-move POV — WHITE winning at "
+        "every leaf in a same-player chain means last_root_value > 0."
+    )
+
+
+def test_last_root_value_contract_root_only_path():
+    """Degenerate single-node sim (only the legacy branch fires). Leaf v=+0.3
+    in WHITE POV; root is WHITE; `last_root_value` must be +0.3.
+    """
+    mcts = _selfplay_mcts()
+    root = _make_node()
+    mcts._backpropagate([root], [Player.WHITE], 0.3)
+    # Legacy stores -0.3 at the root.
+    assert root.value() == pytest.approx(-0.3)
+    last_root_value = -root.value() if root.visit_count > 0 else 0.0
+    assert last_root_value == pytest.approx(0.3)
+
+
+# --------------------------------------------------------------------------- #
 # Sign-convention canned set (folded W0b)                                     #
 #                                                                             #
 # Belt-and-suspenders coverage for the "good for side-to-move = positive"     #

@@ -157,12 +157,15 @@ class _SupervisorMetricsProxy:
         self._metrics_logger.log_eval_value_pair(root_value, terminal_outcome)
 
     def compute_and_log_value_outcome_correlation(
-        self, step: Optional[int] = None, clear: bool = True
+        self,
+        step: Optional[int] = None,
+        clear: bool = True,
+        metric_name: str = 'eval/value_outcome_correlation',
     ) -> Optional[float]:
         if self._metrics_logger is None:
             return None
         return self._metrics_logger.compute_and_log_value_outcome_correlation(
-            step=step, clear=clear,
+            step=step, clear=clear, metric_name=metric_name,
         )
 
     def start_iteration(self, iteration: int) -> None:
