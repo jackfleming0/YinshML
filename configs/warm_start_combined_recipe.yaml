@@ -110,7 +110,10 @@ export:
 
 anchor:
   enabled: true
-  num_games: 4
+  # W2 Step 2: 4 -> 40. At n=4 the Wilson CI half-width was ~35% so anchor
+  # readings were uninterpretable per-iter. n=40 gives CI half-widths ~15%
+  # for ~80 min added anchor-eval cost across the 4 anchor-eligible iters.
+  num_games: 40
   depth: 1
   seed: 1337
   max_moves_per_game: 150
