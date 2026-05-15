@@ -1693,9 +1693,20 @@ class TrainingSupervisor:
                 f"{'PROMOTE' if promote_by_wilson else 'REJECT'}{straddle_flag}"
             )
 
-        # --- Final Promotion Decision Logic (AlphaZero-style: never revert) ---
+        # --- Final Promotion Decision Logic ---
+        # Branches: promote (✅) | kept (➡️) | revert (⏪) | continue (🔄).
+        # The revert branch fires only when `revert_on_gate_failure=True`
+        # AND a valid best_model.pt exists AND the mtime guard allows it.
+        # Otherwise we fall through to AlphaZero-style "continue with
+        # rejected weights" — that's the original default the comment
+        # used to imply (legacy: "never revert").
         promote = False
         kept_current_best = (self.best_model_iteration == candidate_iteration)
+        # W3: track the actual decision taken so the SUMMARY block prints the
+        # truth instead of always saying "no reversion". Set inside each
+        # branch; read in the SUMMARY at the bottom of train_iteration.
+        # Values: 'promoted' | 'kept' | 'reverted' | 'continued'.
+        decision_kind = 'continued'  # safe default; overwritten below
 
         if promote_by_wilson:
             promote = True
@@ -1717,6 +1728,7 @@ class TrainingSupervisor:
 
         # --- Apply Decision ---
         if promote:
+            decision_kind = 'promoted'
             self._promotion_count += 1
             self.best_model_elo = candidate_elo
             self.best_model_iteration = candidate_iteration
@@ -1753,6 +1765,7 @@ class TrainingSupervisor:
                     self.logger.warning(f"Failed to log promotion metrics: {e}")
 
         elif kept_current_best:
+            decision_kind = 'kept'
             self.logger.info(f" Kandidat ({candidate_id_canon}) is already the best model. Keeping current state.")
             self._save_best_model_state()
 
@@ -1792,6 +1805,7 @@ class TrainingSupervisor:
                 if proceed:
                     try:
                         self.network.load_model(str(self.best_model_path))
+                        decision_kind = 'reverted'
                         self.logger.info(f"   ✓ Loaded best weights from {self.best_model_path.name}")
                         if self.reset_optimizer_on_revert:
                             # Momentum was building in the direction of the rejected
@@ -1806,6 +1820,10 @@ class TrainingSupervisor:
                             f"Revert failed ({exc}); continuing with rejected weights. "
                             f"This iteration's self-play data may be poor."
                         )
+                        # decision_kind stays 'continued' — load_model raised
+                        # before we could flip it to 'reverted'.
+                # If proceed was False (mtime mismatch in 'keep_rejected'
+                # mode), decision_kind stays 'continued' — by design.
             else:
                 if self.revert_on_gate_failure:
                     # Flag was on but we couldn't actually revert (no best
@@ -1850,9 +1868,15 @@ class TrainingSupervisor:
                 except Exception as e:
                     self.logger.warning(f"Failed to log metrics: {e}")
 
-        # Determine active network weights for clarity
-        # AlphaZero-style: always continue with current weights (no reversion)
-        active_iter = candidate_iteration
+        # Determine active network weights for clarity.
+        # If the revert path executed inside the gate-decision branch above,
+        # `self.network` was reloaded from `best_model.pt` and the next
+        # self-play iter will run from those weights — NOT the candidate's.
+        # `decision_kind == 'reverted'` is the source of truth set there.
+        if decision_kind == 'reverted':
+            active_iter = self.best_model_iteration
+        else:
+            active_iter = candidate_iteration
         self.logger.info(f"Active network weights in memory correspond to iteration {active_iter}")
 
         # ------------------------------------------------------------------ #
@@ -2020,12 +2044,11 @@ class TrainingSupervisor:
                 f"{candidate_anchor_win_rate:.1%}"
             )
         self.logger.info(f"│   Best Model: Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
-        if promote:
-            self.logger.info(f"│   Decision: ✅ NEW BEST (promoted to best model)")
-        elif kept_current_best:
-            self.logger.info(f"│   Decision: ➡️  KEPT (already best)")
-        else:
-            self.logger.info(f"│   Decision: 🔄 CONTINUE (AlphaZero-style, no reversion)")
+        # W3: print the actual decision taken, not always "no reversion".
+        # `decision_kind` was set inside the decision branches above.
+        self.logger.info(self._format_decision_line(
+            decision_kind, self.best_model_iteration
+        ))
         self.logger.info(f"│   Active Network: Iteration {active_iter}")
         self.logger.info(f"│")
         self.logger.info(f"│ TIMING")
@@ -2877,6 +2900,42 @@ class TrainingSupervisor:
             self.logger.error(f"Unexpected error calculating ring mobility: {e}", exc_info=True)
             return 0.0
 
+
+    @staticmethod
+    def _format_decision_line(decision_kind: str, best_model_iteration: int) -> str:
+        """Format the iteration-summary "Decision: …" line.
+
+        `decision_kind` is set in the gate-decision branches inside
+        ``train_iteration`` and reflects what actually happened to the
+        network for the next self-play iteration:
+
+        - ``'promoted'``: candidate beat the gate, became the new best.
+        - ``'kept'``: candidate was already the best (idempotent path).
+        - ``'reverted'``: gate failed AND the revert path executed
+          (``revert_on_gate_failure=True`` + best_model.pt exists +
+          load_model succeeded). Next self-play uses ``best_model.pt``.
+        - ``'continued'``: gate failed and we did NOT revert (either
+          ``revert_on_gate_failure=False`` or the revert path bailed).
+          Next self-play uses the rejected candidate weights.
+
+        Pre-W3 this line always said "no reversion" on a failed gate,
+        even when the revert path had executed. That made the iteration
+        SUMMARY unreliable as a record of what the network actually
+        looked like going into the next iter.
+        """
+        if decision_kind == 'promoted':
+            return "│   Decision: ✅ NEW BEST (promoted to best model)"
+        if decision_kind == 'kept':
+            return "│   Decision: ➡️  KEPT (already best)"
+        if decision_kind == 'reverted':
+            return (
+                f"│   Decision: ⏪ REVERTED "
+                f"(gate failed, restored iter {best_model_iteration} for next self-play)"
+            )
+        if decision_kind == 'continued':
+            return "│   Decision: 🔄 CONTINUE (AlphaZero-style, no reversion)"
+        # Defensive: unknown kind — fall through to the safest message.
+        return f"│   Decision: ❓ UNKNOWN (decision_kind={decision_kind!r})"
 
     @staticmethod
     def _wilson_bounds(wins: int, total: int, z: float = 1.96) -> Tuple[float, float]:
