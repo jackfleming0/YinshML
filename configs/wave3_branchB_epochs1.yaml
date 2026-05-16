@@ -1,0 +1,108 @@
+# wave3_branchB_epochs1.yaml — Wave 3 Branch B (first pass).
+#
+# Hypothesis under test: per-iter overfitting on the 200-game buffer is the
+# dominant bottleneck. Step 2 saw a 35-point WR drop after 4 epochs of
+# training on the same buffer; D3 (the 1-iter × 1-epoch micro-run) showed
+# only a 5-point drop after 1 epoch (within CI of the seed baseline at
+# 67.5% MCTS-48).
+#
+# This config = warm_start_combined_recipe.yaml with two coupled changes:
+#   1. trainer.epochs_per_iteration: 4 -> 1
+#   2. trainer.warmup_epochs: 10 -> 1
+#      (mirrors D3's schedule — warmup completes at end of epoch 1 so each
+#       iter sees peak LR; otherwise warmup over 10 epochs but total=5
+#       epochs would mean LR never hits peak, confounding the test).
+#
+# Outcomes:
+#   - Iter 0-4 candidate WR stays near seed (~60-65%) -> per-iter overfitting
+#     was the bottleneck. Recipe gets 4x faster too.
+#   - Candidate WR drifts down across iters (e.g., 65 -> 55 -> 45) -> the
+#     damage is from cross-iter feedback (search-consistency, buffer
+#     composition), not per-iter epoch count. Branch B pass 2 then targets
+#     search_consistency.enabled or buffer-mixing logic.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_wave3_branchB_epochs1
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 48
+  late_simulations: 32
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 0
+  use_shared_evaluator: false
+  games_per_iteration: 200
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1   # <-- Branch B knob (was 4)
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1          # <-- scaled with epochs_per_iteration (was 10)
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 20
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260516
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
