@@ -27,8 +27,18 @@ from yinsh_ml.game.constants import PieceType, Player, Position, VALID_POSITIONS
 from yinsh_ml.game.game_state import GameState
 from yinsh_ml.self_play.data_storage import ParquetDataStorage, StorageConfig
 from yinsh_ml.self_play.game_recorder import GameRecorder
-from yinsh_ml.viz import position_to_xy, render_board
-from yinsh_ml.viz.game_replay import list_games, load_game, replay_from_dataframe
+from yinsh_ml.viz import (
+    Annotator,
+    annotate,
+    captures_and_threats_annotator,
+    heuristic_features_annotator,
+    list_games,
+    load_game,
+    position_to_xy,
+    render_board,
+    replay_from_dataframe,
+    replay_from_moves,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +224,85 @@ def test_defensive_miss_logic_classification() -> None:
     assert classify(1, 1) is True
     assert classify(2, 2) is True
     assert classify(1, 2) is True   # got worse
+
+
+# ---------------------------------------------------------------------------
+# Source-agnostic replay + annotator framework
+# ---------------------------------------------------------------------------
+def test_replay_from_moves_smoke() -> None:
+    """`replay_from_moves` builds a usable GameReplay from any move list."""
+    recorder, final_state = _play_random_game(seed=7, max_moves=15)
+    # Pull moves directly out of the recorder; the parquet round-trip
+    # isn't needed here — that's exactly the abstraction we're testing.
+    raw_moves = []
+    state = GameState()
+    rng = random.Random(7)
+    while not state.is_terminal() and len(raw_moves) < 15:
+        valid = list(state.get_valid_moves())
+        if not valid:
+            break
+        m = rng.choice(valid)
+        raw_moves.append(m)
+        state.make_move(m)
+
+    replay = replay_from_moves(raw_moves, game_id="from_moves_test")
+    assert replay.game_id == "from_moves_test"
+    assert len(replay.moves) == len(raw_moves)
+    assert len(replay.states) == len(raw_moves) + 1
+    assert replay.replay_truncated_at is None
+    # Annotations bag exists but starts empty.
+    assert replay.annotations == []
+
+
+def test_annotate_runs_multiple_annotators_in_one_pass() -> None:
+    """`annotate` should produce one merged annotation dict per turn."""
+    rng = random.Random(11)
+    state = GameState()
+    moves = []
+    while not state.is_terminal() and len(moves) < 10:
+        valid = list(state.get_valid_moves())
+        if not valid:
+            break
+        m = rng.choice(valid)
+        moves.append(m)
+        state.make_move(m)
+
+    replay = replay_from_moves(moves, game_id="ann_test")
+    annotate(replay, [
+        captures_and_threats_annotator(),
+        heuristic_features_annotator(feature_keys=["completed_runs_differential"]),
+    ])
+
+    assert len(replay.annotations) == len(moves)
+    for turn_ann in replay.annotations:
+        # captures_and_threats keys
+        assert "capture" in turn_ann
+        assert "white_score" in turn_ann
+        assert "defensive_miss" in turn_ann
+        # heuristic_features keys (prefixed)
+        assert "hf_completed_runs_differential" in turn_ann
+
+
+def test_annotator_failure_does_not_break_replay() -> None:
+    """A broken annotator should log a warning but not abort the run."""
+    def bad_annotator(replay, turn_idx, state):
+        raise RuntimeError("synthetic failure")
+
+    rng = random.Random(3)
+    state = GameState()
+    moves = []
+    while len(moves) < 6:
+        valid = list(state.get_valid_moves())
+        if not valid:
+            break
+        m = rng.choice(valid)
+        moves.append(m)
+        state.make_move(m)
+
+    replay = replay_from_moves(moves, game_id="bad_ann_test")
+    # Bad annotator first, working one second — should still get the
+    # working one's output.
+    annotate(replay, [bad_annotator, captures_and_threats_annotator()])
+    assert len(replay.annotations) == len(moves)
+    for turn_ann in replay.annotations:
+        assert "capture" in turn_ann  # working annotator ran

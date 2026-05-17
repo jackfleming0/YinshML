@@ -18,7 +18,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -94,9 +94,16 @@ class GameReplay:
         empty starting board; ``states[i+1]`` is the board after
         ``moves[i]`` is applied.
     features:
-        Per-turn dict of heuristic feature values (whatever was in the
-        parquet beyond the standard game/turn columns). Length matches
-        ``moves``.
+        Per-turn dict of feature values inlined into the source parquet
+        (whatever was beyond the standard game/turn columns). Length
+        matches ``moves``. Empty when constructed from a move list with
+        no source parquet.
+    annotations:
+        Per-turn dict of values added by annotators after load — e.g.
+        on-the-fly heuristic features, network value predictions, MCTS
+        visit distributions. Open-ended schema; consumers look up keys
+        they care about. Length matches ``moves`` after any annotator
+        has run; otherwise empty. See ``yinsh_ml/viz/annotators.py``.
     winner, white_score, black_score, final_phase, total_turns:
         End-of-game metadata.
     """
@@ -105,6 +112,7 @@ class GameReplay:
     moves: List[Move] = field(default_factory=list)
     states: List[Board] = field(default_factory=list)
     features: List[Dict[str, float]] = field(default_factory=list)
+    annotations: List[Dict[str, Any]] = field(default_factory=list)
     winner: Optional[str] = None
     white_score: int = 0
     black_score: int = 0
@@ -149,42 +157,99 @@ class GameReplay:
             yield i, state
 
 
-def _build_replay(game_id: str, rows: pd.DataFrame, feature_cols: Sequence[str]) -> GameReplay:
-    """Replay one game's rows into board snapshots.
+def replay_from_moves(
+    moves: Sequence[Move],
+    *,
+    game_id: str = "ad_hoc",
+    features: Optional[Sequence[Dict[str, float]]] = None,
+    winner: Optional[str] = None,
+    white_score: int = 0,
+    black_score: int = 0,
+) -> GameReplay:
+    """Build a ``GameReplay`` from a list of ``Move`` objects.
 
-    Aborts gracefully on illegal/corrupt moves: the resulting GameReplay
-    has ``replay_truncated_at`` set and only contains the moves that
-    were successfully applied.
+    Source-agnostic loader — useful for BGA scraper output, in-memory
+    move lists from a running self-play worker, synthetic moves in
+    tests, or any other producer. Replays the moves through a fresh
+    ``GameState`` to materialise per-turn ``Board`` snapshots; aborts
+    gracefully and sets ``replay_truncated_at`` on illegal moves.
+
+    ``features`` is an optional per-turn dict (e.g. from a parquet that
+    inlined extra columns). Length must match ``moves`` if provided.
+    """
+    if features is not None and len(features) != len(moves):
+        raise ValueError(
+            f"features length ({len(features)}) must match moves "
+            f"length ({len(moves)})"
+        )
+
+    state = GameState()
+    applied_moves: List[Move] = []
+    states: List[Board] = [copy.deepcopy(state.board)]
+    applied_features: List[Dict[str, float]] = []
+
+    for i, move in enumerate(moves):
+        try:
+            state.make_move(move)
+        except Exception as e:
+            logger.warning(
+                "Game %s: aborting replay at turn %d (%s)", game_id, i + 1, e
+            )
+            return GameReplay(
+                game_id=game_id,
+                moves=applied_moves,
+                states=states,
+                features=applied_features,
+                winner=winner,
+                white_score=white_score,
+                black_score=black_score,
+                total_turns=len(applied_moves),
+                replay_truncated_at=i,
+            )
+        applied_moves.append(move)
+        states.append(copy.deepcopy(state.board))
+        if features is not None:
+            applied_features.append(features[i])
+
+    return GameReplay(
+        game_id=game_id,
+        moves=applied_moves,
+        states=states,
+        features=applied_features,
+        winner=winner,
+        white_score=white_score,
+        black_score=black_score,
+        total_turns=len(applied_moves),
+    )
+
+
+def _build_replay(game_id: str, rows: pd.DataFrame, feature_cols: Sequence[str]) -> GameReplay:
+    """Replay one parquet game by deserialising its rows then calling
+    ``replay_from_moves``.
+
+    Thin adapter that handles the parquet-specific concerns
+    (deserialisation, endgame metadata extraction) and delegates the
+    actual replay loop to the source-agnostic primitive.
     """
     rows = rows.sort_values("turn_number")
 
-    state = GameState()
     moves: List[Move] = []
-    states: List[Board] = [copy.deepcopy(state.board)]
     features: List[Dict[str, float]] = []
-
     for _, row in rows.iterrows():
         try:
-            move = _deserialize_move(row)
-            state.make_move(move)
+            moves.append(_deserialize_move(row))
         except Exception as e:
-            turn_no = int(row.get("turn_number", len(moves) + 1))
             logger.warning(
-                "Game %s: aborting replay at turn %d (%s)", game_id, turn_no, e
+                "Game %s: move deserialisation failed at turn %s (%s)",
+                game_id, row.get("turn_number"), e,
             )
-            replay = GameReplay(
-                game_id=game_id, moves=moves, states=states, features=features,
-                replay_truncated_at=turn_no - 1,
-            )
-            _fill_endgame_metadata(replay, rows)
-            return replay
-
-        moves.append(move)
-        states.append(copy.deepcopy(state.board))
+            break
         features.append({c: row[c] for c in feature_cols if c in row.index})
 
-    replay = GameReplay(
-        game_id=game_id, moves=moves, states=states, features=features,
+    replay = replay_from_moves(
+        moves,
+        game_id=game_id,
+        features=features if len(features) == len(moves) else None,
     )
     _fill_endgame_metadata(replay, rows)
     return replay
@@ -288,4 +353,5 @@ __all__ = [
     "list_games",
     "load_game",
     "replay_from_dataframe",
+    "replay_from_moves",
 ]

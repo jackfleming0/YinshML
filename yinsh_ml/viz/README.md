@@ -118,9 +118,50 @@ of the cases above, often before the full 200-game run finishes.
 - **Bulk file naming** (default): same pattern, multiple games per file
   controlled by `--batch-size` (default 100).
 
+## Architecture: loaders + annotators
+
+The viewer splits into three layers so future consumers don't need to
+fork the existing audit code:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Source (parquet / BGA JSON / in-memory moves / replay buffer)   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Loader → GameReplay                                             │
+│   load_game(parquet_dir, game_id)        parquet                │
+│   replay_from_dataframe(df)              DataFrame              │
+│   replay_from_moves(moves, ...)          any List[Move]         │
+│   (your_adapter_here)                    any new source         │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Annotator(s) → populate GameReplay.annotations                  │
+│   captures_and_threats_annotator()       scores, threats, miss  │
+│   heuristic_features_annotator()         the 7 hf_* features    │
+│   (network_annotator(wrapper))           network value + π      │
+│   (mcts_annotator(net, num_sims))        re-run MCTS per turn   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Consumer (Streamlit dashboard, Jupyter, save-to-file, ...)      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Each layer is independent.** A new source plugs in as a new loader.
+A new metric plugs in as a new annotator. The dashboard reads
+`replay.features` (loader-provided) and `replay.annotations`
+(annotator-provided) generically.
+
 ## API
 
-### `render_board(board, *, last_move=None, highlight=None, title=None, ax=None, figsize=(8,8), show_coords=True) → Figure`
+### Rendering
+
+`render_board(board, *, last_move=None, highlight=None, title=None, ax=None, figsize=(8,8), show_coords=True) → Figure`
 
 Renders a `Board` to a `matplotlib.Figure`. Drops into `st.pyplot(fig)`,
 `fig.savefig("foo.png")`, or any matplotlib backend without further glue.
@@ -131,29 +172,108 @@ Geometry: monotonic skew along the matching-sign diagonal hex axis. All
 three hex axes render as 60°-separated unit-length screen lines —
 verified by `test_hex_axes_are_unit_distance`.
 
-### `GameReplay`
+### Loaders
 
 ```python
-from yinsh_ml.viz.game_replay import load_game, list_games
+from yinsh_ml.viz import (
+    list_games, load_game,            # parquet directory → GameReplay
+    replay_from_dataframe,            # in-memory pandas DataFrame → GameReplay
+    replay_from_moves,                # any List[Move] → GameReplay  ← most general
+)
 
-# Summary of all games in a parquet directory
+# Parquet (current self-play harness output)
 summary = list_games(Path("self_play_data/run/parquet_data"))
+replay  = load_game(Path("..."), "game_id")
 
-# Load and replay one game
-replay = load_game(Path("..."), "game_id")
+# Source-agnostic — works for BGA scraper output, in-memory moves
+# from a running worker, synthetic moves in tests, anything that can
+# produce a List[Move]:
+replay = replay_from_moves(moves, game_id="my_game", winner="WHITE")
+```
+
+### GameReplay shape
+
+```python
 replay.moves            # List[Move]
 replay.states           # List[Board], length len(moves)+1
 replay.board_after(i)   # Board after move i
 replay.board_before(i)  # Board before move i
 replay.iter_states()    # → Iterator[(turn_idx, GameState)]  O(N) single pass
-replay.features         # List[Dict] — parquet-recorded features per turn
+
+replay.features         # List[Dict] — values inlined by the loader (e.g.
+                        # FeatureExtractor columns from parquet). May be
+                        # empty if the loader had nothing extra.
+replay.annotations      # List[Dict] — values added by annotators after
+                        # load. Empty until annotate() runs.
+
 replay.winner           # "WHITE" / "BLACK" / None
 replay.replay_truncated_at  # None unless a move was illegal
 ```
 
-`iter_states()` is the one to use when you need full `GameState` (for
-phase- or score-dependent feature computation) at every turn — it does a
-single forward pass.
+### Annotators
+
+An annotator is `Callable[[GameReplay, turn_idx, GameState], Dict[str, Any]]` —
+no subclassing required. Run one or more via `annotate()`:
+
+```python
+from yinsh_ml.viz import (
+    annotate,
+    captures_and_threats_annotator,
+    heuristic_features_annotator,
+)
+
+annotate(replay, [
+    captures_and_threats_annotator(),
+    heuristic_features_annotator(player=Player.WHITE),
+])
+# Now replay.annotations[i] is a dict with capture, white_score,
+# white_threats, defensive_miss, hf_completed_runs_differential, …
+```
+
+Multiple annotators run in a single forward pass through the game.
+Their output dicts are merged per turn. A broken annotator logs a
+warning and is skipped for that turn — doesn't take the whole run down.
+
+### Writing a custom annotator
+
+```python
+def my_annotator(replay, turn_idx, state) -> Dict[str, Any]:
+    # state is the GameState AFTER move turn_idx
+    return {
+        "my_metric": some_computation(state),
+        "another": state.board.count_pieces(),
+    }
+
+annotate(replay, [my_annotator])
+# replay.annotations[i] now has "my_metric" and "another" keys
+```
+
+For stateful annotators (e.g. tracking deltas across turns) use a
+closure-with-mutable-dict or a class — see
+`captures_and_threats_annotator` in `annotators.py` for the closure
+pattern. The annotator framework doesn't care which.
+
+### Sketches for use cases not yet implemented
+
+**Neural self-play review** — currently the training pipeline writes
+`replay_buffer.pkl.gz` with encoded state tensors but no moves. Two
+paths: (a) thread a `GameRecorder` through `training/self_play.py` to
+write a sidecar GameRecord parquet (small change, opens the door to
+viewing neural games); (b) write a `network_annotator(wrapper)` that
+runs the network on each replayed state and emits the value
+prediction + top-k move probabilities.
+
+**Expert game review** — load a BGA-scraped game into `replay_from_moves`
+(BGA scraper already produces the same move-dict schema as parquet),
+then annotate with `network_annotator` and/or `mcts_annotator` to see
+what your current model would have played at each position. The
+dashboard surfaces the model's recommendation alongside the human's
+actual move.
+
+**MCTS visit display** — `mcts_annotator(network, num_sims=400)` would
+re-run MCTS at each replayed position and emit the visit-count
+distribution. Expensive (linear in game length × num_sims) but very
+informative for understanding why a particular move was chosen.
 
 ### Harness flags
 
