@@ -22,6 +22,7 @@ from typing import List, Optional
 import matplotlib
 
 matplotlib.use("Agg")
+import pandas as pd
 import streamlit as st
 
 # Make `yinsh_ml` importable when running via `streamlit run` from the repo root.
@@ -29,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from yinsh_ml.game.constants import Player  # noqa: E402
+from yinsh_ml.game.constants import PieceType, Player  # noqa: E402
 from yinsh_ml.game.game_state import GameState  # noqa: E402
 from yinsh_ml.game.types import MoveType  # noqa: E402
 from yinsh_ml.heuristics.features import extract_all_features  # noqa: E402
@@ -80,6 +81,61 @@ def _replay_to_turn(replay: GameReplay, turn_index: int) -> Optional[GameState]:
         except Exception:
             return None
     return state
+
+
+def _count_threats(state: GameState, marker_type: PieceType) -> int:
+    """Number of 4-length contiguous marker rows for ``marker_type``.
+
+    A 4-length row is one marker short of capture — the defining
+    "immediate threat" condition for the offense-only audit. The
+    opponent must place a marker that prevents extension, or the row
+    becomes a captured run next turn.
+
+    Empirical note: in YINSH, markers go from 4→5 in a single ring-move
+    (the ring leaves a marker at its source). Threats are therefore
+    short-lived (often <1 turn), and a stretch of consecutive non-zero
+    values is a stronger signal than a single tick. For a coarser
+    "early warning" view, see ``_count_potential`` below.
+    """
+    rows = state.board.find_marker_rows(marker_type)
+    return sum(1 for r in rows if r.length == 4)
+
+
+def _count_potential(state: GameState, marker_type: PieceType) -> int:
+    """Number of 3+ length contiguous marker rows — broader early warning.
+
+    Captures earlier-stage row-building activity that the strict
+    ``_count_threats`` definition misses. Useful for spotting offense-
+    only buildup before it crystallises into a single 4→5 move.
+    """
+    rows = state.board.find_marker_rows(marker_type)
+    return sum(1 for r in rows if r.length >= 3)
+
+
+@st.cache_data(show_spinner=True)
+def _compute_trajectory(
+    parquet_dir: str, game_id: str, mtime_key: float
+) -> pd.DataFrame:
+    """Per-turn audit features and threat counts for the full game.
+
+    Single forward pass (``replay.iter_states``) so cost is linear in
+    game length. Cached by (game_id, parquet-dir mtime) — re-runs only
+    when underlying data changes.
+    """
+    replay = _load_game_cached(parquet_dir, game_id, mtime_key)
+    rows: List[dict] = []
+    for turn_idx, state in replay.iter_states():
+        feats = extract_all_features(state, Player.WHITE)
+        rows.append({
+            "turn": turn_idx + 1,
+            "player": state.current_player.name,  # whose turn is NEXT
+            **{k: float(feats.get(k, 0.0)) for k in _AUDIT_FEATURES},
+            "white_threats": _count_threats(state, PieceType.WHITE_MARKER),
+            "black_threats": _count_threats(state, PieceType.BLACK_MARKER),
+            "white_potential": _count_potential(state, PieceType.WHITE_MARKER),
+            "black_potential": _count_potential(state, PieceType.BLACK_MARKER),
+        })
+    return pd.DataFrame(rows)
 
 
 def _format_move(move) -> str:
@@ -169,57 +225,118 @@ def main() -> None:
         )
         st.session_state[state_key] = turn_idx
 
-    # ----- Main columns: board + metrics --------------------------------
-    board_col, info_col = st.columns([3, 2])
+    # ----- Compute trajectory once for both tabs ------------------------
+    trajectory: Optional[pd.DataFrame] = None
+    if show_audit:
+        try:
+            trajectory = _compute_trajectory(str(parquet_dir), game_id, mtime)
+        except Exception as e:
+            st.warning(f"Could not compute trajectory: {e}")
 
-    with board_col:
-        move = replay.moves[turn_idx]
-        last_move = None
-        if move.source is not None and move.destination is not None:
-            last_move = (move.source, move.destination)
-        fig = render_board(
-            replay.board_after(turn_idx),
-            last_move=last_move,
-            title=f"{replay.game_id} — turn {turn_idx + 1}/{n}",
-            show_coords=show_coords,
-            figsize=(7.5, 7.5),
-        )
-        st.pyplot(fig)
+    # ----- Tabs: Board view + Trajectory view ---------------------------
+    tab_board, tab_traj = st.tabs(["Board", "Trajectory"])
 
-    with info_col:
-        st.subheader("Move")
-        st.text(_format_move(move))
+    with tab_board:
+        board_col, info_col = st.columns([3, 2])
 
-        st.subheader("Game state")
-        meta = {
-            "Winner": replay.winner or "—",
-            "White score": replay.white_score,
-            "Black score": replay.black_score,
-            "Final phase": replay.final_phase or "—",
-            "Total turns": replay.total_turns,
-        }
-        if replay.replay_truncated_at is not None:
-            meta["⚠ Replay truncated at"] = replay.replay_truncated_at
-        st.table({"": meta})
+        with board_col:
+            move = replay.moves[turn_idx]
+            last_move = None
+            if move.source is not None and move.destination is not None:
+                last_move = (move.source, move.destination)
+            fig = render_board(
+                replay.board_after(turn_idx),
+                last_move=last_move,
+                title=f"{replay.game_id} — turn {turn_idx + 1}/{n}",
+                show_coords=show_coords,
+                figsize=(7.5, 7.5),
+            )
+            st.pyplot(fig)
 
-        if replay.features and replay.features[turn_idx]:
-            st.subheader("Recorded features (parquet)")
-            feats = {
-                k: f"{v:.3f}" if isinstance(v, float) else v
-                for k, v in replay.features[turn_idx].items()
+            # Defensive-miss badge: any 4-marker rows present after this move?
+            if trajectory is not None and turn_idx < len(trajectory):
+                row = trajectory.iloc[turn_idx]
+                wt = int(row["white_threats"])
+                bt = int(row["black_threats"])
+                if wt + bt > 0:
+                    badges = []
+                    if wt:
+                        badges.append(f":red[⚠ White has {wt} 4-row(s)]")
+                    if bt:
+                        badges.append(f":red[⚠ Black has {bt} 4-row(s)]")
+                    st.markdown(" · ".join(badges))
+
+        with info_col:
+            st.subheader("Move")
+            st.text(_format_move(move))
+
+            st.subheader("Game state")
+            meta = {
+                "Winner": replay.winner or "—",
+                "White score": replay.white_score,
+                "Black score": replay.black_score,
+                "Final phase": replay.final_phase or "—",
+                "Total turns": replay.total_turns,
             }
-            st.table({"value": feats})
+            if replay.replay_truncated_at is not None:
+                meta["⚠ Replay truncated at"] = replay.replay_truncated_at
+            st.table({"": meta})
 
-        if show_audit:
-            state = _replay_to_turn(replay, turn_idx)
-            if state is not None:
-                st.subheader("Heuristic features (computed, White POV)")
-                computed = extract_all_features(state, Player.WHITE)
+            if replay.features and replay.features[turn_idx]:
+                st.subheader("Recorded features (parquet)")
+                feats = {
+                    k: f"{v:.3f}" if isinstance(v, float) else v
+                    for k, v in replay.features[turn_idx].items()
+                }
+                st.table({"value": feats})
+
+            if show_audit and trajectory is not None and turn_idx < len(trajectory):
+                st.subheader("Heuristic features (this turn, White POV)")
+                tr_row = trajectory.iloc[turn_idx]
                 audit = {
-                    k: f"{computed.get(k, 0):+.2f}"
-                    for k in _AUDIT_FEATURES if k in computed
+                    k: f"{tr_row[k]:+.2f}"
+                    for k in _AUDIT_FEATURES if k in tr_row
                 }
                 st.table({"diff": audit})
+
+    with tab_traj:
+        if trajectory is None or trajectory.empty:
+            st.info("Enable 'Compute heuristic features on-the-fly' in the "
+                    "sidebar to see trajectories.")
+        else:
+            st.subheader("Heuristic features over the game (White POV)")
+            st.caption(
+                "Positive = White favoured. Watch for one side's "
+                "`potential_runs_count` or `completed_runs_differential` "
+                "climbing without the other side responding — the canonical "
+                "offense-only collapse signature."
+            )
+            st.line_chart(trajectory.set_index("turn")[_AUDIT_FEATURES])
+
+            st.subheader("Row-building over time")
+            st.caption(
+                "**Threats** = rows of exactly 4 markers (one move from "
+                "capture). Often short-lived in YINSH because 4→5 happens "
+                "in a single ring-move. **Potential** = rows of ≥3 markers — "
+                "broader early-warning of one side building unchecked."
+            )
+            st.line_chart(
+                trajectory.set_index("turn")[[
+                    "white_threats", "black_threats",
+                    "white_potential", "black_potential",
+                ]]
+            )
+
+            with st.expander("Per-turn data"):
+                st.dataframe(
+                    trajectory[[
+                        "turn", "player",
+                        "white_threats", "black_threats",
+                        "white_potential", "black_potential",
+                        *_AUDIT_FEATURES,
+                    ]],
+                    hide_index=True,
+                )
 
 
 if __name__ == "__main__":

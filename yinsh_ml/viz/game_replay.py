@@ -128,6 +128,26 @@ class GameReplay:
         for i, move in enumerate(self.moves):
             yield i, move, self.states[i + 1], self.features[i]
 
+    def iter_states(self) -> Iterator[Tuple[int, GameState]]:
+        """Yield ``(turn_index, game_state_after_move)`` for every turn.
+
+        Single forward pass through the move list, so this is O(N) — use
+        in preference to repeatedly rebuilding state from scratch when
+        you need full ``GameState`` (not just ``Board``) at every turn,
+        e.g. for computing phase- or score-dependent heuristic features.
+        """
+        state = GameState()
+        for i, move in enumerate(self.moves):
+            try:
+                state.make_move(move)
+            except Exception as e:
+                logger.warning(
+                    "Game %s: iter_states aborting at turn %d (%s)",
+                    self.game_id, i, e,
+                )
+                return
+            yield i, state
+
 
 def _build_replay(game_id: str, rows: pd.DataFrame, feature_cols: Sequence[str]) -> GameReplay:
     """Replay one game's rows into board snapshots.
