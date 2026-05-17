@@ -37,28 +37,75 @@ streamlit run scripts/dashboard_games.py
 #   - "Compute heuristic features on-the-fly" should be on by default
 ```
 
-## Audit runbook
+## Running a real audit corpus
 
-For the **offense-only equilibrium audit** specifically:
+One-line wrapper:
 
-1. **Generate ≥200 games at depth 3** with `--epsilon 0.05` for trajectory
-   diversity. Depth 2 is too short-sighted to test the hypothesis;
-   depth 4+ is slow.
-2. Open the dashboard, switch to the **Trajectory** tab.
-3. For each game (sample at least 20), look for:
-   - **Score progression** climbing for one side without the other
-     responding within 10-15 moves
-   - **`completed_runs_differential`** monotonically growing for one
-     player — the signature of one side building captures unchallenged
-   - **`white_potential` / `black_potential`** (rows of length ≥3)
-     diverging — earlier-stage early warning
-4. **Capture count distribution**: count captures per game across the
-   corpus. Healthy distribution: most games have 2-5 captures total,
-   roughly balanced W/B. Sick: one side dominates or games end at the
-   move cap with no captures (heuristic is just shuffling markers).
+```bash
+scripts/run_heuristic_audit.sh                # 200 games, depth-mix 2:20,3:60,4:20
+scripts/run_heuristic_audit.sh my_run_name    # custom name → self_play_data/my_run_name/
+NUM_GAMES=50 scripts/run_heuristic_audit.sh smoke    # quick smoke
+DEPTH_MIX=3:100 WORKERS=4 scripts/run_heuristic_audit.sh d3only
+```
 
-Audit-positive findings → consider adding defensive features or
-relying more on search depth (see `TODO_baseline.md` viz section).
+Output lands in `self_play_data/<run_name>/parquet_data/` (one parquet
+per game in live mode) plus a `run.log` for the harness output. Open
+the dashboard in another terminal and point the sidebar there with
+Auto-refresh on — games appear as they complete.
+
+### What the recommended defaults give you
+
+| knob | default | why |
+|---|---|---|
+| `NUM_GAMES=200` | 200 | enough for the per-game metrics to stabilise statistically; ~1-2h serial on a modern laptop, faster with `WORKERS=8` |
+| `DEPTH_MIX="2:20,3:60,4:20"` | 60% at depth 3 | depth 1-2 doesn't deliberately build runs (no case-(a) threats appear, audit produces nothing); depth 4+ is slow and adds little new information |
+| `TIME_LIMIT_SEC=2.0` | 2.0 | caps iterative deepening; depth-3 search comfortably fits |
+| `MAX_MOVES=200` | 200 | catches stalled games but lets real games play to completion |
+| `EPSILON=0.05` | 0.05 | ε-greedy at root for trajectory diversity — 5% random moves per turn |
+| `BATCH_SIZE=1` | 1 | one parquet per game → dashboard sees games live |
+
+### Interpreting the results — decision tree
+
+After the run completes, open the dashboard, pick a few games at random, and check the totals across all games (the sidebar's game list shows scores; the Trajectory tab's defensive-miss caption shows the count per game).
+
+**Case 1 — Few captures (mean <2/game), long games.**
+Heuristic is shuffling markers without building anything. Investigate first:
+- Are games ending at `MAX_MOVES`? If yes, raise `MAX_MOVES` to 300 first; YINSH games at depth 3+ can run long.
+- If games end early with 0-0 score, the heuristic may be stuck in a defensive equilibrium. Bump `EPSILON` to 0.10 for more exploration and re-run.
+
+**Case 2 — Many captures (mean ≥3/game), low defensive-miss rate (<10% of threat-turns).**
+Healthy game dynamics. Most captures are coming via case (b) path-flips (not preventable). Audit confirms the heuristic produces usable warm-start data. Move on to supervised pretraining.
+
+**Case 3 — Many captures, high defensive-miss rate (≥30% of threat-turns).**
+Smoking gun for offense-only collapse — the heuristic builds runs and the opponent fails to defend them. Three responses, in order of cost:
+- Cheap: bump training depth from 2 to 3+ in the self-play config (`configs/*.yaml::self_play.num_simulations` for MCTS-mode, or `--depth` for pure HA).
+- Medium: ship the Tier A proxy metrics in `TODO_baseline.md` viz section (threat-resolution latency, defense-to-capture ratio, case (a) vs (b) capture classification, per-game miss-rate distribution). All ~20 lines of pandas each over the existing trajectory data — no new game-engine APIs needed. Gives you actual numbers to compare across recipe changes.
+- Deeper: Tier C tactical-quality defensive analysis (flip resilience, counter-attack setup, multi-step search). 2-3 days of engine extensions + scoring; opens the door to quantifying *how good* heuristic defense is, not just whether it happened.
+
+**Case 4 — Very skewed W/B scores (one side captures 80%+).**
+Should not happen in symmetric HA-vs-HA. Likely cause: a bug or first-move advantage that depth-3 search can't overcome. Investigate by:
+- Playing a few of the skewed games manually through the dashboard (look for systematically bad moves)
+- Re-running with `SEED_BASE` set to a different value to rule out unlucky seed selection
+
+### Live audit workflow (recommended)
+
+Two terminals:
+
+```bash
+# Terminal 1
+scripts/run_heuristic_audit.sh audit_v1
+
+# Terminal 2
+streamlit run scripts/dashboard_games.py
+# Sidebar:
+#   - Parquet directory: self_play_data/audit_v1/parquet_data
+#   - Live mode: Auto-refresh ON, interval 5s
+#   - Compute heuristic features on-the-fly: ON
+```
+
+Watch the game count climb in the sidebar. Sample 5-10 games as they
+come in — you'll quickly see whether the audit is fingerprinting one
+of the cases above, often before the full 200-game run finishes.
 
 ## Output placement
 
