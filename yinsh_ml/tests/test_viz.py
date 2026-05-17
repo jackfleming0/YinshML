@@ -190,3 +190,27 @@ def test_iter_states_full_pass() -> None:
             assert st.phase is not None
             assert isinstance(st.white_score, int)
             assert isinstance(st.black_score, int)
+
+
+# ---------------------------------------------------------------------------
+# Defensive-miss detector
+# ---------------------------------------------------------------------------
+def test_defensive_miss_logic_classification() -> None:
+    """The detector classifies a turn as a miss iff opponent had a
+    standing 4-row at the start AND it survived the player's move.
+    Mirror the inline logic from dashboard_games.py::_compute_trajectory."""
+
+    def classify(threats_before: int, threats_after: int) -> bool:
+        return bool(threats_before > 0 and threats_after >= threats_before)
+
+    # No threat → no miss possible.
+    assert classify(0, 0) is False
+    assert classify(0, 1) is False  # player CREATED an opponent threat (case b
+                                    # path-flip side-effect); detector ignores
+    # Threat present, player broke it → not a miss.
+    assert classify(1, 0) is False
+    assert classify(2, 1) is False  # broke one of two
+    # Threat present, player did not reduce → miss.
+    assert classify(1, 1) is True
+    assert classify(2, 2) is True
+    assert classify(1, 2) is True   # got worse

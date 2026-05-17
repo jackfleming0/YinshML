@@ -111,7 +111,7 @@ def _count_potential(state: GameState, marker_type: PieceType) -> int:
 def _compute_trajectory(
     parquet_dir: str, game_id: str, mtime_key: float
 ) -> pd.DataFrame:
-    """Per-turn audit features, threat counts, and capture events.
+    """Per-turn audit features, threat counts, captures, defensive misses.
 
     Single forward pass (``replay.iter_states``) so cost is linear in
     game length. Cached by (game_id, parquet-dir mtime) — re-runs only
@@ -122,28 +122,62 @@ def _compute_trajectory(
     is the unambiguous signal — row-length matching is unreliable
     around RING_REMOVAL because the captured markers are immediately
     cleared from the board).
+
+    ``defensive_miss`` column is True on turns where the opponent had
+    a 4-row at the start of the player's turn AND the same opponent
+    still has at least the same number of 4-rows after the player's
+    move. Necessary-but-not-sufficient detector — catches "player
+    ignored the threat entirely" but not subtler issues like "player
+    flipped a marker that the opponent can trivially flip back."
+    See TODO_baseline.md viz section for the richer multi-dim metric.
     """
     replay = _load_game_cached(parquet_dir, game_id, mtime_key)
+
+    def threats_for(state: GameState, player: Player) -> int:
+        marker = (PieceType.WHITE_MARKER if player == Player.WHITE
+                  else PieceType.BLACK_MARKER)
+        return _count_threats(state, marker)
+
     rows: List[dict] = []
-    prev_white = prev_black = 0
+    prev_white_score = prev_black_score = 0
+    # Both players' 4-row counts at the prior state — needed to detect
+    # whether the player whose turn it is now actually responded to a
+    # standing threat. Initialized to 0 because the empty starting
+    # board has no markers.
+    prev_threats = {Player.WHITE: 0, Player.BLACK: 0}
+
     for turn_idx, state in replay.iter_states():
         feats = extract_all_features(state, Player.WHITE)
         capture = ""
-        if state.white_score > prev_white:
+        if state.white_score > prev_white_score:
             capture = "WHITE"
-        elif state.black_score > prev_black:
+        elif state.black_score > prev_black_score:
             capture = "BLACK"
-        prev_white, prev_black = state.white_score, state.black_score
+        prev_white_score, prev_black_score = state.white_score, state.black_score
+
+        # state.current_player is whoever is about to move next, i.e.
+        # the OPPONENT of whoever just moved. Their threats are what
+        # the just-moved player should have been defending against.
+        opponent_of_mover = state.current_player
+        threats_before = prev_threats[opponent_of_mover]
+        threats_after = threats_for(state, opponent_of_mover)
+        defensive_miss = bool(threats_before > 0 and threats_after >= threats_before)
+
+        # Refresh both colors' threats for the next iteration.
+        white_after = threats_for(state, Player.WHITE)
+        black_after = threats_for(state, Player.BLACK)
+        prev_threats = {Player.WHITE: white_after, Player.BLACK: black_after}
 
         rows.append({
             "turn": turn_idx + 1,
-            "player": state.current_player.name,  # whose turn is NEXT
+            "player": state.current_player.name,
             "white_score": state.white_score,
             "black_score": state.black_score,
             "capture": capture,
+            "defensive_miss": defensive_miss,
             **{k: float(feats.get(k, 0.0)) for k in _AUDIT_FEATURES},
-            "white_threats": _count_threats(state, PieceType.WHITE_MARKER),
-            "black_threats": _count_threats(state, PieceType.BLACK_MARKER),
+            "white_threats": white_after,
+            "black_threats": black_after,
             "white_potential": _count_potential(state, PieceType.WHITE_MARKER),
             "black_potential": _count_potential(state, PieceType.BLACK_MARKER),
         })
@@ -282,7 +316,7 @@ def main() -> None:
             )
             st.pyplot(fig)
 
-            # Badges: captures (unambiguous) + defensive-miss warnings (4-rows).
+            # Badges: captures (unambiguous), defensive misses, threats.
             if trajectory is not None and turn_idx < len(trajectory):
                 row = trajectory.iloc[turn_idx]
                 badges: List[str] = []
@@ -290,12 +324,14 @@ def main() -> None:
                 if cap:
                     icon = "⚪" if cap == "WHITE" else "⚫"
                     badges.append(f":green[{icon} CAPTURE — {cap}]")
+                if bool(row.get("defensive_miss", False)):
+                    badges.append(":red[🚨 DEFENSIVE MISS]")
                 wt = int(row["white_threats"])
                 bt = int(row["black_threats"])
                 if wt:
-                    badges.append(f":red[⚠ White has {wt} 4-row(s)]")
+                    badges.append(f":orange[⚠ White has {wt} 4-row(s)]")
                 if bt:
-                    badges.append(f":red[⚠ Black has {bt} 4-row(s)]")
+                    badges.append(f":orange[⚠ Black has {bt} 4-row(s)]")
                 if badges:
                     st.markdown(" · ".join(badges))
 
@@ -342,7 +378,17 @@ def main() -> None:
             cap_txt = " · ".join(
                 f"turn {int(r.turn)}: {r.capture}" for _, r in captures.iterrows()
             ) if not captures.empty else "—"
+            misses = trajectory[trajectory["defensive_miss"] == True]  # noqa: E712
+            miss_txt = " · ".join(
+                f"turn {int(r.turn)}" for _, r in misses.iterrows()
+            ) if not misses.empty else "—"
             st.caption(f"Captures: {cap_txt}")
+            st.caption(
+                f"Defensive misses ({len(misses)}): {miss_txt} "
+                "— necessary-but-not-sufficient detector (opponent had a "
+                "4-row at the start of player's turn AND it survived the "
+                "player's move). See the README for tactical caveats."
+            )
             st.line_chart(
                 trajectory.set_index("turn")[["white_score", "black_score"]]
             )
@@ -377,6 +423,7 @@ def main() -> None:
                     trajectory[[
                         "turn", "player",
                         "white_score", "black_score", "capture",
+                        "defensive_miss",
                         "white_threats", "black_threats",
                         "white_potential", "black_potential",
                         *_AUDIT_FEATURES,
