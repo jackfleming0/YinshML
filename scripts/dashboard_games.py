@@ -25,6 +25,13 @@ matplotlib.use("Agg")
 import pandas as pd
 import streamlit as st
 
+try:
+    from streamlit_autorefresh import st_autorefresh as _st_autorefresh
+    _AUTOREFRESH_AVAILABLE = True
+except ImportError:
+    _AUTOREFRESH_AVAILABLE = False
+    _st_autorefresh = None  # type: ignore
+
 # Make `yinsh_ml` importable when running via `streamlit run` from the repo root.
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -206,6 +213,23 @@ def main() -> None:
         st.divider()
         show_coords = st.checkbox("Show coordinate labels", value=False)
         show_audit = st.checkbox("Compute heuristic features on-the-fly", value=True)
+
+        st.divider()
+        st.caption("Live mode")
+        if _AUTOREFRESH_AVAILABLE:
+            live = st.checkbox("Auto-refresh", value=False,
+                               help="Re-read parquet directory on a timer "
+                                    "so new games appear as the harness "
+                                    "writes them. Pair with "
+                                    "`generate_heuristic_games.py "
+                                    "--batch-size 1`.")
+            interval = st.slider("Interval (seconds)", min_value=2,
+                                 max_value=30, value=5, disabled=not live)
+            if live:
+                _st_autorefresh(interval=interval * 1000, key="game_viewer_refresh")
+        else:
+            st.caption("Install `streamlit-autorefresh` for live mode.")
+
         if st.button("Reload"):
             st.cache_data.clear()
 

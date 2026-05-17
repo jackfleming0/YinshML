@@ -27,6 +27,15 @@ Production — 2000 games at mixed depths, 8 workers, small ε noise::
         --num-games 2000 \\
         --depth-mix 2:20,3:60,4:20 \\
         --workers 8 --epsilon 0.05
+
+Live mode — small parquet files appear as each game finishes so the
+dashboard's auto-refresh picks them up immediately. ``--batch-size 1``
+sets the parquet write cadence to "one file per game"; ``--chunk-size``
+controls the multiprocessing pool's task batching and keeps parallelism::
+
+    python scripts/generate_heuristic_games.py \\
+        --output-dir self_play_data/live \\
+        --num-games 100 --workers 4 --batch-size 1 --chunk-size 8
 """
 
 from __future__ import annotations
@@ -224,8 +233,12 @@ def _run(args: argparse.Namespace) -> None:
     use_pool = args.workers > 1
     pool = mp.Pool(processes=args.workers) if use_pool else None
 
+    # Multiprocessing chunk size is separate from the parquet write
+    # cadence — otherwise --batch-size 1 (live mode) kills parallelism.
+    chunk_size = args.chunk_size or max(args.batch_size, args.workers)
+
     try:
-        for chunk in _chunks(jobs, args.batch_size):
+        for chunk in _chunks(jobs, chunk_size):
             if use_pool:
                 results = pool.imap_unordered(play_one_game, chunk)
             else:
@@ -291,7 +304,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=1,
                    help="Number of parallel workers (1 = serial)")
     p.add_argument("--batch-size", type=int, default=100,
-                   help="Games per parquet batch file (also chunk size for the pool)")
+                   help="Games per parquet file (write cadence). Use 1 for "
+                        "live mode where each completed game gets its own file.")
+    p.add_argument("--chunk-size", type=int, default=None,
+                   help="Multiprocessing pool chunk size (independent of "
+                        "parquet write cadence). Default: max(batch_size, workers).")
 
     depth_group = p.add_mutually_exclusive_group()
     depth_group.add_argument("--depth", type=int, default=3,
