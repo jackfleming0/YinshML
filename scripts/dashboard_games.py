@@ -79,15 +79,18 @@ def _count_threats(state: GameState, marker_type: PieceType) -> int:
     """Number of 4-length contiguous marker rows for ``marker_type``.
 
     A 4-length row is one marker short of capture — the defining
-    "immediate threat" condition for the offense-only audit. The
-    opponent must place a marker that prevents extension, or the row
-    becomes a captured run next turn.
+    "immediate threat" condition for case (a) of YINSH capture
+    formation: gradual marker buildup over multiple turns. On their
+    next turn the threat-holder can complete the row, OR the defender
+    can break it by moving a ring whose path crosses one of the four
+    markers (flipping it to the defender's color).
 
-    Empirical note: in YINSH, markers go from 4→5 in a single ring-move
-    (the ring leaves a marker at its source). Threats are therefore
-    short-lived (often <1 turn), and a stretch of consecutive non-zero
-    values is a stronger signal than a single tick. For a coarser
-    "early warning" view, see ``_count_potential`` below.
+    Caveat — case (b): a 5-row can also form via a single ring move
+    whose path-flips convert scattered markers or a 3-row directly
+    into a 5-row of the mover's color. No visible 4-row state
+    precedes such a capture, so this metric is blind to case (b).
+    Use score-delta capture-event tracking + ``_count_potential``
+    for the full picture.
     """
     rows = state.board.find_marker_rows(marker_type)
     return sum(1 for r in rows if r.length == 4)
@@ -96,9 +99,9 @@ def _count_threats(state: GameState, marker_type: PieceType) -> int:
 def _count_potential(state: GameState, marker_type: PieceType) -> int:
     """Number of 3+ length contiguous marker rows — broader early warning.
 
-    Captures earlier-stage row-building activity that the strict
-    ``_count_threats`` definition misses. Useful for spotting offense-
-    only buildup before it crystallises into a single 4→5 move.
+    Captures earlier-stage row-building activity. Persists across more
+    turns than the strict ``_count_threats == 4`` definition, so
+    sustained one-sided growth is a cleaner offense-only signal.
     """
     rows = state.board.find_marker_rows(marker_type)
     return sum(1 for r in rows if r.length >= 3)
@@ -356,9 +359,11 @@ def main() -> None:
             st.subheader("Row-building over time")
             st.caption(
                 "**Threats** = rows of exactly 4 markers (one move from "
-                "capture). Often short-lived in YINSH because 4→5 happens "
-                "in a single ring-move. **Potential** = rows of ≥3 markers — "
-                "broader early-warning of one side building unchecked."
+                "capture; defender can break by flipping a marker in the "
+                "row). **Potential** = rows of ≥3 markers — broader "
+                "early-warning of one side building unchecked. Neither "
+                "metric catches single-move path-flip captures; see the "
+                "capture-event list above for those."
             )
             st.line_chart(
                 trajectory.set_index("turn")[[

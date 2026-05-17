@@ -123,10 +123,16 @@ Key ones for the audit workflow:
 
 ## Known limitations
 
-- **4-row threat metric is too narrow for YINSH.** Markers go 4→5 in a
-  single ring-move (the ring leaves a marker at its source), so 4-row
-  threats live <1 turn. Use the broader `white_potential`/`black_potential`
-  (length ≥3) and capture events as the real audit signals.
+- **4-row threat metric only catches half the failure modes.** YINSH
+  ring moves do two things atomically: leave a marker at the source AND
+  flip every marker along the path. So a 5-row can form either via
+  (a) gradual buildup — where a 4-row IS visible on the opponent's turn
+  and can be defended by flipping one of its markers — or (b) a
+  single ring move whose path-flip converts a 3-row or scattered
+  markers directly into a 5-row, with no visible 4-row state. The
+  `count(length == 4)` metric catches case (a) defensive misses but is
+  blind to case (b). Pair with `white_potential`/`black_potential`
+  (length ≥3) and capture-event tracking for the full picture.
 - **HA-vs-HA throughput is low.** Iterative deepening + transposition
   table init dominates per-move time. At depth 1 / time-limit 0.3s,
   expect ~50 games/hour serial. Multiprocessing scales linearly.
