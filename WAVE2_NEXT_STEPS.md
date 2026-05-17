@@ -1,6 +1,8 @@
 # Wave 2 — Next Steps
 
-Index document. Wave 2 is **DONE**. The three-step plan ran to completion. Wave 3 begins at `WAVE3_BRANCHES.md`.
+Index document. Wave 2 is **DONE**. Wave 3 is underway.
+
+> **Start here if you're picking this up cold**: read `WAVE3_EXPERIMENT_LOG.md`. It's the running log of every experiment (hypothesis → setup → result → lesson), append-only, kept current as experiments complete. This index file is a phase-boundary summary; the log is the trajectory.
 
 ---
 
