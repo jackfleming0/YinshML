@@ -50,6 +50,17 @@ All Tier 1, 2, and 3 polish items landed between 2026-04-14 and 2026-04-16 in se
 - [ ] **Tests audit** — `tests/` vs `yinsh_ml/tests/` (two parallel test roots). Merge or pick one.
 - [ ] **Memory pool review** — `yinsh_ml/memory/` has `game_state_pool`, `tensor_pool`, `adaptive`, `zero_copy`. Verify each is actually used; delete unused.
 
+## Viz / audit tooling
+
+Added 2026-05-17 with the live game viewer (`yinsh_ml/viz/`, `scripts/dashboard_games.py`, `scripts/generate_heuristic_games.py`). The viewer works end-to-end; these are the next iterations once an audit run produces real findings.
+
+- [ ] **Drop coremltools/torch/seaborn from `HeuristicAgent`'s import chain.** A pure-search agent should not need `torch` (pulled via `search/__init__.py` → `mcts.py` → `utils/encoding.py`), `coremltools` (via `network/__init__.py`), or `seaborn` (via `utils/__init__.py` → `visualization.py`). Move the offending imports to lazy locals. Unblocks running HA on a minimal CPU box / in a notebook without 500MB of ML deps. The viewer dodges this by calling `extract_all_features` directly.
+- [ ] **Fix `tracking/yinsh_visualizer.py` zig-zag offset.** Uses `y_offset = (col_idx % 2) * 0.5` which doesn't match YINSH's matching-sign-diagonal hex axis. Correct transform is in `yinsh_ml/viz/board_render.py::position_to_xy`; this module is older and feeds TensorBoard. Risk: someone is visually reading the buggy boards and inferring wrong adjacency relationships.
+- [ ] **Incremental parquet writer.** `ParquetDataStorage` only flushes when `batch_size` is reached or `flush()` is called explicitly. Live mode uses `--batch-size 1` as a workaround (one parquet per game), which is fine for the audit workflow but produces many tiny files. A real incremental-append mode would let normal-sized batches still be visible mid-write.
+- [ ] **Capture-aware game-end signal in the harness.** `generate_heuristic_games.py` currently caps games at `--max-moves`. When games consistently time out without a winner (depth 1-2 with random play), the value labels become noisy. Add a `--min-captures` filter that re-runs games that ended at 0-0 (signal that HA collapsed into shuffle mode).
+- [ ] **Smarter audit metrics.** The 4-row threat detector fires rarely (markers go 4→5 in a single ring-move; threats live <1 turn). Add a metric that counts *missed defensive moves*: turns where opponent had a 4-row in valid play space AND the chosen move was not on a blocking position. Needs `Board.valid_blocking_positions(row)` — small game-engine extension.
+- [ ] **Fleet trajectory view.** Currently one game at a time. A "fleet" view (mean ± p25/p75 of each audit feature across N games) would surface corpus-level offense-only patterns much faster than reading individual games.
+
 ## Ops / infra
 
 - [ ] **Experiment tracking cleanup** — experiment tracking DB + legacy dirs. Decide a policy (git-lfs? external storage? prune after N days?).

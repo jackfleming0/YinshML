@@ -57,6 +57,8 @@ One-line durable lessons distilled from ~70 experiment-snapshot docs that were d
 - Linear heuristic: ~52% vs random; same 7 features under Random Forest reach 55.1% — non-linear headroom is ~3%, not more.
 - Feature weight order: runs >> centrality ≈ spread > potential_runs >> chains ≈ mobility > edge_proximity. Adjust phase-specific weights, don't add more features speculatively.
 - No positional-threat feature yet; manually engineered run-threat detection would be the most obvious addition if pushing past 55% linear.
+- All 7 features are computed as differentials (`my_value - opponent_value`) — defense is mathematically captured by the existing set as long as search depth is ≥3. Adding "defensive features" buys nothing for the static-eval ceiling; it only matters as a speed/depth trade if running at depth 1-2 for bulk data generation. See `yinsh_ml/heuristics/features.py` and the audit runbook in `yinsh_ml/viz/README.md`.
+- **4-marker rows are transient in YINSH** — markers go 4→5 in a single ring-move (the ring leaves a marker at its source). For threat/audit metrics, prefer `length ≥ 3` (broader early warning, persistent across multiple turns) over `length == 4` (fires for <1 turn). The unambiguous post-hoc capture signal is score-delta between consecutive states, not row-length tracking — captured markers clear during RING_REMOVAL before they can be matched.
 
 ## Training schedule
 

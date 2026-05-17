@@ -183,10 +183,15 @@ yinsh-track --help
 - `tournament.py` - Tournament infrastructure
 - `elo_manager.py` - ELO rating system
 
+**`yinsh_ml/viz/`** - Live game viewer (see `yinsh_ml/viz/README.md`)
+- `board_render.py` - Hex-board renderer returning `matplotlib.Figure` (Streamlit-ready). Correct YINSH hex geometry — monotonic skew along the matching-sign diagonal; verified by `tests/test_viz.py::test_hex_axes_are_unit_distance`. NB: the older `tracking/yinsh_visualizer.py` has a zig-zag-offset geometry bug and is not used by the viewer.
+- `game_replay.py` - Parquet → reconstructed `Board` snapshots by replaying serialized moves through `GameState`. `GameReplay.iter_states()` yields full `GameState` per turn in O(N) for phase/score-dependent feature computation.
+- Companion scripts: `scripts/dashboard_games.py` (Streamlit viewer with live-refresh) and `scripts/generate_heuristic_games.py` (bulk HA-vs-HA harness, pure CPU).
+
 ## Critical Implementation Details
 
 ### YINSH Game Mechanics
-- **Board**: 11×11 hexagonal grid (99 valid positions)
+- **Board**: 11×11 hexagonal grid (85 valid positions; column counts [4,7,8,9,10,9,10,9,8,7,4])
 - **Pieces**: Rings (movable) + Markers (flip when ring passes)
 - **Phases**: RING_PLACEMENT (place 5 rings) → MAIN_GAME (normal play) → RING_REMOVAL (after 3+ rows captured)
 - **Win Condition**: First to capture 3 complete rows (5+ consecutive markers)
@@ -265,6 +270,23 @@ Configured via `MCTSConfig.evaluation_mode`:
 2. Run training: `python scripts/run_training.py --config configs/my_config.yaml`
 3. Monitor via dashboard: `python run_dashboard.py`
 4. Analyze results: `python run_complete_analysis.py`
+
+### Auditing heuristic self-play (live game viewer)
+
+See `yinsh_ml/viz/README.md` for the full audit runbook. Quick start:
+
+```bash
+# Generate games (one parquet per game for live mode)
+python scripts/generate_heuristic_games.py \
+    --output-dir self_play_data/audit_v1 \
+    --num-games 200 --depth-mix "2:30,3:60,4:10" \
+    --workers 8 --batch-size 1 --epsilon 0.05
+
+# Watch them stream in (point sidebar at the parquet dir, enable auto-refresh)
+streamlit run scripts/dashboard_games.py
+```
+
+The viewer's primary purpose is detecting the **offense-only equilibrium** failure mode flagged in `scripts/replay_heuristic_vs_heuristic.py`: the 7 heuristic features (`yinsh_ml/heuristics/features.py`) are all attack-oriented and *all differential*, so defense is mathematically captured under negamax search depth ≥3 but may collapse at depth 1-2. The Trajectory tab visualizes feature drift and capture events over move number; sustained one-sided growth without response is the diagnostic signature.
 
 ## Important Files Reference
 
