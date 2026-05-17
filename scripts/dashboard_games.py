@@ -75,21 +75,6 @@ def _load_game_cached(parquet_dir: str, game_id: str, mtime_key: float) -> GameR
     return load_game(Path(parquet_dir), game_id)
 
 
-def _replay_to_turn(replay: GameReplay, turn_index: int) -> Optional[GameState]:
-    """Re-run the game up to ``turn_index`` to get a full GameState.
-
-    Needed because GameReplay stores Board snapshots but the heuristic
-    feature functions take a GameState (they need phase + scores).
-    """
-    state = GameState()
-    for i in range(min(turn_index + 1, len(replay.moves))):
-        try:
-            state.make_move(replay.moves[i])
-        except Exception:
-            return None
-    return state
-
-
 def _count_threats(state: GameState, marker_type: PieceType) -> int:
     """Number of 4-length contiguous marker rows for ``marker_type``.
 
