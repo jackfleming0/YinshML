@@ -116,19 +116,36 @@ def _count_potential(state: GameState, marker_type: PieceType) -> int:
 def _compute_trajectory(
     parquet_dir: str, game_id: str, mtime_key: float
 ) -> pd.DataFrame:
-    """Per-turn audit features and threat counts for the full game.
+    """Per-turn audit features, threat counts, and capture events.
 
     Single forward pass (``replay.iter_states``) so cost is linear in
     game length. Cached by (game_id, parquet-dir mtime) — re-runs only
     when underlying data changes.
+
+    ``capture`` column is "WHITE"/"BLACK" on turns where that player's
+    running score went up by ≥1 (captures from the score delta, which
+    is the unambiguous signal — row-length matching is unreliable
+    around RING_REMOVAL because the captured markers are immediately
+    cleared from the board).
     """
     replay = _load_game_cached(parquet_dir, game_id, mtime_key)
     rows: List[dict] = []
+    prev_white = prev_black = 0
     for turn_idx, state in replay.iter_states():
         feats = extract_all_features(state, Player.WHITE)
+        capture = ""
+        if state.white_score > prev_white:
+            capture = "WHITE"
+        elif state.black_score > prev_black:
+            capture = "BLACK"
+        prev_white, prev_black = state.white_score, state.black_score
+
         rows.append({
             "turn": turn_idx + 1,
             "player": state.current_player.name,  # whose turn is NEXT
+            "white_score": state.white_score,
+            "black_score": state.black_score,
+            "capture": capture,
             **{k: float(feats.get(k, 0.0)) for k in _AUDIT_FEATURES},
             "white_threats": _count_threats(state, PieceType.WHITE_MARKER),
             "black_threats": _count_threats(state, PieceType.BLACK_MARKER),
@@ -253,17 +270,21 @@ def main() -> None:
             )
             st.pyplot(fig)
 
-            # Defensive-miss badge: any 4-marker rows present after this move?
+            # Badges: captures (unambiguous) + defensive-miss warnings (4-rows).
             if trajectory is not None and turn_idx < len(trajectory):
                 row = trajectory.iloc[turn_idx]
+                badges: List[str] = []
+                cap = row.get("capture", "") or ""
+                if cap:
+                    icon = "⚪" if cap == "WHITE" else "⚫"
+                    badges.append(f":green[{icon} CAPTURE — {cap}]")
                 wt = int(row["white_threats"])
                 bt = int(row["black_threats"])
-                if wt + bt > 0:
-                    badges = []
-                    if wt:
-                        badges.append(f":red[⚠ White has {wt} 4-row(s)]")
-                    if bt:
-                        badges.append(f":red[⚠ Black has {bt} 4-row(s)]")
+                if wt:
+                    badges.append(f":red[⚠ White has {wt} 4-row(s)]")
+                if bt:
+                    badges.append(f":red[⚠ Black has {bt} 4-row(s)]")
+                if badges:
                     st.markdown(" · ".join(badges))
 
         with info_col:
@@ -304,6 +325,16 @@ def main() -> None:
             st.info("Enable 'Compute heuristic features on-the-fly' in the "
                     "sidebar to see trajectories.")
         else:
+            st.subheader("Score progression")
+            captures = trajectory[trajectory["capture"] != ""]
+            cap_txt = " · ".join(
+                f"turn {int(r.turn)}: {r.capture}" for _, r in captures.iterrows()
+            ) if not captures.empty else "—"
+            st.caption(f"Captures: {cap_txt}")
+            st.line_chart(
+                trajectory.set_index("turn")[["white_score", "black_score"]]
+            )
+
             st.subheader("Heuristic features over the game (White POV)")
             st.caption(
                 "Positive = White favoured. Watch for one side's "
@@ -331,6 +362,7 @@ def main() -> None:
                 st.dataframe(
                     trajectory[[
                         "turn", "player",
+                        "white_score", "black_score", "capture",
                         "white_threats", "black_threats",
                         "white_potential", "black_potential",
                         *_AUDIT_FEATURES,
