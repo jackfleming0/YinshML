@@ -50,6 +50,52 @@ All Tier 1, 2, and 3 polish items landed between 2026-04-14 and 2026-04-16 in se
 - [ ] **Tests audit** — `tests/` vs `yinsh_ml/tests/` (two parallel test roots). Merge or pick one.
 - [ ] **Memory pool review** — `yinsh_ml/memory/` has `game_state_pool`, `tensor_pool`, `adaptive`, `zero_copy`. Verify each is actually used; delete unused.
 
+## Architecture (from Eric Jang AutoGo audit, May 2026)
+
+Full context: `ERIC_JANG_AUTOGO_AUDIT.md`. These four items came out of
+auditing YinshML against Eric Jang's AutoGo reproduction + the KataGo
+techniques he discusses in the May 2026 Dwarkesh podcast. Each is
+well-scoped — none requires a from-scratch rewrite.
+
+- [ ] **Global pooling in the network — SE blocks + GAP-in-value-head.** Eric's `MuPGoResNet` and KataGo both use SE blocks (`GAP → FC(C→C/r) → ReLU → FC(C/r→C) → sigmoid → channel-reweight`) inside every ResBlock, and `GAP → Linear(64, …)` for the value head's first layer. YinshML currently has spatial attention (per-pixel gating) but no global aggregation, and the value head uses `Flatten(64·11·11=7744) → Linear(7744, 512)` — ~4M params in one linear layer that has no spatial-translation equivariance. SE blocks cost ~50K extra params total; GAP-in-value-head drops ~4M. YINSH's local-move-triggers-global-state mechanic (3-row capture) makes this gap matter more than it does in Go. Validation: A/B against current architecture in a 24h cloud run; metric = anchor win rate vs `HeuristicAgent(depth=3)` at deployment MCTS budget.
+- [ ] **Measure 300-move cap timeout rate and value-label contamination.** `yinsh_ml/training/self_play.py:1751-1754` assigns `value = clip(score_diff/3, -1, 1)` on timeout — partial credit treated as authoritative. If the timeout rate across self-play games is high, the value head trains on non-terminations. No instrumentation currently. Action: scan an existing self-play corpus, log `(games_at_cap / total_games, score_diff_distribution_at_cap)`. If <5%, ignore. If ≥15%, either treat capped games as draws, raise the cap to 500, or force a "no-cap" subset of games (Eric's 10%-don't-resign analogue).
+- [ ] **Heuristic curriculum sunset signal.** `cloud_run_v1.yaml` anneals `heuristic_weight` over the full 25-iter run length — never functionally reaches 0. `phase_d_warmstart.yaml` does the right thing (anneal over 10 of 12 iters). Add an automatic trigger: if anchor win rate plateaus for K consecutive iterations (K=3-5), force `heuristic_weight=0` from then on. Cheap plumbing — anchor metric is already tracked. Bitter-Lesson concern: heuristic is scaffolding; once value head matures, leaving it on caps performance at what the 7 hand-engineered features express.
+- [ ] **Heuristic-teacher soft policy targets in supervised pretraining.** `yinsh_ml/data/converter.py:26` uses one-hot at the expert move. Eric's bits-per-sample point: a distribution carries dramatically more signal than the argmax. Run `HeuristicAgent` at every position in the expert corpus, extract the move-score distribution (requires small API addition to surface negamax scores per move; currently only argmax is exposed), softmax with temperature, use as secondary target alongside the expert one-hot: `loss = α·CE(one_hot) + (1-α)·CE(heuristic_dist)`. Should be a meaningful warm-start improvement for the same data corpus size.
+- [ ] **Best-response-to-HeuristicAgent training as supplementary data.** Generates trajectories under "play to beat HA" objective (different from the current `hybrid` MCTS evaluation mode which blends HA into leaf values). Cheaper than full neural self-play, richer than HA self-play. Worth one ablation iteration as a complementary data source for the warm-start corpus. Tracked here in case the basic gaps above are addressed and we're looking for the next-tier lift.
+
+## Viz / audit tooling
+
+Added 2026-05-17 with the live game viewer (`yinsh_ml/viz/`, `scripts/dashboard_games.py`, `scripts/generate_heuristic_games.py`). The viewer works end-to-end; these are the next iterations once an audit run produces real findings.
+
+- [ ] **Drop coremltools/torch/seaborn from `HeuristicAgent`'s import chain.** A pure-search agent should not need `torch` (pulled via `search/__init__.py` → `mcts.py` → `utils/encoding.py`), `coremltools` (via `network/__init__.py`), or `seaborn` (via `utils/__init__.py` → `visualization.py`). Move the offending imports to lazy locals. Unblocks running HA on a minimal CPU box / in a notebook without 500MB of ML deps. The viewer dodges this by calling `extract_all_features` directly.
+- [ ] **Fix `tracking/yinsh_visualizer.py` zig-zag offset.** Uses `y_offset = (col_idx % 2) * 0.5` which doesn't match YINSH's matching-sign-diagonal hex axis. Correct transform is in `yinsh_ml/viz/board_render.py::position_to_xy`; this module is older and feeds TensorBoard. Risk: someone is visually reading the buggy boards and inferring wrong adjacency relationships.
+- [ ] **Incremental parquet writer.** `ParquetDataStorage` only flushes when `batch_size` is reached or `flush()` is called explicitly. Live mode uses `--batch-size 1` as a workaround (one parquet per game), which is fine for the audit workflow but produces many tiny files. A real incremental-append mode would let normal-sized batches still be visible mid-write.
+- [ ] **Capture-aware game-end signal in the harness.** `generate_heuristic_games.py` currently caps games at `--max-moves`. When games consistently time out without a winner (depth 1-2 with random play), the value labels become noisy. Add a `--min-captures` filter that re-runs games that ended at 0-0 (signal that HA collapsed into shuffle mode).
+- [x] **Basic missed-defensive-move detector.** ✅ Landed 2026-05-17 (`scripts/dashboard_games.py::_compute_trajectory`). Per-turn boolean: opponent had a 4-row at the start of player's turn AND it survived the player's move. Catches case (a) gradual-buildup defensive failures; blind to case (b) single-move path-flip captures (no visible 4-row state precedes them). Necessary-but-not-sufficient — see next items.
+
+### Proxy metrics for "how good is heuristic defense" — Tier A (cheap, derivable from existing trajectory)
+
+These extend `_compute_trajectory` and don't need new game-engine APIs. Each is ~20 lines of pandas; ship after the audit corpus produces real data to validate against.
+
+- [ ] **Threat-resolution latency.** For each opponent 4-row that appears, measure turns until it's resolved (either broken by defender or captured by attacker). High mean latency = sluggish defense. Compute by scanning the trajectory for `threats > 0` segments and pairing each with the resolution turn.
+- [ ] **Defense-to-capture conversion ratio.** Per game, count opponent 4-row events that ended in (i) defender broke it, (ii) attacker captured it, (iii) game ended with it still standing. The capture-fraction is the cleanest single-number "defense effectiveness" metric. Healthy heuristic at depth ≥3 should be <20%.
+- [ ] **Capture cause classification — case (a) vs case (b).** For each capture turn, check whether the immediately preceding state had a 4-row of the capturing player's color. Case (a) = "preventable but missed"; case (b) = "single-move path-flip, no warning." High case (a) share is the actual smoking gun for offense-only collapse; high case (b) share is fine (path-flip captures aren't defensive failures).
+- [ ] **Per-game defensive miss rate distribution.** Right now we expose `defensive_miss` as a per-turn boolean. Aggregate it across games and plot the distribution (histogram + percentiles). One nasty outlier with a 60% miss rate is more useful than a corpus-mean of 12%.
+- [ ] **Threat-creation rate per side.** How many 4-rows does each side build per game, on average? If WHITE builds 5 and BLACK builds 1, that's a real asymmetry worth investigating (random seed bias, first-move advantage, or a feature-weight quirk).
+
+### Tier B — needs small engine extensions
+
+- [ ] **Defensive-option existence flag.** Per turn with `threats_before > 0`, enumerate the player's legal moves and check whether ANY would have reduced opponent's threat count. Distinguishes "missed a defendable threat" (real failure) from "had no good defensive move available" (no fault). Cost: O(legal_moves × make_move) per threat-turn, ~few seconds per game.
+
+### Tier C — full tactical-quality analysis (the rich version discussed 2026-05-17)
+
+- [ ] **Tactical-quality defensive analysis.** The basic detector above is binary: did you respond to the 4-row at all? Real YINSH defense is multi-dimensional and "which flip" matters as much as "did I flip":
+  - **Flip resilience.** When you flip an opponent's marker to break their 4-row, can they trivially flip it back next turn? Score each defensive option by whether the flipped marker is reachable by an opponent ring along a valid path. Prefer flips where the counter-flip would (a) require traversing the opponent's own markers (which would flip them too, costing material), or (b) sit on an axis the opponent's rings can't easily access.
+  - **Counter-attack setup.** A defensive flip that also creates one of YOUR markers in a productive position is strictly better than a pure-defense flip. Score each option by `defense_value + α · offense_value` where offense_value comes from running the standard heuristic over the post-defense position.
+  - **Multi-step tactical search.** The above two are 1-ply analyses. Real tactical quality requires search depth — "if I flip here, opponent flips there, can I still capture?" This is what minimax already does, but isolating *defensive quality* specifically (vs. raw eval) requires per-move attribution.
+  - Engineering: needs `Board.legal_flips_of(position, by_player)` (small game-engine extension), a `defensive_options(state, threats)` enumerator, and a scoring composer. Probably 2-3 days of work for v1; opens the door to actually quantifying *how good* heuristic defense is, not just whether it happened. Discussion thread: 2026-05-17.
+- [ ] **Fleet trajectory view.** Currently one game at a time. A "fleet" view (mean ± p25/p75 of each audit feature across N games) would surface corpus-level offense-only patterns much faster than reading individual games.
+
 ## Ops / infra
 
 - [ ] **Experiment tracking cleanup** — experiment tracking DB + legacy dirs. Decide a policy (git-lfs? external storage? prune after N days?).
