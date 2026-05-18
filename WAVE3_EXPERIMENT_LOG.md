@@ -140,6 +140,20 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 - **Verdict**: V2 head-to-head match is worth building. yngine at ~10K sims should be a meaningful opponent against our HeuristicAgent at depth=3. C++ speed advantage means high sim counts are cheap.
 - **Lesson**: Reading 1700 lines of well-written C++ is a fast way to assess engine quality vs running a full benchmark — saves the dev cost of V2 if the code looks like junk. yngine is the opposite case: code looks like junk's opposite, so V2 is justified.
 
+### V2a-qual — turn-by-turn review of yngine and HA games (verifying that quant fingerprints aren't hiding obvious blunders)
+- **Date**: 2026-05-18 (~1h)
+- **Hypothesis**: V2a's quantitative fingerprints (game length, outcome balance, draws) were similar across engines. Before committing to yngine for a 100K-game volume corpus, look at actual games turn-by-turn — does either engine miss obvious 5-row captures, do dumb ring shuffles, fail to defend 4-row threats?
+- **Setup**:
+  - **yngine**: extended `yngine_selfplay_dump.cpp` to print each move + the full BoardState ASCII after every move. Ran 2 games at MCTS-10K.
+  - **HA**: used the merged-from-GRV viz module on the 16 HA d=3 games from V2a. Rendered key board states + dumped the move sequence for ha_000000 (87 turns, W wins 3-2).
+- **Headline findings**:
+  - **yngine plays multi-move plans**. Game 0 move-21 was a long ring jump (8,6 → 8,2) that completed a 5-marker diagonal (4,10)–(5,9)–(6,8)–(7,7)–(8,6) built up over 5 prior moves. Then captured the row (move 22) and removed a ring (move 23). That's sophisticated tactical play — not random rollout noise.
+  - **HA plays snake-style positional buildup**. ha_000000's white played `B1→B2→...→B7→C8→D9` (sequential single-step ring moves) over turns 10-20 — methodically building markers along a column. Eventually completed a `B5,C6,D7,E8,F9` diagonal capture at turn 85.
+  - **Neither engine** missed visible 5-row captures, did obvious random shuffles, or placed rings in pathological spots. Openings spread rings across the board (E3/G11/B1/J11/B4 for HA; (0,9)/(4,10)/(6,9)/(5,9)/(1,10) for yngine).
+  - **Style difference**: yngine completes captures faster (game 0 = 59 moves). HA games run longer (87 turns) — more cautious / more positional. This is a style difference, not a quality difference.
+- **Lesson**: The 5× yngine speed advantage holds even after looking at actual games. Neither engine is broken or obviously weak. **For the volume corpus, yngine wins on throughput; quality looks at least competitive in this sample.**
+- **Mitigation for "yngine might have subtle blind spots not visible in 2 games"**: after generating the volume corpus and pretraining the value head on it, validate the resulting checkpoint against the standard HA(d=1) anchor pipeline at n=40 BEFORE committing to a full neural self-play training run on top.
+
 ### Branch C — MCTS-200 self-play targets — `IN FLIGHT`
 - **Started**: 2026-05-18 11:15 UTC
 - **Hypothesis**: Self-play target quality is the plateau bottleneck. §8 showed iter 0 EMA was 81.7% at MCTS-400 vs 63.3% at MCTS-48 vs 16.7% raw — the deeper-search teacher is much stronger than the training-time teacher. Training against MCTS-200 targets (4× deeper than MCTS-48) should produce candidates that exceed seed.
