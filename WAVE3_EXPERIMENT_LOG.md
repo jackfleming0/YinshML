@@ -108,6 +108,17 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 
 ---
 
+### Branch C — MCTS-200 self-play targets — `IN FLIGHT`
+- **Started**: 2026-05-18 11:15 UTC
+- **Hypothesis**: Self-play target quality is the plateau bottleneck. §8 showed iter 0 EMA was 81.7% at MCTS-400 vs 63.3% at MCTS-48 vs 16.7% raw — the deeper-search teacher is much stronger than the training-time teacher. Training against MCTS-200 targets (4× deeper than MCTS-48) should produce candidates that exceed seed.
+- **Setup**: `configs/wave3_branchC_mcts200.yaml`. Same as B' plus three coupled knobs: `num_simulations 48→200`, `late_simulations 32→100`, `games_per_iteration 200→100` (the last to keep wall time under ~30h since per-game cost is ~4× higher).
+- **Decision doc**: `WAVE3_BRANCH_C_DECISION.md`.
+- **Success criteria** (any one suffices): best iter MCTS-48 anchor ≥ 75%, OR raw policy ≥ 30%, OR mean ≥ 65% with peak ≥ 70%.
+- **Failure criteria**: best iter MCTS-48 ≤ 67.5% AND mean ≤ 57% — target depth wasn't the bottleneck; fall back to C3 (head decoupling).
+- **Headline**: pending. Cron `dd59c71a` checks every 2h at :37.
+
+---
+
 ## Heuristics added after Branch B'
 
 - **L7** — Single-iter "outliers" with strong-looking results should be assumed to be variance until they reproduce. The +20-point iter 1 in Branch B looked like a real lift; the matched-recipe Branch B' iter 1 was -17.5 points off it. Two samples at n=40 anchor are nowhere near enough to call a single-iter result.
