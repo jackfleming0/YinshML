@@ -108,6 +108,26 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 
 ---
 
+### Gap 2 measurement — 300-move cap hit rate (Eric Jang AutoGo audit)
+- **Date**: 2026-05-18 (free, ~10 min local Python)
+- **Hypothesis**: The audit's Gap 2 claim — `self_play.py:1751-1754` applies `value = clip(score_diff/3, -1, 1)` to games that hit `max_game_moves=300` as if they were terminal. If a meaningful fraction of self-play games hit the cap, the value head has been learning partial-credit non-terminal labels. The audit's threshold for "matters" was ≥15%.
+- **Setup**: Parsed Step 2 and Branch B training logs (`runs_*/training.log` and `branchB.log`), counted self-play games (`Worker-N - INFO - Game M finished in K moves.`) per run, computed % at cap.
+- **Headline**: **0/1000 games hit the 300-move cap in both runs.** Mean game length ~87 moves (Step 2: 87.9, Branch B: 86.0). Max observed: 119 moves (Step 2) / 119 (Branch B). YINSH self-play games end naturally well before the cap.
+- **Lesson**: Gap 2 is **NOT** the bottleneck for our recipe. The 300-move cap is so generous for YINSH that it never fires. One audit hypothesis ruled out without spending compute. Audit's framing was generic to AlphaZero-style games (where Go can hit caps); YINSH has shorter games. Cheap measurement, decisive result.
+
+### V1 — yngine source read (Eric Jang AutoGo audit, validation gate)
+- **Date**: 2026-05-18 (free, ~30 min)
+- **Hypothesis**: Volume corpus generation (audit's core thesis: 10K-100K cheap value-head pretraining games) only helps if the teacher is reasonably strong. If our HeuristicAgent has tactical gaps, volume scaling on its games bakes those gaps into the value head. yngine (C++ MCTS engine for YINSH) is a candidate external strength reference.
+- **Setup**: Read `temhelk/yngine/yngine/{mcts.cpp,mcts.hpp,board_state.cpp}` (~1700 lines C++).
+- **Headline**: yngine is a **serious engine, not hobby code**. Key features:
+  - Pure-UCT MCTS with random rollouts. No neural net, no hand-crafted heuristic.
+  - **128-bit bitboards** for state representation (efficient).
+  - **Parallel lock-free MCTS** with atomic ops + pool allocator + cross-move tree reuse — sophisticated implementation.
+  - **Exploration constant: 0.5** (vs the standard sqrt(2) ≈ 1.414). The commented-out `std::numbers::sqrt2_v<float>` suggests it was tuned down deliberately, but 0.5 is unusually low — exploits more aggressively.
+  - **Random rollout to natural game-end** every playout (no move cap, no biasing). Standard for vanilla MCTS but produces noisy game-end signals; quality scales with sim count.
+- **Verdict**: V2 head-to-head match is worth building. yngine at ~10K sims should be a meaningful opponent against our HeuristicAgent at depth=3. C++ speed advantage means high sim counts are cheap.
+- **Lesson**: Reading 1700 lines of well-written C++ is a fast way to assess engine quality vs running a full benchmark — saves the dev cost of V2 if the code looks like junk. yngine is the opposite case: code looks like junk's opposite, so V2 is justified.
+
 ### Branch C — MCTS-200 self-play targets — `IN FLIGHT`
 - **Started**: 2026-05-18 11:15 UTC
 - **Hypothesis**: Self-play target quality is the plateau bottleneck. §8 showed iter 0 EMA was 81.7% at MCTS-400 vs 63.3% at MCTS-48 vs 16.7% raw — the deeper-search teacher is much stronger than the training-time teacher. Training against MCTS-200 targets (4× deeper than MCTS-48) should produce candidates that exceed seed.
