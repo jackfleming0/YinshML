@@ -89,14 +89,29 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 - **Lesson**: F_overfitting confirmed at the population level. **But iter 1 (70% MCTS-48, the peak) was Wilson-rejected** (17/40 head-to-head, LB=0.285 < 0.55 threshold) → pipeline reverted to iter 0 → strength didn't compound. The gate threw away the run's best model.
 - **Deeper doc**: `WAVE3_BRANCH_B_RESULTS.md`.
 
-### Branch B' — promotion_threshold 0.55 → 0.20 — `IN FLIGHT`
-- **Started**: 2026-05-17 12:23 UTC
+### Branch B' — promotion_threshold 0.55 → 0.20
+- **Started → finished**: 2026-05-17 12:23 → 2026-05-18 07:15 (18.87h cloud, ~$10)
 - **Hypothesis**: Iter 1's 70% MCTS-48 was a real strength gain. If the gate had promoted it, iter 2 self-play would have used iter 1's weights, and the gain might have compounded. Lower threshold to LB > 0.20 (just above iter 1's LB=0.285) promotes the marginal-but-strong candidates.
 - **Setup**: `configs/wave3_branchB_prime_low_wilson.yaml`. Single knob change vs Branch B: `arena.promotion_threshold: 0.55 → 0.20`.
-- **Expected outcomes**:
-  - **Propagation**: iters 2+ stay near 70% → Wilson gate was the bottleneck. Branch C should change the gate logic to use anchor WR directly.
-  - **Regression**: iter 1 still drops to ~60% after another iter of training → iter 1's gain was a fluke. Different architectural lever needed (Branch C: distillation source, head decoupling, or from-scratch).
-- **Headline**: pending. Cron `7d947323` checks every 2h at :29.
+- **Headline**: **5/5 promotions** (every iter became new best). **Best model = iter 4 at 67.5% MCTS-48 — equal to the seed**. Mean WR 57.0% (B was 59.5%; -2.5 within CI noise). Branch B's iter 1 at 70% **did not reproduce in B'** — B' iter 1 was 52.5%. That confirmed B's 70% was a high-variance outlier, not a reproducible state.
+
+  | iter | B' anchor MCTS-48 | promoted? |
+  |---|---:|---|
+  | 0 | 62.5% | ✅ |
+  | 1 | 52.5% | ✅ (would have been ⏪ in B) |
+  | 2 | 47.5% | ✅ |
+  | 3 | 55.0% | ✅ |
+  | 4 | 67.5% | ✅ (final best) |
+
+- **Lesson**: The "Wilson gate threw away the run's best model" framing from Branch B was real but the underlying gain was variance, not signal. **The pipeline is now stable but not constructive — it matches seed quality, doesn't exceed it.** Branch C's question shifts from "stop the damage" to "make it gain ground past seed."
+- **Deeper doc**: `WAVE3_BRANCH_B_PRIME_RESULTS.md` (to be written).
+
+---
+
+## Heuristics added after Branch B'
+
+- **L7** — Single-iter "outliers" with strong-looking results should be assumed to be variance until they reproduce. The +20-point iter 1 in Branch B looked like a real lift; the matched-recipe Branch B' iter 1 was -17.5 points off it. Two samples at n=40 anchor are nowhere near enough to call a single-iter result.
+- **L8** — Stability and progress are different gates. Branch B' achieved **5/5 promotions** (pipeline stable, no Wilson-thrashing) and **finishes at seed quality** (no degradation across iters). Neither outcome includes "model gets meaningfully better than seed." Recipe tuning closed the destruction problem; it didn't open the improvement problem.
 
 ---
 
