@@ -154,6 +154,14 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 - **Lesson**: The 5× yngine speed advantage holds even after looking at actual games. Neither engine is broken or obviously weak. **For the volume corpus, yngine wins on throughput; quality looks at least competitive in this sample.**
 - **Mitigation for "yngine might have subtle blind spots not visible in 2 games"**: after generating the volume corpus and pretraining the value head on it, validate the resulting checkpoint against the standard HA(d=1) anchor pipeline at n=40 BEFORE committing to a full neural self-play training run on top.
 
+### Volume corpus generation — `IN FLIGHT`
+- **Started**: 2026-05-18 15:08 UTC
+- **Hypothesis**: Per Eric Jang AutoGo audit, the value head needs 10-100K cheap games for proper grounding. V2a confirmed yngine plays competently and is ~5× faster per game than our HA. Pursue Option B: yngine for the volume corpus.
+- **Setup**: Cloud (192-core EPYC, 1TB RAM). 64 parallel `yngine_volume` workers, each playing ~3125 games at MCTS-1K → 200K total games. Each game ~70 moves. Output: text format `G/P/M/R/X/S/E` per shard, ~150-200KB per shard.
+- **Speed observation**: Initial 184-worker run was only 2.4 games/sec (heavy thread-spawn contention — yngine spawns 2 threads per `MCTS::search()` call). Dropped to 64 workers → 19.3 games/sec, ETA ~3 hours. The user picked this over patching yngine source to avoid risk of corrupting a known-good corpus.
+- **Translator**: `scripts/yngine_corpus_to_npz.py` — already written and smoke-tested on 3 yngine games (201 positions, 0 replay failures). yngine (x, y) → our (col=chr('A'+x), row=11-y). All 6 yngine hex directions land on our 3 hex axes.
+- **Headline**: pending. Cron `56d92b17` checks every 2h at :41.
+
 ### Branch C — MCTS-200 self-play targets — `IN FLIGHT`
 - **Started**: 2026-05-18 11:15 UTC
 - **Hypothesis**: Self-play target quality is the plateau bottleneck. §8 showed iter 0 EMA was 81.7% at MCTS-400 vs 63.3% at MCTS-48 vs 16.7% raw — the deeper-search teacher is much stronger than the training-time teacher. Training against MCTS-200 targets (4× deeper than MCTS-48) should produce candidates that exceed seed.
