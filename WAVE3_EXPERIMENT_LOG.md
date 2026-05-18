@@ -115,7 +115,19 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 - **Headline**: **0/1000 games hit the 300-move cap in both runs.** Mean game length ~87 moves (Step 2: 87.9, Branch B: 86.0). Max observed: 119 moves (Step 2) / 119 (Branch B). YINSH self-play games end naturally well before the cap.
 - **Lesson**: Gap 2 is **NOT** the bottleneck for our recipe. The 300-move cap is so generous for YINSH that it never fires. One audit hypothesis ruled out without spending compute. Audit's framing was generic to AlphaZero-style games (where Go can hit caps); YINSH has shorter games. Cheap measurement, decisive result.
 
-### V1 — yngine source read (Eric Jang AutoGo audit, validation gate)
+### V2a — yngine self-play vs HA self-play "fingerprint" comparison
+- **Date**: 2026-05-18 (~30 min on cloud, ~$0.30)
+- **Hypothesis**: Before investing 1-2 days in a yngine ↔ Python protocol bridge for direct head-to-head (V2b), measure each engine's self-play "fingerprint" — game length distribution, outcome balance, decisive-vs-draw ratio. If the fingerprints diverge wildly, one engine is much weaker; if they overlap, V2b is needed for the strength decision.
+- **Setup**: Cloned + built `temhelk/yngine` on the cloud box (cmake-min downgraded 3.30→3.20; otherwise clean build). Wrote a small C++ self-play driver (`yngine_selfplay.cpp`) that runs N games of yngine-MCTS-vs-itself. Ran 30 games at MCTS-10K. In parallel, ran 30 games of `scripts/generate_heuristic_games.py` at depth=3 (16 completed before the worker pool exited early — enough for fingerprint).
+- **Headline**:
+
+  | Engine | n | Mean moves | W/B/Draws | Wall/game |
+  |---|---:|---:|---:|---:|
+  | yngine MCTS-10K | 30 | 69.6 | 53% / 47% / 0 | 34s |
+  | HA depth=3 | 16 | 82.3 | 56% / 44% / 0 | ~180s |
+
+  Both engines are decisive (zero draws). Both produce roughly 50/50 W/B balance. yngine games are ~15% shorter. **yngine is ~5× faster per game on the same hardware.**
+- **Lesson**: The fingerprints overlap — no engine looks broken or much weaker. The 5× throughput gap matters for volume scaling: yngine @ 1K sims would generate 100K games in ~10h on 8 cores (yngine self-play, no neural net needed); HA @ d=3 would take ~3 days wall time for the same volume. Direct strength comparison (V2b) is still needed to decide which engine is the better corpus generator, but V2a confirms yngine is a real opponent worth a bridge.
 - **Date**: 2026-05-18 (free, ~30 min)
 - **Hypothesis**: Volume corpus generation (audit's core thesis: 10K-100K cheap value-head pretraining games) only helps if the teacher is reasonably strong. If our HeuristicAgent has tactical gaps, volume scaling on its games bakes those gaps into the value head. yngine (C++ MCTS engine for YINSH) is a candidate external strength reference.
 - **Setup**: Read `temhelk/yngine/yngine/{mcts.cpp,mcts.hpp,board_state.cpp}` (~1700 lines C++).
