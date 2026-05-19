@@ -39,7 +39,15 @@ logger = logging.getLogger(__name__)
 
 
 class ExpertDataset(Dataset):
-    """PyTorch Dataset for expert game training data."""
+    """PyTorch Dataset for expert game training data.
+
+    Policy targets may be either:
+      - (N, total_moves) float32 — soft/one-hot distribution
+      - (N,) int64           — argmax move index (preferred for volume corpora;
+                               avoids materializing ~400GB of one-hot zeros)
+
+    Downstream loss code branches on tensor dimensionality.
+    """
 
     def __init__(self, states: np.ndarray, policies: np.ndarray,
                  values: np.ndarray):
@@ -55,10 +63,34 @@ class ExpertDataset(Dataset):
 
 
 def load_data(args) -> tuple:
-    """Load training data from .npz file or raw game directory."""
+    """Load training data from .npz file or raw game directory.
+
+    Returns (states, policy_targets, values). `policy_targets` is either
+    one-hot/soft (N, total_moves) float32 OR int64 indices (N,) depending
+    on which schema the npz file stores.
+    """
     if args.data:
         logger.info(f"Loading pre-converted data from {args.data}")
-        states, policies, values = GameConverter.load_training_data(args.data)
+        data = np.load(args.data)
+        states = data['states']
+        values = data['values']
+        if 'policy_indices' in data.files:
+            policy_targets = data['policy_indices'].astype(np.int64)
+            logger.info(
+                f"Policy schema: int64 indices (shape={policy_targets.shape}); "
+                f"loss will use F.cross_entropy"
+            )
+        elif 'policies' in data.files:
+            policy_targets = data['policies'].astype(np.float32)
+            logger.info(
+                f"Policy schema: soft/one-hot distribution "
+                f"(shape={policy_targets.shape}); loss will use soft-target NLL"
+            )
+        else:
+            raise RuntimeError(
+                f"{args.data} must contain either 'policy_indices' or "
+                f"'policies' key (found: {list(data.files)})"
+            )
     elif args.games_dir:
         logger.info(f"Converting games from {args.games_dir}")
         encoder = EnhancedStateEncoder() if args.use_enhanced_encoding else StateEncoder()
@@ -69,20 +101,20 @@ def load_data(args) -> tuple:
             raise RuntimeError(f"No valid training pairs from {args.games_dir}")
 
         states = np.array([p['state'] for p in pairs], dtype=np.float32)
-        policies = np.array([p['policy'] for p in pairs], dtype=np.float32)
+        policy_targets = np.array([p['policy'] for p in pairs], dtype=np.float32)
         values = np.array([p['value'] for p in pairs], dtype=np.float32)
 
         # Save for future use
         save_path = Path(args.games_dir) / 'training_data.npz'
-        np.savez_compressed(save_path, states=states, policies=policies,
+        np.savez_compressed(save_path, states=states, policies=policy_targets,
                            values=values)
         logger.info(f"Saved converted data to {save_path}")
     else:
         raise RuntimeError("Must specify --data or --games-dir")
 
     logger.info(f"Loaded {len(states)} positions "
-                f"(states: {states.shape}, policies: {policies.shape})")
-    return states, policies, values
+                f"(states: {states.shape}, policy_targets: {policy_targets.shape})")
+    return states, policy_targets, values
 
 
 def create_model(args) -> tuple:
@@ -157,9 +189,16 @@ def train(model, device, train_loader, val_loader, args):
             pred_logits, _ = model(states)
             value_logits = model._value_logits  # populated in forward()
 
-            # Policy loss: cross-entropy against expert moves
-            log_probs = F.log_softmax(pred_logits, dim=1)
-            policy_loss = -(policies * log_probs).sum(dim=1).mean()
+            # Policy loss: cross-entropy against expert moves.
+            # Branch on target schema: 1-D int targets → integer-target CE;
+            # 2-D soft/one-hot targets → soft-target NLL.
+            if policies.dim() == 1:
+                expert_moves = policies.long()
+                policy_loss = F.cross_entropy(pred_logits, expert_moves)
+            else:
+                log_probs = F.log_softmax(pred_logits, dim=1)
+                policy_loss = -(policies * log_probs).sum(dim=1).mean()
+                expert_moves = policies.argmax(dim=1)
 
             # Value loss: cross-entropy on discretized outcome classes.
             # Mirrors yinsh_ml/training/trainer.py — same loss surface as
@@ -180,7 +219,6 @@ def train(model, device, train_loader, val_loader, args):
 
             # Top-1 accuracy
             pred_moves = pred_logits.argmax(dim=1)
-            expert_moves = policies.argmax(dim=1)
             train_correct += (pred_moves == expert_moves).sum().item()
 
             pred_class = value_logits.argmax(dim=1)
@@ -262,8 +300,13 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
             pred_logits, _ = model(states)
             value_logits = model._value_logits
 
-            log_probs = F.log_softmax(pred_logits, dim=1)
-            policy_loss = -(policies * log_probs).sum(dim=1).mean()
+            if policies.dim() == 1:
+                expert_moves = policies.long()
+                policy_loss = F.cross_entropy(pred_logits, expert_moves)
+            else:
+                log_probs = F.log_softmax(pred_logits, dim=1)
+                policy_loss = -(policies * log_probs).sum(dim=1).mean()
+                expert_moves = policies.argmax(dim=1)
 
             target_class = _value_targets_to_classes(values, num_value_classes)
             value_loss = F.cross_entropy(value_logits, target_class)
@@ -272,7 +315,6 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
             total_value += value_loss.item() * len(states)
 
             pred_moves = pred_logits.argmax(dim=1)
-            expert_moves = policies.argmax(dim=1)
             correct += (pred_moves == expert_moves).sum().item()
 
             pred_class = value_logits.argmax(dim=1)
