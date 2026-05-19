@@ -170,11 +170,24 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 - **Caveat**: pace under yngine corpus contention was ~7 min/game (vs ~2 min/game alone). Iter 1 took ~13h instead of expected ~5h. Iters 2-4 should run at restored pace now that the corpus is done.
 - **Run continues**: iters 2-4 will tell whether the gain compounds (like Branch B's iter 1 → iter 2 drop showed it didn't, but that was a recipe-noise outlier) or holds steady.
 
-### Volume corpus — yngine 200K games — DONE
-- **Wall**: 2026-05-18 15:03 → 2026-05-19 04:08 (13h 4m, 47057s).
-- **Output**: 200,000 games / 174MB text on cloud at `/tmp/yngine_corpus/`. 64 shards.
-- **Pulled to laptop**: `/tmp/yngine_corpus_local/yngine_corpus/`.
-- **Translator on cloud**: `scripts/yngine_corpus_to_npz.py` running now. Stores policy as int32 index instead of full (N, 7433) one-hot to avoid the ~400GB in-memory allocation at the final save. ETA ~67 min from launch (~05:30 UTC). Output: `/tmp/yngine_volume.npz`. Downstream `run_supervised_pretraining.py` will need a dataloader tweak to materialize one-hot from the index column (or use `F.cross_entropy(logits, target_indices)` directly).
+### Volume corpus — yngine 200K games + translation — DONE
+- **yngine self-play**: 2026-05-18 15:03 → 2026-05-19 04:08 (13h 4m, 47057s). 200K games, 64 shards, 174MB text.
+- **Translation**: `scripts/yngine_corpus_to_npz.py` finished 2026-05-19 06:11 UTC (84 min wall, mostly the np.savez_compressed at the end). **0 replay failures across all 200K games** — yngine ↔ ours coordinate translation and rule semantics agree perfectly.
+- **Output** on cloud at `/tmp/yngine_volume.npz` (600MB compressed) and pulled to laptop at `expert_games/yngine_volume.npz`:
+
+  | Field | Value |
+  |---|---|
+  | states | (13,641,822, 6, 11, 11) float32 |
+  | policy_indices | (13.6M,) int32, range [0, 7432] (full move-space coverage) |
+  | values | (13.6M,) float32 |
+  | total_moves | 7433 |
+  | wins (+1) | 52.5% |
+  | losses (-1) | 47.4% |
+  | draws (0) | **0.16%** (yngine plays decisively at MCTS-1K) |
+  | value mean | +0.0511 (~5% White first-mover bias, small) |
+
+- **Schema choice**: policy stored as `int32` index per position (4 bytes) instead of full `(N, 7433)` one-hot (~400GB raw). Downstream `run_supervised_pretraining.py` will need a dataloader tweak — either materialize one-hot lazily, or use `F.cross_entropy(logits, target_indices)` directly. (Deferred — corpus is ready as a resource; the script update is small and can land when we commit to using it for value-head pretraining.)
+- **Lesson**: 200K yngine games at MCTS-1K = ~13h cloud / ~$5. 13.6M positions of balanced terminal-outcome data. This is now a permanent training-data asset that can ground value-head pretraining for any future architectural experiment.
 
 ---
 
