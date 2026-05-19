@@ -206,7 +206,7 @@ def main():
     total_moves_slots = encoder.total_moves
 
     all_states: List[np.ndarray] = []
-    all_policies: List[np.ndarray] = []
+    all_policy_idx: List[int] = []     # int32; expand to one-hot at load time
     all_values: List[float] = []
 
     shards = sorted(args.corpus_dir.glob(args.shard_glob))
@@ -226,11 +226,9 @@ def main():
                 logger.debug(f"game {game.gid} replay failed: {e}")
                 continue
             for state_tensor, mv_idx, pidx in zip(states, mv_idxs, players):
-                policy = np.zeros(total_moves_slots, dtype=np.float32)
-                policy[mv_idx] = 1.0
                 value = outcome_value(game.outcome, pidx)
                 all_states.append(state_tensor)
-                all_policies.append(policy)
+                all_policy_idx.append(int(mv_idx))
                 all_values.append(value)
                 positions += 1
             games_ok += 1
@@ -242,13 +240,20 @@ def main():
     logger.info(f"Done: {games_ok} games OK, {games_failed} failed, {positions} positions")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    # Note: schema differs from the supervised-pretrain expected (`policies`
+    # as full (N, total_moves) one-hot). For 13.6M positions × 7433 slots
+    # one-hot is ~400GB; we instead save the argmax index per position
+    # (4 bytes/position) plus the total_moves size as metadata so the
+    # downstream dataloader can materialize on-demand.
     np.savez_compressed(
         args.output,
         states=np.asarray(all_states, dtype=np.float32),
-        policies=np.asarray(all_policies, dtype=np.float32),
+        policy_indices=np.asarray(all_policy_idx, dtype=np.int32),
         values=np.asarray(all_values, dtype=np.float32),
+        total_moves=np.int32(total_moves_slots),
     )
-    logger.info(f"Wrote {args.output}")
+    logger.info(f"Wrote {args.output} ({len(all_states)} positions, "
+                f"policy stored as int32 indices to save space — see comment)")
 
 
 if __name__ == "__main__":
