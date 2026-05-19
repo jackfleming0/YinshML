@@ -162,13 +162,34 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 - **Translator**: `scripts/yngine_corpus_to_npz.py` — already written and smoke-tested on 3 yngine games (201 positions, 0 replay failures). yngine (x, y) → our (col=chr('A'+x), row=11-y). All 6 yngine hex directions land on our 3 hex axes.
 - **Headline**: pending. Cron `56d92b17` checks every 2h at :41.
 
-### Branch C — MCTS-200 self-play targets — `iter 1 = WIN, run continues`
-- **Started**: 2026-05-18 11:15 UTC. **Iter 1 SUMMARY: 2026-05-19 ~04:30 UTC**.
+### Branch C — MCTS-200 self-play targets — DONE
+- **Wall**: 2026-05-18 11:15 → 2026-05-19 18:50 UTC (31.58h total — would have been ~22h without yngine contention during iter 1).
 - **Hypothesis**: Self-play target quality is the plateau bottleneck. §8 showed iter 0 EMA was 81.7% at MCTS-400 vs 63.3% at MCTS-48 vs 16.7% raw — the deeper-search teacher is much stronger than the training-time teacher. Training against MCTS-200 targets (4× deeper than MCTS-48) should produce candidates that exceed seed.
 - **Setup**: `configs/wave3_branchC_mcts200.yaml`. Same as B' plus three coupled knobs: `num_simulations 48→200`, `late_simulations 32→100`, `games_per_iteration 200→100`.
-- **Iter 1 headline**: **MCTS-48 EMA = 82.5% (33/40, n=40), raw policy = 27.5% (11/40)**. Compared to Branch B' iter 1 = 52.5% MCTS-48, 12.5% raw. **+30 percentage points** on the headline metric. Best-iter ≥ 75% success criterion **CLEARED at the first measurable iter**. First training iteration of any Wave 2/3 run to exceed the seed baseline (67.5% MCTS-48) by a meaningful margin.
-- **Caveat**: pace under yngine corpus contention was ~7 min/game (vs ~2 min/game alone). Iter 1 took ~13h instead of expected ~5h. Iters 2-4 should run at restored pace now that the corpus is done.
-- **Run continues**: iters 2-4 will tell whether the gain compounds (like Branch B's iter 1 → iter 2 drop showed it didn't, but that was a recipe-noise outlier) or holds steady.
+- **Headline scoreboard** (MCTS-48 EMA, n=40):
+
+  | iter | Branch B' | **Branch C** | promoted? |
+  |---|---:|---:|---|
+  | 0 | 62.5% | 60.0% | ✅ |
+  | 1 | 52.5% | **82.5%** ← peak | ✅ |
+  | 2 | 47.5% | 60.0% | ✅ |
+  | 3 | 55.0% | 60.0% | ✅ |
+  | 4 | 67.5% | 60.0% | ✅ |
+  | **mean** | 57.0% | **64.5%** (+7.5) | — |
+  | **best preserved** | iter 4 = 67.5% | iter 1 = **82.5%** | — |
+  | promotions | 5/5 | 5/5 | — |
+
+  Raw-policy max: B' 30% (iter 0), C 27.5% (iter 1).
+
+- **Success criteria** (any one suffices):
+  - ✅ Best iter ≥ 75% — **82.5% at iter 1**
+  - ❌ Raw policy ≥ 30% — max 27.5%
+  - ⚠️ Mean ≥ 65% with peak ≥ 70% — mean 64.5% (just below), peak ✓
+
+- **Headline lesson**: **The MCTS-200 self-play recipe can produce a meaningfully stronger checkpoint (iter 1 at 82.5%, the strongest in any Wave 2/3 run by 15 points over B''s best iter 4 at 67.5%). But it does not stabilize — iters 2/3/4 all converge to 60% MCTS-48, essentially seed-level.** The supervisor's gate promoted iter 1, so iter 2's self-play used iter 1's stronger weights — yet iter 2's trained candidate still dropped to 60%. One epoch of training on iter 2's buffer pulls weights back to seed-quality.
+- **What that suggests**: there's a stable equilibrium near seed-quality (60%) that the recipe defaults back to within one iter, even from a 82.5% starting point. The 82.5% is unstable. **Iter 1's checkpoint** (saved at `runs_wave3_branchC/20260518_111505/iteration_1/checkpoint_iteration_1_ema.pt`) is the run's best artifact — worth preserving and using as a future warm-start.
+
+### Volume corpus — yngine 200K games + translation — DONE
 
 ### Volume corpus — yngine 200K games + translation — DONE
 - **yngine self-play**: 2026-05-18 15:03 → 2026-05-19 04:08 (13h 4m, 47057s). 200K games, 64 shards, 174MB text.
