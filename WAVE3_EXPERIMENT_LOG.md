@@ -162,14 +162,19 @@ Append-as-we-go log of every experiment. One block per experiment: hypothesis �
 - **Translator**: `scripts/yngine_corpus_to_npz.py` — already written and smoke-tested on 3 yngine games (201 positions, 0 replay failures). yngine (x, y) → our (col=chr('A'+x), row=11-y). All 6 yngine hex directions land on our 3 hex axes.
 - **Headline**: pending. Cron `56d92b17` checks every 2h at :41.
 
-### Branch C — MCTS-200 self-play targets — `IN FLIGHT`
-- **Started**: 2026-05-18 11:15 UTC
+### Branch C — MCTS-200 self-play targets — `iter 1 = WIN, run continues`
+- **Started**: 2026-05-18 11:15 UTC. **Iter 1 SUMMARY: 2026-05-19 ~04:30 UTC**.
 - **Hypothesis**: Self-play target quality is the plateau bottleneck. §8 showed iter 0 EMA was 81.7% at MCTS-400 vs 63.3% at MCTS-48 vs 16.7% raw — the deeper-search teacher is much stronger than the training-time teacher. Training against MCTS-200 targets (4× deeper than MCTS-48) should produce candidates that exceed seed.
-- **Setup**: `configs/wave3_branchC_mcts200.yaml`. Same as B' plus three coupled knobs: `num_simulations 48→200`, `late_simulations 32→100`, `games_per_iteration 200→100` (the last to keep wall time under ~30h since per-game cost is ~4× higher).
-- **Decision doc**: `WAVE3_BRANCH_C_DECISION.md`.
-- **Success criteria** (any one suffices): best iter MCTS-48 anchor ≥ 75%, OR raw policy ≥ 30%, OR mean ≥ 65% with peak ≥ 70%.
-- **Failure criteria**: best iter MCTS-48 ≤ 67.5% AND mean ≤ 57% — target depth wasn't the bottleneck; fall back to C3 (head decoupling).
-- **Headline**: pending. Cron `dd59c71a` checks every 2h at :37.
+- **Setup**: `configs/wave3_branchC_mcts200.yaml`. Same as B' plus three coupled knobs: `num_simulations 48→200`, `late_simulations 32→100`, `games_per_iteration 200→100`.
+- **Iter 1 headline**: **MCTS-48 EMA = 82.5% (33/40, n=40), raw policy = 27.5% (11/40)**. Compared to Branch B' iter 1 = 52.5% MCTS-48, 12.5% raw. **+30 percentage points** on the headline metric. Best-iter ≥ 75% success criterion **CLEARED at the first measurable iter**. First training iteration of any Wave 2/3 run to exceed the seed baseline (67.5% MCTS-48) by a meaningful margin.
+- **Caveat**: pace under yngine corpus contention was ~7 min/game (vs ~2 min/game alone). Iter 1 took ~13h instead of expected ~5h. Iters 2-4 should run at restored pace now that the corpus is done.
+- **Run continues**: iters 2-4 will tell whether the gain compounds (like Branch B's iter 1 → iter 2 drop showed it didn't, but that was a recipe-noise outlier) or holds steady.
+
+### Volume corpus — yngine 200K games — DONE
+- **Wall**: 2026-05-18 15:03 → 2026-05-19 04:08 (13h 4m, 47057s).
+- **Output**: 200,000 games / 174MB text on cloud at `/tmp/yngine_corpus/`. 64 shards.
+- **Pulled to laptop**: `/tmp/yngine_corpus_local/yngine_corpus/`.
+- **Translator on cloud**: `scripts/yngine_corpus_to_npz.py` running now. Stores policy as int32 index instead of full (N, 7433) one-hot to avoid the ~400GB in-memory allocation at the final save. ETA ~67 min from launch (~05:30 UTC). Output: `/tmp/yngine_volume.npz`. Downstream `run_supervised_pretraining.py` will need a dataloader tweak to materialize one-hot from the index column (or use `F.cross_entropy(logits, target_indices)` directly).
 
 ---
 
