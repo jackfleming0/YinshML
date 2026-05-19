@@ -5,8 +5,12 @@ Produces a model checkpoint pre-trained on expert games that can then
 feed into the self-play training loop as a warm start.
 
 Usage:
-    # Pre-train from converted game data (.npz)
+    # Pre-train from converted game data (.npz) — eager load, needs RAM ≥ corpus
     python scripts/run_supervised_pretraining.py --data expert_games/training_data.npz
+
+    # Pre-train from a directory of .npy files (memory-mapped, RAM-light)
+    # See scripts/convert_npz_to_mmap_shards.py for the npz → .npy conversion.
+    python scripts/run_supervised_pretraining.py --data-dir expert_games/yngine_volume_mmap/
 
     # Pre-train from raw JSON game files
     python scripts/run_supervised_pretraining.py --games-dir expert_games/json/ --min-rating 1500
@@ -41,47 +45,88 @@ logger = logging.getLogger(__name__)
 class ExpertDataset(Dataset):
     """PyTorch Dataset for expert game training data.
 
+    Accepts numpy arrays OR numpy memmaps (same indexing API). All
+    dtype conversion is per-item so the same code handles eager npz
+    loads (full arrays in RAM) and lazy memmap loads (paged from disk).
+
     Policy targets may be either:
       - (N, total_moves) float32 — soft/one-hot distribution
-      - (N,) int64           — argmax move index (preferred for volume corpora;
-                               avoids materializing ~400GB of one-hot zeros)
+      - (N,) int{32,64}           — argmax move index (volume corpora)
 
     Downstream loss code branches on tensor dimensionality.
     """
 
-    def __init__(self, states: np.ndarray, policies: np.ndarray,
-                 values: np.ndarray):
-        self.states = torch.from_numpy(states)
-        self.policies = torch.from_numpy(policies)
-        self.values = torch.from_numpy(values)
+    def __init__(self, states, policies, values):
+        assert len(states) == len(policies) == len(values), (
+            f"length mismatch: states={len(states)} policies={len(policies)} "
+            f"values={len(values)}"
+        )
+        self.states = states
+        self.policies = policies
+        self.values = values
 
     def __len__(self):
         return len(self.states)
 
     def __getitem__(self, idx):
-        return self.states[idx], self.policies[idx], self.values[idx]
+        # np.ascontiguousarray triggers a copy out of any underlying mmap,
+        # which keeps torch.from_numpy / pin_memory well-behaved across workers.
+        state = torch.from_numpy(np.ascontiguousarray(self.states[idx])).float()
+        policy_raw = self.policies[idx]
+        if np.ndim(policy_raw) == 0:
+            policy = torch.tensor(int(policy_raw), dtype=torch.long)
+        else:
+            policy = torch.from_numpy(np.ascontiguousarray(policy_raw)).float()
+        value = torch.tensor(float(self.values[idx]), dtype=torch.float32)
+        return state, policy, value
 
 
 def load_data(args) -> tuple:
-    """Load training data from .npz file or raw game directory.
+    """Load training data from one of: .npz file, .npy directory, raw games dir.
 
-    Returns (states, policy_targets, values). `policy_targets` is either
-    one-hot/soft (N, total_moves) float32 OR int64 indices (N,) depending
-    on which schema the npz file stores.
+    Returns (states, policy_targets, values). Arrays may be backed by RAM
+    (npz / games-dir paths) or by mmap (data-dir path). ExpertDataset is
+    backing-agnostic.
+
+    `policy_targets` is one-hot/soft (N, total_moves) float32 OR int{32,64}
+    indices (N,) — schema determined by what keys/files are present.
     """
-    if args.data:
+    if args.data_dir:
+        data_dir = Path(args.data_dir)
+        logger.info(f"Memory-mapping arrays from {data_dir}/")
+        states = np.load(data_dir / 'states.npy', mmap_mode='r')
+        values = np.load(data_dir / 'values.npy', mmap_mode='r')
+        if (data_dir / 'policy_indices.npy').exists():
+            policy_targets = np.load(data_dir / 'policy_indices.npy', mmap_mode='r')
+            logger.info(
+                f"Policy schema: integer indices "
+                f"(shape={policy_targets.shape}, dtype={policy_targets.dtype}); "
+                f"loss will use F.cross_entropy"
+            )
+        elif (data_dir / 'policies.npy').exists():
+            policy_targets = np.load(data_dir / 'policies.npy', mmap_mode='r')
+            logger.info(
+                f"Policy schema: soft/one-hot distribution "
+                f"(shape={policy_targets.shape}); loss will use soft-target NLL"
+            )
+        else:
+            raise RuntimeError(
+                f"{data_dir} must contain policy_indices.npy or policies.npy"
+            )
+    elif args.data:
         logger.info(f"Loading pre-converted data from {args.data}")
         data = np.load(args.data)
         states = data['states']
         values = data['values']
         if 'policy_indices' in data.files:
-            policy_targets = data['policy_indices'].astype(np.int64)
+            policy_targets = data['policy_indices']
             logger.info(
-                f"Policy schema: int64 indices (shape={policy_targets.shape}); "
+                f"Policy schema: integer indices "
+                f"(shape={policy_targets.shape}, dtype={policy_targets.dtype}); "
                 f"loss will use F.cross_entropy"
             )
         elif 'policies' in data.files:
-            policy_targets = data['policies'].astype(np.float32)
+            policy_targets = data['policies']
             logger.info(
                 f"Policy schema: soft/one-hot distribution "
                 f"(shape={policy_targets.shape}); loss will use soft-target NLL"
@@ -336,6 +381,11 @@ def main():
     data_group = parser.add_mutually_exclusive_group(required=True)
     data_group.add_argument('--data', type=str,
                            help='Path to .npz file with training data')
+    data_group.add_argument('--data-dir', type=str,
+                           help='Directory of .npy files (memory-mapped at '
+                                'load time; required for corpora that exceed '
+                                'RAM, e.g. yngine_volume — see '
+                                'scripts/convert_npz_to_mmap_shards.py)')
     data_group.add_argument('--games-dir', type=str,
                            help='Directory of JSON game files to convert')
 
