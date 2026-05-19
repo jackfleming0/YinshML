@@ -39,6 +39,7 @@ from yinsh_ml.game.game_state import GameState  # noqa: E402
 from yinsh_ml.game.types import Player  # noqa: E402
 from yinsh_ml.heuristics import YinshHeuristics  # noqa: E402
 from yinsh_ml.network.wrapper import NetworkWrapper  # noqa: E402
+from yinsh_ml.self_play.data_storage import ParquetDataStorage, StorageConfig  # noqa: E402
 from yinsh_ml.self_play.game_recorder import GameRecorder  # noqa: E402
 from yinsh_ml.training.self_play import MCTS  # noqa: E402
 
@@ -73,6 +74,7 @@ def play_one_game(
     max_moves: int,
     temperature: float,
     seed: int,
+    storage: ParquetDataStorage,
 ) -> dict:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -127,6 +129,8 @@ def play_one_game(
 
     winner = state.get_winner() if state.is_terminal() else None
     record = recorder.end_game(state, winner=winner)
+    if record is not None:
+        storage.store_game_record(record)
     elapsed = time.time() - started
 
     cand_color = "white" if candidate_is_white else "black"
@@ -164,6 +168,11 @@ def main():
         device = args.device
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    storage = ParquetDataStorage(config=StorageConfig(
+        output_dir=str(args.output_dir),
+        parquet_dir="parquet_data",
+        batch_size=1,  # one parquet file per game — easier for live viewing
+    ))
     logger.info(f"Loading checkpoint: {args.checkpoint}")
     network = NetworkWrapper(model_path=str(args.checkpoint), device=device)
     network.network.eval()
@@ -188,9 +197,12 @@ def main():
             max_moves=args.max_moves,
             temperature=args.temperature,
             seed=args.seed_base + i,
+            storage=storage,
         )
         results.append(info)
         logger.info(f"  → {info}")
+
+    storage.flush()
 
     cand_wins = sum(1 for r in results
                     if r["winner"] and (
