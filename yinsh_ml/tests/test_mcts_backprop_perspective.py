@@ -23,7 +23,6 @@ import torch
 from yinsh_ml.game.constants import Player
 from yinsh_ml.game.game_state import GameState
 from yinsh_ml.training.self_play import MCTS as SelfPlayMCTS, Node
-from yinsh_ml.search.mcts import MCTS as SearchMCTS, MCTSNode, MCTSConfig
 from yinsh_ml.utils.encoding import StateEncoder
 
 
@@ -61,19 +60,9 @@ def _selfplay_mcts():
     )
 
 
-def _search_mcts():
-    network = _fake_network(StateEncoder().total_moves)
-    config = MCTSConfig(num_simulations=4)
-    return SearchMCTS(network=network, config=config)
-
-
 def _make_node():
     """A bare Node usable by self_play.MCTS._backpropagate."""
     return Node(state=None, c_puct=1.0)
-
-
-def _make_mcts_node():
-    return MCTSNode(state=None, c_puct=1.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -120,28 +109,6 @@ def test_self_play_get_value_returns_none_for_non_terminal():
     assert mcts._get_value(state) is None
 
 
-def test_search_mcts_get_terminal_value_leaf_pov():
-    mcts = _search_mcts()
-    state = MagicMock()
-    state.is_terminal.return_value = True
-    state.get_winner.return_value = Player.WHITE
-
-    state.current_player = Player.WHITE
-    assert mcts._get_terminal_value(state) == pytest.approx(1.0)
-
-    state.current_player = Player.BLACK
-    assert mcts._get_terminal_value(state) == pytest.approx(-1.0)
-
-
-def test_search_mcts_get_terminal_value_draw():
-    mcts = _search_mcts()
-    state = MagicMock()
-    state.is_terminal.return_value = True
-    state.get_winner.return_value = None
-    state.current_player = Player.WHITE
-    assert mcts._get_terminal_value(state) == pytest.approx(0.0)
-
-
 # --------------------------------------------------------------------------- #
 # Backprop sign-flip — chess-alternating path (regression: legacy unchanged)  #
 # --------------------------------------------------------------------------- #
@@ -158,18 +125,6 @@ def test_self_play_backprop_chess_alternating_unchanged():
     assert nodes[1].value_sum == pytest.approx(0.5)   # child
     assert nodes[2].value_sum == pytest.approx(-0.5)  # leaf
     assert all(n.visit_count == 1 for n in nodes)
-
-
-def test_search_mcts_backprop_chess_alternating_unchanged():
-    """search/mcts.py uses the +value (no leading negation) convention."""
-    mcts = _search_mcts()
-    nodes = [_make_mcts_node() for _ in range(3)]
-    players = [Player.WHITE, Player.BLACK, Player.WHITE]
-    mcts._backpropagate(nodes, players, 0.5)
-
-    assert nodes[0].value_sum == pytest.approx(0.5)   # root
-    assert nodes[1].value_sum == pytest.approx(-0.5)  # child
-    assert nodes[2].value_sum == pytest.approx(0.5)   # leaf
 
 
 # --------------------------------------------------------------------------- #
@@ -225,23 +180,6 @@ def test_self_play_backprop_mixed_path():
     assert nodes[2].value_sum == pytest.approx(0.6)   # same as parent
     assert nodes[1].value_sum == pytest.approx(-0.6)  # different from parent
     assert nodes[0].value_sum == pytest.approx(0.6)   # root: legacy stores -running
-
-
-def test_search_mcts_backprop_capture_sequence_same_player():
-    """Same scenario for search/mcts.py (its convention stores +running).
-
-    [X, X, X] all same player, leaf v in X's POV:
-      Pre-fix: leaf=+v, mid=-v, root=+v — alternating regardless of player.
-      Post-fix: running never flips (no transitions) → leaf=mid=root=+v.
-    """
-    mcts = _search_mcts()
-    nodes = [_make_mcts_node() for _ in range(3)]
-    players = [Player.WHITE, Player.WHITE, Player.WHITE]
-    mcts._backpropagate(nodes, players, 0.4)
-
-    assert nodes[0].value_sum == pytest.approx(0.4)
-    assert nodes[1].value_sum == pytest.approx(0.4)
-    assert nodes[2].value_sum == pytest.approx(0.4)
 
 
 # --------------------------------------------------------------------------- #
@@ -511,27 +449,3 @@ def test_self_play_get_value_winning_side_to_move_always_positive():
             assert v == pytest.approx(0.0)
 
 
-def test_search_mcts_get_terminal_value_canned_set_correlates():
-    """Same canned set, applied to ``search/mcts.py::MCTS._get_terminal_value``.
-
-    That implementation reads ``state.get_winner()`` rather than scores, so
-    it can only return {-1, 0, +1} — we collapse the expected outcomes to
-    sign and assert exact match plus positive correlation.
-    """
-    mcts = _search_mcts()
-    actual = []
-    expected_sign = []
-    for ws, bs, p, expected_v in _SIGN_CONVENTION_CANNED_TERMINALS:
-        state = _terminal_state_mock(ws, bs, p)
-        v = mcts._get_terminal_value(state)
-        actual.append(v)
-        expected_sign.append(np.sign(expected_v))
-
-    actual = np.asarray(actual, dtype=np.float64)
-    expected_sign = np.asarray(expected_sign, dtype=np.float64)
-
-    # _get_terminal_value returns ±1 (no draw rows in this canned set).
-    np.testing.assert_allclose(actual, expected_sign, atol=1e-9)
-    # Trivially correlated (exact match), but pin it as the W0b contract.
-    corr = np.corrcoef(actual, expected_sign)[0, 1]
-    assert corr > 0.95

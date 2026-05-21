@@ -3,10 +3,9 @@
 Three independent metrics, each with its own integration point:
 
   * **B1 — `mcts/effective_child_visits`**: per-call ratio of total
-    root-child visits to the simulation budget. Emitted from BOTH MCTS
-    code paths (`yinsh_ml/search/mcts.py` and the self-play
-    `yinsh_ml/training/self_play.py` MCTS, in both `search()` and
-    `search_batch()`). After Wave 0, the W1-NEW workstream is fixing the
+    root-child visits to the simulation budget. Emitted from the canonical
+    self-play `yinsh_ml/training/self_play.py` MCTS, in both `search()` and
+    `search_batch()`. After Wave 0, the W1-NEW workstream is fixing the
     batched-MCTS bug — this metric is the regression detector.
 
   * **B2 — `eval/value_outcome_correlation`**: Pearson r over
@@ -61,17 +60,12 @@ def _fake_network(total_moves: int):
         value = torch.tensor([[0.42]])
         return policy_logits, value
 
-    def predict(_state_tensor):
-        # search/mcts.py calls network.predict (not predict_from_state)
-        return np.full(total_moves, 1.0 / total_moves, dtype=np.float32), 0.42
-
     def predict_batch(states):
         policy_logits = torch.zeros(len(states), total_moves)
         values = torch.full((len(states), 1), 0.42)
         return policy_logits, values
 
     network.predict_from_state = predict_from_state
-    network.predict = predict
     network.predict_batch = predict_batch
     return network
 
@@ -79,79 +73,6 @@ def _fake_network(total_moves: int):
 # ---------------------------------------------------------------------------
 # B1 — MCTS effective child visits
 # ---------------------------------------------------------------------------
-
-
-class TestB1EffectiveChildVisitsSearchMcts:
-    """Telemetry on `yinsh_ml/search/mcts.py::MCTS.search`."""
-
-    def _build(self, metrics_logger=None, num_simulations=8):
-        from yinsh_ml.search.mcts import MCTS, MCTSConfig, EvaluationMode
-
-        encoder = StateEncoder()
-        network = _fake_network(encoder.total_moves)
-        cfg = MCTSConfig(
-            num_simulations=num_simulations,
-            late_simulations=num_simulations,
-            simulation_switch_ply=200,
-            c_puct=1.0,
-            dirichlet_alpha=0.0,
-            value_weight=1.0,
-            max_depth=20,
-            initial_temp=1.0,
-            final_temp=1.0,
-            annealing_steps=1,
-            evaluation_mode=EvaluationMode.PURE_NEURAL,
-            use_heuristic_evaluation=False,
-            auto_reduce_heuristic_weight=False,
-            fpu_reduction=0.0,
-            epsilon_mix_start=0.0,
-            epsilon_mix_end=0.0,
-            epsilon_mix_taper_moves=0,
-        )
-        return MCTS(network=network, config=cfg, metrics_logger=metrics_logger)
-
-    def test_attribute_set_after_search(self):
-        """Even without a metrics_logger, the in-process probe attribute
-        must be set so callers can read it directly (the regression detector
-        is a contract on the value, not on the side channel)."""
-        mcts = self._build()
-        state = GameState()
-        _ = mcts.search(state, move_number=0)
-        assert hasattr(mcts, 'last_effective_child_visits')
-        assert isinstance(mcts.last_effective_child_visits, float)
-        assert np.isfinite(mcts.last_effective_child_visits)
-        # Pre-W1 batched-MCTS fix the value can be < 0.95; we only assert
-        # finiteness + non-negativity here. After W1 lands the batched fix,
-        # tighten this to `>= 0.95` to catch regressions.
-        assert mcts.last_effective_child_visits >= 0.0
-
-    def test_metrics_logger_receives_scalar(self, tmp_path):
-        ml = MetricsLogger(save_dir=tmp_path)
-        ml.start_iteration(iteration=0)
-        mcts = self._build(metrics_logger=ml, num_simulations=8)
-        state = GameState()
-        _ = mcts.search(state, move_number=0)
-        scalars = ml.current_metrics['scalars']
-        assert 'mcts/effective_child_visits' in scalars
-        entries = scalars['mcts/effective_child_visits']
-        assert len(entries) == 1
-        entry = entries[0]
-        assert entry['step'] == 1  # first call
-        assert isinstance(entry['value'], float)
-        assert np.isfinite(entry['value'])
-        assert entry['value'] >= 0.0
-
-    def test_step_monotonic_across_calls(self, tmp_path):
-        """Step counter advances per `search()` call, regardless of
-        whether the simulation budget was actually consumed."""
-        ml = MetricsLogger(save_dir=tmp_path)
-        ml.start_iteration(iteration=0)
-        mcts = self._build(metrics_logger=ml, num_simulations=4)
-        state = GameState()
-        for _ in range(3):
-            _ = mcts.search(state, move_number=0)
-        steps = [e['step'] for e in ml.current_metrics['scalars']['mcts/effective_child_visits']]
-        assert steps == [1, 2, 3]
 
 
 class TestB1EffectiveChildVisitsSelfPlayMcts:

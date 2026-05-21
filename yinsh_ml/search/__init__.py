@@ -1,12 +1,11 @@
-"""MCTS search module with heuristic integration."""
+"""MCTS search module with heuristic integration.
 
-from .mcts import MCTS, MCTSConfig, EvaluationMode
+NB: the legacy `search/mcts.py` engine (and its `performance_profiler.py`
+companion) were removed — they were a dead, broken duplicate of the
+canonical engine in `yinsh_ml/training/self_play.py::MCTS`. Use that one.
+"""
+
 from .training_tracker import TrainingTracker, PerformanceMetrics
-from .performance_profiler import (
-    MCTSPerformanceProfiler,
-    BenchmarkResults,
-    run_performance_benchmark
-)
 from .transposition_table import (
     TranspositionTable,
     TranspositionTableEntry,
@@ -14,9 +13,6 @@ from .transposition_table import (
 from .node_type import NodeType
 
 __all__ = [
-    'MCTS', 'MCTSConfig', 'EvaluationMode',
     'TrainingTracker', 'PerformanceMetrics',
-    'MCTSPerformanceProfiler', 'BenchmarkResults', 'run_performance_benchmark',
     'TranspositionTable', 'TranspositionTableEntry', 'NodeType',
 ]
-

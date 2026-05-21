@@ -596,57 +596,19 @@ class MCTSPolicyConfig:
 
 
 class MCTSPolicy:
-    """MCTS-based move selection policy using Monte Carlo Tree Search."""
-    
+    """REMOVED — this policy was a thin wrapper over the dead, broken
+    ``yinsh_ml.search.mcts.MCTS`` engine, which has been excised. It had no
+    production callers (the ``SelfPlayRunner``/``game_runner.py`` path that
+    would have wired it is never instantiated in training). Use
+    ``yinsh_ml.training.self_play.SelfPlay`` / ``MCTS.search_batch`` for any
+    MCTS self-play instead.
+    """
+
     def __init__(self, config: MCTSPolicyConfig = None, network=None):
-        """Initialize the MCTS policy.
-        
-        Args:
-            config: Policy configuration
-            network: Optional neural network wrapper. If None, will use pure heuristic mode.
-        """
-        self.config = config or MCTSPolicyConfig()
-        
-        # Import here to avoid circular dependencies
-        from ..search.mcts import MCTS, MCTSConfig, EvaluationMode
-        
-        # Determine evaluation mode
-        if self.config.evaluation_mode == "pure_heuristic":
-            eval_mode = EvaluationMode.PURE_HEURISTIC
-        elif self.config.evaluation_mode == "pure_neural":
-            eval_mode = EvaluationMode.PURE_NEURAL
-        else:
-            eval_mode = EvaluationMode.HYBRID
-        
-        # If no network provided and mode requires neural, fall back to heuristic
-        if network is None and eval_mode == EvaluationMode.PURE_NEURAL:
-            logger.warning("No network provided for pure_neural mode, falling back to pure_heuristic")
-            eval_mode = EvaluationMode.PURE_HEURISTIC
-        
-        # Create MCTS config
-        mcts_config = MCTSConfig(
-            num_simulations=self.config.num_simulations,
-            evaluation_mode=eval_mode,
-            heuristic_weight=self.config.heuristic_weight,
-            c_puct=self.config.c_puct,
-            dirichlet_alpha=self.config.dirichlet_alpha if self.config.use_dirichlet else 0.0,
-            max_depth=self.config.max_depth
+        raise NotImplementedError(
+            "MCTSPolicy used the removed search.mcts engine; use "
+            "yinsh_ml.training.self_play.SelfPlay / MCTS.search_batch instead."
         )
-        
-        # Create a dummy network if needed (MCTS will use heuristic evaluation)
-        if network is None:
-            # Create a minimal network wrapper that will be ignored in pure heuristic mode
-            from ..network.wrapper import NetworkWrapper
-            network = NetworkWrapper()
-        
-        # Create MCTS instance
-        self.mcts = MCTS(network=network, config=mcts_config)
-        
-        self._rng = random.Random(self.config.random_seed)
-        self._move_number = 0
-        
-        logger.info(f"Initialized MCTSPolicy with mode={self.config.evaluation_mode}, "
-                   f"simulations={self.config.num_simulations}")
     
     def select_move(self, game_state: GameState) -> Move:
         """Select a move using MCTS search.

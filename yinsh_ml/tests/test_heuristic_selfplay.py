@@ -84,6 +84,7 @@ class TestHeuristicPolicy(unittest.TestCase):
         self.assertIsNotNone(move_high)
 
 
+@pytest.mark.skip(reason="MCTSPolicy removed — dead search.mcts engine; see TECH_DEBT.md")
 class TestMCTSPolicy(unittest.TestCase):
     """Test MCTS policy implementation."""
     
@@ -127,6 +128,7 @@ class TestMCTSPolicy(unittest.TestCase):
             self.assertEqual(policy.config.evaluation_mode, mode)
 
 
+@pytest.mark.skip(reason="MCTSPolicy removed — AdaptivePolicy builds MCTSPolicy (dead search.mcts engine); see TECH_DEBT.md")
 class TestAdaptivePolicy(unittest.TestCase):
     """Test adaptive policy implementation."""
     
@@ -197,6 +199,7 @@ class TestPolicyFactory(unittest.TestCase):
         self.assertIsNotNone(policy)
         self.assertIsInstance(policy, HeuristicPolicy)
     
+    @pytest.mark.skip(reason="MCTSPolicy removed — dead search.mcts engine; see TECH_DEBT.md")
     def test_create_mcts_policy(self):
         """Test creating MCTS policy via factory."""
         from yinsh_ml.self_play import PolicyFactory, MCTSPolicy, MCTSPolicyConfig
@@ -206,6 +209,7 @@ class TestPolicyFactory(unittest.TestCase):
         self.assertIsNotNone(policy)
         self.assertIsInstance(policy, MCTSPolicy)
     
+    @pytest.mark.skip(reason="MCTSPolicy removed — AdaptivePolicy builds MCTSPolicy (dead search.mcts engine); see TECH_DEBT.md")
     def test_create_adaptive_policy(self):
         """Test creating adaptive policy via factory."""
         from yinsh_ml.self_play import PolicyFactory, AdaptivePolicy, AdaptivePolicyConfig
@@ -279,6 +283,7 @@ class TestSelfPlayRunnerIntegration(unittest.TestCase):
         self.assertEqual(runner.config.policy_type, "heuristic")
         self.assertIsNotNone(runner.policy)
     
+    @pytest.mark.skip(reason="MCTSPolicy removed — runner policy_type='mcts' builds MCTSPolicy (dead search.mcts engine); see TECH_DEBT.md")
     def test_mcts_runner_config(self):
         """Test runner with MCTS policy."""
         from yinsh_ml.self_play import SelfPlayRunner, RunnerConfig
@@ -404,6 +409,7 @@ class TestHeuristicVsRandomQuality(unittest.TestCase):
             self.assertLessEqual(metrics.strategic_coherence, 1.0)
 
 
+@pytest.mark.skip(reason="MCTSPolicy removed — AdaptivePolicy builds MCTSPolicy (dead search.mcts engine); see TECH_DEBT.md")
 class TestAdaptivePolicyTransition(unittest.TestCase):
     """Test that adaptive policy actually transitions correctly."""
     
@@ -487,6 +493,7 @@ class TestAdaptivePolicyTransition(unittest.TestCase):
         self.assertEqual(final_policy_type, "MCTSPolicy")
 
 
+@pytest.mark.skip(reason="MCTSPolicy removed — dead search.mcts engine; see TECH_DEBT.md")
 class TestMCTSPolicyModes(unittest.TestCase):
     """Test that MCTS policy works correctly in different modes."""
     
@@ -713,6 +720,7 @@ class TestEndToEndIntegration(unittest.TestCase):
         self.assertIsNotNone(runner.stats.quality_metrics)
         self.assertEqual(len(runner.stats.quality_metrics), 0)  # No games yet
     
+    @pytest.mark.skip(reason="MCTSPolicy removed — adaptive runner builds MCTSPolicy (dead search.mcts engine); see TECH_DEBT.md")
     def test_adaptive_policy_integration(self):
         """Test adaptive policy works in runner initialization."""
         from yinsh_ml.self_play import SelfPlayRunner, RunnerConfig

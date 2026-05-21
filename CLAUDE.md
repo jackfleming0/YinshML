@@ -135,11 +135,14 @@ yinsh-track --help
 - `types.py` - Enums (MoveType, GamePhase, Player)
 - `zobrist.py` - Zobrist hashing for position encoding (fast position caching)
 
-**`yinsh_ml/search/`** - Search algorithms
-- `mcts.py` - Monte Carlo Tree Search with configurable evaluation modes
+**`yinsh_ml/search/`** - Search support (transposition table, node types, profiling)
 - `transposition_table.py` - Position cache using Zobrist hashing (depth-preferred replacement)
 - `node_type.py` - Node type enums for alpha-beta pruning (EXACT, LOWER_BOUND, UPPER_BOUND)
 - See `yinsh_ml/search/README.md` for detailed search system documentation
+- **MCTS lives in `yinsh_ml/training/self_play.py::MCTS`** (`search_batch()` batched
+  leaf eval + a singleton `search()`). The old `search/mcts.py::MCTS` was a dead,
+  broken duplicate (uniform-random, never reached the network) and was excised
+  2026-05-21 — see `TECH_DEBT.md`. There is now one MCTS engine.
 
 **`yinsh_ml/agents/`** - Game-playing agents
 - `heuristic_agent.py` - Pure heuristic agent using negamax with alpha-beta pruning
@@ -232,10 +235,11 @@ Weights are **phase-specific** - different priorities for early/mid/late game.
 - Clear between games: `agent.clear_transposition_table()`
 
 ### MCTS Evaluation Modes
-Configured via `MCTSConfig.evaluation_mode`:
-- `PURE_HEURISTIC` - Only use heuristic evaluation
-- `PURE_NEURAL` - Only use neural network
-- `HYBRID` - Weighted combination (neural + heuristic)
+The engine is `yinsh_ml/training/self_play.py::MCTS`; the mode is the
+`evaluation_mode` constructor arg (a string):
+- `"pure_heuristic"` - Only use heuristic evaluation
+- `"pure_neural"` - Only use neural network
+- `"hybrid"` - Weighted combination (neural + heuristic)
 
 ### Training Data Flow
 1. **Self-Play**: Generate games using MCTS with heuristic evaluation
@@ -254,10 +258,12 @@ Configured via `MCTSConfig.evaluation_mode`:
 5. Test with HeuristicAgent: `python scripts/test_game.py`
 
 ### Modifying MCTS Search
-1. Edit `yinsh_ml/search/mcts.py`
-2. Update `MCTSConfig` if adding parameters
-3. Test with smoke test: `python scripts/tune_mcts_hyperparameters.py --smoke-test`
-4. Run full hyperparameter tuning if needed
+1. Edit `yinsh_ml/training/self_play.py::MCTS` (the single engine; `search_batch()`
+   is the batched path used in training/eval, `search()` the singleton path)
+2. Update its constructor args if adding parameters
+3. Run the MCTS tests: `pytest yinsh_ml/tests/test_subtree_reuse.py
+   yinsh_ml/tests/test_fpu.py yinsh_ml/tests/test_search_consistency.py
+   yinsh_ml/tests/test_mcts_serial_vs_batch_parity.py`
 
 ### Adjusting Neural Network Architecture
 1. Modify `YinshNetwork` in `yinsh_ml/network/model.py`
