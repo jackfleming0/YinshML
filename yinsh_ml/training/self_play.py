@@ -132,6 +132,12 @@ class Node:
 class MCTS:
     """Monte-Carlo Tree-Search with temperature annealing and ply-adaptive rollouts."""
 
+    # Class-level flag so the multi-line "MCTS Initialized" / Configuration
+    # Debug blocks only emit at INFO on the FIRST construction. Per-game
+    # re-inits (one per self-play game) log at DEBUG. Flip the YinshML
+    # loggers to DEBUG via `verbose_logging: true` in mode_settings.
+    _init_logged: bool = False
+
     def __init__(self,
                  network: NetworkWrapper,
                  # --- Evaluation Mode ---
@@ -171,6 +177,16 @@ class MCTS:
                  epsilon_mix_start: float = 0.25,
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
+                 # Iteration-aware multiplicative tapering (Tier 3 #6). When
+                 # `iteration_progress` is set (via constructor or
+                 # `set_iteration_progress`), the move-number-derived epsilon
+                 # is multiplied by a factor interpolating from
+                 # `epsilon_mix_iteration_start` (at progress 0.0) to
+                 # `epsilon_mix_iteration_end` (at progress 1.0). Defaults of
+                 # 1.0 / 1.0 mean iteration tapering is a no-op (opt-in).
+                 epsilon_mix_iteration_start: float = 1.0,
+                 epsilon_mix_iteration_end: float = 1.0,
+                 iteration_progress: Optional[float] = None,
                  # --- Root policy temperature (alphazero-general style) ---
                  # T > 1 flattens root prior (more exploration); T < 1 sharpens.
                  # Applied to root child priors BEFORE Dirichlet noise mixing.
@@ -183,6 +199,11 @@ class MCTS:
                  # is the whole point — see BATCHED_EVALUATOR_DESIGN.md. None
                  # = unchanged behavior (each MCTS calls predict_batch alone).
                  evaluator=None,
+                 # --- Telemetry safeguards (W1-NEW B1) ---
+                 # Optional MetricsLogger for the effective_child_visits regression
+                 # detector. None ⇒ no scalar logging (last_effective_child_visits
+                 # is still set on the instance for in-process probes/tests).
+                 metrics_logger=None,
                 ):
         """
         Initialize MCTS.
@@ -286,6 +307,15 @@ class MCTS:
         self.metrics = mcts_metrics if mcts_metrics is not None else MCTSMetrics()
         self.current_iteration = 0 # Can be updated externally if needed
 
+        # B1 telemetry plumbing — None-safe; the actual logging sites guard.
+        self.metrics_logger = metrics_logger
+        # Per-instance call counter; used as the `step` for log_scalar when
+        # no outer step is plumbed in. Bumped from BOTH `search()` and
+        # `search_batch()` so `step` is monotonic across both code paths.
+        self._search_call_count = 0
+        # Most recent effective_child_visits value, exposed for tests / probes.
+        self.last_effective_child_visits: Optional[float] = None
+
         # Subtree reuse state — carries the search tree across moves within a game.
         # Ownership contract: the caller drives the tree lifecycle by calling
         # `advance_root(played_move)` after every outer-game move and (optionally)
@@ -303,40 +333,61 @@ class MCTS:
         self.epsilon_mix_end = float(epsilon_mix_end)
         self.epsilon_mix_taper_moves = int(epsilon_mix_taper_moves)
 
+        # Iteration-aware multiplicative taper (Tier 3 #6). `iteration_progress`
+        # is mutable across an MCTS lifetime — supervisor sets it per
+        # iteration before generating self-play games. Defaults of 1.0/1.0
+        # AND `iteration_progress is None` both preserve pre-change behavior.
+        self.epsilon_mix_iteration_start = float(epsilon_mix_iteration_start)
+        self.epsilon_mix_iteration_end = float(epsilon_mix_iteration_end)
+        self.iteration_progress: Optional[float] = (
+            None if iteration_progress is None else float(iteration_progress)
+        )
+
         # Root policy temperature: re-shape priors at root before noise mixing.
         # T > 1 flattens (more exploration); T < 1 sharpens; 1.0 is no-op.
         self.root_policy_temp = float(root_policy_temp)
 
-        self.logger.info(f"MCTS Initialized:")
-        self.logger.info(f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
-        self.logger.info(f"  Memory: Pool enabled={self._pool_enabled}")
-        self.logger.info(f"  Subtree Reuse: {'ENABLED' if self.enable_subtree_reuse else 'DISABLED'}")
-        self.logger.info(f"  FPU Reduction: {self.fpu_reduction:.3f}")
-        self.logger.info(
+        # Per-game re-init logspam fix: emit the full block at INFO only
+        # on the first construction; per-game re-inits log at DEBUG.
+        _init_level = logging.INFO if not type(self)._init_logged else logging.DEBUG
+        self.logger.log(_init_level, f"MCTS Initialized:")
+        self.logger.log(_init_level, f"  Evaluation Mode: {self.evaluation_mode} (heuristic_weight={self.heuristic_weight:.3f})")
+        self.logger.log(_init_level, f"  Memory: Pool enabled={self._pool_enabled}")
+        self.logger.log(_init_level, f"  Subtree Reuse: {'ENABLED' if self.enable_subtree_reuse else 'DISABLED'}")
+        self.logger.log(_init_level, f"  FPU Reduction: {self.fpu_reduction:.3f}")
+        self.logger.log(
+            _init_level,
             f"  Epsilon Mix: {self.epsilon_mix_start:.3f} → {self.epsilon_mix_end:.3f} "
             f"over {self.epsilon_mix_taper_moves} moves"
         )
-        self.logger.info(f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
+        self.logger.log(_init_level, f"  Sims: Early={self.early_simulations}, Late={self.late_simulations} (Switch Ply {self.switch_ply})")
         if self.fast_sim_prob > 0.0 and self.fast_simulations > 0:
-            self.logger.info(
+            self.logger.log(
+                _init_level,
                 f"  Fast-sim split: fast={self.fast_simulations} sims with p={self.fast_sim_prob:.2f}"
             )
-        self.logger.info(f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
-        self.logger.info(f"  Temperature: Initial={self.initial_temp:.2f}, Final={self.final_temp:.2f}, Steps={self.annealing_steps}, Clamp Frac={self.temp_clamp_frac:.2f}")
+        self.logger.log(_init_level, f"  Search: cPUCT={self.c_puct:.2f}, Alpha={self.dirichlet_alpha:.2f}, Value Weight={self.value_weight:.2f}, Max Depth={self.max_depth}")
+        self.logger.log(_init_level, f"  Temperature: Initial={self.initial_temp:.2f}, Final={self.final_temp:.2f}, Steps={self.annealing_steps}, Clamp Frac={self.temp_clamp_frac:.2f}")
 
-        self.debug_config()
+        self.debug_config(level=_init_level)
+        type(self)._init_logged = True
 
-    def debug_config(self):
-        """Log all configuration parameters to verify they're being set correctly."""
-        self.logger.info("====== MCTS Configuration Debug ======")
-        self.logger.info(f"Early Simulations: {self.early_simulations}")
-        self.logger.info(f"Late Simulations: {self.late_simulations}")
-        self.logger.info(f"Switch Ply: {self.switch_ply}")
-        self.logger.info(f"c_puct: {self.c_puct}")
-        self.logger.info(f"Dirichlet Alpha: {self.dirichlet_alpha}")
-        self.logger.info(f"Value Weight: {self.value_weight}")
-        self.logger.info(f"Max Depth: {self.max_depth}")
-        self.logger.info("======================================")
+    def debug_config(self, level: int = logging.INFO):
+        """Log all configuration parameters to verify they're being set correctly.
+
+        Args:
+            level: logging level. Defaults to INFO; per-game re-inits pass
+                DEBUG to suppress per-game logspam (see `__init__`).
+        """
+        self.logger.log(level, "====== MCTS Configuration Debug ======")
+        self.logger.log(level, f"Early Simulations: {self.early_simulations}")
+        self.logger.log(level, f"Late Simulations: {self.late_simulations}")
+        self.logger.log(level, f"Switch Ply: {self.switch_ply}")
+        self.logger.log(level, f"c_puct: {self.c_puct}")
+        self.logger.log(level, f"Dirichlet Alpha: {self.dirichlet_alpha}")
+        self.logger.log(level, f"Value Weight: {self.value_weight}")
+        self.logger.log(level, f"Max Depth: {self.max_depth}")
+        self.logger.log(level, "======================================")
 
     def _acquire_state_copy(self, original_state: GameState) -> GameState:
         """Get a GameState copy from pool or create new one."""
@@ -420,15 +471,46 @@ class MCTS:
             delattr(kept, "policy_temp_applied")
         self._cached_root = kept
 
+    def set_iteration_progress(self, progress: Optional[float]) -> None:
+        """Set the training-iteration progress used for iteration-aware
+        Dirichlet noise tapering (Tier 3 #6). Pass None to disable iteration
+        tapering for subsequent searches; pass a float in [0,1] otherwise.
+        """
+        self.iteration_progress = (
+            None if progress is None else float(progress)
+        )
+
     def _compute_epsilon_mix(self, move_number: int) -> float:
         """Linearly interpolate `epsilon_mix` from start → end over
         `epsilon_mix_taper_moves`. Returns `epsilon_mix_start` if the taper
         is disabled (taper_moves ≤ 0) so callers never have to special-case
-        the no-taper path."""
+        the no-taper path.
+
+        When `self.iteration_progress` is not None, the result is
+        additionally multiplied by a factor that linearly interpolates from
+        `epsilon_mix_iteration_start` (at progress 0.0) to
+        `epsilon_mix_iteration_end` (at progress 1.0). Default config
+        (both knobs at 1.0) AND a None iteration_progress preserve the
+        pre-Tier-3-#6 behavior identically.
+        """
         if self.epsilon_mix_taper_moves <= 0:
-            return self.epsilon_mix_start
-        alpha = min(max(move_number, 0) / self.epsilon_mix_taper_moves, 1.0)
-        return self.epsilon_mix_start + alpha * (self.epsilon_mix_end - self.epsilon_mix_start)
+            base = self.epsilon_mix_start
+        else:
+            alpha = min(max(move_number, 0) / self.epsilon_mix_taper_moves, 1.0)
+            base = self.epsilon_mix_start + alpha * (
+                self.epsilon_mix_end - self.epsilon_mix_start
+            )
+
+        if self.iteration_progress is None:
+            return base
+
+        # Clamp progress into [0,1] defensively — callers may divide by an
+        # off-by-one total or pass progress for a "bonus" iteration.
+        p = min(max(self.iteration_progress, 0.0), 1.0)
+        iter_factor = self.epsilon_mix_iteration_start + p * (
+            self.epsilon_mix_iteration_end - self.epsilon_mix_iteration_start
+        )
+        return base * iter_factor
 
     def _apply_root_policy_temperature(self, root: 'Node') -> None:
         """Re-shape root child priors with temperature T = ``root_policy_temp``.
@@ -668,6 +750,9 @@ class MCTS:
                          move_probs[move_idx] = prob
                     else:
                          self.logger.error(f"Invalid move index {move_idx} for move {move} generated by state.get_valid_moves(). Max index: {len(move_probs)-1}")
+            # B1: emit zero on the empty-root early-return path so the metric
+            # series doesn't silently drop samples when something has gone wrong.
+            self._log_effective_child_visits(root, budget)
             return move_probs # Return uniform or zero vector
 
 
@@ -710,7 +795,27 @@ class MCTS:
         # Store root value for use as training target (mirrors search_batch).
         # Search-consistency probe (and any future caller) needs both `search()`
         # and `search_batch()` to expose the root value the same way.
-        self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+        #
+        # W2 sign-flip fix: `_backpropagate` stores root's `value_sum` from the
+        # *opposite*-of-root POV (legacy convention — see comments in
+        # `_backpropagate` and `test_self_play_backprop_root_only_path`). PUCT
+        # only ever reads `child.value()` (parent-POV), so the legacy storage
+        # at the root is invisible to selection. But consumers of
+        # `last_root_value` want the AlphaZero-standard "side-to-move POV"
+        # (positive = current player winning). Negate at the assignment so the
+        # public contract matches that convention. The Wave 2 tournament B2
+        # gate was reading the un-negated value and seeing -0.07 to -0.31
+        # correlations that should have been positive.
+        self.last_root_value = -root.value() if root.visit_count > 0 else 0.0
+
+        # B1 telemetry: effective child visits ratio. After Wave 0, the W1-NEW
+        # workstream is fixing the batched-MCTS bug where many sims dead-end
+        # before reaching root.children — this metric is the regression
+        # detector. ~1.0 means every sim landed under a root child; <0.95
+        # means a non-trivial fraction of the sim budget was wasted on selection
+        # errors / max-depth bailouts. Computed even when root.children is empty
+        # (eff=0 in that case) so the call site is unconditional.
+        self._log_effective_child_visits(root, budget)
 
         # With subtree reuse enabled, the tree is preserved for the next search
         # call — cleanup happens in `advance_root`/`reset_tree`. Without reuse,
@@ -756,8 +861,29 @@ class MCTS:
 
         # Collect leaves for batched evaluation
         batch_leaves = []  # List of (node, search_path, current_state, depth)
+        # Set of `id(node)` for every node currently sitting in batch_leaves.
+        # Used by the duplicate-leaf guard (T1.1 fix): if a sim's selection
+        # bottoms out at a node already queued for evaluation, we MUST flush
+        # the batch first — otherwise the second sim either (a) clobbers the
+        # first sim's expansion (pre-fix bug, see commit "make
+        # _evaluate_and_backup_batch expansion idempotent"), or (b) backs up
+        # to a stale path. The most common case is the very first batch on a
+        # fresh tree: every sim sees the unexpanded root, all B sims would
+        # land at root with `search_path=[root]`, root would be expanded once
+        # and then B-1 backups would touch only the root with no children.
+        # Net effect: 30-60% of sims wasted at every fresh root.
+        in_flight_node_ids = set()
 
-        for sim in range(budget):
+        # Sim counter advances only when we successfully consume a budget slot
+        # (terminal-backup, selection-error, or successful batch enqueue).
+        # The duplicate-leaf branch flushes and `continue`s WITHOUT
+        # incrementing — the same sim retries against the now-expanded tree.
+        # Worst case: every sim queues uniquely; best case: first sim of every
+        # fresh batch races (first batch retries once). Either way the loop
+        # terminates because flush + expansion makes the duplicated leaf
+        # `is_expanded`, so the retry's selection descends past it.
+        sim = 0
+        while sim < budget:
             node = root
             search_path = [node]
             current_state = self._acquire_state_copy(state)
@@ -790,6 +916,7 @@ class MCTS:
             # comment in `search()` — the old `action is None` guard was a bug
             # that silently skipped first-sim expansion.
             if action is not None and action not in node.children and node.is_expanded and node.children:
+                sim += 1  # Selection error consumes a sim slot (matches old `for` loop semantics).
                 continue
 
             # 2. Check if this is a terminal state
@@ -797,6 +924,25 @@ class MCTS:
             if terminal_value is not None:
                 # Terminal state - backpropagate immediately
                 self._backpropagate(search_path, players_path, terminal_value)
+                sim += 1
+                continue
+
+            # 2b. Duplicate-leaf guard (T1.1 fix). If this leaf is already in
+            #     the in-flight batch, flush the batch first so it gets
+            #     expanded, then retry this sim against the updated tree.
+            #     Without this guard, B sims on a fresh root would all queue
+            #     `[root]` and only one would do useful work — see commit msg.
+            if id(node) in in_flight_node_ids:
+                # Release the per-sim state copy and retry — we're going to
+                # rebuild from `state` once root (or the contended internal
+                # node) is expanded.
+                self._release_state(current_state)
+                simulation_states.pop()  # we just appended this; pop to keep set tidy
+                # Flush the in-flight batch — this expands the contended leaf.
+                self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
+                batch_leaves = []
+                in_flight_node_ids = set()
+                # IMPORTANT: do not increment sim — we have to redo this attempt.
                 continue
 
             # 3. Check if we hit max depth
@@ -810,15 +956,20 @@ class MCTS:
                 node.add_virtual_loss()  # Mark as in-flight
                 batch_leaves.append((node, search_path, players_path, current_state, depth, True))
 
-            # 4. Process batch when it's full or we're at the end
-            if len(batch_leaves) >= batch_size or sim == budget - 1:
-                if batch_leaves:
-                    self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
-                    batch_leaves = []
+            in_flight_node_ids.add(id(node))
+            sim += 1
+
+            # 4. Process batch when it's full
+            if len(batch_leaves) >= batch_size:
+                self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
+                batch_leaves = []
+                in_flight_node_ids = set()
 
         # Process any remaining leaves
         if batch_leaves:
             self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
+            batch_leaves = []
+            in_flight_node_ids = set()
 
         # Clean up simulation states
         for s in simulation_states:
@@ -836,6 +987,9 @@ class MCTS:
                     move_idx = self.state_encoder.move_to_index(move)
                     if 0 <= move_idx < len(move_probs):
                         move_probs[move_idx] = prob
+            # B1: emit zero on the empty-root early-return path so the metric
+            # series doesn't silently drop samples when something has gone wrong.
+            self._log_effective_child_visits(root, budget)
             return move_probs
 
         valid_moves_at_root = list(root.children.keys())
@@ -864,8 +1018,19 @@ class MCTS:
             if 0 <= move_idx < len(move_probs):
                 move_probs[move_idx] = prob
 
-        # Store root value for use as training target (Fix #1)
-        self.last_root_value = root.value() if root.visit_count > 0 else 0.0
+        # Store root value for use as training target (Fix #1).
+        # W2 sign-flip fix: see the matching comment in `search()` above —
+        # root's value_sum is stored in opposite-of-root POV by legacy
+        # backprop convention, so we negate at assignment to make
+        # `last_root_value` agree with the AlphaZero "side-to-move POV"
+        # contract documented in `tournament.py`.
+        self.last_root_value = -root.value() if root.visit_count > 0 else 0.0
+
+        # B1 telemetry — see `search()` for the long form. Mirrored here so
+        # the batched and serial paths emit the same scalar series; that's
+        # the whole point of the safeguard, since the W1-NEW workstream is
+        # specifically chasing a batched-MCTS divergence.
+        self._log_effective_child_visits(root, budget)
 
         # With subtree reuse enabled, the tree is preserved for the next search
         # call — cleanup happens in `advance_root`/`reset_tree`.
@@ -873,6 +1038,31 @@ class MCTS:
             root.clear_tree()
 
         return move_probs
+
+    def _log_effective_child_visits(self, root, budget: int) -> None:
+        """Compute and log B1's effective_child_visits scalar.
+
+        Helper extracted so `search()` and `search_batch()` (and their early-
+        return paths) emit identical telemetry without duplicating the
+        boilerplate. Always sets ``last_effective_child_visits`` and bumps
+        ``_search_call_count`` so the step value stays monotonic across both
+        code paths even when ``metrics_logger`` is None.
+        """
+        budget_for_metric = max(1, int(budget))  # guard against budget==0 in tests
+        try:
+            total = sum(c.visit_count for c in root.children.values()) if root.children else 0
+        except AttributeError:
+            # Defensive: callers pass `root` of two distinct Node classes (this
+            # module's Node and a Mock in tests); both expose `.children` with
+            # `.visit_count`, but if a future refactor breaks that, fail soft.
+            total = 0
+        eff = float(total) / float(budget_for_metric)
+        self.last_effective_child_visits = eff
+        self._search_call_count += 1
+        if self.metrics_logger is not None:
+            self.metrics_logger.log_scalar(
+                'mcts/effective_child_visits', eff, step=self._search_call_count
+            )
 
     def _evaluate_and_backup_batch(self, batch_leaves: List[Tuple], root: Node, move_number: int = 0):
         """
@@ -959,8 +1149,16 @@ class MCTS:
                 policy = policy_nn
                 value = value_nn
 
-            # Expand node if allowed
-            if can_expand and not current_state.is_terminal():
+            # Expand node if allowed.
+            #
+            # The `not node.is_expanded` guard is load-bearing: without it, two
+            # entries in `batch_leaves` that happen to point at the same node
+            # (which can happen if a future change re-introduces duplicate-leaf
+            # batching, or if multiple sims race to the same internal node)
+            # would re-create `node.children` from scratch on the second pass,
+            # silently clobbering visit counts and priors set by the first
+            # pass. Guarding by `is_expanded` makes expansion idempotent.
+            if can_expand and not node.is_expanded and not current_state.is_terminal():
                 valid_moves = current_state.get_valid_moves()
                 if valid_moves:
                     node.is_expanded = True
@@ -1290,6 +1488,15 @@ class SelfPlay:
                  epsilon_mix_start: float = 0.25,
                  epsilon_mix_end: float = 0.0,
                  epsilon_mix_taper_moves: int = 20,
+                 # --- Iteration-aware Dirichlet tapering (Tier 3 #6) ---
+                 # Defaults of 1.0 / 1.0 disable iteration tapering (opt-in).
+                 # When the supervisor calls `set_iteration_progress(p)` per
+                 # iteration, the move-number-derived epsilon is multiplied by
+                 # a factor interpolating from `..._iteration_start` (at p=0)
+                 # to `..._iteration_end` (at p=1). End=0.3 → 70% noise cut by
+                 # the last iteration.
+                 epsilon_mix_iteration_start: float = 1.0,
+                 epsilon_mix_iteration_end: float = 1.0,
                  root_policy_temp: float = 1.0,
                  # --- C++ bitboard engine ---
                  use_cpp_engine: bool = False,
@@ -1339,6 +1546,12 @@ class SelfPlay:
         self.mcts_batch_size = mcts_batch_size
         self.use_shared_evaluator = use_shared_evaluator
 
+        # T4.10: cumulative count of worker / thread crashes observed by
+        # the parent across all calls to generate_games. Bumped from the
+        # `as_completed` exception handler. Used by tests + ops dashboards
+        # to verify worker robustness.
+        self.worker_crash_count: int = 0
+
         # Store all parameters needed by MCTS and workers explicitly
         self.mcts_config = {
             'evaluation_mode': evaluation_mode,
@@ -1365,6 +1578,14 @@ class SelfPlay:
             'epsilon_mix_start': epsilon_mix_start,  # Root Dirichlet mixing fraction at move 0
             'epsilon_mix_end': epsilon_mix_end,  # Root mixing fraction after taper (0 = no late-game noise)
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,  # Linear taper horizon
+            # Iteration-aware tapering knobs (Tier 3 #6). 1.0/1.0 = opt-out.
+            'epsilon_mix_iteration_start': epsilon_mix_iteration_start,
+            'epsilon_mix_iteration_end': epsilon_mix_iteration_end,
+            # `iteration_progress` defaults to None and is updated per
+            # iteration by the supervisor before generate_games(); see
+            # `set_iteration_progress` below. Workers read this from the
+            # mcts_config dict at MCTS-construction time.
+            'iteration_progress': None,
             'root_policy_temp': root_policy_temp,  # Reshape root prior; >1 flattens, <1 sharpens
             'use_cpp_engine': use_cpp_engine,  # Opt-in to game_cpp engine in workers
         }
@@ -1385,6 +1606,7 @@ class SelfPlay:
             network=self.network,
             mcts_metrics=self.mcts_metrics, # Pass metrics instance
             game_state_pool=self.game_state_pool, # Pass memory pool
+            metrics_logger=self.metrics_logger,  # #13: B1 telemetry sink for parent-process MCTS
             **mcts_init_config # Unpack the filtered config dict
         )
 
@@ -1394,6 +1616,24 @@ class SelfPlay:
         self.logger.info(f"  Batched MCTS: {'ENABLED' if self.use_batched_mcts else 'DISABLED'} (batch_size={self.mcts_batch_size})")
         self.logger.info(f"  Enhanced Encoding: {'ENABLED (15 channels)' if self.mcts_config.get('use_enhanced_encoding', False) else 'DISABLED (6 channels)'}")
         self.logger.info(f"  MCTS Config: {self.mcts_config}")
+
+    def set_iteration_progress(self, progress: Optional[float]) -> None:
+        """Update the iteration-progress signal used by MCTS for iteration-
+        aware Dirichlet noise tapering (Tier 3 #6).
+
+        Mutates both the in-process MCTS instance (used by single-thread
+        callers) AND the `mcts_config` dict that gets pickled into worker
+        processes — the workers reconstruct MCTS from the dict, so this is
+        the only seat the value lives. Callers (e.g., `Supervisor`) must
+        invoke this BEFORE calling `generate_games` for the iteration whose
+        progress they want to apply.
+
+        Pass None to disable iteration tapering for subsequent searches.
+        """
+        normalized = None if progress is None else float(progress)
+        self.mcts_config['iteration_progress'] = normalized
+        if hasattr(self, 'mcts') and self.mcts is not None:
+            self.mcts.set_iteration_progress(normalized)
 
 
     def generate_games(self, num_games: int) -> List[Tuple[List[np.ndarray], List[np.ndarray], List[float], List[Dict]]]:
@@ -1440,6 +1680,7 @@ class SelfPlay:
                         model_path=model_path,
                         game_id=game_id,
                         mcts_config=self.mcts_config,
+                        metrics_logger=self.metrics_logger,
                     )
                     if result is not None:
                         states, policies, values, temp_data, game_history = result
@@ -1450,11 +1691,21 @@ class SelfPlay:
                         if games_completed % max(1, num_games // 10) == 0 or games_completed == num_games:
                             elapsed = time.time() - start_time
                             rate = games_completed / elapsed if elapsed > 0 else 0
-                            self.logger.info(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
+                            # Demoted to DEBUG: redundant with per-worker
+                            # "Game N finished" lines + the supervisor's
+                            # "Completed N/N games" summary.
+                            self.logger.debug(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
                     else:
                         self.logger.warning(f"Game {game_id} returned None result.")
                 except Exception as e:
-                    self.logger.error(f"Error generating game {game_id}: {e}", exc_info=True)
+                    # T4.10: bump the same crash counter the parallel paths
+                    # use so callers can monitor failures uniformly.
+                    self.worker_crash_count += 1
+                    self.logger.error(
+                        f"Error generating game {game_id} "
+                        f"(crash #{self.worker_crash_count}): {e}",
+                        exc_info=True,
+                    )
 
             # Cleanup temp model file
             if 'model_path' in locals() and os.path.exists(model_path):
@@ -1504,6 +1755,7 @@ class SelfPlay:
                                 evaluator,
                                 game_id,
                                 self.mcts_config,
+                                self.metrics_logger,
                             )
                             for game_id in range(num_games)
                         ]
@@ -1518,15 +1770,21 @@ class SelfPlay:
                                             or games_completed == num_games):
                                         elapsed = time.time() - start_time
                                         rate = games_completed / elapsed if elapsed > 0 else 0
-                                        self.logger.info(
+                                        # Demoted to DEBUG: see note above.
+                                        self.logger.debug(
                                             f"Games Generated: {games_completed}/{num_games} "
                                             f"({rate:.2f} games/s)"
                                         )
                                 else:
                                     self.logger.warning("Thread returned None result for a game.")
                             except Exception as e:
+                                # T4.10: count crashed thread workers so the
+                                # supervisor / tests can see infra failures
+                                # rather than silently dropping games.
+                                self.worker_crash_count += 1
                                 self.logger.error(
-                                    f"Error processing game result from thread: {e}",
+                                    f"Error processing game result from thread "
+                                    f"(crash #{self.worker_crash_count}): {e}",
                                     exc_info=True,
                                 )
             except Exception as e:
@@ -1583,7 +1841,9 @@ class SelfPlay:
                              if games_completed % max(1, num_games // 10) == 0 or games_completed == num_games:
                                  elapsed = time.time() - start_time
                                  rate = games_completed / elapsed if elapsed > 0 else 0
-                                 self.logger.info(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
+                                 # Demoted to DEBUG: redundant with per-worker
+                                 # "Game N finished" + supervisor "Completed N/N".
+                                 self.logger.debug(f"Games Generated: {games_completed}/{num_games} ({rate:.2f} games/s)")
                                  # Log CPU usage (optional)
                                  # cpu_percent = psutil.cpu_percent(percpu=True)
                                  # avg_cpu = sum(cpu_percent) / len(cpu_percent) if cpu_percent else 0
@@ -1598,8 +1858,18 @@ class SelfPlay:
                              self.logger.warning(f"Worker returned None result for a game.")
 
                     except Exception as e:
-                        # Log errors from worker processes
-                        self.logger.error(f"Error processing game result from worker: {e}", exc_info=True)
+                        # T4.10: count crashed process workers (e.g. worker
+                        # raised, was killed by OOM, or exited via os._exit).
+                        # Pool resources inside the dead worker process die
+                        # with it — there's nothing for the parent to
+                        # release — but we still want the crash to be
+                        # observable rather than swallowed.
+                        self.worker_crash_count += 1
+                        self.logger.error(
+                            f"Error processing game result from worker "
+                            f"(crash #{self.worker_crash_count}): {e}",
+                            exc_info=True,
+                        )
 
         except Exception as e:
              self.logger.error(f"Error during parallel game generation: {e}", exc_info=True)
@@ -1649,7 +1919,8 @@ def _run_game_loop(
     (optionally) `local_game_state_pool` — and for cleaning up resources
     that are caller-owned (`network`, `mcts.network`, the pool itself).
     This function only owns the GameState it acquires from the pool /
-    constructs.
+    constructs and is responsible for releasing it on every exit path,
+    including exceptions (T4.10: pool-resource leak hardening).
 
     Returns the same 5-tuple as `play_game_worker`:
         (states, policies, values, temp_data, game_history)
@@ -1664,6 +1935,48 @@ def _run_game_loop(
         from ..memory import reset_game_state
         reset_game_state(state)
 
+    # T4.10: ensure the GameState is returned to its pool on every exit
+    # path (normal return, raised exception). The process-pool worker
+    # creates its pool inside the worker process so a crashed worker
+    # can't leak into the parent — but the thread-pool path shares the
+    # parent process, and any future caller that reuses a pool across
+    # games will leak GameStates without this guard.
+    try:
+        return _run_game_loop_inner(
+            state=state,
+            mcts=mcts,
+            state_encoder=state_encoder,
+            game_id=game_id,
+            worker_logger=worker_logger,
+            use_batched_mcts=use_batched_mcts,
+            mcts_batch_size=mcts_batch_size,
+        )
+    finally:
+        # CppGameState path has no pool — those states fall out of scope
+        # and are GC'd. Only return pool-allocated states.
+        if local_game_state_pool is not None and not use_cpp_engine:
+            try:
+                local_game_state_pool.return_game_state(state)
+            except Exception as cleanup_err:  # pragma: no cover - defensive
+                worker_logger.warning(
+                    f"Game {game_id}: failed to return GameState to pool: "
+                    f"{cleanup_err}"
+                )
+
+
+def _run_game_loop_inner(
+        state,
+        mcts: "MCTS",
+        state_encoder,
+        game_id: int,
+        worker_logger: logging.Logger,
+        use_batched_mcts: bool,
+        mcts_batch_size: int,
+):
+    """Body of the per-game loop. Split from `_run_game_loop` so the
+    GameState-return-to-pool finally block in the outer function has a
+    single ownership boundary regardless of how the loop exits.
+    """
     states: List[np.ndarray] = []
     policies: List[np.ndarray] = []
     players = []
@@ -1768,11 +2081,8 @@ def _run_game_loop(
                 f"hits={cs['hits']} misses={cs['misses']} size={cs['size']}/{cs['capacity']}"
             )
 
-    # Return the GameState to its pool if applicable. CppGameState path
-    # has no pool — those states fall out of scope and are GC'd.
-    if local_game_state_pool is not None and not use_cpp_engine:
-        local_game_state_pool.return_game_state(state)
-
+    # GameState is returned to its pool by `_run_game_loop`'s finally
+    # block (T4.10), so this body just produces the result tuple.
     return states, policies, values, temp_data, game_history
 
 
@@ -1780,9 +2090,15 @@ def play_game_worker(
         model_path: str,
         game_id: int,
         mcts_config: Dict,
+        metrics_logger=None,
 ) -> Optional[Tuple[List[np.ndarray], List[np.ndarray], float, Dict, List[Dict]]]:
     """
     Memory-optimized worker function for self-play game generation.
+
+    ``metrics_logger`` is only honoured when this function runs in the parent
+    process (sequential mode, ``num_workers=0``). In process-pool dispatch the
+    parent must not pass a logger — it isn't picklable and the worker lives
+    in another process.
     """
     # Configure minimal logging to reduce memory overhead
     worker_logger = logging.getLogger(f"Worker-{game_id}")
@@ -1862,7 +2178,14 @@ def play_game_worker(
                            if k not in ['use_batched_mcts', 'mcts_batch_size',
                                         'use_enhanced_encoding', 'use_cpp_engine']}
 
-        mcts = MCTS(network=network, game_state_pool=local_game_state_pool, **mcts_init_config)
+        # W2 B1: only the in-process (sequential) caller can pass a logger
+        # safely; process-pool callers pass None to avoid a pickling error.
+        mcts = MCTS(
+            network=network,
+            game_state_pool=local_game_state_pool,
+            metrics_logger=metrics_logger,
+            **mcts_init_config,
+        )
 
         # Run the shared game loop. _run_game_loop owns the GameState
         # lifecycle; this function still owns `network` and `mcts` and
@@ -1905,6 +2228,7 @@ def play_game_thread(
         evaluator,
         game_id: int,
         mcts_config: Dict,
+        metrics_logger=None,
 ) -> Optional[Tuple[List[np.ndarray], List[np.ndarray], List[float], Dict, List[Dict]]]:
     """Thread-pool sibling of `play_game_worker`.
 
@@ -1928,6 +2252,12 @@ def play_game_thread(
             use `play_game_worker` instead.
         game_id: integer game index for logging.
         mcts_config: same dict shape `play_game_worker` consumes.
+        metrics_logger: optional parent-process MetricsLogger (or
+            `_SupervisorMetricsProxy`). Threads share memory with the
+            parent, so the per-MCTS B1 telemetry (`mcts/effective_child_visits`)
+            can be logged straight into the parent's sidecar. None ⇒ no
+            scalar logging from this worker (back-compat for callers that
+            don't have a logger to share).
     """
     worker_logger = logging.getLogger(f"Thread-{game_id}")
     worker_logger.setLevel(logging.INFO)
@@ -1955,10 +2285,15 @@ def play_game_thread(
 
         # The shared evaluator routes inference; MCTS still needs the
         # network reference for its state_encoder.
+        # W2 B1: forward the parent's metrics_logger so this worker's MCTS
+        # actually emits mcts/effective_child_visits (the threaded-path
+        # MCTS was previously created without a logger, which is why the
+        # Wave 2 sidecar showed 0 entries despite 4 call sites).
         mcts = MCTS(
             network=network,
             game_state_pool=local_game_state_pool,
             evaluator=evaluator,
+            metrics_logger=metrics_logger,
             **mcts_init_config,
         )
 

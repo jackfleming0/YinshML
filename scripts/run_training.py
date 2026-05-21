@@ -428,9 +428,23 @@ def main() -> None:
     # Compute the cosine horizon from the outer training loop's full epoch count
     # so the LR curve is scaled to the run, not to a single iteration.
     mode_settings['total_epochs'] = num_iterations * epochs_per_iteration
+    # Tier 3 #6: Supervisor needs total_iterations to compute iteration_progress
+    # for iteration-aware Dirichlet noise tapering. Stored in mode_settings so
+    # the runner stays the only seat that knows the loop bounds.
+    mode_settings['total_iterations'] = num_iterations
 
-    # Instantiate network and supervisor
-    network = NetworkWrapper(device=device, use_enhanced_encoding=use_enhanced_encoding)
+    # Instantiate network and supervisor. When warm-starting via
+    # --init-checkpoint, pass model_path so NetworkWrapper auto-detects
+    # num_channels / num_blocks / input_channels from the state_dict
+    # (e.g. for a 256x18 supervised init checkpoint). Without this, the
+    # network gets built at the default 256x12 and load_model rejects
+    # the larger checkpoint.
+    init_path_for_construct = init_checkpoint_to_load if init_checkpoint_to_load is not None else None
+    network = NetworkWrapper(
+        model_path=str(init_path_for_construct) if init_path_for_construct else None,
+        device=device,
+        use_enhanced_encoding=use_enhanced_encoding,
+    )
     # Attach difficulty presets for export metadata
     network.difficulty_presets = cfg.get('difficulty_presets', {})
     supervisor = TrainingSupervisor(

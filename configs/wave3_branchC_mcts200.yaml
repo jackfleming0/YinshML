@@ -1,0 +1,101 @@
+# wave3_branchC_mcts200.yaml — Wave 3 Branch C: bet on target search depth.
+#
+# Hypothesis under test: self-play target quality is the bottleneck. With
+# MCTS-48 as the teacher, the network plateaus at seed quality (67.5%).
+# Stronger teacher (MCTS-200) should produce policy/value targets the
+# network can learn from to exceed seed.
+#
+# Setup = wave3_branchB_prime_low_wilson.yaml + three coupled changes:
+#   - self_play.num_simulations: 48 -> 200  (early-game search depth)
+#   - self_play.late_simulations: 32 -> 100 (late-game search depth)
+#   - self_play.games_per_iteration: 200 -> 100  (compensate for ~4x cost)
+#
+# Wall time estimate: B''s self-play was ~3h/iter at MCTS-48. At MCTS-200
+# search cost should scale ~4x per game, but with games_per_iteration halved,
+# net ~2x per iter -> ~6h/iter. 5 iters x 6h + train/anchor overhead ~ 30h.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_wave3_branchC
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 200       # <-- C knob: was 48
+  late_simulations: 100      # <-- C knob: was 32
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 0
+  use_shared_evaluator: false
+  games_per_iteration: 100   # <-- C knob: was 200 (compensates for ~4x cost)
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 20
+  promotion_threshold: 0.20
+  tournament_sliding_window: 3
+  eval_seed: 20260518
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1

@@ -548,11 +548,12 @@ class MemoryMappedExperienceBuffer:
         policy_size: int = 213,
         create_if_missing: bool = True,
         lock_timeout_ms: int = 1000,
-        config: Optional[BufferConfig] = None
+        config: Optional[BufferConfig] = None,
+        max_oversampling: Optional[float] = None,
     ):
         """
         Initialize memory-mapped experience buffer.
-        
+
         Args:
             file_path: Path to buffer file
             capacity: Maximum number of experiences to store
@@ -561,6 +562,13 @@ class MemoryMappedExperienceBuffer:
             create_if_missing: Whether to create file if it doesn't exist
             lock_timeout_ms: Timeout for acquiring locks in milliseconds
             config: Advanced configuration options (optional)
+            max_oversampling: Optional cap on the per-phase combined weight
+                (`user_weight * inverse_freq_weight`) used by
+                `_weighted_sample_by_phase`. Without a cap, a phase that
+                accounts for ~5% of the buffer (e.g. RING_PLACEMENT)
+                receives ~20× oversampling — extreme overfitting on rare
+                phases. A typical safe value is 4.0; ``None`` (default)
+                preserves the legacy uncapped behavior.
         """
         self.file_path = Path(file_path)
         self.capacity = capacity
@@ -611,6 +619,17 @@ class MemoryMappedExperienceBuffer:
             ExperiencePhase.MAIN_GAME: 1.0,
             ExperiencePhase.RING_REMOVAL: 1.0
         }
+        # T3.7: cap on per-phase combined weight in _weighted_sample_by_phase.
+        # ``None`` preserves the legacy uncapped behavior; a positive float
+        # clips `user_weight * inverse_freq_weight` per phase before the
+        # per-sample weights are materialized. See `set_max_oversampling`.
+        self._max_oversampling: Optional[float] = (
+            float(max_oversampling) if max_oversampling is not None else None
+        )
+        if self._max_oversampling is not None and self._max_oversampling <= 0:
+            raise ValueError(
+                f"max_oversampling must be positive or None, got {max_oversampling}"
+            )
         
         # Prioritized replay components
         self._priority_weights: Dict[str, float] = {}  # experience_id -> priority
@@ -1366,14 +1385,24 @@ class MemoryMappedExperienceBuffer:
         # Calculate inverse frequency weights to balance phases
         total = sum(phase_counts.values())
         inverse_freq_weights = {phase: total / max(count, 1) for phase, count in phase_counts.items()}
-        
-        # Apply user-provided weights
+
+        # Apply user-provided weights, optionally capping the combined per-phase
+        # weight (T3.7). Without a cap, a phase that's 5% of the buffer gets
+        # ~20× oversampling, which collapses the effective batch onto a tiny
+        # set of rare-phase positions and overfits hard. The cap is applied
+        # *per phase* on `user_weight * inverse_freq_weight` before recency
+        # and sampling-temperature multipliers are layered in below — those
+        # are bounded (≤1.5×) so the per-phase cap dominates.
+        max_oversampling = self._max_oversampling
         combined_weights = {}
         for phase in ExperiencePhase:
             phase_name = phase.name
             user_weight = phase_weights.get(phase_name, phase_weights.get(phase.name.lower(), 1.0))
             freq_weight = inverse_freq_weights.get(phase, 1.0)
-            combined_weights[phase] = user_weight * freq_weight
+            combined = user_weight * freq_weight
+            if max_oversampling is not None and combined > max_oversampling:
+                combined = max_oversampling
+            combined_weights[phase] = combined
         
         # Calculate recency weights (more recent experiences get higher weight)
         if timestamps:
@@ -1717,11 +1746,25 @@ class MemoryMappedExperienceBuffer:
     def set_phase_weights(self, weights: Dict[str, float]) -> None:
         """
         Set weights for different game phases during sampling.
-        
+
         Args:
             weights: Dictionary mapping phase names to weights
         """
         self._phase_weights = weights.copy()
+
+    def set_max_oversampling(self, max_oversampling: Optional[float]) -> None:
+        """
+        Set the per-phase combined-weight cap used by `_weighted_sample_by_phase`
+        (T3.7). ``None`` disables the cap (legacy behavior); a positive float
+        clips `user_weight * inverse_freq_weight` per phase.
+        """
+        if max_oversampling is not None and max_oversampling <= 0:
+            raise ValueError(
+                f"max_oversampling must be positive or None, got {max_oversampling}"
+            )
+        self._max_oversampling = (
+            float(max_oversampling) if max_oversampling is not None else None
+        )
 
     def get_oldest_experiences(self, count: int) -> List[ExperienceRecord]:
         """

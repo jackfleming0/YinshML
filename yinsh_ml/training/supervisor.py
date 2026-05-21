@@ -39,6 +39,7 @@ from ..utils.encoding import StateEncoder
 from ..game.constants import Player, PieceType
 from ..game.game_state import GameState
 from ..utils.metrics_manager import TrainingMetrics # Keep if used for internal tracking
+from ..utils.metrics_logger import MetricsLogger
 from ..utils.tournament import ModelTournament, _canon # Import _canon if used directly
 from ..utils.manifest import (
     build_launch_manifest,
@@ -60,6 +61,122 @@ logger = logging.getLogger("TrainingSupervisor")
 # Make sure root logger is configured if running supervisor standalone
 if not logging.getLogger().hasHandlers():
      logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+
+class _SupervisorMetricsProxy:
+    """Duck-typed metrics-logger surface used by the tournament module.
+
+    Wave-1 T5.4 introduced this proxy to route deterministic-collapse alerts
+    (``log_event`` / ``log_scalar``) into the supervisor's experiment-tracker
+    path. Wave-2 (#12 / #13) extends it to also delegate the B2
+    value-outcome-correlation API (``log_eval_value_pair`` /
+    ``compute_and_log_value_outcome_correlation``) plus iteration-boundary
+    calls (``start_iteration`` / ``save_iteration``) so the tournament can
+    treat the proxy as a complete MetricsLogger.
+
+    Architecture: experiment-tracker forwarding stays on the proxy (it owns
+    the tracker handle via the supervisor), while everything else is
+    delegated to the real ``MetricsLogger`` instance the supervisor created
+    in ``__init__``. The same scalar/event is also mirrored to the real
+    logger so it persists into ``metrics/iteration_<N>.json`` alongside the
+    B1/B3 streams. A bare proxy without a backing logger still works (used
+    only by older unit tests) — the delegating methods no-op in that case.
+
+    Implemented as a separate class (not the supervisor itself) to avoid
+    enlarging ``TrainingSupervisor``'s public surface or creating a circular
+    dep with ``yinsh_ml.utils.tournament``.
+    """
+
+    def __init__(self, supervisor: "TrainingSupervisor",
+                 metrics_logger: Optional[MetricsLogger] = None):
+        self._supervisor = supervisor
+        # Backing MetricsLogger; bound by the supervisor once the real
+        # logger is constructed. May be None in older tests that don't wire
+        # one up — delegating methods guard for that.
+        self._metrics_logger = metrics_logger
+
+    def log_event(self, event_name: str, severity: str = 'info',
+                  iteration: Optional[int] = None,
+                  details: Optional[Dict] = None) -> None:
+        # Always log to python logger so the event lands in the run log.
+        msg = f"[event:{event_name}] iter={iteration} details={details}"
+        log = self._supervisor.logger
+        if severity == 'error':
+            log.error(msg)
+        elif severity == 'warning':
+            log.warning(msg)
+        else:
+            log.info(msg)
+        # Forward as a counter to the experiment tracker (1.0 per emission).
+        try:
+            self._supervisor._log_metric_safe(
+                f'event/{event_name}', 1.0, iteration
+            )
+        except Exception as e:  # never fail eval on metrics routing
+            log.warning(f"Failed to forward event '{event_name}' to tracker: {e}")
+        # Mirror to the real MetricsLogger so the event lands in the JSON
+        # sidecar (events list) for post-run inspection.
+        if self._metrics_logger is not None:
+            try:
+                self._metrics_logger.log_event(
+                    event_name, severity=severity,
+                    iteration=iteration, details=details,
+                )
+            except Exception as e:
+                log.warning(
+                    f"Failed to mirror event '{event_name}' to MetricsLogger: {e}"
+                )
+
+    def log_scalar(self, name: str, value: float,
+                   iteration: Optional[int] = None) -> None:
+        try:
+            self._supervisor._log_metric_safe(name, float(value), iteration)
+        except Exception as e:
+            self._supervisor.logger.warning(
+                f"Failed to forward scalar '{name}' to tracker: {e}"
+            )
+        # Mirror to the real MetricsLogger so this scalar lands in the JSON
+        # sidecar alongside B1/B3 streams.
+        if self._metrics_logger is not None:
+            try:
+                self._metrics_logger.log_scalar(name, float(value), iteration=iteration)
+            except Exception as e:
+                self._supervisor.logger.warning(
+                    f"Failed to mirror scalar '{name}' to MetricsLogger: {e}"
+                )
+
+    # -- Delegating methods (#12 fix) -------------------------------------
+    # The tournament's anchor-eval path (ecc49e9) calls these directly on
+    # whatever metrics_logger the supervisor passed. Pre-fix the proxy
+    # didn't expose them and the call raised AttributeError mid-eval.
+
+    def log_eval_value_pair(self, root_value: float,
+                            terminal_outcome: float) -> None:
+        if self._metrics_logger is None:
+            return
+        self._metrics_logger.log_eval_value_pair(root_value, terminal_outcome)
+
+    def compute_and_log_value_outcome_correlation(
+        self,
+        step: Optional[int] = None,
+        clear: bool = True,
+        metric_name: str = 'eval/value_outcome_correlation',
+    ) -> Optional[float]:
+        if self._metrics_logger is None:
+            return None
+        return self._metrics_logger.compute_and_log_value_outcome_correlation(
+            step=step, clear=clear, metric_name=metric_name,
+        )
+
+    def start_iteration(self, iteration: int) -> None:
+        if self._metrics_logger is None:
+            return
+        self._metrics_logger.start_iteration(iteration)
+
+    def save_iteration(self) -> None:
+        if self._metrics_logger is None:
+            return
+        self._metrics_logger.save_iteration()
 
 
 class TrainingSupervisor:
@@ -134,6 +251,21 @@ class TrainingSupervisor:
             mode_settings = {}
         self.mode_settings = mode_settings  # <<< STORE mode_settings AS INSTANCE VARIABLE
         self.full_config = full_config
+
+        # `verbose_logging` knob: when True, flip the noisy YinshML loggers
+        # to DEBUG so per-game MCTS init / pool resize / Value Diagnostics
+        # detail / [Memory] / Cache-cleared lines all become visible. Default
+        # False = trim noise (~10x volume reduction). Read from mode_settings.
+        if self.mode_settings.get("verbose_logging", False):
+            for name in (
+                "MCTS",
+                "SelfPlay",
+                "YinshTrainer",
+                "yinsh_ml.memory.adaptive",
+                "yinsh_ml.memory.tensor_pool",
+                "yinsh_ml.memory.game_state_pool",
+            ):
+                logging.getLogger(name).setLevel(logging.DEBUG)
 
         self.logger.info(f"Initializing TrainingSupervisor in '{self.save_dir}'")
 
@@ -265,10 +397,31 @@ class TrainingSupervisor:
             'RING_REMOVAL': 1.0
         })
         self.logger.info(f"Phase weights: {self.phase_weights}")
+        # T3.7: optional cap on per-phase sampling weight. ``None`` (default)
+        # preserves legacy uncapped behavior. A typical safe value is 4.0:
+        # at 5% RING_PLACEMENT frequency the inverse-frequency multiplier
+        # in the mmap buffer path would otherwise hit ~20×, collapsing the
+        # effective batch onto rare-phase positions.
+        max_oversampling_cfg = self.mode_settings.get('max_oversampling', None)
+        max_oversampling = (
+            float(max_oversampling_cfg) if max_oversampling_cfg is not None else None
+        )
 
         # ==================================================================
         # 2. Instantiate Components with Extracted Parameters
         # ==================================================================
+
+        # MetricsLogger (#13 fix): central B1/B2/B3 telemetry sink. Wired
+        # into SelfPlay → MCTS (B1 effective_child_visits), trainer (B3
+        # policy_target_entropy), and the tournament path via the proxy
+        # (B2 value-outcome correlation, deterministic-collapse routing).
+        # save_dir=self.save_dir → creates self.save_dir/metrics/iteration_<N>.json.
+        # Created here (before SelfPlay / YinshTrainer ctors) so we can hand
+        # the same instance to every downstream consumer.
+        self.metrics_logger = MetricsLogger(save_dir=self.save_dir, debug=False)
+        self.logger.info(
+            f"Initialized MetricsLogger at {self.save_dir / 'metrics'}"
+        )
 
         # Extract evaluation mode parameters
         evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
@@ -302,6 +455,20 @@ class TrainingSupervisor:
         epsilon_mix_start = float(self.mode_settings.get('epsilon_mix_start', 0.25))
         epsilon_mix_end = float(self.mode_settings.get('epsilon_mix_end', 0.0))
         epsilon_mix_taper_moves = int(self.mode_settings.get('epsilon_mix_taper_moves', 20))
+        # Iteration-aware Dirichlet noise tapering (Tier 3 #6). Defaults of
+        # 1.0 / 1.0 are a no-op; set `epsilon_mix_iteration_end < 1.0` (e.g.
+        # 0.3 for 70% noise reduction at the last iteration) to opt in.
+        # `total_iterations` is read so `train_iteration` can compute progress
+        # without depending on the runner pushing the value in.
+        epsilon_mix_iteration_start = float(
+            self.mode_settings.get('epsilon_mix_iteration_start', 1.0)
+        )
+        epsilon_mix_iteration_end = float(
+            self.mode_settings.get('epsilon_mix_iteration_end', 1.0)
+        )
+        self._total_iterations: int = int(
+            self.mode_settings.get('total_iterations', 0)
+        )
         # Probabilistic fast/slow sim split. Default off; opt-in via config when
         # you want to spend less compute on the bulk of moves and concentrate
         # search where it matters. RiverNewbury default: fast=20, prob=0.75.
@@ -339,6 +506,8 @@ class TrainingSupervisor:
             'epsilon_mix_start': epsilon_mix_start,
             'epsilon_mix_end': epsilon_mix_end,
             'epsilon_mix_taper_moves': epsilon_mix_taper_moves,
+            'epsilon_mix_iteration_start': epsilon_mix_iteration_start,
+            'epsilon_mix_iteration_end': epsilon_mix_iteration_end,
             'root_policy_temp': root_policy_temp,
             'use_cpp_engine': use_cpp_engine,
         }
@@ -347,8 +516,8 @@ class TrainingSupervisor:
             network=self.network,
             num_workers=self._compute_num_workers(),
             game_state_pool=self.game_state_pool,  # Pass memory pool
+            metrics_logger=self.metrics_logger,  # #13: B1 telemetry sink
             **_mcts_config_for_init # Pass the explicitly constructed dict
-            # metrics_logger=... , mcts_metrics=... # Add if needed
         )
 
         self.logger.info(f"SelfPlay Initialized with Evaluation Mode: {evaluation_mode} (heuristic_weight={heuristic_weight:.3f})")
@@ -386,11 +555,12 @@ class TrainingSupervisor:
             search_consistency_long_sims=search_consistency_long_sims,
             search_consistency_batch_size=search_consistency_batch_size,
             search_consistency_warmup_iters=search_consistency_warmup_iters,
+            max_oversampling=max_oversampling,
             # --- Pass LR info if Trainer sets up optimizers/schedulers ---
             # base_lr = base_lr,
             # lr_schedule = lr_schedule,
             # warmup_steps = warmup_steps
-            # metrics_logger=self.metrics_logger, # If using a shared logger instance
+            metrics_logger=self.metrics_logger,  # #13: B3 telemetry sink
         )
 
         self.logger.info(f"Trainer initialized with buffer size: {max_buffer_size:,} samples "
@@ -437,6 +607,14 @@ class TrainingSupervisor:
         self.best_model_path: Optional[Path] = None
         # Save best model directly in the run directory for simplicity
         self.best_model_save_path: Path = self.save_dir / "best_model.pt"
+        # T4.11: filesystem mtimes recorded the last time we wrote the
+        # best-model checkpoints. Compared against the on-disk mtimes
+        # before a gate revert to detect corruption / stale state files.
+        # `None` means "no record yet" — older state files written before
+        # T4.11 will load with these as None and the revert check
+        # silently skips (backward compatible).
+        self.best_model_path_mtime: Optional[float] = None
+        self.best_model_save_path_mtime: Optional[float] = None
         self._iteration_counter: int = 0 # Initialize iteration counter
 
         # --- Checkpoint Retention ---
@@ -466,6 +644,26 @@ class TrainingSupervisor:
             self.mode_settings.get('reset_optimizer_on_revert', True)
         )
 
+        # T4.11: behavior when the recorded best_model mtime doesn't match
+        # what's on disk at revert time. Three modes:
+        #   'fail'           - log + raise so the corruption is loud (default)
+        #   'keep_rejected'  - log + skip the revert; keep current weights
+        #   'force_revert'   - log a warning + revert anyway (legacy behavior)
+        # Picked for the warm-start regime where a silent stale revert can
+        # quietly destroy a run; fail-fast surfaces the disk inconsistency
+        # before further iterations bake it in.
+        self.gate_revert_on_mtime_mismatch: str = str(
+            self.mode_settings.get('gate_revert_on_mtime_mismatch', 'fail')
+        )
+        if self.gate_revert_on_mtime_mismatch not in {
+            'fail', 'keep_rejected', 'force_revert'
+        }:
+            raise ValueError(
+                f"gate_revert_on_mtime_mismatch must be one of "
+                f"'fail' | 'keep_rejected' | 'force_revert', got "
+                f"{self.gate_revert_on_mtime_mismatch!r}"
+            )
+
         # --- Absolute Evaluation Anchor (CLOUD_TRAINING_PLAN §1.3) ---
         # Fixed opponent per iteration so we can track absolute strength
         # independent of the relative Elo pool. See
@@ -490,6 +688,24 @@ class TrainingSupervisor:
         # strength metric since it matches deployment behavior.
         self.anchor_mcts_enabled: bool = bool(self.mode_settings.get('anchor_mcts_enabled', False))
         self.anchor_mcts_simulations: int = int(self.mode_settings.get('anchor_mcts_simulations', 64))
+        # T4.9: candidate move-selection temperature for the raw-policy eval.
+        # Default 0.5 — argmax (0.0) silently produces the deterministic-side
+        # artifact where every game on a side replays the same line. 0.5 is
+        # enough variance to surface real strength while still being heavily
+        # skewed toward the network's preferred move. The MCTS-vs-anchor
+        # eval ignores this (it uses temperature=0.0 on the visit-distribution
+        # by design, which is the deployment behavior).
+        self.anchor_eval_temperature: float = float(
+            self.mode_settings.get('anchor_eval_temperature', 0.5)
+        )
+        # T4.9 dual-mode eval: when True, every anchor pass runs BOTH
+        # raw-policy and MCTS against the same anchor slate so dashboards
+        # see both Elo numbers. Default True (the spec defaults canonical
+        # recipes ON) — doubles anchor eval cost but the observability
+        # win is big and anchor eval is bounded (minutes, not hours).
+        self.anchor_dual_eval_enabled: bool = bool(
+            self.mode_settings.get('anchor_dual_eval_enabled', True)
+        )
         # Most recent candidate anchor win rate — consumed by
         # run_training.py → finalize_manifest at the end of the run.
         # Set from MCTS eval when enabled, else from raw-policy eval.
@@ -498,6 +714,16 @@ class TrainingSupervisor:
         # --- Experiment Tracking ---
         self.experiment_tracker = None
         self.experiment_id = None
+
+        # T5.4 + #12 fix: metrics-logger proxy passed to the tournament
+        # module. log_event / log_scalar forward to the experiment tracker
+        # AND mirror to the real MetricsLogger; the B2 correlation API
+        # (log_eval_value_pair / compute_and_log_value_outcome_correlation)
+        # and iteration-boundary calls (start_iteration / save_iteration)
+        # delegate to the real MetricsLogger instance constructed above.
+        self._tournament_metrics_proxy = _SupervisorMetricsProxy(
+            self, metrics_logger=self.metrics_logger,
+        )
 
         self._load_best_model_state() # Load previous state if exists for this run directory
         self.logger.info("=== Training Supervisor Initialized ===")
@@ -556,7 +782,7 @@ class TrainingSupervisor:
         self.logger.info(f"  TensorPool: {tensor_pool_size} initial, {tensor_pool_size * 2} max")
         self.logger.info(f"  Workers: {num_workers}")
 
-    def _log_mps_memory(self, phase_name: str = ""):
+    def _log_mps_memory(self, phase_name: str = "", level: Optional[int] = None):
         """Log a one-line memory snapshot: RSS + MPS driver/current + buffer size.
 
         Consolidates process RSS, MPS allocator state, and replay-buffer size so
@@ -564,6 +790,10 @@ class TrainingSupervisor:
 
         Args:
             phase_name: Name of the phase for logging context
+            level: explicit logging level. ``None`` honours the supervisor's
+                ``verbose_logging`` mode_setting — INFO when verbose, else
+                DEBUG (so only the end-of-iter snapshot called explicitly with
+                ``logging.INFO`` survives the trim).
         """
         parts = []
         try:
@@ -590,7 +820,13 @@ class TrainingSupervisor:
             pass
 
         if parts:
-            self.logger.info(f"[Memory] {phase_name}: {', '.join(parts)}")
+            if level is None:
+                level = (
+                    logging.INFO
+                    if self.mode_settings.get("verbose_logging", False)
+                    else logging.DEBUG
+                )
+            self.logger.log(level, f"[Memory] {phase_name}: {', '.join(parts)}")
 
     def _clear_memory_cache(self, phase_name: str = ""):
         """Clear PyTorch memory caches to free up memory with aggressive tensor cleanup.
@@ -644,10 +880,17 @@ class TrainingSupervisor:
                 tensor_count_after = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
                 tensors_freed = tensor_count_before - tensor_count_after
                 if phase_name:
-                    self.logger.info(f"Cache cleared after {phase_name}: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
+                    # Demoted: fires multiple times per iteration. Use
+                    # `verbose_logging: true` to surface.
+                    _level = (
+                        logging.INFO
+                        if self.mode_settings.get("verbose_logging", False)
+                        else logging.DEBUG
+                    )
+                    self.logger.log(_level, f"Cache cleared after {phase_name}: {memory_after:.1f} MB (freed {memory_freed:.1f} MB), {tensor_count_after} tensors (freed {tensors_freed})")
         except:
             if phase_name:
-                self.logger.info(f"Memory cache cleared after {phase_name}")
+                self.logger.debug(f"Memory cache cleared after {phase_name}")
 
     def cleanup_memory_pools(self):
         """Clean up memory pools and release all resources."""
@@ -679,6 +922,15 @@ class TrainingSupervisor:
         """
         self.experiment_tracker = tracker
         self.experiment_id = experiment_id
+        # Forward to the real MetricsLogger so its own log_scalar / log_event
+        # also fan out to the tracker (B1 / B3 streams that bypass the proxy).
+        if self.metrics_logger is not None:
+            try:
+                self.metrics_logger.set_experiment_tracker(tracker, experiment_id)
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to forward experiment tracker to MetricsLogger: {e}"
+                )
         self.logger.info(f"Experiment tracker set with experiment ID: {experiment_id}")
 
     def _log_metric_safe(self, metric_name: str, value: float, iteration: int = None):
@@ -746,28 +998,36 @@ class TrainingSupervisor:
         current_iteration = self._iteration_counter
         self.logger.info(f"\n{'=' * 15} Starting Iteration {current_iteration} {'=' * 15}")
 
-        # Detailed memory diagnostics at iteration start
+        # #13: open the MetricsLogger iteration so B1/B2/B3 scalars + events
+        # land in this iteration's bucket and get flushed at end-of-iteration.
+        try:
+            self.metrics_logger.start_iteration(current_iteration)
+        except Exception as e:
+            self.logger.warning(f"metrics_logger.start_iteration failed: {e}")
+
+        # Detailed memory diagnostics at iteration start. Compacted from a
+        # 4-5 line block into a single line — full breakdown still available
+        # at DEBUG via `verbose_logging: true`.
         try:
             import gc
-            self.logger.info(f"Memory Diagnostics at Iteration {current_iteration} Start:")
-            self.logger.info(f"  Process Memory: {initial_memory_mb:.1f} MB")
-            self.logger.info(f"  Python Objects: {len(gc.get_objects())} objects tracked")
-
-            # Log PyTorch tensor count and memory
+            parts = [f"rss={initial_memory_mb:.0f}MB"]
             if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated() / (1024 * 1024)
                 cached = torch.cuda.memory_reserved() / (1024 * 1024)
-                self.logger.info(f"  CUDA Memory: {allocated:.1f} MB allocated, {cached:.1f} MB cached")
+                parts.append(f"cuda_alloc={allocated:.0f}MB cuda_cached={cached:.0f}MB")
             elif torch.backends.mps.is_available():
-                # MPS doesn't have detailed memory stats, but we can count tensors
                 tensor_count = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
-                self.logger.info(f"  MPS Tensors: {tensor_count} tensors in memory")
-
-            # Log buffer size
+                parts.append(f"mps_tensors={tensor_count}")
             if hasattr(self.trainer, 'experience'):
                 buffer_size = self.trainer.experience.size()
                 max_buffer = self.trainer.experience.max_size
-                self.logger.info(f"  Replay Buffer: {buffer_size:,}/{max_buffer:,} samples ({100*buffer_size/max_buffer:.1f}% full)")
+                parts.append(f"buffer={buffer_size:,}/{max_buffer:,} ({100*buffer_size/max_buffer:.0f}%)")
+            self.logger.info(
+                f"Memory @ iter {current_iteration} start: {', '.join(parts)}"
+            )
+            self.logger.debug(
+                f"  Python Objects: {len(gc.get_objects())} objects tracked"
+            )
         except Exception as e:
             self.logger.warning(f"Failed to collect memory diagnostics: {e}")
 
@@ -782,6 +1042,23 @@ class TrainingSupervisor:
         self.self_play.network = self.network
         # Pass the number of games for this iteration
         self.self_play.current_iteration = current_iteration
+
+        # Iteration-aware Dirichlet noise tapering (Tier 3 #6). Push the
+        # current progress into SelfPlay so MCTS workers can multiply the
+        # move-number-derived epsilon by the iteration factor. Only fires
+        # when total_iterations > 0; otherwise we leave it at None and the
+        # downstream `_compute_epsilon_mix` short-circuits to today's
+        # behavior. Use (current + 1) / total so the LAST iteration gets
+        # progress=1.0 (full reduction), not progress=(N-1)/N.
+        if self._total_iterations > 0:
+            iter_progress = min(
+                1.0, (current_iteration + 1) / float(self._total_iterations)
+            )
+            self.self_play.set_iteration_progress(iter_progress)
+        else:
+            # Be explicit: clear any stale value if total_iterations was
+            # set on a prior run and unset on this one.
+            self.self_play.set_iteration_progress(None)
 
         previous_hw = self.self_play.mcts.heuristic_weight
         hw = self._apply_heuristic_curriculum(current_iteration)
@@ -1192,16 +1469,25 @@ class TrainingSupervisor:
                         prev_ckpt,
                     ))
 
+                # T4.9: dual_eval forces MCTS on so dashboards see both
+                # raw and mcts Elo every iteration. When dual_eval is off
+                # we honor anchor_mcts_enabled as before.
+                run_mcts_pass = self.anchor_mcts_enabled or self.anchor_dual_eval_enabled
                 self.logger.info(
                     f"Running anchor eval: {len(anchor_models)} model(s) vs "
                     f"HeuristicAgent(depth={self.anchor_depth}) x {self.anchor_num_games} games "
-                    f"(seed={self.anchor_seed}, mcts={'on' if self.anchor_mcts_enabled else 'off'})"
+                    f"(seed={self.anchor_seed}, temp={self.anchor_eval_temperature}, "
+                    f"mcts={'on' if run_mcts_pass else 'off'}, "
+                    f"dual_eval={'on' if self.anchor_dual_eval_enabled else 'off'})"
                 )
                 candidate_label = _canon(str(checkpoint_path))
                 # Raw-policy diagnostic. Always runs — fast, isolates the
                 # policy head from search. Print result as soon as it's
                 # available so the operator sees progress before MCTS
                 # eval (which can be 5-10× slower) finishes.
+                # T5.4: pass metrics proxy + iteration so collapse alerts
+                # land in dashboards. T4.9: candidate_temperature=0.5 by
+                # default breaks the deterministic-side mirage.
                 anchor_results = self.tournament_manager.run_anchor_eval_batch(
                     models=anchor_models,
                     num_games=self.anchor_num_games,
@@ -1209,6 +1495,9 @@ class TrainingSupervisor:
                     seed=self.anchor_seed,
                     max_moves_per_game=self.anchor_max_moves_per_game,
                     use_mcts=False,
+                    candidate_temperature=self.anchor_eval_temperature,
+                    metrics_logger=self._tournament_metrics_proxy,
+                    iteration=current_iteration,
                 ) or {}
                 cand_res = anchor_results.get(candidate_label)
                 if cand_res and cand_res.get('games_played', 0) > 0:
@@ -1227,7 +1516,7 @@ class TrainingSupervisor:
                 # labels in metrics.json so both series persist for plotting.
                 anchor_results_mcts: Dict[str, Dict] = {}
                 cand_res_mcts: Optional[Dict] = None
-                if self.anchor_mcts_enabled:
+                if run_mcts_pass:
                     anchor_results_mcts = self.tournament_manager.run_anchor_eval_batch(
                         models=anchor_models,
                         num_games=self.anchor_num_games,
@@ -1236,6 +1525,9 @@ class TrainingSupervisor:
                         max_moves_per_game=self.anchor_max_moves_per_game,
                         use_mcts=True,
                         mcts_simulations=self.anchor_mcts_simulations,
+                        candidate_temperature=self.anchor_eval_temperature,
+                        metrics_logger=self._tournament_metrics_proxy,
+                        iteration=current_iteration,
                     ) or {}
                     cand_res_mcts = anchor_results_mcts.get(candidate_label)
                     if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
@@ -1271,7 +1563,7 @@ class TrainingSupervisor:
                             f"{res['candidate_wins']}/{res['games_played']} "
                             f"= {res['win_rate']:.1%}"
                         )
-                if self.anchor_mcts_enabled:
+                if run_mcts_pass:
                     for lbl, res in anchor_results_mcts.items():
                         if lbl == candidate_label:
                             continue
@@ -1287,19 +1579,28 @@ class TrainingSupervisor:
                 # `anchor_win_rate` tracks the primary metric (MCTS when
                 # enabled, raw-policy otherwise); raw and MCTS are also
                 # logged under explicit suffixes so both series are available.
+                # T4.9: also log anchor_elo_raw / anchor_elo_mcts so
+                # dashboards have a unified Elo axis for both modes.
                 if (
                     candidate_anchor_win_rate is not None
                     and self.experiment_tracker
                     and self.experiment_id
                 ):
                     try:
+                        from ..utils.tournament import win_rate_to_elo_delta
                         iteration_1b = current_iteration + 1
                         self._log_metric_safe(
                             'anchor_win_rate', candidate_anchor_win_rate, iteration_1b
                         )
                         if cand_res and cand_res.get('games_played', 0) > 0:
+                            raw_wr = float(cand_res['win_rate'])
                             self._log_metric_safe(
-                                'anchor_win_rate_raw', float(cand_res['win_rate']), iteration_1b
+                                'anchor_win_rate_raw', raw_wr, iteration_1b
+                            )
+                            self._log_metric_safe(
+                                'anchor_elo_raw',
+                                win_rate_to_elo_delta(raw_wr),
+                                iteration_1b,
                             )
                             self._log_metric_safe(
                                 'anchor_games_played',
@@ -1315,9 +1616,13 @@ class TrainingSupervisor:
                                 'anchor_draws', int(cand_res['draws']), iteration_1b
                             )
                         if cand_res_mcts and cand_res_mcts.get('games_played', 0) > 0:
+                            mcts_wr = float(cand_res_mcts['win_rate'])
                             self._log_metric_safe(
-                                'anchor_win_rate_mcts',
-                                float(cand_res_mcts['win_rate']),
+                                'anchor_win_rate_mcts', mcts_wr, iteration_1b,
+                            )
+                            self._log_metric_safe(
+                                'anchor_elo_mcts',
+                                win_rate_to_elo_delta(mcts_wr),
                                 iteration_1b,
                             )
                     except Exception as e:
@@ -1388,9 +1693,20 @@ class TrainingSupervisor:
                 f"{'PROMOTE' if promote_by_wilson else 'REJECT'}{straddle_flag}"
             )
 
-        # --- Final Promotion Decision Logic (AlphaZero-style: never revert) ---
+        # --- Final Promotion Decision Logic ---
+        # Branches: promote (✅) | kept (➡️) | revert (⏪) | continue (🔄).
+        # The revert branch fires only when `revert_on_gate_failure=True`
+        # AND a valid best_model.pt exists AND the mtime guard allows it.
+        # Otherwise we fall through to AlphaZero-style "continue with
+        # rejected weights" — that's the original default the comment
+        # used to imply (legacy: "never revert").
         promote = False
         kept_current_best = (self.best_model_iteration == candidate_iteration)
+        # W3: track the actual decision taken so the SUMMARY block prints the
+        # truth instead of always saying "no reversion". Set inside each
+        # branch; read in the SUMMARY at the bottom of train_iteration.
+        # Values: 'promoted' | 'kept' | 'reverted' | 'continued'.
+        decision_kind = 'continued'  # safe default; overwritten below
 
         if promote_by_wilson:
             promote = True
@@ -1412,12 +1728,17 @@ class TrainingSupervisor:
 
         # --- Apply Decision ---
         if promote:
+            decision_kind = 'promoted'
             self._promotion_count += 1
             self.best_model_elo = candidate_elo
             self.best_model_iteration = candidate_iteration
             self.best_model_path = checkpoint_path
             if self.best_model_path.exists():
                 self.network.save_model(str(self.best_model_save_path))
+                # T4.11: snapshot the on-disk mtimes immediately after
+                # the writes so a later gate-revert can detect drift.
+                # Read AFTER the save so we capture the post-write value.
+                self._record_best_model_mtimes()
                 self.logger.info(f"✅ NEW BEST: Copied {self.best_model_path.name} to {self.best_model_save_path.name}")
             else:
                 self.logger.error(f"Cannot copy best model: Source checkpoint {self.best_model_path} does not exist!")
@@ -1444,6 +1765,7 @@ class TrainingSupervisor:
                     self.logger.warning(f"Failed to log promotion metrics: {e}")
 
         elif kept_current_best:
+            decision_kind = 'kept'
             self.logger.info(f" Kandidat ({candidate_id_canon}) is already the best model. Keeping current state.")
             self._save_best_model_state()
 
@@ -1470,22 +1792,38 @@ class TrainingSupervisor:
                     f"Reloading best model (iter {self.best_model_iteration}) "
                     f"for next self-play iteration."
                 )
-                try:
-                    self.network.load_model(str(self.best_model_path))
-                    self.logger.info(f"   ✓ Loaded best weights from {self.best_model_path.name}")
-                    if self.reset_optimizer_on_revert:
-                        # Momentum was building in the direction of the rejected
-                        # weights — that direction was bad by definition (gate
-                        # failed), so resetting prevents the next training step
-                        # from immediately marching back into the rejected zone.
-                        self._reinitialize_optimizers()
-                except Exception as exc:
-                    # Don't crash the whole run on a revert failure. Fall back
-                    # to continuous-training behavior with a loud warning.
-                    self.logger.error(
-                        f"Revert failed ({exc}); continuing with rejected weights. "
-                        f"This iteration's self-play data may be poor."
-                    )
+
+                # T4.11: validate the on-disk best-model mtime against the
+                # value we recorded at promotion time. A mismatch means
+                # `best_model.pt` (or the per-iteration checkpoint) was
+                # rewritten or corrupted out from under us, so the bytes
+                # we're about to load may not be the "best" model the
+                # state file is pointing at. Behavior is configurable.
+                # `_check_best_model_mtime_for_revert` raises in 'fail'
+                # mode and returns False in 'keep_rejected' mode.
+                proceed = self._check_best_model_mtime_for_revert()
+                if proceed:
+                    try:
+                        self.network.load_model(str(self.best_model_path))
+                        decision_kind = 'reverted'
+                        self.logger.info(f"   ✓ Loaded best weights from {self.best_model_path.name}")
+                        if self.reset_optimizer_on_revert:
+                            # Momentum was building in the direction of the rejected
+                            # weights — that direction was bad by definition (gate
+                            # failed), so resetting prevents the next training step
+                            # from immediately marching back into the rejected zone.
+                            self._reinitialize_optimizers()
+                    except Exception as exc:
+                        # Don't crash the whole run on a revert failure. Fall back
+                        # to continuous-training behavior with a loud warning.
+                        self.logger.error(
+                            f"Revert failed ({exc}); continuing with rejected weights. "
+                            f"This iteration's self-play data may be poor."
+                        )
+                        # decision_kind stays 'continued' — load_model raised
+                        # before we could flip it to 'reverted'.
+                # If proceed was False (mtime mismatch in 'keep_rejected'
+                # mode), decision_kind stays 'continued' — by design.
             else:
                 if self.revert_on_gate_failure:
                     # Flag was on but we couldn't actually revert (no best
@@ -1530,9 +1868,15 @@ class TrainingSupervisor:
                 except Exception as e:
                     self.logger.warning(f"Failed to log metrics: {e}")
 
-        # Determine active network weights for clarity
-        # AlphaZero-style: always continue with current weights (no reversion)
-        active_iter = candidate_iteration
+        # Determine active network weights for clarity.
+        # If the revert path executed inside the gate-decision branch above,
+        # `self.network` was reloaded from `best_model.pt` and the next
+        # self-play iter will run from those weights — NOT the candidate's.
+        # `decision_kind == 'reverted'` is the source of truth set there.
+        if decision_kind == 'reverted':
+            active_iter = self.best_model_iteration
+        else:
+            active_iter = candidate_iteration
         self.logger.info(f"Active network weights in memory correspond to iteration {active_iter}")
 
         # ------------------------------------------------------------------ #
@@ -1578,7 +1922,10 @@ class TrainingSupervisor:
         # inspectable after the run without rerunning eval. Both raw and
         # MCTS variants persist under separate keys.
         anchor_payload = {'anchor_eval': anchor_results}
-        if self.anchor_mcts_enabled:
+        # T4.9: persist MCTS variant whenever it ran (dual_eval ON or
+        # legacy anchor_mcts_enabled). Without this gate the MCTS payload
+        # would silently disappear from metrics.json under dual-eval.
+        if self.anchor_mcts_enabled or self.anchor_dual_eval_enabled:
             anchor_payload['anchor_eval_mcts'] = anchor_results_mcts
         self._save_metrics(iteration_dir, extra_payload=anchor_payload)
 
@@ -1697,12 +2044,11 @@ class TrainingSupervisor:
                 f"{candidate_anchor_win_rate:.1%}"
             )
         self.logger.info(f"│   Best Model: Iteration {self.best_model_iteration} (ELO {self.best_model_elo:.1f})")
-        if promote:
-            self.logger.info(f"│   Decision: ✅ NEW BEST (promoted to best model)")
-        elif kept_current_best:
-            self.logger.info(f"│   Decision: ➡️  KEPT (already best)")
-        else:
-            self.logger.info(f"│   Decision: 🔄 CONTINUE (AlphaZero-style, no reversion)")
+        # W3: print the actual decision taken, not always "no reversion".
+        # `decision_kind` was set inside the decision branches above.
+        self.logger.info(self._format_decision_line(
+            decision_kind, self.best_model_iteration
+        ))
         self.logger.info(f"│   Active Network: Iteration {active_iter}")
         self.logger.info(f"│")
         self.logger.info(f"│ TIMING")
@@ -1711,6 +2057,15 @@ class TrainingSupervisor:
         self.logger.info(f"│   Breakdown: SelfPlay={game_time:.0f}s, Train={train_time:.0f}s, "
                          f"Other={other_time:.0f}s (tournament, eval, etc.)")
         self.logger.info("="*80 + "\n")
+
+        # #13: flush this iteration's MetricsLogger buffer to
+        # save_dir/metrics/iteration_<N>.json. Failure is non-fatal — the
+        # supervisor's experiment-tracker forwarding already captured the
+        # scalars; the JSON sidecar is the secondary persistence path.
+        try:
+            self.metrics_logger.save_iteration()
+        except Exception as e:
+            self.logger.warning(f"metrics_logger.save_iteration failed: {e}")
 
         # ------------------------------------------------------------------ #
         # 8. RETURN SUMMARY
@@ -1790,28 +2145,21 @@ class TrainingSupervisor:
         except Exception as e:
             self.logger.warning(f"Error clearing gradients/optimizer state: {e}")
 
-        # CRITICAL: Clear all tensor containers (del in loop doesn't work due to Python references)
+        # Clear loss-tracking lists (hold tensor refs); never touch the
+        # model's _buffers. Earlier code unconditionally set every module
+        # buffer to None — including BatchNorm's running_mean / running_var
+        # / num_batches_tracked, which silently destroyed inference: the
+        # next saved checkpoint had no BN stats, so on reload BN fell back
+        # to mean=0 / var=1 and the policy head's effective output became
+        # nonsense (mode collapse to 1-2 logits, or near-uniform). That was
+        # the cloud_run_v1 50/0/0 failure mode. Do NOT reintroduce.
         try:
-            # Clear model's internal buffers and caches
-            if hasattr(self.network, 'network'):
-                # Clear buffers (running stats in BatchNorm, etc.)
-                for module in self.network.network.modules():
-                    if hasattr(module, '_buffers'):
-                        for key in list(module._buffers.keys()):
-                            buffer = module._buffers[key]
-                            if buffer is not None and torch.is_tensor(buffer):
-                                # Re-register as zeros to clear cached tensors
-                                module._buffers[key] = None
-
-            # Clear any cached forward/backward hooks
             if hasattr(self.trainer, 'experience'):
-                # Clear the loss tracking lists which hold tensor references
                 self.trainer.policy_losses.clear()
                 self.trainer.value_losses.clear()
-
-            self.logger.info(f"Cleared model buffers and caches")
+            self.logger.info("Cleared loss-history caches")
         except Exception as e:
-            self.logger.warning(f"Error clearing tensor containers: {e}")
+            self.logger.warning(f"Error clearing loss history: {e}")
 
         # Force garbage collection before empty_cache
         for _ in range(3):
@@ -1974,6 +2322,24 @@ class TrainingSupervisor:
                 self.self_play.network = self.network
                 self.trainer.network = self.network
 
+                # Rebind the EMA shadow's `module` reference to the new
+                # nn.Module. Without this, EMAShadow keeps tracking the
+                # OLD (now-orphaned) module: its state_dict iteration in
+                # `update()` reads frozen values, its `swap_into` puts
+                # those frozen values into the live network at checkpoint
+                # save time, and BN running stats appear to stop updating
+                # entirely — which is exactly the "nbt frozen at 2084
+                # since iter 5" symptom from the 2026-05-07 cloud rerun.
+                # See overnight_watch_log.md for the trace.
+                #
+                # Rebinding (rather than recreating the shadow) preserves
+                # the EMA accumulation history across the reset. Shadow
+                # tensor shapes are identical between OLD and NEW modules
+                # (same architecture), so the existing shadow dict still
+                # matches.
+                if getattr(self.trainer, 'ema', None) is not None:
+                    self.trainer.ema.module = new_network.network
+
                 os.unlink(temp_path)
 
                 # Also reinitialize optimizers after network recreation
@@ -2121,6 +2487,19 @@ class TrainingSupervisor:
                 self.best_model_iteration = state.get('best_model_iteration', -1)
                 best_path_str = state.get('best_model_path')
                 self._iteration_counter = state.get('_iteration_counter', 0) # Load counter
+                # T4.11: optional fields. Missing (legacy state file) →
+                # None → mtime guard skips the check on the first revert
+                # after resume and logs a warning. Subsequent promotions
+                # in this run will populate them.
+                self.best_model_path_mtime = state.get('best_model_path_mtime')
+                self.best_model_save_path_mtime = state.get('best_model_save_path_mtime')
+                if self.best_model_path_mtime is None and best_path_str:
+                    self.logger.warning(
+                        "T4.11: best_model_state.json has no "
+                        "'best_model_path_mtime' field (legacy / pre-T4.11 "
+                        "state file). Mtime guard will skip until the next "
+                        "promotion in this run."
+                    )
 
                 if best_path_str:
                     # Interpret stored path as relative to save_dir (portable across moves).
@@ -2176,7 +2555,11 @@ class TrainingSupervisor:
             'best_model_elo': self.best_model_elo,
             'best_model_iteration': self.best_model_iteration,
             'best_model_path': relative_best_path, # Store relative path or filename
-            '_iteration_counter': self._iteration_counter # Save counter
+            '_iteration_counter': self._iteration_counter, # Save counter
+            # T4.11: filesystem-mtime guard for the gate-revert path. May
+            # be null when no promotion has happened in this run yet.
+            'best_model_path_mtime': self.best_model_path_mtime,
+            'best_model_save_path_mtime': self.best_model_save_path_mtime,
         }
         state_path = self.save_dir / "best_model_state.json"
         try:
@@ -2191,8 +2574,136 @@ class TrainingSupervisor:
         self.best_model_elo = -float('inf')
         self.best_model_iteration = -1
         self.best_model_path = None
+        self.best_model_path_mtime = None
+        self.best_model_save_path_mtime = None
         self._iteration_counter = 0 # Reset counter too
         self.logger.info("Reset best model tracking state.")
+
+    # ------------------------------------------------------------------ #
+    # T4.11 helpers — best-model mtime tracking for the gate-revert path.
+    # ------------------------------------------------------------------ #
+    def _record_best_model_mtimes(self) -> None:
+        """Snapshot on-disk mtimes for the best-model artifacts.
+
+        Called immediately after a successful promotion writes
+        ``best_model.pt`` and reflects the per-iteration checkpoint
+        ``best_model_path``. Read AFTER the writes so the recorded
+        value is the post-write mtime — used later by
+        ``_check_best_model_mtime_for_revert`` to detect drift.
+        """
+        try:
+            if self.best_model_path is not None and self.best_model_path.exists():
+                self.best_model_path_mtime = self.best_model_path.stat().st_mtime
+            else:
+                self.best_model_path_mtime = None
+            if self.best_model_save_path is not None and self.best_model_save_path.exists():
+                self.best_model_save_path_mtime = self.best_model_save_path.stat().st_mtime
+            else:
+                self.best_model_save_path_mtime = None
+        except OSError as e:
+            # Filesystem error reading mtime — clear so the next revert
+            # check goes the "missing record" path rather than a stale
+            # value masquerading as fresh.
+            self.logger.warning(
+                f"T4.11: failed to record best-model mtimes ({e}); "
+                f"skipping mtime guard until next promotion."
+            )
+            self.best_model_path_mtime = None
+            self.best_model_save_path_mtime = None
+
+    def _check_best_model_mtime_for_revert(self) -> bool:
+        """Validate the on-disk best-model mtime against the recorded value.
+
+        Returns True if the caller should proceed with the revert,
+        False if the caller should skip it (keep rejected weights).
+        Raises ``RuntimeError`` when ``gate_revert_on_mtime_mismatch ==
+        'fail'`` and a mismatch is detected.
+
+        Backward compatibility: if no mtime is recorded (e.g. state file
+        was written by a pre-T4.11 supervisor, or the run has never
+        promoted yet), the check is skipped and we proceed.
+        """
+        # Nothing recorded yet → nothing to check. Common on the first
+        # revert of a freshly resumed run from a legacy state file.
+        if self.best_model_path_mtime is None:
+            self.logger.warning(
+                "T4.11: no best_model_path_mtime recorded — skipping the "
+                "mtime guard. (Likely a pre-T4.11 state file or a run "
+                "that has never promoted.)"
+            )
+            return True
+        if self.best_model_path is None or not self.best_model_path.exists():
+            # The .exists() check at the call site already gated this,
+            # but be defensive — a vanished checkpoint is itself a
+            # revert-blocking condition.
+            self.logger.error(
+                "T4.11: best_model_path is missing on disk at revert "
+                "time. Cannot trust the source bytes."
+            )
+            return self._handle_mtime_mismatch(
+                actual=None, recorded=self.best_model_path_mtime,
+                reason="best_model_path missing",
+            )
+        try:
+            actual_mtime = self.best_model_path.stat().st_mtime
+        except OSError as e:
+            self.logger.error(
+                f"T4.11: failed to stat {self.best_model_path} during "
+                f"revert check: {e}"
+            )
+            return self._handle_mtime_mismatch(
+                actual=None, recorded=self.best_model_path_mtime,
+                reason=f"stat() failed: {e}",
+            )
+
+        # Use a tight tolerance — any rewrite advances mtime by far more
+        # than a microsecond. Equality with a small epsilon catches any
+        # filesystem-precision quirks without masking real changes.
+        if abs(actual_mtime - self.best_model_path_mtime) <= 1e-6:
+            return True
+        return self._handle_mtime_mismatch(
+            actual=actual_mtime, recorded=self.best_model_path_mtime,
+            reason="mtime drift",
+        )
+
+    def _handle_mtime_mismatch(
+        self,
+        *,
+        actual: Optional[float],
+        recorded: float,
+        reason: str,
+    ) -> bool:
+        """Apply the ``gate_revert_on_mtime_mismatch`` policy.
+
+        Returns True iff the caller should proceed with the revert.
+        Raises ``RuntimeError`` in 'fail' mode.
+        """
+        actual_str = f"{actual:.6f}" if actual is not None else "<missing>"
+        msg = (
+            f"T4.11: best-model mtime mismatch — "
+            f"recorded={recorded:.6f}, actual={actual_str}, reason={reason}. "
+            f"best_model_path={self.best_model_path}, "
+            f"best_model_iteration={self.best_model_iteration}"
+        )
+        if self.gate_revert_on_mtime_mismatch == 'fail':
+            self.logger.error(msg)
+            raise RuntimeError(
+                f"{msg} | gate_revert_on_mtime_mismatch='fail' — "
+                f"refusing to load potentially corrupted/stale weights."
+            )
+        if self.gate_revert_on_mtime_mismatch == 'keep_rejected':
+            self.logger.error(
+                f"{msg} | gate_revert_on_mtime_mismatch='keep_rejected' — "
+                f"skipping revert; keeping current (rejected) weights."
+            )
+            return False
+        # 'force_revert'
+        self.logger.warning(
+            f"{msg} | gate_revert_on_mtime_mismatch='force_revert' — "
+            f"reverting anyway. Bytes loaded may not match the recorded "
+            f"best model."
+        )
+        return True
 
     def _maybe_sync_run_dir(self) -> None:
         """Shell out to scripts/sync_run.sh if SYNC_RUN_DEST is set.
@@ -2389,6 +2900,42 @@ class TrainingSupervisor:
             self.logger.error(f"Unexpected error calculating ring mobility: {e}", exc_info=True)
             return 0.0
 
+
+    @staticmethod
+    def _format_decision_line(decision_kind: str, best_model_iteration: int) -> str:
+        """Format the iteration-summary "Decision: …" line.
+
+        `decision_kind` is set in the gate-decision branches inside
+        ``train_iteration`` and reflects what actually happened to the
+        network for the next self-play iteration:
+
+        - ``'promoted'``: candidate beat the gate, became the new best.
+        - ``'kept'``: candidate was already the best (idempotent path).
+        - ``'reverted'``: gate failed AND the revert path executed
+          (``revert_on_gate_failure=True`` + best_model.pt exists +
+          load_model succeeded). Next self-play uses ``best_model.pt``.
+        - ``'continued'``: gate failed and we did NOT revert (either
+          ``revert_on_gate_failure=False`` or the revert path bailed).
+          Next self-play uses the rejected candidate weights.
+
+        Pre-W3 this line always said "no reversion" on a failed gate,
+        even when the revert path had executed. That made the iteration
+        SUMMARY unreliable as a record of what the network actually
+        looked like going into the next iter.
+        """
+        if decision_kind == 'promoted':
+            return "│   Decision: ✅ NEW BEST (promoted to best model)"
+        if decision_kind == 'kept':
+            return "│   Decision: ➡️  KEPT (already best)"
+        if decision_kind == 'reverted':
+            return (
+                f"│   Decision: ⏪ REVERTED "
+                f"(gate failed, restored iter {best_model_iteration} for next self-play)"
+            )
+        if decision_kind == 'continued':
+            return "│   Decision: 🔄 CONTINUE (AlphaZero-style, no reversion)"
+        # Defensive: unknown kind — fall through to the safest message.
+        return f"│   Decision: ❓ UNKNOWN (decision_kind={decision_kind!r})"
 
     @staticmethod
     def _wilson_bounds(wins: int, total: int, z: float = 1.96) -> Tuple[float, float]:

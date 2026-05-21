@@ -322,3 +322,216 @@ def test_self_play_puct_q_for_capture_child_has_correct_sign():
     )
     # Concretely:
     assert mid.value() == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------- #
+# last_root_value sign contract (W2 fix)                                       #
+#                                                                             #
+# The legacy backprop convention stores root's value_sum from the *opposite*  #
+# of-root POV ("store -running" at the root branch in `_backpropagate`).      #
+# PUCT only reads `child.value()` so the root storage is invisible to         #
+# selection, but `last_root_value` is consumed externally (e.g. the tournament #
+# B2 value-outcome correlation gate) and the consumers want the AlphaZero-     #
+# standard "side-to-move POV". The Wave 2 cloud run surfaced this as -0.07 to #
+# -0.31 correlations that should have been positive.                          #
+#                                                                             #
+# Post-fix: `search()` and `search_batch()` negate `root.value()` at          #
+# assignment so the public `last_root_value` contract is:                     #
+#                                                                             #
+#     positive  ⇔ side-to-move at the root is winning at the leaves           #
+#                                                                             #
+# These tests pin that contract directly against `_backpropagate` — running   #
+# the full search would also work but is far more expensive.                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_last_root_value_contract_chess_alternating():
+    """Two-ply alternating path. Leaf v=+0.5 in BLACK POV (BLACK is winning
+    at the leaf). After backprop, the public `-root.value()` contract must
+    be NEGATIVE — root's side-to-move (WHITE) is losing.
+
+    Internal state we're checking against (per the legacy convention):
+      i=1 leaf (BLACK): same as parent? i>0 and players[1]==players[0]?
+          BLACK==WHITE → False. value_sum += -running = -0.5.
+          Then players[1]!=players[0] → running flips: running = -0.5.
+      i=0 root (WHITE): no parent. value_sum += -running = -(-0.5) = +0.5.
+
+    So root.value() = +0.5 (opposite-of-root POV — value is high for BLACK).
+    The fix at the assignment site flips this: last_root_value = -0.5,
+    correctly saying "WHITE (side to move) is losing".
+    """
+    mcts = _selfplay_mcts()
+    root, leaf = _make_node(), _make_node()
+    mcts._backpropagate([root, leaf], [Player.WHITE, Player.BLACK], 0.5)
+    # Raw root.value() is in opposite-of-root POV by legacy convention.
+    assert root.value() == pytest.approx(0.5)
+    # The public last_root_value contract negates this.
+    last_root_value = -root.value() if root.visit_count > 0 else 0.0
+    assert last_root_value == pytest.approx(-0.5), (
+        "last_root_value must be in side-to-move POV — WHITE losing means "
+        "last_root_value < 0."
+    )
+
+
+def test_last_root_value_contract_capture_sequence_same_player():
+    """Three-ply same-player path (YINSH capture continuation). Leaf v=+0.7
+    in WHITE POV (WHITE has executed a winning capture sequence). Root is
+    also WHITE. `last_root_value` must be POSITIVE (root's side is winning).
+    """
+    mcts = _selfplay_mcts()
+    root, mid, leaf = _make_node(), _make_node(), _make_node()
+    mcts._backpropagate(
+        [root, mid, leaf],
+        [Player.WHITE, Player.WHITE, Player.WHITE],
+        0.7,
+    )
+    # Legacy: root stores -running = -0.7 (per
+    # test_self_play_backprop_capture_sequence_same_player above).
+    assert root.value() == pytest.approx(-0.7)
+    last_root_value = -root.value() if root.visit_count > 0 else 0.0
+    assert last_root_value == pytest.approx(0.7), (
+        "last_root_value must be in side-to-move POV — WHITE winning at "
+        "every leaf in a same-player chain means last_root_value > 0."
+    )
+
+
+def test_last_root_value_contract_root_only_path():
+    """Degenerate single-node sim (only the legacy branch fires). Leaf v=+0.3
+    in WHITE POV; root is WHITE; `last_root_value` must be +0.3.
+    """
+    mcts = _selfplay_mcts()
+    root = _make_node()
+    mcts._backpropagate([root], [Player.WHITE], 0.3)
+    # Legacy stores -0.3 at the root.
+    assert root.value() == pytest.approx(-0.3)
+    last_root_value = -root.value() if root.visit_count > 0 else 0.0
+    assert last_root_value == pytest.approx(0.3)
+
+
+# --------------------------------------------------------------------------- #
+# Sign-convention canned set (folded W0b)                                     #
+#                                                                             #
+# Belt-and-suspenders coverage for the "good for side-to-move = positive"     #
+# convention documented at self_play.py:1142-1163. Above tests pin individual #
+# states; this set walks a small mixed table and asserts the Pearson          #
+# correlation between `_get_value(state)` and the leaf-player-POV outcome     #
+# computed independently is essentially perfect (>0.95). If a future refactor #
+# accidentally drops the WHITE/BLACK negation (or flips it), the canned-set   #
+# correlation drops below threshold even when individual edge cases happen    #
+# to still align.                                                             #
+# --------------------------------------------------------------------------- #
+
+
+_SIGN_CONVENTION_CANNED_TERMINALS = [
+    # (white_score, black_score, current_player, expected_leaf_pov_outcome)
+    (3, 0, Player.WHITE, 1.0),    # W winning, W to move
+    (3, 0, Player.BLACK, -1.0),   # W winning, B to move
+    (0, 3, Player.BLACK, 1.0),    # B winning, B to move (mirror of #1)
+    (0, 3, Player.WHITE, -1.0),   # B winning, W to move (mirror of #2)
+    (3, 1, Player.WHITE, 2.0 / 3.0),
+    (3, 1, Player.BLACK, -2.0 / 3.0),
+    (1, 3, Player.WHITE, -2.0 / 3.0),
+    (1, 3, Player.BLACK, 2.0 / 3.0),
+    (3, 2, Player.WHITE, 1.0 / 3.0),
+    (3, 2, Player.BLACK, -1.0 / 3.0),
+]
+
+
+def _terminal_state_mock(white_score, black_score, current_player):
+    state = MagicMock()
+    state.is_terminal.return_value = True
+    state.white_score = white_score
+    state.black_score = black_score
+    state.current_player = current_player
+    state.get_winner.return_value = (
+        Player.WHITE if white_score > black_score
+        else Player.BLACK if black_score > white_score
+        else None
+    )
+    return state
+
+
+def test_self_play_get_value_canned_set_correlates_with_leaf_pov_outcome():
+    """Walk 10 mixed terminal states and assert _get_value tracks the
+    independently-computed leaf-player-POV outcome with corrcoef > 0.95.
+
+    The expected outcomes encode the convention: positive = good for the
+    side currently to move. If a refactor flips the WHITE/BLACK branch in
+    `_get_value`, the correlation collapses to ~-1.0 — caught here.
+    """
+    mcts = _selfplay_mcts()
+    actual = []
+    expected = []
+    for ws, bs, p, expected_v in _SIGN_CONVENTION_CANNED_TERMINALS:
+        state = _terminal_state_mock(ws, bs, p)
+        v = mcts._get_value(state)
+        actual.append(v)
+        expected.append(expected_v)
+
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+
+    # Element-wise sanity (each row of the canned table should match exactly,
+    # since `_get_value` is deterministic and clipped to [-1, 1]).
+    np.testing.assert_allclose(actual, expected, atol=1e-9)
+
+    corr = np.corrcoef(actual, expected)[0, 1]
+    assert corr > 0.95, (
+        f"_get_value sign convention regressed: corrcoef(actual, expected)"
+        f"={corr:.4f}. Convention is 'positive = good for side-to-move' "
+        f"(self_play.py:1142-1163)."
+    )
+
+
+def test_self_play_get_value_winning_side_to_move_always_positive():
+    """For every canned terminal where the side to move is winning, _get_value
+    must be > 0. Conversely, when the side to move is losing, _get_value < 0.
+
+    This is the literal restatement of the convention — if any single row
+    here flips sign, the convention is broken at that edge case even if the
+    overall correlation looks ok.
+    """
+    mcts = _selfplay_mcts()
+    for ws, bs, p, _expected in _SIGN_CONVENTION_CANNED_TERMINALS:
+        state = _terminal_state_mock(ws, bs, p)
+        v = mcts._get_value(state)
+        side_score = ws if p == Player.WHITE else bs
+        opp_score = bs if p == Player.WHITE else ws
+        if side_score > opp_score:
+            assert v > 0, (
+                f"Side {p.name} is winning ({side_score}-{opp_score}) but "
+                f"_get_value={v}. Sign convention broken."
+            )
+        elif side_score < opp_score:
+            assert v < 0, (
+                f"Side {p.name} is losing ({side_score}-{opp_score}) but "
+                f"_get_value={v}. Sign convention broken."
+            )
+        else:
+            assert v == pytest.approx(0.0)
+
+
+def test_search_mcts_get_terminal_value_canned_set_correlates():
+    """Same canned set, applied to ``search/mcts.py::MCTS._get_terminal_value``.
+
+    That implementation reads ``state.get_winner()`` rather than scores, so
+    it can only return {-1, 0, +1} — we collapse the expected outcomes to
+    sign and assert exact match plus positive correlation.
+    """
+    mcts = _search_mcts()
+    actual = []
+    expected_sign = []
+    for ws, bs, p, expected_v in _SIGN_CONVENTION_CANNED_TERMINALS:
+        state = _terminal_state_mock(ws, bs, p)
+        v = mcts._get_terminal_value(state)
+        actual.append(v)
+        expected_sign.append(np.sign(expected_v))
+
+    actual = np.asarray(actual, dtype=np.float64)
+    expected_sign = np.asarray(expected_sign, dtype=np.float64)
+
+    # _get_terminal_value returns ±1 (no draw rows in this canned set).
+    np.testing.assert_allclose(actual, expected_sign, atol=1e-9)
+    # Trivially correlated (exact match), but pin it as the W0b contract.
+    corr = np.corrcoef(actual, expected_sign)[0, 1]
+    assert corr > 0.95

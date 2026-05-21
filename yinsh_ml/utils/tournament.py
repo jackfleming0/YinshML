@@ -5,7 +5,7 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, TYPE_CHECKING
 import torch
 from datetime import datetime
 import json
@@ -17,7 +17,24 @@ from ..game.game_state import GameState
 from ..game.constants import Player
 from .elo_manager import EloTracker, MatchResult
 
+if TYPE_CHECKING:  # type-only import to avoid circular import at runtime
+    from .metrics_logger import MetricsLogger
+
 import math
+
+
+def win_rate_to_elo_delta(win_rate: float) -> float:
+    """Convert a candidate win rate against a fixed opponent into an Elo
+    delta. Used to render anchor eval results as Elo numbers so dashboards
+    can plot both raw-policy and MCTS strength on the same axis.
+
+    Edge cases: 0.0 → -inf, 1.0 → +inf. Clamp to ±999 (~99.9% / 0.1%) so we
+    return a finite, plottable number. The anchor is fixed across iterations,
+    so this is a real Elo delta on the anchor's scale (anchor Elo unchanged).
+    """
+    eps = 1e-3
+    p = max(min(float(win_rate), 1.0 - eps), eps)
+    return 400.0 * math.log10(p / (1.0 - p))
 
 
 def derive_match_seed(base_seed: int, white_id: str, black_id: str, game_num: int) -> int:
@@ -558,6 +575,34 @@ class ModelTournament:
     #
     # Kept as a separate call (not folded into the round-robin) so it
     # survives any future changes to the Elo / promotion-gate logic.
+    # TODO(W1-NEW B2 / W1e): Wire B2 value-outcome correlation here.
+    #
+    # The safeguard wants, per evaluation pass, a Pearson r between:
+    #   (a) MCTS root value at the start of each evaluated position, in the
+    #       POV of the player to move there
+    #   (b) terminal outcome of that game in the same POV (+1 candidate win,
+    #       -1 candidate loss, 0 draw, with sign-flip for white/black-as-
+    #       candidate symmetry)
+    # logged via ``metrics_logger.compute_and_log_value_outcome_correlation()``
+    # at the end of the eval pass.
+    #
+    # Integration points when W1e lands:
+    #   1. Plumb a `MetricsLogger` into `ModelTournament` (constructor arg),
+    #      or set it on the instance from the supervisor right before the
+    #      anchor eval call.
+    #   2. In `run_anchor_eval` (use_mcts=True branch only — raw-policy mode
+    #      has no MCTS root value), after each game:
+    #        rv = game_mcts.last_root_value  # root value at game start
+    #        outcome_in_pov = +1 if winner == candidate_color else -1 if winner else 0
+    #        metrics_logger.log_eval_value_pair(rv, outcome_in_pov)
+    #   3. After the game loop, call
+    #        metrics_logger.compute_and_log_value_outcome_correlation(step=current_iteration)
+    #
+    # NOT done here yet: the W1e workstream is restructuring exactly the
+    # game-loop block where (2) lands, and doing it twice is worse than
+    # waiting. The MetricsLogger API for B2 IS in place (see
+    # ``log_eval_value_pair`` / ``compute_and_log_value_outcome_correlation``)
+    # and is unit-tested, so wiring is a 5-line change once W1e is stable.
     def run_anchor_eval(
         self,
         candidate_network: NetworkWrapper,
@@ -569,6 +614,13 @@ class ModelTournament:
         use_mcts: bool = False,
         mcts_simulations: int = 64,
         heuristic_time_limit_seconds: float = 0.0,
+        # BREAKING (T4.9): default changed 0.0 -> 0.5 so the eval doesn't
+        # silently fall into argmax determinism mirages. Set explicitly to
+        # 0.0 for legacy argmax behavior (and read the deterministic_sides
+        # warning carefully if you do).
+        candidate_temperature: float = 0.5,
+        metrics_logger: Optional["MetricsLogger"] = None,
+        iteration: Optional[int] = None,
     ) -> Dict:
         """Play the candidate network against a fixed HeuristicAgent baseline.
 
@@ -604,6 +656,22 @@ class ModelTournament:
                 COMPLETED depth's best move when the budget is hit, so this
                 is a liveness fix that costs only the depth on positions
                 where depth=3 wasn't reachable anyway.
+            candidate_temperature: Move-selection temperature for the
+                candidate (T4.9). Default 0.5 — argmax (0.0) silently
+                produces the deterministic-side artifact where every game
+                on a side replays the same line, so the win rate measures
+                side-coverage rather than skill. 0.5 is enough variance to
+                surface real strength while still being heavily skewed
+                toward the network's preferred move. Pass 0.0 only when
+                you specifically want to diagnose deterministic behavior.
+            metrics_logger: Optional ``MetricsLogger`` (T5.4). When
+                provided, deterministic-collapse alerts at the end of the
+                eval are routed through ``log_event`` and ``log_scalar`` so
+                they surface in the per-iteration metrics JSON and the
+                experiment tracker — not just the python logger.
+            iteration: Training iteration this eval belongs to. Used to
+                annotate metrics_logger events. Defaults to ``None``
+                (events still emit, just without iteration context).
 
         Returns:
             Dict with keys ``games_played``, ``candidate_wins``,
@@ -710,6 +778,16 @@ class ModelTournament:
         draws = 0
         games_played = 0
         total_moves = 0
+        # Per-side bookkeeping so we can detect the deterministic-side artifact:
+        # when both candidate and heuristic play argmax, every game on a given
+        # side replays the same line, so the eval splits {0/half, half/half}
+        # by side-coverage rather than by skill. We surface that as a warning
+        # so callers don't read a 50% win rate as "tied" when it's really
+        # "wins all white, loses all black, deterministically."
+        per_side_stats = {
+            'white': {'cand_wins': 0, 'games': 0, 'move_counts': []},
+            'black': {'cand_wins': 0, 'games': 0, 'move_counts': []},
+        }
 
         # Pre-allocate a reusable input tensor for the candidate network.
         cand_input_tensor = candidate_network._acquire_input_tensor(batch_size=1)
@@ -750,6 +828,11 @@ class ModelTournament:
                 # Map color → side
                 candidate_is_white = (cand_color == 'white')
 
+                # B2 telemetry buffer: per-move (root_value, terminal_outcome)
+                # pairs collected during the MCTS path; resolved to terminal
+                # outcome after the game ends and pushed to metrics_logger.
+                game_root_values: List[float] = []
+
                 try:
                     while not game_state.is_terminal() and move_count < max_moves_per_game:
                         valid_moves = game_state.get_valid_moves()
@@ -772,11 +855,23 @@ class ModelTournament:
                                 visit_probs = game_mcts.search_batch(
                                     game_state, move_count, batch_size=32
                                 )
+                                # B2 (W1b): capture root value at this position
+                                # in side-to-move POV. The MCTS post-Wave-2
+                                # negates `root.value()` at assignment so
+                                # `last_root_value` agrees with the
+                                # AlphaZero "side-to-move POV" contract
+                                # (positive = current player winning). Since
+                                # `cand_to_move` is True here, that's the
+                                # candidate's POV — directly comparable to
+                                # `outcome_in_pov` below without a sign flip.
+                                rv = getattr(game_mcts, 'last_root_value', None)
+                                if rv is not None and np.isfinite(rv):
+                                    game_root_values.append(float(rv))
                                 visit_probs_t = torch.from_numpy(np.asarray(visit_probs)).to(
                                     candidate_network.device
                                 )
                                 selected_move = candidate_network.select_move(
-                                    visit_probs_t, valid_moves, temperature=0.0
+                                    visit_probs_t, valid_moves, temperature=candidate_temperature
                                 )
                                 del visit_probs_t
                             else:
@@ -785,9 +880,10 @@ class ModelTournament:
                                     torch.from_numpy(np.array(state_array)).unsqueeze(0)
                                 )
                                 move_probs, _ = candidate_network.predict(cand_input_tensor)
-                                # temperature=0 → argmax, fully deterministic given seeds
+                                # candidate_temperature=0 (default) → argmax (deterministic given seeds).
+                                # >0 → sample from softmax(logits / temperature) over valid moves.
                                 selected_move = candidate_network.select_move(
-                                    move_probs, valid_moves, temperature=0.0
+                                    move_probs, valid_moves, temperature=candidate_temperature
                                 )
                                 del move_probs
                         else:
@@ -831,6 +927,34 @@ class ModelTournament:
                 games_played += 1
                 total_moves += move_count
 
+                # Per-side bookkeeping
+                side_key = 'white' if candidate_is_white else 'black'
+                per_side_stats[side_key]['games'] += 1
+                per_side_stats[side_key]['move_counts'].append(move_count)
+                cand_won = (
+                    (winner == Player.WHITE and candidate_is_white)
+                    or (winner == Player.BLACK and not candidate_is_white)
+                )
+                if cand_won:
+                    per_side_stats[side_key]['cand_wins'] += 1
+
+                # B2 (W1b): resolve per-position root values to terminal
+                # outcome in candidate POV and push to metrics_logger. Skip
+                # when no metrics_logger or no MCTS root values were captured
+                # (raw-policy mode, or candidate never moved). Outcome is
+                # +1 candidate-win, -1 candidate-loss, 0 draw — all root
+                # values were captured in candidate POV (see the cand_to_move
+                # branch above), so no per-color sign flip is needed here.
+                if metrics_logger is not None and game_root_values:
+                    if cand_won:
+                        outcome_in_pov = 1.0
+                    elif winner is None:
+                        outcome_in_pov = 0.0
+                    else:
+                        outcome_in_pov = -1.0
+                    for rv in game_root_values:
+                        metrics_logger.log_eval_value_pair(rv, outcome_in_pov)
+
                 # Per-game completion log — running totals so the user can
                 # estimate ETA and track win rate as the eval progresses.
                 game_dt = time.time() - game_t0
@@ -857,6 +981,33 @@ class ModelTournament:
             candidate_network._release_tensor(cand_input_tensor)
 
         win_rate = (candidate_wins / games_played) if games_played > 0 else 0.0
+
+        # Per-side aggregation + deterministic-collapse detection.
+        side_summary = {}
+        deterministic_sides = []
+        for side, s in per_side_stats.items():
+            if s['games'] == 0:
+                continue
+            mc = s['move_counts']
+            length_min = min(mc)
+            length_max = max(mc)
+            length_range = length_max - length_min
+            side_summary[side] = {
+                'games': s['games'],
+                'cand_wins': s['cand_wins'],
+                'cand_win_rate': s['cand_wins'] / s['games'],
+                'avg_game_length': sum(mc) / len(mc),
+                'game_length_min': length_min,
+                'game_length_max': length_max,
+                'game_length_range': length_range,
+            }
+            # If 2+ games on a side and ALL games have identical length, the
+            # candidate's argmax + anchor's argmax replayed the same line every
+            # time on that side. That's the deterministic-collapse fingerprint
+            # — the win rate doesn't measure skill, it measures side-coverage.
+            if s['games'] >= 2 and length_range == 0:
+                deterministic_sides.append(side)
+
         result = {
             'games_played': games_played,
             'candidate_wins': candidate_wins,
@@ -868,12 +1019,79 @@ class ModelTournament:
             'avg_game_length': (total_moves / games_played) if games_played > 0 else 0.0,
             'mode': mode_label,
             'mcts_simulations': mcts_simulations if use_mcts else 0,
+            'per_side': side_summary,
+            'deterministic_sides': deterministic_sides,
         }
         self.logger.info(
             f"Anchor eval [{mode_label}]: {candidate_label} vs {anchor_label} → "
             f"W/L/D = {candidate_wins}/{anchor_wins}/{draws} "
             f"({win_rate:.1%} win rate over {games_played} games)"
         )
+        # Per-side breakdown — helps catch the deterministic-collapse case
+        # where overall win rate hides a 100% / 0% side split.
+        for side, ss in side_summary.items():
+            self.logger.info(
+                f"  side={side}: cand_wins={ss['cand_wins']}/{ss['games']} "
+                f"({ss['cand_win_rate']:.1%})  "
+                f"game_length min/avg/max = "
+                f"{ss['game_length_min']}/{ss['avg_game_length']:.1f}/{ss['game_length_max']}"
+            )
+        if deterministic_sides:
+            self.logger.warning(
+                f"⚠️  Deterministic-collapse detected on side(s): "
+                f"{', '.join(deterministic_sides)}. Every game on these sides "
+                f"had identical move counts — candidate's argmax + anchor's "
+                f"argmax replayed the same line. The win rate measures "
+                f"side-coverage, not skill. Re-run with candidate_temperature "
+                f">= 0.5 or use_mcts=True to break the determinism."
+            )
+            # T5.4: route the alert into the metrics system so dashboards
+            # (and post-run analysis) see the collapse, not just the run log.
+            # We emit BOTH a counter scalar (count of collapsing sides) and
+            # a structured event with the side list + mode for context.
+            if metrics_logger is not None:
+                try:
+                    metrics_logger.log_event(
+                        'deterministic_collapse_alert',
+                        severity='warning',
+                        iteration=iteration,
+                        details={
+                            'sides': list(deterministic_sides),
+                            'mode': mode_label,
+                            'candidate_label': candidate_label,
+                            'candidate_temperature': float(candidate_temperature),
+                            'use_mcts': bool(use_mcts),
+                        },
+                    )
+                    metrics_logger.log_scalar(
+                        'eval/deterministic_collapse_count',
+                        float(len(deterministic_sides)),
+                        iteration=iteration,
+                    )
+                except Exception as e:  # never let metrics routing kill eval
+                    self.logger.warning(
+                        f"Failed to route deterministic_collapse_alert: {e}"
+                    )
+
+        # B2 (W1b): aggregate buffered (root_value, terminal_outcome) pairs
+        # into eval/value_outcome_correlation for this iteration. Only
+        # meaningful in MCTS mode (raw-policy mode never appends pairs).
+        # The helper handles too-few-pairs / zero-variance internally; we
+        # just call it unconditionally and let it no-op when appropriate.
+        if metrics_logger is not None and use_mcts:
+            try:
+                # W2 B3: name the series after the candidate so each checkpoint
+                # in the sliding-window eval lands on its own series. The
+                # canonical ``eval/value_outcome_correlation`` is still
+                # populated as a mirror for backwards-compat.
+                metrics_logger.compute_and_log_value_outcome_correlation(
+                    step=iteration,
+                    metric_name=f'eval/value_outcome_correlation/{candidate_label}',
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to log value_outcome_correlation: {e}"
+                )
         return result
 
     def run_anchor_eval_batch(
@@ -885,6 +1103,9 @@ class ModelTournament:
         max_moves_per_game: int = 200,
         use_mcts: bool = False,
         mcts_simulations: int = 64,
+        candidate_temperature: float = 0.5,
+        metrics_logger: Optional["MetricsLogger"] = None,
+        iteration: Optional[int] = None,
     ) -> Dict[str, Dict]:
         """Run anchor eval for a list of (label, checkpoint_path) entries.
 
@@ -892,6 +1113,11 @@ class ModelTournament:
         is resident at a time. Missing checkpoints are skipped gracefully.
         Set ``use_mcts=True`` to evaluate with pure-neural MCTS instead of
         raw policy argmax.
+
+        ``candidate_temperature`` defaults to 0.5 (T4.9) — see
+        ``run_anchor_eval`` for the rationale. Pass ``metrics_logger`` and
+        ``iteration`` to surface deterministic-collapse alerts in dashboards
+        (T5.4).
         """
         results: Dict[str, Dict] = {}
         for label, ckpt in models:
@@ -916,6 +1142,9 @@ class ModelTournament:
                     max_moves_per_game=max_moves_per_game,
                     use_mcts=use_mcts,
                     mcts_simulations=mcts_simulations,
+                    candidate_temperature=candidate_temperature,
+                    metrics_logger=metrics_logger,
+                    iteration=iteration,
                 )
             finally:
                 if hasattr(net, 'cleanup'):
@@ -926,6 +1155,96 @@ class ModelTournament:
                 del net
                 self._clear_model_memory()
         return results
+
+    def run_dual_anchor_eval(
+        self,
+        candidate_network: NetworkWrapper,
+        candidate_label: str,
+        num_games: int = 40,
+        depth: int = 3,
+        seed: int = 1337,
+        max_moves_per_game: int = 200,
+        mcts_simulations: int = 64,
+        candidate_temperature: float = 0.5,
+        run_raw: bool = True,
+        run_mcts: bool = True,
+        metrics_logger: Optional["MetricsLogger"] = None,
+        iteration: Optional[int] = None,
+    ) -> Dict:
+        """Run anchor eval TWICE — raw-policy AND MCTS — against the same
+        anchor opponent (T4.9). The deployed player uses MCTS, but the raw
+        policy is the diagnostic we trained the head against, so we want
+        both numbers side-by-side every iteration.
+
+        Cost note: doubles the anchor eval wall-clock. The supervisor wires
+        this on for canonical recipes (anchor_dual_eval_enabled=true) because
+        the cost is bounded (anchor eval is ~minutes, not hours) and the
+        observability win is large. For one-off probes you can disable
+        either side via ``run_raw`` / ``run_mcts``.
+
+        Returns:
+            Dict with keys:
+              - ``raw``: full result dict from raw-policy eval (or ``None`` if skipped)
+              - ``mcts``: full result dict from MCTS eval (or ``None`` if skipped)
+              - ``raw_elo``: Elo delta vs the anchor for raw-policy mode
+                (or ``None`` if skipped). Anchor = 0.
+              - ``mcts_elo``: Elo delta vs the anchor for MCTS mode
+                (or ``None`` if skipped).
+              - ``raw_collapse``: list of sides that collapsed in raw-policy
+                mode (empty list = none). Always present if raw ran.
+              - ``mcts_collapse``: same, for MCTS mode.
+        """
+        raw_result: Optional[Dict] = None
+        mcts_result: Optional[Dict] = None
+
+        if run_raw:
+            raw_result = self.run_anchor_eval(
+                candidate_network=candidate_network,
+                candidate_label=candidate_label,
+                num_games=num_games,
+                depth=depth,
+                seed=seed,
+                max_moves_per_game=max_moves_per_game,
+                use_mcts=False,
+                mcts_simulations=mcts_simulations,
+                candidate_temperature=candidate_temperature,
+                metrics_logger=metrics_logger,
+                iteration=iteration,
+            )
+
+        if run_mcts:
+            mcts_result = self.run_anchor_eval(
+                candidate_network=candidate_network,
+                candidate_label=candidate_label,
+                num_games=num_games,
+                depth=depth,
+                seed=seed,
+                max_moves_per_game=max_moves_per_game,
+                use_mcts=True,
+                mcts_simulations=mcts_simulations,
+                candidate_temperature=candidate_temperature,
+                metrics_logger=metrics_logger,
+                iteration=iteration,
+            )
+
+        def _elo(res: Optional[Dict]) -> Optional[float]:
+            if not res or res.get('games_played', 0) <= 0:
+                return None
+            return win_rate_to_elo_delta(float(res.get('win_rate', 0.0)))
+
+        def _collapse(res: Optional[Dict]) -> Optional[List[str]]:
+            if not res:
+                return None
+            return list(res.get('deterministic_sides') or [])
+
+        return {
+            'raw': raw_result,
+            'mcts': mcts_result,
+            'raw_elo': _elo(raw_result),
+            'mcts_elo': _elo(mcts_result),
+            'raw_collapse': _collapse(raw_result),
+            'mcts_collapse': _collapse(mcts_result),
+        }
 
     def run_full_round_robin_tournament(self, current_iteration: int):
         """

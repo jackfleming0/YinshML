@@ -156,7 +156,19 @@ class YinshSymmetryAugmenter:
                         self._stats.reflections_applied += 1
 
             except Exception as e:
-                logger.warning(f"Failed to apply transform {transform_id}: {e}")
+                # This fires once per skipped augmentation (e.g. ring-placement
+                # phases have no valid-move mapping for some reflections).
+                # Surface the first occurrence at WARNING, then suppress —
+                # the count is tracked in `_stats.invalid_transforms_skipped`
+                # and surfaced in the augmentation summary instead.
+                if getattr(self, "_transform_fail_warned", False):
+                    logger.debug(f"Failed to apply transform {transform_id}: {e}")
+                else:
+                    logger.warning(
+                        f"Failed to apply transform {transform_id}: {e} "
+                        f"(further occurrences suppressed; see stats for count)"
+                    )
+                    self._transform_fail_warned = True
                 if self.enable_stats:
                     self._stats.invalid_transforms_skipped += 1
                 continue

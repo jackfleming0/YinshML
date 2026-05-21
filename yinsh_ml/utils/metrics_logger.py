@@ -49,12 +49,27 @@ class MetricsLogger:
         self.value_accuracy_history = defaultdict(list)
         self.training_curves = defaultdict(list)
 
+        # Optional experiment tracker handle for forwarding log_event /
+        # log_scalar calls. Set via set_experiment_tracker(). Not required —
+        # events still land in the JSON sidecar when this is None.
+        self._experiment_tracker = None
+        self._experiment_id: Optional[int] = None
+
     def _init_metrics_storage(self) -> Dict:
         """Initialize metrics storage with all necessary fields."""
         return {
             'games': [],
             'training': [],
             'tournament': None,
+            # Generic time-series scalars logged via `log_scalar()`. Keyed by
+            # metric name, each entry is a list of {step, value, ...} dicts.
+            # Used by W1b telemetry safeguards (B1 effective_child_visits,
+            # B2 value_outcome_correlation, B3 policy_target_entropy_mean)
+            # and W1e collapse-alert routing.
+            'scalars': defaultdict(list),
+            # Discrete events/alerts logged via `log_event()` (W1e). Flat
+            # list of dicts so dashboards can render an event timeline.
+            'events': [],
             'summary_stats': {
                 'game_lengths': {
                     'mean': 0.0,
@@ -74,6 +89,248 @@ class MetricsLogger:
                 }
             }
         }
+
+    def log_scalar(
+        self,
+        name: str,
+        value: float,
+        step: Optional[int] = None,
+        iteration: Optional[int] = None,
+    ) -> None:
+        """Log a scalar metric value (W1b telemetry + W1e collapse routing).
+
+        Storage is dict-keyed by metric name in
+        ``self.current_metrics['scalars'][name]`` so each metric is its own
+        time series. Non-finite values are stored as ``None`` (JSON survives).
+        Non-numeric values are dropped with a warning.
+
+        Args:
+            name: Metric path, e.g. ``"mcts/effective_child_visits"``.
+            value: Scalar value (coerced to float).
+            step: Optional global step (preferred when training-step semantics
+                matter, e.g. inside the inner train loop).
+            iteration: Optional iteration index (W1e callers from eval/anchor
+                paths use this). Falls back to ``self.current_iteration``.
+
+        ``step`` and ``iteration`` are functionally equivalent; ``step`` wins
+        when both are supplied, then ``iteration``, then current_iteration.
+        Forwarded to a connected experiment tracker if one is set.
+        """
+        # Lazy-init so callers can use this without start_iteration() first
+        # (focused unit tests, eval-only invocations).
+        if 'scalars' not in self.current_metrics:
+            self.current_metrics['scalars'] = defaultdict(list)
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            self.logger.warning(f"log_scalar({name}): non-numeric value {value!r}, dropping")
+            return
+        if not np.isfinite(v):
+            self.logger.warning(f"log_scalar({name}): non-finite value {v}, storing as None")
+            stored: Optional[float] = None
+        else:
+            stored = v
+        resolved_step = step if step is not None else iteration
+        if resolved_step is None:
+            resolved_step = self.current_iteration
+        self.current_metrics['scalars'][name].append({'step': resolved_step, 'value': stored})
+        self.logger.debug(f"scalar/{name} @ {resolved_step}: {stored}")
+
+        # Forward to experiment tracker (W1e). No-op if none attached.
+        if (
+            self._experiment_tracker is not None
+            and self._experiment_id is not None
+            and stored is not None
+        ):
+            try:
+                self._experiment_tracker.log_metric(
+                    self._experiment_id, name, stored, resolved_step,
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to forward scalar '{name}' to tracker: {e}")
+
+    # ---- B2: value-outcome correlation ------------------------------------
+    # The intent: per evaluation pass, collect (root_value_at_position_start,
+    # terminal_outcome_in_position_pov) pairs across the eval games, then
+    # Pearson r → log as ``eval/value_outcome_correlation``.
+    #
+    # Why it lives here and not in `enhanced_metrics.py`: that collector
+    # already computes a CONFIDENCE-vs-error correlation per game phase; the
+    # B2 safeguard needs a fundamentally different aggregation (across all
+    # eval positions, not per-phase), so a separate buffer keeps the two
+    # signals independent.
+    #
+    # See `compute_and_log_value_outcome_correlation()` for the aggregation
+    # entry point. `log_eval_value_pair()` is the per-position append; both
+    # are no-ops if the caller never wired them up.
+
+    def log_eval_value_pair(self, root_value: float, terminal_outcome: float) -> None:
+        """Append a (root_value, terminal_outcome) pair for B2 correlation.
+
+        Both arguments are expected in the same POV — typically the side
+        whose move it was at position start. Non-finite values are skipped
+        with a debug log (don't poison Pearson with NaN).
+
+        TODO(W1e): wire the actual call sites in tournament eval and/or the
+        per-iteration validation pass. Until then this method is callable
+        but uncalled; the unit test exercises it directly so the math is
+        proven before the plumbing lands. The integration point is
+        ``ModelTournament.run_anchor_eval`` (after each game completes,
+        you have access to ``terminal_outcome`` from the game runner and
+        the MCTS's ``last_root_value`` from the candidate's first move) —
+        but doing so cleanly requires touching the eval loop that W1e is
+        also restructuring, so we coordinate via the W1e workstream.
+        """
+        if not hasattr(self, '_eval_value_pairs'):
+            self._eval_value_pairs: List[Tuple[float, float]] = []
+        try:
+            rv = float(root_value)
+            to = float(terminal_outcome)
+        except (TypeError, ValueError):
+            self.logger.debug(f"log_eval_value_pair: non-numeric inputs {(root_value, terminal_outcome)}, skipping")
+            return
+        if not (np.isfinite(rv) and np.isfinite(to)):
+            self.logger.debug(f"log_eval_value_pair: non-finite inputs {(rv, to)}, skipping")
+            return
+        self._eval_value_pairs.append((rv, to))
+
+    def compute_and_log_value_outcome_correlation(
+        self,
+        step: Optional[int] = None,
+        clear: bool = True,
+        metric_name: str = 'eval/value_outcome_correlation',
+    ) -> Optional[float]:
+        """Pearson r over the buffered eval pairs; logged as ``metric_name``
+        (default ``eval/value_outcome_correlation``).
+
+        Returns the computed r (None if too few points). When ``clear`` is
+        True (default), the buffer is reset so each eval pass produces one
+        scalar. Set ``clear=False`` if you want a running correlation across
+        a multi-pass eval.
+
+        ``metric_name`` lets callers disambiguate per-checkpoint series — the
+        runbook's gate-check was reading ``entries[-1]`` from a shared series
+        and silently picking up the oldest historical entry (W2 B3). Passing
+        e.g. ``eval/value_outcome_correlation/<candidate_label>`` makes the
+        candidate's correlation its own series and removes the read ambiguity.
+
+        Edge cases:
+          * Fewer than 2 pairs → returns None, logs nothing.
+          * Zero variance on either side (degenerate eval where every game
+            had the same outcome) → returns None, logs nothing, debug-warn.
+        """
+        pairs = getattr(self, '_eval_value_pairs', [])
+        if len(pairs) < 2:
+            self.logger.debug(
+                f"value_outcome_correlation: only {len(pairs)} pair(s) buffered, skipping"
+            )
+            if clear:
+                self._eval_value_pairs = []
+            return None
+        arr = np.asarray(pairs, dtype=np.float64)
+        x, y = arr[:, 0], arr[:, 1]
+        if np.std(x) == 0.0 or np.std(y) == 0.0:
+            self.logger.debug(
+                "value_outcome_correlation: zero variance on one side, skipping"
+            )
+            if clear:
+                self._eval_value_pairs = []
+            return None
+        # np.corrcoef returns a 2x2 matrix; we want the off-diagonal Pearson r.
+        r = float(np.corrcoef(x, y)[0, 1])
+        self.log_scalar(metric_name, r, step=step)
+        # Backwards-compat: mirror to the canonical series so existing
+        # dashboards keep working. The custom (per-candidate) series is the
+        # source of truth for new readers.
+        if metric_name != 'eval/value_outcome_correlation':
+            self.log_scalar('eval/value_outcome_correlation', r, step=step)
+        if clear:
+            self._eval_value_pairs = []
+        return r
+
+    def log_event(self,
+                  event_name: str,
+                  severity: str = 'info',
+                  iteration: Optional[int] = None,
+                  details: Optional[Dict] = None) -> None:
+        """Log a discrete event (alert / warning / milestone) into the metrics
+        stream.
+
+        Events are stored in ``current_metrics['events']`` so they persist into
+        ``iteration_<N>.json`` and can be picked up by dashboards. Also forwarded
+        to a connected experiment tracker (when set via
+        :meth:`set_experiment_tracker`) as a counter metric
+        ``event/<event_name>`` so it shows up as a scalar series.
+
+        Args:
+            event_name: Stable identifier (e.g. ``'deterministic_collapse_alert'``).
+                Used as a metric key in the experiment tracker so keep it
+                lowercase, snake_case, and namespaced.
+            severity: One of ``info | warning | error``. Passed to the Python
+                logger so operators see the alert in the run log.
+            iteration: Training iteration where the event fired. Defaults to
+                the current iteration if one has been started.
+            details: Arbitrary JSON-serializable payload for context (e.g.
+                ``{'sides': ['white', 'black']}``).
+        """
+        it = iteration if iteration is not None else self.current_iteration
+        entry = {
+            'name': event_name,
+            'severity': severity,
+            'iteration': it,
+            'timestamp': datetime.now().isoformat(),
+            'details': details or {},
+        }
+
+        # Always log to the Python logger so the event appears in the run log
+        # even when no iteration has been started (e.g. eval-only invocations).
+        log_msg = f"[event:{event_name}] iter={it} details={details}"
+        if severity == 'error':
+            self.logger.error(log_msg)
+        elif severity == 'warning':
+            self.logger.warning(log_msg)
+        else:
+            self.logger.info(log_msg)
+
+        # Buffer the event for the next save_iteration() if we have an active
+        # iteration. If not, fall back to a sidecar events file so the alert
+        # isn't silently dropped.
+        if self.current_iteration is not None:
+            self.current_metrics.setdefault('events', []).append(entry)
+        else:
+            try:
+                events_file = self.metrics_dir / 'events.jsonl'
+                with open(events_file, 'a') as f:
+                    f.write(json.dumps(entry) + '\n')
+            except Exception as e:
+                self.logger.warning(f"Failed to write event to sidecar: {e}")
+
+        # Forward to experiment tracker as a counter so it shows up alongside
+        # other metrics in the experiment DB / dashboards. We log the count
+        # of times this event has fired this iteration (always 1 per call,
+        # so plotting "sum by iteration" gives you the count).
+        if self._experiment_tracker is not None and self._experiment_id is not None:
+            try:
+                self._experiment_tracker.log_metric(
+                    self._experiment_id,
+                    f'event/{event_name}',
+                    1.0,
+                    it,
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to forward event '{event_name}' to tracker: {e}"
+                )
+
+    def set_experiment_tracker(self, tracker, experiment_id: Optional[int]) -> None:
+        """Attach an experiment tracker so log_event / log_scalar forward to it.
+
+        Optional — when not set, events and scalars only land in the JSON
+        sidecar / iteration file. The supervisor wires this up after creating
+        the tracker so collapse alerts surface in dashboards.
+        """
+        self._experiment_tracker = tracker
+        self._experiment_id = experiment_id
 
     # def record_game_history(self, game_history: List[Dict]):
     #     """Record the history of a single game for later analysis."""
@@ -223,7 +480,7 @@ class MetricsLogger:
                             np.int16, np.int32, np.int64, np.uint8,
                             np.uint16, np.uint32, np.uint64)):
             return int(obj)
-        if isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+        if isinstance(obj, (np.float16, np.float32, np.float64)):
             return float(obj)
         if isinstance(obj, np.ndarray):
             return obj.tolist()

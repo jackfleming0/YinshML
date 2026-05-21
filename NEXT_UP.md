@@ -6,44 +6,47 @@ Rule: this file is the only one that reorders. The menus are append-or-delete on
 
 ---
 
-## Active
+## Active — Wave 3 (May 2026)
 
-**Phase E — post-warm-start recipe rebuild (2026-04-30 onward).** Phase D shipped: gating-revert mechanism works structurally (PR #9, merged), but iter_3 of the post-fix run lost 6/24 (20%) to `HeuristicAgent(depth=3)` at deployment-realistic config — well below the ≥65% intermediate bar. Recipe plateau is real; further iterations of the same recipe won't help. See `WARMSTART_PHASE_LOG.md` §9 for the full conclusion + ranked options.
+> Branch: `training-pipeline-fixes`. Living docs: `WAVE3_EXPERIMENT_LOG.md` (append-as-we-go log of every experiment), `WAVE3_BRANCH_C_DECISION.md` (current-bet decision doc), `WAVE2_NEXT_STEPS.md` (index), `WAVE2_STEP_2_POSTMORTEM.md`, `WAVE3_BRANCH_B_RESULTS.md`. Read those first if picking up cold.
 
-**Highest-EV next step (Option 5a, ~$2, half a day):** retrain supervised seed on humans_only filtered data and re-eval. The 2026-04-30 expert-data analysis (commit `f2d899a`) found 41% of training data is bot/anonymous games (Dumbot, guest, WeakBot, etc.) — the seed literally learned chain-shuffler play from Dumbot. `scripts/analyze_and_filter_expert_data.py` produces a humans_only dataset (1312 games / 82,837 positions, 35% of input).
+**State of play.** Wave 2 fixed the telemetry pipeline + a `last_root_value` sign-flip bug in `self_play.py:798/1022` (Step 1, `3cb047f`). The validation run at n=40 anchors (Step 2, `336dd98`) made it clear Wave 1's training-quality claim doesn't hold: best raw policy 30%, best MCTS-48 60% at iter 0 (the supervised seed before any training). Wave 3 then ran Branches A/B/B' to characterize the plateau. **Result**: the recipe is now *stable* (5/5 promotions, final model matches seed at 67.5% MCTS-48) but not *constructive* — training preserves seed quality without exceeding it.
 
-```bash
-# 1) Filter
-python scripts/analyze_and_filter_expert_data.py --output-dir expert_games/humans_only
+**Currently running**: Branch C (cloud, PID 10529, cron `dd59c71a`) — tests "self-play target search depth is the bottleneck" by increasing `num_simulations: 48 → 200`. ETA ~25h remaining. Decision doc at `WAVE3_BRANCH_C_DECISION.md`.
 
-# 2) Retrain
-python scripts/run_supervised_pretraining.py \
-    --games-dir expert_games/humans_only --epochs 10 --batch-size 256 \
-    --output-dir models/supervised_seed_humans --device cuda
+**External lens just landed**: `ERIC_JANG_AUTOGO_AUDIT.md` on `claude/game-replay-viewer` (commit `821f4a0`). The audit identifies four ordered architectural gaps and surfaces the **volume thesis** as the load-bearing claim from Eric's AlphaGo reproduction: pair a 1-1.5K expert corpus (already have, → seed) with **10K-100K cheap volume games for value-head grounding**. The audit branch already built `scripts/generate_heuristic_games.py` to produce these.
 
-# 3) Eval at full N=30 vs depth=3
-python scripts/eval_vs_heuristic.py \
-    --checkpoint models/supervised_seed_humans/best_supervised.pt \
-    --num-games 30 --depth 3 --mcts-simulations 400 \
-    --time-limit-per-move 30 --device cuda \
-    --label iter_0_humans --output-json eval_iter0_humans_d3.json \
-  2>&1 | tee cloud_logs/eval_iter0_humans_d3_$(date +%Y%m%d_%H%M%S).log
-```
+### Priority chain (in order, gated where noted)
 
-**In parallel (Option 0, ~$2, ~7h):** rerun the *original* seed at full N=30 to get a canonical baseline for the dirty-data seed. Lets us A/B human-filtered seed vs dirty seed cleanly.
+1. **Cherry-pick audit branch artifacts onto `training-pipeline-fixes`.** `ERIC_JANG_AUTOGO_AUDIT.md`, `yinsh_ml/viz/` module, `scripts/generate_heuristic_games.py`, `scripts/dashboard_games.py`, `scripts/run_heuristic_audit.sh`. Needed before any downstream step. Cheap.
 
-```bash
-python scripts/eval_vs_heuristic.py \
-    --checkpoint models/supervised_seed/best_supervised.pt \
-    --num-games 30 --depth 3 --mcts-simulations 400 \
-    --time-limit-per-move 30 --device cuda \
-    --label iter_0_seed --output-json eval_iter0_d3_full.json \
-  2>&1 | tee cloud_logs/eval_iter0_d3_full_$(date +%Y%m%d_%H%M%S).log
-```
+2. **Gap 2 measurement (free diagnostic).** What % of games hit the 300-move cap across Step 2 / Branch B / Branch B' / Branch C runs? Audit's Gap 2 says: capped games get `value = clip(score_diff/3, -1, 1)` as if terminal — partial-credit value labels. If ≥15% of games hit the cap, the value head's been learning corrupted signal across every run. ~10 min Python script on existing parquet data.
 
-**Engineering project (Option 1, 1-2 weeks):** **bitboard port** — replace Python game engine with C++ extension via pybind11 using yngine's `__uint128_t` bitboards + precomputed `TABLE_RAYS[121][6]` (design: temhelk/yinsh; tracked in `TODO_baseline.md` Tier 5). Expected 10-100× speedup on move generation. **Compute-independent so can run alongside the eval workload.** Once it lands, every recipe experiment becomes 10× cheaper.
+3. **V1: yngine source read (free).** `temhelk/yngine` is C++ MCTS with bitboards (no neural net, no hand-crafted heuristic — pure MCTS-with-rollouts). Read the code to assess: is it a serious engine worth using as an external strength reference, or hobby code? 1-2h. Gates whether V2 is worth the dev time.
 
-**Decision gate (after 5a + 0 results land):** see `WARMSTART_PHASE_LOG.md` §9d for the branching logic. Ranked options 2-7 (more games, larger network, MCTS knob tuning, growing replay window, frontier shift) all become cheap parallel A/Bs once bitboards land + we have a non-bot-trained seed.
+4. **V2: yngine vs HeuristicAgent head-to-head match (gated on V1).** Build yngine on cloud, write a thin stdin/stdout protocol bridge, run 50-100 game match HA(depth=3) vs yngine at ~1000 sims. Calibrates HA's strength against an independent reference. 1-2 days dev + 1-2h compute.
+
+5. **Volume corpus generation (gated on V2 outcome — choose ONE path).**
+   - **(a) HA-self-play**: if V2 confirms HA(d=3) ≥ yngine, run `scripts/generate_heuristic_games.py` for 10-50K HA-vs-HA games on CPU. Cheap (~free if laptop overnight, or ~$5 cloud CPU).
+   - **(b) Fork yngine for self-play**: if V2 shows yngine >> HA, **fork yngine, add a self-play output mode emitting our parquet game schema, generate 100K yngine-vs-yngine games**. Several days dev (C++ work) but yngine is fast — 100K games is hours of compute, not days. The audit's volume thesis with a much stronger teacher.
+   - **(c) Both in sequence**: if mixed result, generate HA corpus first (cheap), then yngine corpus later as a richer secondary track.
+
+6. **Re-pretrain seed using volume corpus.** Continue training the existing `models/supervised_seed/best_supervised.pt` (or train fresh) on the volume corpus for value-head grounding. Compare anchor WR of the volume-seeded model to the current seed at the same eval pipeline. Cheap (~few hours, ~$5 cloud).
+
+7. **Branch D — SE blocks + GAP value head (audit Gap 1, gated on Branch C result).** Architectural. SE blocks per ResBlock in the trunk; replace `Flatten(7744) → Linear(7744, 512)` value head with `GAP(64) → Linear(64, 512) → ...`. Drops ~4M params and makes the value head translation-equivariant. KataGo-era technique, confirmed in Eric's `MuPGoResNet`. ~$5-10 cloud A/B against current architecture. Should run *after* volume-corpus pretraining (step 6) so we measure architectural lift on the strongest seed we have.
+
+8. **Branch C results → decision** (when ~25h is up).
+   - C succeeds (best iter > 75% MCTS-48 OR raw policy > 30%): teacher-depth was a real lever. Layer with steps 5-7 for compounding gains.
+   - C fails: target depth wasn't the bottleneck. Steps 5-7 become the load-bearing path.
+
+### Open questions feeding into priority
+
+- **Is the seed actually a meaningful warm-start, or just lucky?** Phase E (April 30) recommended retraining the seed on humans-only filtered data — `scripts/analyze_and_filter_expert_data.py` exists, ~35% of input is human games. **Not run yet**; deferred while we tested whether the seed-then-self-play recipe could be made productive at all. Worth revisiting *if* steps 5-7 don't lift performance.
+- **300-move cap fix path** (if Gap 2 measurement shows it matters): treat capped games as draws (`value=0`), or downweight them in training loss, or raise the cap to 500. Don't decide until measurement is in.
+
+### Branch C cron schedule
+
+Cron `dd59c71a` (every 2h at :37) checks Branch C, builds the running scoreboard against Step 2/B/B'. Cancel with `CronDelete` when C finishes.
 
 ---
 
@@ -145,6 +148,17 @@ Wait for GPU before starting any of these. See `TODO_frontier.md` hardware table
 ---
 
 ## Completed
+
+### 2026-05-13 to 2026-05-18 — Wave 2 / Wave 3 (training-pipeline-fixes branch)
+
+- [x] **Wave 2 Step 1 — Telemetry wiring + `last_root_value` sign-flip fix** (commit `3cb047f`, 2026-05-13). Three Wave 2 acceptance gates fixed: B1 (`mcts/effective_child_visits` not wired through workers), B2 (`train/effective_batch_size` never called `log_scalar`), B3 (gate-check reading `entries[-1]` instead of `entries[0]` due to shared series across sliding-window checkpoints). Plus the load-bearing fix: `self_play.py:798/1022` was assigning `last_root_value = root.value()` but the legacy backprop convention stores root's `value_sum` in opposite-of-root POV — tournament was correlating with terminal outcomes as if same-POV. Result: prior cloud run's value_outcome_correlation was -0.07 to -0.31 across iters (looked like "value head learning wrong sign"); fix flips it positive (+0.06 to +0.20 in Step 2). 156 preflight tests pass + 3 new `last_root_value` contract tests in `test_mcts_backprop_perspective.py`.
+- [x] **Wave 2 Step 2 — n=40 anchor validation run** (commit `336dd98`, run `runs_warm_start_combined_recipe/20260514_122701/`). 5 iters × 200 games × 4 epochs over 20.34h. Single config change vs prior run: `anchor.num_games: 4 → 40`. All 5 gates green; sign-flip fix held end-to-end. **But Wave 1's training-quality claim doesn't survive**: best raw policy 30% (below 33% baseline), best MCTS-48 60% at iter 0 (the seed, before any training). Per-iter MCTS-48 EMA: 60 → 50 → 35 → 32.5 → 47.5. Deep dive: `WAVE2_STEP_2_POSTMORTEM.md`.
+- [x] **Supervisor decision-log misleading-output fix** (commit `ae63e8c`). `supervisor.py:2028` was unconditionally printing `Decision: 🔄 CONTINUE (AlphaZero-style, no reversion)` on any failed gate, even when the revert path (`supervisor.py:1775+`) had executed and reloaded best_model.pt. Tracked actual decision via new `decision_kind` variable; extracted summary into `_format_decision_line` with 6 unit tests covering four decision kinds. Also fixed `active_iter` reporting on the reverted path. Visible in all subsequent runs.
+- [x] **Wave 3 Branch A** (2026-05-15, $0, inference-only). Pulled each iter's non-EMA `checkpoint_iteration_N.pt` through the same anchor pipeline. **F4 (EMA-drift hypothesis) REFUTED**: EMA was *stronger* than raw candidate in every iter (gaps +2.5 to +32.5 points). Pattern reframed as high-frequency training noise that EMA filters out. Inflection point — pivoted from "EMA is the problem" to "training step itself is making weights worse than seed."
+- [x] **D1/D2/D3 diagnostics** (2026-05-15). D1: pinned seed MCTS-48 baseline at 67.5% (n=40) — needed before any "training degrades by N%" claim. D2: per-epoch loss timeline showed LR is 10× smaller than recipe nominal (`lr: 0.0001` is the peak; epoch-1 LR ≈ 1e-5; iter 4 trains at 2.5e-6, effectively zero). D3: 1-iter × 1-epoch micro-run produced iter 0 candidate at 62.5% (within CI of seed 67.5%). **Confirmed cumulative damage across epochs**, not first-epoch damage. Direct evidence for Branch B's epoch knob.
+- [x] **Wave 3 Branch B — `epochs_per_iteration: 4 → 1`** (commit `3025829`, run `runs_wave3_branchB_epochs1/`). 5 iters × 200 games × 1 epoch in 18.78h. Mean MCTS-48 EMA = 59.5% vs Step 2's 45.0% (+14.5 absolute, +32% relative). 3/5 promotions (vs Step 2's 1/5). **But iter 1's peak (70% MCTS-48) got Wilson-rejected** — same sliding-window/Wilson-too-strict pattern as Step 2. Final best = iter 3 at 60%. Deep dive: `WAVE3_BRANCH_B_RESULTS.md`.
+- [x] **Wave 3 Branch B' — `promotion_threshold: 0.55 → 0.20`** (commit `3025829`, run `runs_wave3_branchB_prime/`). Tested "if Wilson hadn't killed iter 1's 70%, the gain would have compounded." Result: B' iter 1 was 52.5% (Branch B's 70% was high-variance outlier, did not reproduce). But **5/5 promotions**, final best = iter 4 at 67.5% (equal to seed). Mean 57.0%. Pipeline now stable at seed quality but not above it.
+- [x] **Running experiment log + decision docs** (commits `6a54a7c`, `b8d1956`, `ac93701`). `WAVE3_EXPERIMENT_LOG.md` is the append-as-we-go log of every experiment (hypothesis → setup → headline → lesson); `WAVE3_BRANCH_C_DECISION.md` is the current-bet doc. Six heuristics distilled (L1-L8) — e.g., "pin baselines before extrapolating," "single-iter outliers are variance until they reproduce."
 
 ### 2026-04-16
 

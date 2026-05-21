@@ -21,6 +21,13 @@ from ..network.wrapper import NetworkWrapper
 from ..heuristics import YinshHeuristics
 from .training_tracker import TrainingTracker
 
+# Optional MetricsLogger for telemetry safeguard B1 (effective child visits).
+# Imported under TYPE_CHECKING to avoid the matplotlib pull-in cost on
+# consumers that don't need metrics.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..utils.metrics_logger import MetricsLogger
+
 
 class EvaluationMode(Enum):
     """Evaluation mode for MCTS leaf nodes."""
@@ -76,6 +83,17 @@ class MCTSConfig:
     epsilon_mix_end: float = 0.0
     epsilon_mix_taper_moves: int = 20
 
+    # Iteration-aware Dirichlet noise tapering (Tier 3 #6). When the caller
+    # passes `iteration_progress` ∈ [0,1] into `search`, the move-number-derived
+    # epsilon is additionally multiplied by a factor that linearly interpolates
+    # from `epsilon_mix_iteration_start` (at progress 0) to
+    # `epsilon_mix_iteration_end` (at progress 1). Defaults of 1.0 / 1.0 are
+    # opt-in: with both at 1.0 OR when iteration_progress is None, the final
+    # epsilon equals the move-number taper alone (current behavior preserved).
+    # Example: end=0.3 → 70% noise reduction by the last iteration.
+    epsilon_mix_iteration_start: float = 1.0
+    epsilon_mix_iteration_end: float = 1.0
+
 
 class MCTSNode:
     """MCTS node with heuristic evaluation caching."""
@@ -122,27 +140,46 @@ class MCTSNode:
 
 class MCTS:
     """Monte Carlo Tree Search with YinshHeuristics integration."""
-    
+
+    # Class-level flag so the verbose per-instance "MCTS Initialized" block
+    # only fires at INFO the FIRST time. Re-inits (one per self-play game)
+    # log at DEBUG. Flip the YinshML loggers to DEBUG via the supervisor's
+    # `verbose_logging: true` to see them all.
+    _init_logged: bool = False
+
     def __init__(self,
                  network: NetworkWrapper,
                  config: Optional[MCTSConfig] = None,
                  mcts_metrics: Optional[MCTSMetrics] = None,
                  game_state_pool: Optional[GameStatePool] = None,
-                 training_tracker: Optional[TrainingTracker] = None):
+                 training_tracker: Optional[TrainingTracker] = None,
+                 metrics_logger: Optional["MetricsLogger"] = None):
         """
         Initialize MCTS with heuristic integration.
-        
+
         Args:
             network: The neural network wrapper
             config: MCTS configuration (uses defaults if None)
             mcts_metrics: Optional metrics collector
             game_state_pool: Optional memory pool for game states
             training_tracker: Optional training progress tracker for adaptive weights
+            metrics_logger: Optional MetricsLogger for telemetry safeguard B1
+                (effective child visits). When provided, every `search()` call
+                logs ``mcts/effective_child_visits`` so the W1-NEW batched-MCTS
+                regression detector has a signal to read.
         """
         self.network = network
         self.config = config or MCTSConfig()
         self.state_encoder = StateEncoder()
         self.logger = logging.getLogger("MCTS")
+        # B1 telemetry plumbing — None-safe; everywhere we emit, we guard.
+        self.metrics_logger = metrics_logger
+        # Per-instance call counter; used as the `step` for log_scalar when
+        # no outer step is plumbed in.
+        self._search_call_count = 0
+        # Most recent effective_child_visits value, exposed for tests / probes
+        # that don't depend on metrics_logger being wired up.
+        self.last_effective_child_visits: Optional[float] = None
         
         # Memory pool management
         self.game_state_pool = game_state_pool
@@ -181,10 +218,16 @@ class MCTS:
         if self.config.auto_reduce_heuristic_weight and self.training_tracker is not None:
             self._update_heuristic_weight_from_tracker()
         
-        self.logger.info(f"MCTS Initialized:")
-        self.logger.info(f"  Evaluation Mode: {self.config.evaluation_mode.value}")
-        self.logger.info(f"  Heuristic Weight: {self.config.heuristic_weight}")
-        self.logger.info(f"  Use Heuristic: {self.config.use_heuristic_evaluation}")
+        # Per-game re-init logspam fix: only emit the full init block at INFO
+        # the FIRST time any MCTS instance is constructed (class-level flag).
+        # Subsequent constructions log at DEBUG so the noise can be enabled
+        # via the supervisor `verbose_logging` knob.
+        _init_level = logging.INFO if not type(self)._init_logged else logging.DEBUG
+        self.logger.log(_init_level, f"MCTS Initialized:")
+        self.logger.log(_init_level, f"  Evaluation Mode: {self.config.evaluation_mode.value}")
+        self.logger.log(_init_level, f"  Heuristic Weight: {self.config.heuristic_weight}")
+        self.logger.log(_init_level, f"  Use Heuristic: {self.config.use_heuristic_evaluation}")
+        type(self)._init_logged = True
     
     def _update_heuristic_weight_from_tracker(self):
         """Update heuristic weight based on training progress."""
@@ -235,16 +278,40 @@ class MCTS:
         """
         return MCTSNode(None, parent=parent, prior_prob=prior_prob, c_puct=self.config.c_puct)
     
-    def _compute_epsilon_mix(self, move_number: int) -> float:
+    def _compute_epsilon_mix(
+        self,
+        move_number: int,
+        iteration_progress: Optional[float] = None,
+    ) -> float:
         """Linearly taper root-noise mixing fraction from `epsilon_mix_start`
         at move 0 to `epsilon_mix_end` at `epsilon_mix_taper_moves`, then
-        clamped at end. Returns start value if taper is disabled."""
+        clamped at end. Returns start value if taper is disabled.
+
+        When `iteration_progress` is supplied (∈ [0,1]), the result is
+        additionally multiplied by a factor that linearly interpolates from
+        `epsilon_mix_iteration_start` (at 0.0) to `epsilon_mix_iteration_end`
+        (at 1.0). Default config (both knobs at 1.0) AND the legacy callsite
+        (`iteration_progress=None`) preserve identical pre-change behavior.
+        """
         if self.config.epsilon_mix_taper_moves <= 0:
-            return self.config.epsilon_mix_start
-        alpha = min(max(move_number, 0) / self.config.epsilon_mix_taper_moves, 1.0)
-        return self.config.epsilon_mix_start + alpha * (
-            self.config.epsilon_mix_end - self.config.epsilon_mix_start
+            base = self.config.epsilon_mix_start
+        else:
+            alpha = min(max(move_number, 0) / self.config.epsilon_mix_taper_moves, 1.0)
+            base = self.config.epsilon_mix_start + alpha * (
+                self.config.epsilon_mix_end - self.config.epsilon_mix_start
+            )
+
+        if iteration_progress is None:
+            return base
+
+        # Clamp progress into [0,1] defensively — callers may divide by an
+        # off-by-one total or pass progress for a "bonus" iteration.
+        p = min(max(float(iteration_progress), 0.0), 1.0)
+        iter_factor = self.config.epsilon_mix_iteration_start + p * (
+            self.config.epsilon_mix_iteration_end
+            - self.config.epsilon_mix_iteration_start
         )
+        return base * iter_factor
 
     def _get_simulation_budget(self, move_number: int) -> int:
         """Get simulation budget based on move number."""
@@ -445,14 +512,23 @@ class MCTS:
             return (self.config.initial_temp - 
                    (self.config.initial_temp - self.config.final_temp) * progress)
     
-    def search(self, state: GameState, move_number: int) -> np.ndarray:
+    def search(
+        self,
+        state: GameState,
+        move_number: int,
+        iteration_progress: Optional[float] = None,
+    ) -> np.ndarray:
         """
         Perform MCTS search with heuristic integration.
-        
+
         Args:
             state: Current game state
             move_number: Current move number for temperature calculation
-            
+            iteration_progress: Optional training progress in [0,1]. When set,
+                feeds into `_compute_epsilon_mix` so root Dirichlet noise can
+                additionally taper across training iterations (Tier 3 #6).
+                None preserves the legacy move-number-only schedule.
+
         Returns:
             Policy vector over all possible moves
         """
@@ -528,9 +604,12 @@ class MCTS:
                         
                         # Apply Dirichlet noise at root. Mixing fraction tapers
                         # with move_number so late-game positions lose root
-                        # randomness — see `_compute_epsilon_mix`.
+                        # randomness — and additionally with iteration_progress
+                        # when supplied (Tier 3 #6) — see `_compute_epsilon_mix`.
                         if node is root and not hasattr(root, "dirichlet_applied"):
-                            epsilon_mix = self._compute_epsilon_mix(move_number)
+                            epsilon_mix = self._compute_epsilon_mix(
+                                move_number, iteration_progress=iteration_progress
+                            )
                             if self.config.dirichlet_alpha > 0 and len(valid_moves) > 0 and epsilon_mix > 0:
                                 noise = np.random.dirichlet([self.config.dirichlet_alpha] * len(valid_moves))
                                 for i, move in enumerate(valid_moves):
@@ -563,6 +642,9 @@ class MCTS:
                     move_idx = self.state_encoder.move_to_index(move)
                     if 0 <= move_idx < len(move_probs):
                         move_probs[move_idx] = prob
+            # B1: emit zero on the empty-root early-return path so the metric
+            # series doesn't silently drop samples when something has gone wrong.
+            self._log_effective_child_visits(root, budget)
             return move_probs
         
         # Get visit counts and apply temperature
@@ -598,5 +680,33 @@ class MCTS:
         # Store root value for use as training target (Fix #1)
         self.last_root_value = root.value() if root.visit_count > 0 else 0.0
 
+        # B1 telemetry: effective child visits ratio. After Wave 0, the W1-NEW
+        # workstream is fixing the batched-MCTS bug where many sims dead-end
+        # before reaching root.children — this metric is the regression
+        # detector. ~1.0 means every sim landed under a root child; <0.95
+        # means a non-trivial fraction of the sim budget was wasted on selection
+        # errors / max-depth bailouts.
+        self._log_effective_child_visits(root, budget)
+
         return move_probs
+
+    def _log_effective_child_visits(self, root, budget: int) -> None:
+        """Compute and log B1's effective_child_visits scalar.
+
+        Always sets ``last_effective_child_visits`` and bumps
+        ``_search_call_count`` so the step value stays monotonic even when
+        ``metrics_logger`` is None.
+        """
+        budget_for_metric = max(1, int(budget))  # guard against budget==0 in tests
+        try:
+            total = sum(c.visit_count for c in root.children.values()) if root.children else 0
+        except AttributeError:
+            total = 0
+        eff = float(total) / float(budget_for_metric)
+        self.last_effective_child_visits = eff
+        self._search_call_count += 1
+        if self.metrics_logger is not None:
+            self.metrics_logger.log_scalar(
+                'mcts/effective_child_visits', eff, step=self._search_call_count
+            )
 

@@ -1,0 +1,120 @@
+# warm_start_combined_recipe_smoke.yaml — local-MPS smoke variant of the
+# canonical Wave 2 recipe. Same fix knobs, scaled-down volume so a 5-6
+# hour overnight run produces enough signal to verify telemetry plumbing
+# and rule out hard regressions. NOT a substitute for the cloud-class
+# 200-game/5-iter validation run.
+#
+# Init: models/supervised_seed/best_supervised.pt (local stand-in for the
+#       cloud's models/supervised_deep_256x18/ — same architecture).
+# LR:   0.0001 (preservation LR — same as canonical).
+#
+# Invocation:
+#   python scripts/run_training.py \
+#     --config configs/warm_start_combined_recipe_smoke.yaml \
+#     --init-checkpoint models/supervised_seed/best_supervised.pt
+#
+# Smoke acceptance gates (all must hold or recipe has regressed):
+#   - eval/value_outcome_correlation > 0 by iter 2 (sample size too small
+#     to expect monotonic rise — directional check only)
+#   - train/policy_target_entropy_mean > 0 across all phases
+#   - train/effective_batch_size >= 0.8 * batch_size
+#   - mcts/effective_child_visits >= 0.7 (regression test for batched-MCTS fix)
+#   - eval/deterministic_collapse_count == 0
+#   - Process completes without crashes / OOMs / hangs
+
+version: 1
+device: auto
+num_iterations: 2
+save_dir: runs_warm_start_combined_recipe_smoke
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 48
+  late_simulations: 32
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  # W1c: iteration-aware Dirichlet tapering (opt-in).
+  # 1.0 -> no iteration scaling at start; 0.3 -> 70% noise reduction at end.
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 0
+  use_shared_evaluator: false
+  games_per_iteration: 50
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 4
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 10
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  # W1a fixed _search_consistency_step value target. Re-enable to exercise
+  # the fix; if stability regresses, flip back to false and retain the W1a
+  # unit test as the proof of correctness.
+  search_consistency:
+    enabled: true
+  # W1d (T3.7): cap inverse-frequency oversampling so a 90/10 buffer can't
+  # blow out the rare-phase weight to 9.0x and collapse effective batch size.
+  # Knob is plumbed through trainer (per W1d wiring), not phase_weights.
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 20
+  promotion_threshold: 0.55
+  tournament_sliding_window: 3
+  eval_seed: 20260511
+  revert_self_play_on_gate_failure: true
+  # W1f2: detect corrupted/stale best_model.pt before reverting.
+  gate_revert_on_mtime_mismatch: fail
+  # W1e: report both raw-policy and MCTS-assisted Elo. Raw default temp 0.5
+  # to avoid argmax determinism mirages.
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 4
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
