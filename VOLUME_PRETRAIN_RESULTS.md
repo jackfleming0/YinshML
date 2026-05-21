@@ -176,11 +176,78 @@ run dir there are redundant with local copies.
 
 ---
 
+## Session update — 2026-05-21: yardstick built (step 1 DONE)
+
+**Decision: frozen-checkpoint anchor, NOT yngine (yet).** The gating question for
+the next move is *relative* ("does lever X beat our current best?"), not absolute
+("where's the ceiling?"). A frozen `best_iter_4` anchor answers the relative
+question exactly and cheaply — `~0.50` WR = no improvement, `>0.55` = genuinely
+stronger, and if a candidate saturates the anchor you re-freeze to it and climb
+again (the standard AlphaZero iterate-and-promote ladder). yngine is the only
+*absolute* ceiling-detector, but it's not local (box torn down, no binary/runner
+in repo — only the offline shard parser `scripts/yngine_corpus_to_npz.py`), and
+building it = clone+build temhelk/yinsh on macOS + write the deferred V2b C++
+stdin/stdout protocol driver + Python bridge. **Defer-yngine trigger:** build the
+bridge only when (a) a long scaled self-play run needs a collusion tripwire, or
+(b) a candidate convincingly beats frozen-best and we want the absolute number.
+
+**What shipped:**
+- `scripts/eval_vs_frozen_anchor.py` — candidate(s) vs a fixed anchor (default
+  `best_iter_4.pt`), n split by color, reports WR + Wilson CI + STRONGER / WEAKER /
+  inconclusive verdict. Built on the **batched MCTS** (`self_play.MCTS.search_batch`),
+  the same engine `run_anchor_eval` uses — see the bug note below. Opening moves are
+  sampled (`--opening-sample-plies`, default 20) then greedy, to defeat the
+  deterministic-side artifact. Per-game `gc`+`torch.mps.empty_cache()` so long runs
+  don't OOM. Cost on MPS: ~30 min/candidate at n=40 @ 64 sims (≈16–23 s/game).
+- **⚠ Found a serious bug: the legacy MCTS `search()` is broken** (separate doc:
+  `TECH_DEBT.md`). My first cut reused `eval_head_to_head_mcts.py`, which calls
+  `yinsh_ml/search/mcts.py::MCTS.search()` — that method **never expands the root**
+  and returns a **uniform-random, net-blind** policy (`effective_child_visits=0.0`;
+  every checkpoint plays identically; verified). Its prior "white-wins pattern"
+  finding is an argmax-on-uniform artifact. **Blast radius is contained:** self-play
+  training and the HA-ladder anchor gates both use `search_batch` (`use_batched_mcts`
+  defaults `True`), so **this doc's headline results are NOT contaminated.** The
+  broken path only fed `eval_head_to_head_mcts.py` (diagnostic) and a test-only
+  `MCTSPolicy`. The bug surfaced only because the yardstick build included a positive
+  control — see below.
+- **Validation — the yardstick discriminates** (batched MCTS, opening-sampled):
+  - *Negative control* — `best_supervised` vs `best_iter_4`: inconclusive (CI spans
+    0.5; point est. 0.55 @ n=40/64sims, 0.70 @ n=20/32sims — both CIs include 0.5).
+    Correct: both sweep the HA ladder, ≈ equal.
+  - *Positive control* — abandoned `supervised_seed` and `supervised_seed_humans_only`
+    vs `best_iter_4`: **0/20 = 0.000, WEAKER** (CI95 ≤ 0.161), **balanced across
+    colors** (0 as White, 0 as Black) — genuine strength gap, not the color artifact.
+  - **Caveat — gradient is coarse for now.** It cleanly separates "comparable" from
+    "much weaker," but n=20 CIs are ±0.37 wide, so resolving a *small* real gain
+    (e.g. 0.55 vs 0.50) needs higher n — and at ~30 min/candidate on MPS that means
+    the GPU box for the real step-2 measurement.
+  - JSONs: `logs/frozen_anchor_disc/*.json`.
+- **Internal Elo beefed:** `configs/wave3_branchC_mcts200.yaml` `arena.games_per_match`
+  20 → 100 (tournament is raw-policy, cheap; shrinks the ±150 band ~2.2×).
+- **SPRT mode added + validated** (`--sprt`). Sequential test (H0 p0=0.5 vs H1 p1,
+  α=β configurable, Bernoulli LLR over decisive games, colors alternate per game)
+  that stops the moment the result is decisive instead of paying fixed-n for every
+  candidate — the fishtest approach, the load-bearing fix for the coarseness. Both
+  boundaries validated with p1=0.65: `best_iter_4` vs seed → STRONGER in 12 games;
+  seed vs `best_iter_4` → NOT_STRONGER in 9 games (LLR increments match theory).
+  JSONs: `logs/sprt_{upper,lower}.json`. (Deferred, theory-free option for further
+  variance reduction: a shared on-distribution opening book / common-random-numbers
+  pairing — only add if SPRT alone still burns too many games.)
+
+**Now unblocked → the actual experiment.** Run MCTS-1000 (or 400) self-play
+targets (strongest prior for raising the ceiling) and/or Branch D architecture,
+then screen each new candidate vs frozen `best_iter_4` with
+`eval_vs_frozen_anchor.py --sprt` (set `--sprt-p1` to the smallest edge worth
+promoting; clear cases stop fast, borderline ones run to `--sprt-max-games`).
+Likely on GPU — borderline cases can still need many games, and MPS is ~16–50 s/game.
+
+---
+
 ## Next steps — raising the ceiling
 
 The ordered plan. Step 1 is a prerequisite for everything after it.
 
-### 1. Build a non-saturated yardstick (DO THIS FIRST)
+### 1. Build a non-saturated yardstick — ✅ DONE 2026-05-21 (frozen anchor; see session update above)
 
 We've outgrown the heuristic ladder. Without a measurement that can distinguish
 "stronger" from "this strong," every experiment below produces flat noise.
