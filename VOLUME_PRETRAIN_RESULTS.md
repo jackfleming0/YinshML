@@ -260,13 +260,41 @@ Options (pick one or combine):
 - **Beefed-up internal Elo** — many more games/match (e.g. 100+) so the ±150 noise
   band shrinks enough to read a real trend.
 
+### 1b. GPU efficiency — prerequisite for the heavier search experiments
+
+The MCTS-400 run (2026-05-21, vast.ai 4090) ran serial (`num_workers: 0`,
+`use_shared_evaluator: false`) on purpose — clean comparison to the serial Branch C
+baseline, known-good path. Cost: the 4090 sat at **~7% util** (the workload is
+GPU-batch-starved, not compute-bound) — ~$13 of GPU time doing CPU-bound work.
+Fine for one controlled run; **not fine for MCTS-1000**, where serial wall-time is
+prohibitive (~5× this run → a week+). So before the heavier search experiments:
+
+- **Tier 1 — `num_workers: 4` (proven, zero-risk).** The 2026-05-05 4090 sweep
+  (`GPU_SCALING_RESULTS.md`) measured **1.85× games/hr** (677→1295) at workers=4.
+  Caps fast: 8 = 52% of peak, 16 = 40% (more workers → more GPU command-queue
+  contention, not throughput). **4 is the sweet spot, full stop.** This alone would
+  have cut the MCTS-400 run from ~38h to ~20h. Set it on every cloud run.
+- **Tier 2 — `use_shared_evaluator: true` (the real GPU unlock, NEEDS VALIDATION).**
+  The `BatchedEvaluator` (PR #12) coalesces leaf-eval inference across concurrent
+  games into one batch (`min(512, mcts_batch_size×workers)`), fixing the
+  per-worker `predict_batch` serialization that caps the multiprocess path — the
+  only lever that pushes *sustained* util up (`sm_p95` already hits 73-75% when fed;
+  `sm_avg` is the problem). **Gating task:** parity-check serial vs shared-evaluator
+  targets on a short config FIRST — there's an open batched-MCTS sim-accounting
+  concern (T1.1, ~30-60% sim loss). Don't bet a multi-day MCTS-1000 run on an
+  unvalidated batched path. (Audit the instrument before trusting it — same lesson
+  as the yardstick.)
+- **Don't bother:** `mcts_batch_size: 128` (a wash vs 64 at every worker count).
+
 ### 2. Ceiling-raising experiments (now measurable)
 
 Once step 1 gives a gradient we can see:
 - **MCTS-1000 (or 400) self-play targets** — strongest prior. Test whether a
   stronger teacher than the already-strong init's own policy produces targets the
   net can learn from. Costly (~5× MCTS-200 per-move), but the direct test of the
-  "stronger teacher" thesis.
+  "stronger teacher" thesis. **Run on the GPU-efficient config from §1b** (serial
+  is infeasible at 1000 sims) — the shared-evaluator parity check is a hard
+  prerequisite here.
 - **Branch D — architecture** (audit Gap 1): SE blocks + global-average-pool value
   head. Raise the representational ceiling. See `ARCHITECTURAL_IMPROVEMENTS_PLAN.md`.
 - **Secondary levers**: more epochs/iter, longer iters (more games → less
