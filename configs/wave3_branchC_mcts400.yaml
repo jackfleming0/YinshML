@@ -59,8 +59,14 @@ self_play:
   final_temp: 0.1
   annealing_steps: 30
   temp_clamp_fraction: 0.6
-  num_workers: 0
-  use_shared_evaluator: false
+  num_workers: 4            # throughput-only: ProcessPoolExecutor runs the SAME
+                            # per-game play_game_worker as serial, just 4 at once.
+                            # 4 is the measured 4090 sweet spot (GPU_SCALING_RESULTS:
+                            # 1.85x vs serial; 8w=52%, 16w=40% — command-queue
+                            # contention). Not learning-relevant, so the controlled
+                            # sims-only comparison vs Branch C is preserved.
+  use_shared_evaluator: false   # Tier-2 lever (coalesced inference) deferred — needs
+                                # the serial-vs-shared parity check first (see §1b).
   games_per_iteration: 100   # held fixed (controlled test) — NOT compensating for the 2x cost
 
 trainer:
