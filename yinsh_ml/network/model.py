@@ -81,7 +81,8 @@ class YinshNetwork(nn.Module):
 
     def __init__(self, num_channels: int = 256, num_blocks: int = 12,
                  value_mode: str = 'classification', num_value_classes: int = 7,
-                 input_channels: int = 6):
+                 input_channels: int = 6,
+                 value_head_type: str = 'spatial'):
         """
         Args:
             num_channels: Number of channels in residual blocks
@@ -89,8 +90,18 @@ class YinshNetwork(nn.Module):
             value_mode: 'classification' (AlphaZero-style) or 'regression' (legacy MSE)
             num_value_classes: Number of discrete outcome classes for classification mode
             input_channels: Number of input channels (6 for basic, 15 for enhanced encoding)
+            value_head_type: 'spatial' (legacy ~4M params: 3x3 conv x2 → Flatten(64*11*11)
+                → 512 → 256 → out) or 'gap' (Branch D.1, ~17K params: 1x1 conv → BN →
+                ReLU → AdaptiveAvgPool2d(1) → Linear(64, out)). 'gap' is the KataGo /
+                Leela value-head pattern; the spatial-flatten head is the documented
+                value-head overfitting trap. See VOLUME_PRETRAIN_RESULTS.md §2 Branch D.1.
         """
         super().__init__()
+
+        if value_head_type not in ('spatial', 'gap'):
+            raise ValueError(
+                f"value_head_type must be 'spatial' or 'gap', got {value_head_type!r}"
+            )
 
         # Policy head output size comes from the encoder so there's one source
         # of truth. The legacy hardcoded 7395 here + in StateEncoder used to
@@ -100,6 +111,8 @@ class YinshNetwork(nn.Module):
         self.value_mode = value_mode
         self.num_value_classes = num_value_classes
         self.input_channels = input_channels  # Store for reference
+        self.value_head_type = value_head_type
+        self._num_channels = num_channels  # needed by _build_*_value_head
 
         # Initial convolution block - now configurable input channels
         self.conv_block = nn.Sequential(
@@ -132,67 +145,29 @@ class YinshNetwork(nn.Module):
         # Value head activations for diagnostics
         self.value_head_activations = {}
 
-        # Build value head based on mode
+        # outcome_values is a tensor of class-center values used to convert the
+        # classification head's class probabilities into a scalar expected
+        # value. Only meaningful in classification mode; defined here so it's
+        # present regardless of value_head_type so load_model can match by name.
         if value_mode == 'classification':
-            # Classification-based value head (AlphaZero approach)
-            # Outputs logits for discrete outcome classes
-            self.value_head = nn.Sequential(
-                nn.Conv2d(num_channels, 64, 3, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(),
-                nn.Conv2d(64, 64, 3, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(),
-                nn.Flatten(),
-                nn.Linear(64 * 11 * 11, 512),
-                nn.BatchNorm1d(512),
-                nn.ReLU(),
-                nn.Dropout(0.4),
-                nn.Linear(512, 256),
-                nn.LayerNorm(256),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(256, num_value_classes)  # Output logits for each class
-                # No activation - we want raw logits for cross-entropy
-            )
-
-            # Outcome values for computing expected value from probabilities
-            # For 7 classes: score differences {-3, -2, -1, 0, +1, +2, +3}
-            # Normalized to [-1, 1] range
             if num_value_classes == 7:
+                # 7 classes: score differences {-3, -2, -1, 0, +1, +2, +3}
+                # normalized to [-1, 1].
                 self.outcome_values = nn.Parameter(
                     torch.tensor([-1.0, -0.667, -0.333, 0.0, 0.333, 0.667, 1.0]),
                     requires_grad=False
                 )
             else:
-                # For other numbers of classes, evenly space between -1 and 1
                 self.outcome_values = nn.Parameter(
                     torch.linspace(-1.0, 1.0, num_value_classes),
                     requires_grad=False
                 )
+
+        # Build value head — dispatch on (value_head_type, value_mode).
+        if value_head_type == 'gap':
+            self.value_head = self._build_gap_value_head()
         else:
-            # Legacy regression mode (for backward compatibility)
-            self.value_head = nn.Sequential(
-                nn.Conv2d(num_channels, 64, 3, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(),
-                nn.Conv2d(64, 64, 3, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(),
-                nn.Flatten(),
-                nn.Linear(64 * 11 * 11, 512),
-                nn.BatchNorm1d(512),
-                nn.ReLU(),
-                nn.Dropout(0.4),
-                nn.Linear(512, 256),
-                nn.LayerNorm(256),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(256, 128),
-                nn.ReLU(),
-                nn.Linear(128, 1),
-                nn.Tanh()
-            )
+            self.value_head = self._build_spatial_value_head()
 
         # Add this right after defining the value_head
         # Initialize the value head with better weights
@@ -218,7 +193,84 @@ class YinshNetwork(nn.Module):
         self._initialize_weights()
         self._initialize_value_head()
 
-    # Add this to model.py just after the value_head definition
+    def _build_spatial_value_head(self) -> nn.Sequential:
+        """Legacy spatial-flatten value head (~4M params).
+
+        The dominant cost is Linear(64*11*11=7744, 512) — 3.96M params for a
+        head that predicts a 7-class scalar. Documented as the value-head
+        overfitting trap across KataGo / Leela / AlphaZero. Kept as the default
+        only for back-compat with all pre-Branch-D.1 checkpoints; new training
+        runs should prefer the GAP head (see `_build_gap_value_head`).
+        """
+        c = self._num_channels
+        if self.value_mode == 'classification':
+            return nn.Sequential(
+                nn.Conv2d(c, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(64 * 11 * 11, 512),
+                nn.BatchNorm1d(512),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(512, 256),
+                nn.LayerNorm(256),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(256, self.num_value_classes),
+                # No activation - raw logits for cross-entropy
+            )
+        # regression mode (legacy)
+        return nn.Sequential(
+            nn.Conv2d(c, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 11 * 11, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Tanh(),
+        )
+
+    def _build_gap_value_head(self) -> nn.Sequential:
+        """Branch D.1 GAP value head (~17K params).
+
+        1x1 conv (channel projection 256→64) → BN → ReLU → AdaptiveAvgPool2d(1)
+        → Flatten → Linear(64, out). Mirrors the KataGo / Leela small-value-head
+        design. Param count ≈ 17K vs spatial's ~4M (≈250x reduction). Detected
+        in checkpoints by `value_head.0.weight.shape[-1] == 1` (1x1 conv kernel)
+        — used by NetworkWrapper.__init__ for auto-detection.
+
+        Output: logits for classification mode (num_value_classes), single
+        tanh-bounded scalar for regression mode.
+        """
+        c = self._num_channels
+        out_size = self.num_value_classes if self.value_mode == 'classification' else 1
+        layers = [
+            nn.Conv2d(c, 64, kernel_size=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(64, out_size),
+        ]
+        if self.value_mode == 'regression':
+            layers.append(nn.Tanh())
+        return nn.Sequential(*layers)
 
     def _initialize_value_head(self):
         """Improved initialization for value head."""

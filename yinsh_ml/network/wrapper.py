@@ -28,7 +28,8 @@ class NetworkWrapper:
                  value_mode: str = 'classification', num_value_classes: int = 7,
                  use_enhanced_encoding: bool = False,
                  num_channels: Optional[int] = None,
-                 num_blocks: Optional[int] = None):
+                 num_blocks: Optional[int] = None,
+                 value_head_type: Optional[str] = None):
         """
         Initialize the network wrapper.
 
@@ -41,6 +42,13 @@ class NetworkWrapper:
             use_enhanced_encoding: If True, use 15-channel enhanced encoding. If False, use basic 6-channel.
             num_channels: ResNet channel count. If None and model_path given, auto-detect from state_dict.
             num_blocks: Number of residual/attention blocks. If None and model_path given, auto-detect.
+            value_head_type: 'spatial' (legacy ~4M params) or 'gap' (Branch D.1 ~17K params).
+                If None and model_path given, auto-detect by inspecting `value_head.0.weight`'s
+                kernel size (3 → spatial, 1 → gap). If None and no model_path, defaults to
+                'spatial'. To DELIBERATELY swap heads during warm-start (e.g. load a spatial
+                checkpoint into a gap wrapper for Branch D.1), pass 'gap' explicitly — the
+                shape filter in `load_model` will load the trunk + policy and silently drop
+                the spatial-head keys, leaving the GAP head freshly initialized.
         """
         if device:
             self.device = torch.device(device)
@@ -89,17 +97,30 @@ class NetworkWrapper:
                             continue
                 if block_ids:
                     num_blocks = len(block_ids)
+            # Auto-detect value head type. The first value-head Conv2d is at
+            # `value_head.0.weight`. Spatial head: Conv2d(c, 64, kernel=3) →
+            # weight shape (64, c, 3, 3). GAP head: Conv2d(c, 64, kernel=1) →
+            # weight shape (64, c, 1, 1). The last dim discriminates cleanly.
+            # Only override if the caller didn't specify a type — explicit
+            # 'gap' on a spatial checkpoint is the Branch D.1 warm-start path.
+            if value_head_type is None:
+                vh0 = sd.get('value_head.0.weight')
+                if vh0 is not None and vh0.dim() == 4:
+                    value_head_type = 'gap' if vh0.shape[-1] == 1 else 'spatial'
         if num_channels is None:
             num_channels = 256
         if num_blocks is None:
             num_blocks = 12
+        if value_head_type is None:
+            value_head_type = 'spatial'
 
         self.network = YinshNetwork(
             num_channels=num_channels,
             num_blocks=num_blocks,
             value_mode=value_mode,
             num_value_classes=num_value_classes,
-            input_channels=input_channels
+            input_channels=input_channels,
+            value_head_type=value_head_type,
         ).to(self.device)
 
         # Setup logging
@@ -139,6 +160,13 @@ class NetworkWrapper:
         else:
             self.state_encoder = StateEncoder()
             self.logger.info("Using basic 6-channel encoding")
+
+        # Mirror value_head_type onto self so callers (e.g. supervisor's
+        # network-recreation path) can preserve it without poking into
+        # `self.network.value_head_type`.
+        self.value_head_type = self.network.value_head_type
+        vh_params = sum(p.numel() for p in self.network.value_head.parameters())
+        self.logger.info(f"Using {self.value_head_type} value head ({vh_params:,d} params)")
 
         # Difficulty presets can be attached by runner for CoreML metadata
         self.difficulty_presets = None

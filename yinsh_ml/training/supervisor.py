@@ -2307,14 +2307,18 @@ class TrainingSupervisor:
                 # Save current network state
                 self.network.save_model(temp_path)
 
-                # Get device and encoding information
+                # Get device and architecture information
                 device = getattr(self.network, 'device', torch.device('cpu'))
                 use_enhanced_encoding = getattr(self.network, 'use_enhanced_encoding', False)
+                value_head_type = getattr(self.network, 'value_head_type', None)
 
-                # Recreate network with tensor pool (preserving encoding type)
+                # Recreate network with tensor pool (preserving encoding type
+                # AND value-head architecture — without the latter, a GAP-head
+                # run silently reverts to a spatial head on recreation).
                 from yinsh_ml.network.wrapper import NetworkWrapper
                 new_network = NetworkWrapper(device=device, tensor_pool=self.tensor_pool,
-                                            use_enhanced_encoding=use_enhanced_encoding)
+                                            use_enhanced_encoding=use_enhanced_encoding,
+                                            value_head_type=value_head_type)
                 new_network.load_model(temp_path)
 
                 # Replace old network
