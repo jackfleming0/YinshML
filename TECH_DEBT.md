@@ -82,6 +82,22 @@ was broken, and it's now deleted. No landmine there.
   and kept the self_play side). No coverage of the real engine was lost.
 - If a real MCTS profiler is ever wanted, write one against `self_play.MCTS`
   (the deleted `performance_profiler.py` only knew the dead API).
+- **TensorPool device-string mismatch on MPS (discovered 2026-05-23):**
+  `TensorPool._detect_default_device` returns `torch.device('mps')` (no index)
+  but a tensor allocated on that device records as `torch.device('mps:0')`,
+  so `_get_tensor_key` writes `'mps:0'` into the pool key while `get(device=None)`
+  queries with `'mps'`. The `device_str` filter in `_find_compatible_tensor`
+  (and the exact-match key lookup in `get`) consequently never matches on
+  MPS — **the pool effectively allocates fresh every call on Apple Silicon.**
+  Pre-existing, harmless to correctness, missed perf opportunity. Fix by
+  normalizing both sides through `torch.device(str).type + ':0'` (or always
+  call `.cuda(0)` / `.mps(0)` style at storage). Out of scope for the
+  reshape-warning fix that surfaced it.
+- **TensorPool API drift (pre-existing):** 23 tests in `test_tensor_pool.py`
+  call `pool.get_tensor` / `pool.return_tensor` / etc. (old API); the
+  production API is `pool.get` / `pool.release`. Tests fail uniformly with
+  `AttributeError: 'TensorPool' object has no attribute 'get_tensor'`. Tests
+  need to be ported; production code is unaffected.
 
 ## 5. Process note (the durable lesson)
 
