@@ -272,8 +272,8 @@ def main() -> None:
     # value head for a ~17K-param GAP head. None = auto-detect from
     # --init-checkpoint, else fall back to wrapper default ('spatial').
     value_head_type = network_cfg.get('value_head_type', None)
-    if value_head_type is not None and value_head_type not in ('spatial', 'gap'):
-        parser.error(f"network.value_head_type must be 'spatial' or 'gap', got {value_head_type!r}")
+    if value_head_type is not None and value_head_type not in ('spatial', 'gap', 'gap_v2'):
+        parser.error(f"network.value_head_type must be 'spatial', 'gap', or 'gap_v2', got {value_head_type!r}")
 
     if use_enhanced_encoding:
         logger.info(f"Using ENHANCED encoding (15 channels)")

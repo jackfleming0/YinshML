@@ -66,6 +66,36 @@ class TestGapValueHead:
         # Classification mode: value head returns expected value (scalar per item).
         assert tuple(value.shape) == (3,), f"value shape {tuple(value.shape)} != (3,)"
 
+    def test_gap_v2_head_param_count(self):
+        """gap_v2 adds a hidden Linear (~5K extra params) — total ~22K."""
+        net = YinshNetwork(num_channels=256, num_blocks=12,
+                           value_mode='classification', num_value_classes=7,
+                           value_head_type='gap_v2')
+        # Conv(256,64,k=1) 16,448 + BN 128 + Linear(64,80) 5,200 + Linear(80,7) 567 = 22,343
+        n = _vh_params(net)
+        assert 18_000 < n < 28_000, f"gap_v2 head size outside expected range: {n}"
+
+    def test_gap_v2_head_forward_shapes(self):
+        net = YinshNetwork(num_channels=64, num_blocks=2,
+                           value_mode='classification', num_value_classes=7,
+                           value_head_type='gap_v2')
+        net.eval()
+        x = torch.zeros(3, 6, 11, 11)
+        with torch.no_grad():
+            policy, value = net(x)
+        assert tuple(policy.shape) == (3, net.total_moves)
+        assert tuple(value.shape) == (3,)
+
+    def test_gap_v2_has_two_linear_layers(self):
+        """gap_v2's signature: 2 Linear modules in value_head (vs gap's 1)."""
+        net = YinshNetwork(num_channels=64, num_blocks=2, value_head_type='gap_v2')
+        linears = [m for m in net.value_head.modules() if isinstance(m, torch.nn.Linear)]
+        assert len(linears) == 2, f"gap_v2 should have 2 Linears, got {len(linears)}"
+        # First Linear: pooled 64-dim → hidden 80
+        assert linears[0].in_features == 64 and linears[0].out_features == 80
+        # Second Linear: hidden 80 → 7 classes
+        assert linears[1].in_features == 80 and linears[1].out_features == 7
+
     def test_gap_head_regression_mode(self):
         """GAP also supports regression mode (Linear(64, 1) + Tanh).
 
@@ -172,7 +202,8 @@ class TestGapWarmStartFromSpatial:
 
 class TestAutoDetectFromCheckpoint:
     """When value_head_type is None and a model_path is given, the wrapper
-    must auto-detect by inspecting `value_head.0.weight`'s kernel size."""
+    must auto-detect by inspecting `value_head.0.weight`'s kernel size
+    (3=spatial, 1=GAP) and Linear count (1=gap, ≥2=gap_v2)."""
 
     def test_auto_detect_spatial(self, tmp_path):
         spatial_net = YinshNetwork(num_channels=32, num_blocks=2,
@@ -190,13 +221,54 @@ class TestAutoDetectFromCheckpoint:
         wrapper = NetworkWrapper(model_path=str(path), device='cpu')
         assert wrapper.value_head_type == 'gap'
 
+    def test_auto_detect_gap_v2(self, tmp_path):
+        gap_v2_net = YinshNetwork(num_channels=32, num_blocks=2,
+                                  value_head_type='gap_v2')
+        path = tmp_path / "gap_v2.pt"
+        torch.save(gap_v2_net.state_dict(), path)
+        wrapper = NetworkWrapper(model_path=str(path), device='cpu')
+        assert wrapper.value_head_type == 'gap_v2', (
+            f"gap_v2 (2 Linears) should auto-detect as gap_v2, "
+            f"not {wrapper.value_head_type}"
+        )
+
     def test_explicit_override_beats_auto_detect(self, tmp_path):
-        """The Branch D.1 warm-start path: explicit 'gap' on a spatial
+        """The Branch D.1 warm-start path: explicit 'gap_v2' on a spatial
         checkpoint must NOT be overridden by auto-detect."""
         spatial_net = YinshNetwork(num_channels=32, num_blocks=2,
                                    value_head_type='spatial')
         path = tmp_path / "spatial.pt"
         torch.save(spatial_net.state_dict(), path)
-        wrapper = NetworkWrapper(model_path=str(path), device='cpu',
-                                 value_head_type='gap')
-        assert wrapper.value_head_type == 'gap'
+        # v1 override
+        w1 = NetworkWrapper(model_path=str(path), device='cpu',
+                            value_head_type='gap')
+        assert w1.value_head_type == 'gap'
+        # v2 override
+        w2 = NetworkWrapper(model_path=str(path), device='cpu',
+                            value_head_type='gap_v2')
+        assert w2.value_head_type == 'gap_v2'
+
+    def test_gap_v2_warm_start_from_spatial(self, tmp_path):
+        """gap_v2 must support the same warm-start path as gap v1:
+        load spatial checkpoint, trunk transfers cleanly, fresh head inits."""
+        spatial_net = YinshNetwork(num_channels=32, num_blocks=2,
+                                   value_head_type='spatial')
+        with torch.no_grad():
+            for p in spatial_net.parameters():
+                p.add_(0.123)
+        path = tmp_path / "spatial.pt"
+        torch.save(spatial_net.state_dict(), path)
+
+        w = NetworkWrapper(device='cpu', num_channels=32, num_blocks=2,
+                           value_head_type='gap_v2')
+        w.load_model(str(path))
+        assert w.value_head_type == 'gap_v2'
+        # Forward works
+        w.network.eval()
+        with torch.no_grad():
+            policy, value = w.network(torch.zeros(1, 6, 11, 11))
+        assert policy.shape == (1, w.network.total_moves)
+        # GAP-v2 head has 2 Linears; first conv is 1x1 (not 3x3)
+        assert w.network.value_head[0].kernel_size == (1, 1)
+        linears = [m for m in w.network.value_head.modules() if isinstance(m, torch.nn.Linear)]
+        assert len(linears) == 2

@@ -421,15 +421,19 @@ def main():
     parser.add_argument('--num-blocks', type=int, default=12,
                        help='Number of residual/attention blocks (default: 12)')
     parser.add_argument('--value-head-type', type=str, default='spatial',
-                       choices=['spatial', 'gap'],
+                       choices=['spatial', 'gap', 'gap_v2'],
                        help="Value head architecture: 'spatial' (legacy ~4M "
-                            "params, Flatten(64*11*11)->512->256->out) or 'gap' "
-                            "(Branch D.1, ~17K params, 1x1 conv->GAP->Linear(64, "
-                            "out)). Defaults to 'spatial' for back-compat. Use "
-                            "'gap' to train a GAP-head supervised init from "
-                            "scratch — the parallel-track alternative to "
-                            "warm-starting a spatial-head checkpoint into a "
-                            "fresh GAP head via run_training.py's --init-checkpoint.")
+                            "params, Flatten(64*11*11)->512->256->out), 'gap' "
+                            "(~17K params, 1x1 conv->GAP->Linear(64, out) — "
+                            "direct projection, lost to spatial head in SPRT), "
+                            "or 'gap_v2' (~22K params, adds hidden layer: 1x1 "
+                            "conv->GAP->Linear(64,80)->ReLU->Linear(80,out), "
+                            "KataGo-canonical). Defaults to 'spatial' for "
+                            "back-compat. Use 'gap_v2' to train a GAP-native "
+                            "supervised init from scratch — the parallel-track "
+                            "alternative to warm-starting a spatial-head "
+                            "checkpoint into a fresh head via run_training.py's "
+                            "--init-checkpoint.")
 
     # Output options
     parser.add_argument('--output-dir', type=str, default='models/supervised',

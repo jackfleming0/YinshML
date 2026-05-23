@@ -98,9 +98,9 @@ class YinshNetwork(nn.Module):
         """
         super().__init__()
 
-        if value_head_type not in ('spatial', 'gap'):
+        if value_head_type not in ('spatial', 'gap', 'gap_v2'):
             raise ValueError(
-                f"value_head_type must be 'spatial' or 'gap', got {value_head_type!r}"
+                f"value_head_type must be 'spatial', 'gap', or 'gap_v2', got {value_head_type!r}"
             )
 
         # Policy head output size comes from the encoder so there's one source
@@ -166,6 +166,8 @@ class YinshNetwork(nn.Module):
         # Build value head — dispatch on (value_head_type, value_mode).
         if value_head_type == 'gap':
             self.value_head = self._build_gap_value_head()
+        elif value_head_type == 'gap_v2':
+            self.value_head = self._build_gap_v2_value_head()
         else:
             self.value_head = self._build_spatial_value_head()
 
@@ -267,6 +269,44 @@ class YinshNetwork(nn.Module):
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(64, out_size),
+        ]
+        if self.value_mode == 'regression':
+            layers.append(nn.Tanh())
+        return nn.Sequential(*layers)
+
+    def _build_gap_v2_value_head(self, hidden_size: int = 80) -> nn.Sequential:
+        """Branch D.1 v2 — GAP head + hidden Linear (~22K params).
+
+        Direct fix for the v1 failure mode (cf. experiments/branchD1_failed_run/
+        branchD1_iter4_vs_frozen.json: NOT_STRONGER, 1-15-0 vs frozen
+        best_iter_4). v1's head projected pooled features (64-dim) directly
+        to 7 logits with NO hidden composition step — likely starvation:
+        anchor-vs-HA(d=1) still scored 95-100% (saturated signal), but the
+        candidate was strictly worse vs the spatial-head Branch C iter_4
+        when discriminated by SPRT.
+
+        v2 adds the KataGo / Leela canonical hidden layer:
+            Conv2d(c→64, k=1) → BN → ReLU → AdaptiveAvgPool2d(1)
+                              → Linear(64, 80) → ReLU → Linear(80, out)
+
+        ~22K params total (still ~190x smaller than the spatial head's
+        ~4.28M). The 64→80 hidden dim is KataGo's default; gives the head
+        enough capacity to compose pooled features before final projection.
+
+        Detected in checkpoints by the SECOND Linear layer being present
+        (gap v1 has 1 Linear, v2 has 2).
+        """
+        c = self._num_channels
+        out_size = self.num_value_classes if self.value_mode == 'classification' else 1
+        layers = [
+            nn.Conv2d(c, 64, kernel_size=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(64, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, out_size),
         ]
         if self.value_mode == 'regression':
             layers.append(nn.Tanh())

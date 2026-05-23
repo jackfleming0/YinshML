@@ -97,16 +97,30 @@ class NetworkWrapper:
                             continue
                 if block_ids:
                     num_blocks = len(block_ids)
-            # Auto-detect value head type. The first value-head Conv2d is at
-            # `value_head.0.weight`. Spatial head: Conv2d(c, 64, kernel=3) →
-            # weight shape (64, c, 3, 3). GAP head: Conv2d(c, 64, kernel=1) →
-            # weight shape (64, c, 1, 1). The last dim discriminates cleanly.
+            # Auto-detect value head type. Spatial head's first layer is
+            # Conv2d(c, 64, kernel=3) → weight shape (64, c, 3, 3). Both GAP
+            # variants use Conv2d(c, 64, kernel=1) → weight shape (64, c, 1, 1).
+            # To discriminate GAP v1 vs v2, count Linear modules in the head:
+            #   spatial: 3 Linears (7744→512, 512→256, 256→out)
+            #   gap (v1): 1 Linear (64→out)
+            #   gap_v2:   2 Linears (64→hidden=80, hidden→out)
+            # Detection by counting `value_head.N.weight` keys with shape == 2
+            # (which marks a Linear's weight tensor).
             # Only override if the caller didn't specify a type — explicit
-            # 'gap' on a spatial checkpoint is the Branch D.1 warm-start path.
+            # 'gap' / 'gap_v2' on a spatial checkpoint is the warm-start path.
             if value_head_type is None:
                 vh0 = sd.get('value_head.0.weight')
                 if vh0 is not None and vh0.dim() == 4:
-                    value_head_type = 'gap' if vh0.shape[-1] == 1 else 'spatial'
+                    if vh0.shape[-1] == 3:
+                        value_head_type = 'spatial'
+                    else:
+                        # kernel=1 → GAP variant. Count Linears to distinguish.
+                        n_linears = sum(
+                            1 for k, v in sd.items()
+                            if k.startswith('value_head.') and k.endswith('.weight')
+                            and v.dim() == 2
+                        )
+                        value_head_type = 'gap_v2' if n_linears >= 2 else 'gap'
         if num_channels is None:
             num_channels = 256
         if num_blocks is None:

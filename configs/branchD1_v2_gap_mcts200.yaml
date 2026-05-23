@@ -1,0 +1,118 @@
+# branchD1_v2_gap_mcts200.yaml — Branch D.1 v2: GAP value head + hidden Linear.
+#
+# Iteration on Branch D.1 v1 (configs/branchD1_gap_mcts200.yaml). v1 result:
+# SPRT NOT_STRONGER, 1-15-0 vs frozen best_iter_4 (experiments/branchD1_failed_run/
+# branchD1_iter4_vs_frozen.json). Internal training metrics all looked
+# healthy (loss decreased monotonically, anchor 95-100%, 5/5 promotions),
+# but the head-to-head SPRT was decisive: candidate strictly weaker than
+# the spatial-head Branch C iter_4.
+#
+# Hypothesis for v1 failure: starvation. v1 projected pooled 64-dim features
+# DIRECTLY to 7 class logits with no hidden composition step — KataGo/Leela
+# small-value-head designs always include a hidden layer (typical: 80 units)
+# between GAP and final projection. The v1 head was likely producing
+# near-constant value estimates across positions, making MCTS unable to
+# discriminate branches.
+#
+# v2 adds the canonical hidden layer:
+#     Conv2d(c→64, k=1) → BN → ReLU → AdaptiveAvgPool2d(1)
+#                       → Linear(64, 80) → ReLU → Linear(80, 7)
+# Param count: ~22K (vs v1's ~17K, vs spatial's ~4.28M).
+#
+# One variable changed from v1 config: `network.value_head_type: gap → gap_v2`.
+# Everything else identical (recipe, sims, sampling, anchor, promotion gate).
+# save_dir is bumped to runs_branchD1_v2 so v1 results remain intact for
+# A/B comparison.
+#
+# If v2 ALSO loses the SPRT, we have evidence that "the GAP architecture is
+# not the right shape for this problem at this trunk capacity" — pivot to
+# Branch D.2 (enhanced encoding) becomes the next axis.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_branchD1_v2
+
+network:
+  value_head_type: gap_v2   # <-- THE D.1 v2 KNOB (everything else mirrors v1 = Branch C)
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 200
+  late_simulations: 100
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 4
+  use_shared_evaluator: false
+  games_per_iteration: 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 100
+  promotion_threshold: 0.20
+  tournament_sliding_window: 3
+  eval_seed: 20260518
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
