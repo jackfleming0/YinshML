@@ -10,7 +10,7 @@ bottom (§"Prompt for the next session").
 
 ## TL;DR
 
-Two experiments, run back-to-back on a rented vast.ai RTX 4090 (~$30 total):
+Three experiments, run on a rented vast.ai RTX 4090 (~$40 total):
 
 1. **Option 2 — volume-corpus value-head pretraining.** Trained a network from
    scratch on 13.6M yngine self-play positions. The resulting checkpoint
@@ -30,11 +30,19 @@ Two experiments, run back-to-back on a rented vast.ai RTX 4090 (~$30 total):
    exploity — confirming the 100% ladder isn't an artifact of gaming the
    heuristic.
 
-**Net:** we have a genuinely strong, stable YINSH bot, built cheaply. The
-pretrained init did the work; self-play treads water on top of it. The
-bottleneck is now the **ceiling**, not recipe stability — and, critically, we
-**can no longer measure improvement** because every yardstick we have is
-saturated.
+4. **Step 2 — MCTS-400 ceiling experiment (2026-05-22/23, 19.84h).** Controlled
+   lever test (sims 200→400, all else identical to Branch C). Resulting candidate
+   vs frozen `best_iter_4` on the SPRT yardstick: **INCONCLUSIVE at the 400-game
+   cap, 221-179, WR 0.552, CI95 [0.504, 0.600].** Small *real* edge (~30–40 Elo,
+   lower CI > 0.50) but sits squarely below the p₁=0.60 promotion bar. Stability
+   was flawless: 5/5 promotions, all 4 anchors at 100%, 0 crashes. **Search depth
+   is not the dominant lever for this architecture — the ceiling is structural.**
+
+**Net:** we have a genuinely strong, stable YINSH bot AND a working non-saturated
+yardstick. The first ceiling experiment (MCTS-400) confirmed search depth isn't
+the binding constraint — the network architecture is. The next axis is **Branch D
+(GAP value head first)**, with `num_workers:4` and the `BatchedEvaluator`
+parity-check as enabling prereqs (see §2).
 
 ---
 
@@ -243,6 +251,90 @@ Likely on GPU — borderline cases can still need many games, and MPS is ~16–5
 
 ---
 
+## Session update — 2026-05-22 → 23: Step 2 ran (MCTS-400)
+
+Tested the stronger-teacher hypothesis end to end. **Result: small real edge,
+not promotion-worthy. Search depth is not the dominant lever for this
+architecture.**
+
+### Run
+
+- **Setup** (`configs/wave3_branchC_mcts400.yaml`, `STEP2_MCTS400_RUNBOOK.md`):
+  controlled lever test — sims 200→400, late_sims 100→200, all else identical to
+  the Branch C MCTS-200 baseline. Warm-started from the same `best_supervised.pt`
+  init, screened against frozen `best_iter_4` afterward.
+- **GPU efficiency restart**: launched serial (`num_workers: 0`), then killed after
+  ~1h / 15 games when the 4090 sat at ~7% util. Restarted with `num_workers: 4`;
+  first batch validated **2.84× speedup** (50.5 min → 17.8 min per 10-game batch,
+  0 worker crashes). The multiprocess path calls the same per-game
+  `play_game_worker` as serial, so this is throughput-only — the controlled
+  comparison is preserved. Cut the run from ~44h to **19.84h actual**.
+- **Stability**: 5/5 promotions, **all 4 completed-iter anchors at 100%** vs
+  HA(d=1), 0 crashes. The Branch C collapse mode (82.5%→60% in the original
+  2026-05 run) stayed fixed under the stronger teacher too — the value-grounded
+  pretrained init is robust at this sim count.
+- **Internal Elo** (raw-policy tournament, beefed to 100 games/match): iter 0–4
+  hovered around 1485–1505. Flat — same pattern as MCTS-200. Internal Elo is now
+  genuinely diagnosed as a noisy/saturated signal in this regime; the
+  frozen-anchor SPRT is the load-bearing measurement.
+
+### Result — SPRT (`logs/mcts400_iter4_vs_frozen.json`)
+
+| | |
+|---|---|
+| Verdict | **INCONCLUSIVE** at the 400-game cap |
+| Score | candidate **221-179-0**, WR **0.552** |
+| CI95 | **[0.504, 0.600]** |
+| LLR | +0.35 (boundaries ±2.94, α=β=0.05) |
+| Color split | W/B 114/107 (balanced — no deterministic-side artifact) |
+| Cost | 400 games, ~7.9h on the 4090 at 64 sims/move |
+
+**How to read INCONCLUSIVE in this case.** The formal label is "test didn't
+decisively cross H0 or H1," but the CI carries the real meaning. Lower bound
+**0.504 > 0.500 with ~95% confidence** ⇒ a real positive effect exists. Upper
+bound **= 0.600** ⇒ almost certainly below the promotion threshold we set. The
+candidate is roughly **30–40 Elo stronger**, not the ≥70 Elo we required. The
+SPRT result and the flat internal Elo are coherent: small real bump, not a
+ceiling break.
+
+### Implications for the ceiling thesis
+
+- **Search depth alone is not the dominant lever for this architecture.** Doubling
+  sims produced a measurable but small gain, well below what log-linear scaling
+  priors (50–100 Elo per doubling in the unsaturated regime) would predict. The
+  network architecture is the binding constraint, not search budget.
+- **By log-linear extrapolation, MCTS-800 buys ~15–25 Elo more at best**, MCTS-1000
+  marginally more — still below the promotion bar relative to the next anchor we'd
+  set, at 4× the compute cost. **MCTS-1000 as a standalone experiment is
+  effectively pre-answered: marginal.** Demote.
+- **The Branch D / architecture axis is the next leverage point.** See §2 below.
+
+### Methodological note: don't eyeball-call mid-flight
+
+Three times during the SPRT I read intermediate trajectory and called the result
+early — g68 "settled NOT_STRONGER," g92 "climbing STRONGER," g120 "back to
+NOT_STRONGER." Each read was overturned within ~30 games. The truth was always
+"true WR right at the indifference point (~0.55); LLR random-walks near zero;
+will hit the cap." This is exactly the regime SPRT is designed to handle without
+premature commitment, and I made the mistake anyway. **Trust the formal boundary.
+The whole point of sequential testing is to refuse to call until the evidence
+accumulates beyond chance.**
+
+### Side wins (not just the verdict)
+
+- `num_workers: 4` is now battle-tested on the production training path (no worker
+  crashes across 500 self-play games + 3 full anchor evals + 4 tournament rounds).
+  Tier-1 GPU lever from §1b is fully de-risked.
+- The frozen-anchor SPRT instrument itself ran a real long borderline case clean —
+  boundaries and cap behavior all worked as designed; W/B color split came out
+  balanced (114/107), confirming the opening-sample defense against the
+  deterministic-side artifact.
+- Local artifacts pulled: `logs/mcts400_iter4_vs_frozen.json`,
+  `logs/mcts400_sprt.log`, `logs/mcts400.log`. Repo: `configs/wave3_branchC_mcts400.yaml`,
+  `STEP2_MCTS400_RUNBOOK.md`. Box terminated after artifact pull.
+
+---
+
 ## Next steps — raising the ceiling
 
 The ordered plan. Step 1 is a prerequisite for everything after it.
@@ -260,45 +352,77 @@ Options (pick one or combine):
 - **Beefed-up internal Elo** — many more games/match (e.g. 100+) so the ±150 noise
   band shrinks enough to read a real trend.
 
-### 1b. GPU efficiency — prerequisite for the heavier search experiments
+### 1b. GPU efficiency — prerequisite for the heavier experiments
 
-The MCTS-400 run (2026-05-21, vast.ai 4090) ran serial (`num_workers: 0`,
-`use_shared_evaluator: false`) on purpose — clean comparison to the serial Branch C
-baseline, known-good path. Cost: the 4090 sat at **~7% util** (the workload is
-GPU-batch-starved, not compute-bound) — ~$13 of GPU time doing CPU-bound work.
-Fine for one controlled run; **not fine for MCTS-1000**, where serial wall-time is
-prohibitive (~5× this run → a week+). So before the heavier search experiments:
+The original Step 2 launch ran serial (`num_workers: 0`) on purpose — clean
+comparison to the serial Branch C baseline. The 4090 sat at **~7% util** (workload
+is GPU-batch-starved, not compute-bound). We killed it after ~1h and restarted with
+`num_workers: 4`; the first batch validated **2.84× speedup** with zero worker
+crashes, and the full 5-iter run completed in 19.84h instead of the projected ~44h.
+**Tier 1 is now fully battle-tested on the production training path.**
 
-- **Tier 1 — `num_workers: 4` (proven, zero-risk).** The 2026-05-05 4090 sweep
-  (`GPU_SCALING_RESULTS.md`) measured **1.85× games/hr** (677→1295) at workers=4.
-  Caps fast: 8 = 52% of peak, 16 = 40% (more workers → more GPU command-queue
-  contention, not throughput). **4 is the sweet spot, full stop.** This alone would
-  have cut the MCTS-400 run from ~38h to ~20h. Set it on every cloud run.
+- **Tier 1 — `num_workers: 4` (proven, zero-risk, battle-tested 2026-05-22).**
+  Sweep evidence (`GPU_SCALING_RESULTS.md`) said 1.85× games/hr at workers=4;
+  measured 2.84× on the actual Step 2 run (sub-linear gains amplify when the
+  per-game workload has more CPU-bound MCTS tree work, i.e. at higher sim counts).
+  Caps fast: 8 workers = 52% of peak, 16 = 40% — more workers → more GPU
+  command-queue contention, not throughput. **4 is the sweet spot, full stop.**
+  Set it on every cloud run.
 - **Tier 2 — `use_shared_evaluator: true` (the real GPU unlock, NEEDS VALIDATION).**
   The `BatchedEvaluator` (PR #12) coalesces leaf-eval inference across concurrent
   games into one batch (`min(512, mcts_batch_size×workers)`), fixing the
   per-worker `predict_batch` serialization that caps the multiprocess path — the
-  only lever that pushes *sustained* util up (`sm_p95` already hits 73-75% when fed;
+  only lever that pushes *sustained* util up (`sm_p95` already hits 73–75% when fed;
   `sm_avg` is the problem). **Gating task:** parity-check serial vs shared-evaluator
   targets on a short config FIRST — there's an open batched-MCTS sim-accounting
-  concern (T1.1, ~30-60% sim loss). Don't bet a multi-day MCTS-1000 run on an
-  unvalidated batched path. (Audit the instrument before trusting it — same lesson
-  as the yardstick.)
+  concern (T1.1, ~30–60% sim loss). Don't bet a multi-day run on an unvalidated
+  batched path. (Audit the instrument before trusting it — same lesson as the
+  yardstick.) **This is the gating task for the next heavy run.**
 - **Don't bother:** `mcts_batch_size: 128` (a wash vs 64 at every worker count).
 
-### 2. Ceiling-raising experiments (now measurable)
+### 2. Ceiling-raising experiments — Branch D (architecture) is the next axis
 
-Once step 1 gives a gradient we can see:
-- **MCTS-1000 (or 400) self-play targets** — strongest prior. Test whether a
-  stronger teacher than the already-strong init's own policy produces targets the
-  net can learn from. Costly (~5× MCTS-200 per-move), but the direct test of the
-  "stronger teacher" thesis. **Run on the GPU-efficient config from §1b** (serial
-  is infeasible at 1000 sims) — the shared-evaluator parity check is a hard
-  prerequisite here.
-- **Branch D — architecture** (audit Gap 1): SE blocks + global-average-pool value
-  head. Raise the representational ceiling. See `ARCHITECTURAL_IMPROVEMENTS_PLAN.md`.
-- **Secondary levers**: more epochs/iter, longer iters (more games → less
-  overfit), tighter promotion gate (Wilson 0.20 is too loose for a real run).
+After Step 2 (MCTS-400) confirmed search depth isn't the binding constraint,
+the indicated lever is the network architecture itself. Sequential one-variable
+tests, not stacked, so each result attributes cleanly:
+
+- **Branch D.1 — GAP value head (PRIMARY, do this next).** Replace the
+  spatial-flatten value-head pipeline (currently ~4M params: 2 convs →
+  `Flatten(64·11·11=7,744)` → 512 → 256 → 7 classes) with a global-average-pool
+  head (~5K params: 1×1 conv → `AdaptiveAvgPool2d(1)` → 64 → 7). Smallest change,
+  strongest mechanism-based prior — the spatial-flatten pattern is documented
+  across KataGo/Leela/AlphaZero as the dominant value-head overfitting trap, and
+  the current head is conspicuously parameter-heavy for what it predicts (a 7-class
+  scalar). One head swap, no encoder retrain, no training-loop changes. Train from
+  the same `best_supervised.pt` init, screen vs frozen `best_iter_4` on the SPRT
+  yardstick.
+- **Branch D.2 — Enhanced 15-channel encoding.** Add threat/tactical planes (rows-
+  of-3/4, blocking rings), positional planes (centrality, edge distance), and
+  enhanced game-state planes (turn counter, score diff). Already half-built;
+  `EnhancedStateEncoder` exists. Bigger commitment than D.1 (regenerate the
+  pretraining corpus with the new encoder to match the input shape), but the
+  change with the most *information* added — gives the net access to features it
+  currently has to derive from raw piece positions. See
+  `ARCHITECTURAL_IMPROVEMENTS_PLAN.md` Phase 1.
+- **Branch D.3 — SE (channel attention) blocks.** Drop in alongside the existing
+  spatial-attention blocks. Cheap (~5K extra params per block), well-attested in
+  Leela/KataGo, complements rather than overlaps the existing attention (spatial
+  asks "which cells matter," SE asks "which feature channels matter"). Sequence
+  *after* D.1 and D.2 so attribution stays clean — its mechanism partly overlaps
+  the existing spatial attention.
+- **NOT pursuing — D6 hex augmentation.** Earlier analysis ruled this out
+  (YINSH's column counts `[4,7,8,9,10,9,10,9,8,7,4]` are palindromic but not a
+  regular hexagon; the board's true symmetry group is smaller than D6, and
+  applying full D6 transforms would teach false invariances). Current axis-flip
+  augmentation matches the actual symmetry; that's the right call.
+- **NOT pursuing standalone — MCTS-1000.** Demoted post-Step-2. Log-linear scaling
+  priors (50–100 Elo per doubling in an unsaturated regime; we got ~30–40 Elo from
+  the 200→400 doubling) predict marginal gains; 4× the compute cost for an Elo
+  bump still below the promotion bar. Worth a re-test only *after* an architecture
+  change has shown it can absorb stronger targets.
+- **Secondary levers (keep on the shelf):** tighter promotion gate (Wilson 0.20 is
+  documented as loose), more epochs/iter, longer iters (more games → less overfit).
+  Stack only after the primary architecture axis has produced a candidate.
 
 ### 3. If scaling the AlphaZero loop
 
@@ -320,29 +444,38 @@ climbing. If you do:
 ## Prompt for the next session
 
 > I'm continuing the YINSH ceiling-raising work. Read `VOLUME_PRETRAIN_RESULTS.md`
-> first — it has the full results of the volume-corpus pretraining + Branch C
-> rerun and the next-step plan.
+> first — it has the full story (volume-corpus pretraining → Branch C MCTS-200
+> rerun → frozen-anchor yardstick built → Step 2 MCTS-400 ran). The "Next steps"
+> section is the ordered plan.
 >
 > Short version: we have a strong, stable bot
-> (`models/branchC_volume_pretrain/best_iter_4.pt` — sweeps the HA d1/d2/d3 ladder
-> at 100% and beats a competent human) but it's plateaued *as far as we can
-> measure* — every yardstick is saturated. So before any ceiling experiment
-> (MCTS-1000 targets, Branch D architecture), the immediate task is **step 1 from
-> that doc: build a non-saturated yardstick.**
+> (`models/branchC_volume_pretrain/best_iter_4.pt`, sweeps HA d1/d2/d3 at 100%,
+> beats a competent human) AND a working non-saturated yardstick
+> (`scripts/eval_vs_frozen_anchor.py --sprt`). Step 2 (MCTS-400) screened
+> INCONCLUSIVE with WR 0.552 (CI95 [0.504, 0.600]) — small ~30–40 Elo edge, below
+> the p₁=0.60 promotion bar. **Search depth isn't the binding constraint; the
+> architecture is.** Next axis is Branch D.
 >
-> Specifically: write an eval harness that plays a checkpoint head-to-head against
-> **yngine** (the engine our corpus came from), n≥40 split by color, and reports
-> WR + Wilson CI — analogous to `scripts/eval_vs_heuristic.py` but with yngine as
-> the opponent instead of HeuristicAgent. Check whether a yngine-play harness or
-> binary already exists in the repo (the corpus was generated from yngine
-> self-play, so there's a translator/runner somewhere) before writing from scratch.
-> Then run `best_iter_4.pt` and the pretrained `best_supervised.pt` against it to
-> get our first non-saturated strength numbers.
+> Specifically: **two tasks in order.**
 >
-> Operational notes: the old vast.ai box is torn down — spin a fresh instance only
-> if a real run is needed (the yngine eval may be cheap enough to run locally on
-> MPS). All checkpoints + corpus are local (see the doc's Artifacts section).
-> Branch `training-pipeline-fixes`; two play_dashboard commits are local-only if
-> you want them pushed. Don't re-litigate: training from scratch (not seed
-> warm-start) was deliberate; the recipe-doesn't-compound finding is measurement-
-> limited, not proven — see the doc's epistemic caveat.
+> 1. **`BatchedEvaluator` parity-check (enabling prereq).** Confirm that turning on
+>    `use_shared_evaluator: true` + `num_workers: 4` produces *identical-quality*
+>    self-play targets to the serial path. There's an open batched-MCTS sim-loss
+>    concern in my notes (T1.1). Suggested: short-config training run (e.g. 1 iter,
+>    20 games) under each path, compare resulting checkpoint strengths via the
+>    SPRT yardstick. Cheap, local-feasible, gates the next heavy run.
+>
+> 2. **Branch D.1 — GAP value head.** Replace the spatial-flatten value head
+>    (~4M params: `Flatten(64·11·11)` → 512 → 256 → 7) with a GAP head (~5K params:
+>    1×1 conv → `AdaptiveAvgPool2d(1)` → 64 → 7) in `yinsh_ml/network/model.py`.
+>    Train a controlled-comparison run (same init `best_supervised.pt`, same recipe
+>    as MCTS-200 Branch C *except* the head), screen vs frozen `best_iter_4` with
+>    `eval_vs_frozen_anchor.py --sprt --sprt-p1 0.60`. One variable changed.
+>
+> Operational notes: vast.ai box from Step 2 is terminated; spin a fresh one for
+> the actual training run (use `num_workers: 4` from the start — battle-tested
+> 2.84× speedup at MCTS-400 sim depth, zero worker crashes across the full Step 2
+> run). All checkpoints + corpus are local. Branch `training-pipeline-fixes`.
+> Don't re-litigate: training from scratch (not seed warm-start) was deliberate;
+> the MCTS-400 small-but-not-promotion-worthy result is robust (CI95 [0.504, 0.600],
+> 400 games, color-balanced) — don't re-run MCTS-400 hoping for a different number.
