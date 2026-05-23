@@ -441,41 +441,147 @@ climbing. If you do:
 
 ---
 
-## Prompt for the next session
+## Session update — 2026-05-23: tasks 1 & 2 landed locally; D.1 ready for cloud
 
-> I'm continuing the YINSH ceiling-raising work. Read `VOLUME_PRETRAIN_RESULTS.md`
-> first — it has the full story (volume-corpus pretraining → Branch C MCTS-200
-> rerun → frozen-anchor yardstick built → Step 2 MCTS-400 ran). The "Next steps"
-> section is the ordered plan.
+Picked up on a fresh machine (laptop, not the original vast.ai box). Pulled
+artifacts via gh release `mcts400-session-snapshot-2026-05-23` (MD5s match).
+Two pre-D.2 items completed locally; D.1 is implemented and tested but the
+actual training run is GPU work.
+
+### Task 1 — BatchedEvaluator parity check ✅
+
+Already-existing unit tests (`test_mcts_serial_vs_batch_parity.py`, the
+T1.1 visit-loss regression suite + `test_batched_evaluator.py::test_mcts_with_evaluator_matches_direct_path`)
+proved the math on a fake constant-output net. New `scripts/tier_a_threaded_parity.py`
+closed the remaining gap: real `best_supervised.pt`, three dispatch paths
+(serial / process-pool / **threaded shared-evaluator**), CPU forced, 8 games
+× 3 paths × MCTS-64, ~560 per-move policy targets per path. **PARITY across
+all critical pairs** (KS p > 0.85 on entropy + top-1 mass for serial↔threaded
+and process_pool↔threaded), zero worker crashes. The threaded path is
+cleared for the next heavy CUDA run — though on this CPU/MPS Mac the
+*throughput* win is invisible (Python GIL serializes single-net forwards);
+the CUDA payoff is what matters and lives on the cloud box.
+
+Bonus: the parity run surfaced a real (but benign) bug in
+`yinsh_ml/memory/adaptive.py` — `TensorCompatibilityChecker.is_compatible`
+accepted `target_numel <= source_numel` (slice semantics) but the consumer
+called `tensor.view(shape)` (requires exact numel match), causing every
+batch-size-mismatched lookup in the threaded path to fire a "Failed to
+reshape" warning before silently falling through to fresh allocation.
+Fixed in commit `96c814c`; the reshape path was effectively dead code for
+batch-size variation. Two MPS-specific TensorPool follow-ups logged to
+`TECH_DEBT.md` §4 (device-string `mps` vs `mps:0` mismatch causes the
+pool to never reuse on Apple Silicon at all; pre-existing test API drift).
+
+### Task 2 — Branch D.1 GAP value head, implemented + tested ✅ (local), 🟡 (cloud)
+
+Landed in commit `60aa4bd`. The full spec:
+
+  - **`YinshNetwork.__init__`**: new `value_head_type: str = 'spatial'` flag.
+    Default preserves all pre-D.1 behavior. `'gap'` selects the new head:
+    `Conv2d(c→64, k=1) → BN → ReLU → AdaptiveAvgPool2d(1) → Flatten → Linear(64, num_classes)`.
+    Param count: **4,284,807 → 17,031 (252× reduction in head, 14% reduction
+    in total model size)**.
+  - **`NetworkWrapper`**: accepts flag; auto-detects from checkpoint by
+    inspecting `value_head.0.weight.shape[-1]` (3 = spatial, 1 = gap).
+    Explicit override beats auto-detect (the D.1 warm-start path: load
+    spatial checkpoint into gap wrapper, trunk + policy + outcome_values
+    transfer via shape-match, spatial-head keys silently drop, GAP head
+    freshly initializes).
+  - **Propagated through** `mcts_config` → `play_game_worker`, supervisor
+    network-recreate path, `run_training.py` (reads `network.value_head_type`
+    from YAML), AND `run_supervised_pretraining.py` (`--value-head-type`
+    flag for the parallel-track option: train a GAP-head supervised init
+    from scratch instead of warm-starting a spatial-head checkpoint).
+  - **`configs/branchD1_gap_mcts200.yaml`**: one-variable-changed mirror
+    of `wave3_branchC_mcts200.yaml`. `num_workers: 4` set from the start
+    (Step 2 battle-tested). `use_shared_evaluator: false` kept off for
+    the controlled comparison — flip on later once D.1 has an attribution.
+  - **Tests** (`test_gap_value_head.py`, 11/11 pass): param count
+    invariants, forward shapes both modes, validation, warm-start from
+    spatial-head checkpoint succeeds + transfers ≥20 trunk tensors +
+    leaves GAP head at fresh init (verified by checking the first conv's
+    kernel_size = 1).
+  - **End-to-end local smoke** (1 iter, 2 games, 8 sims, real warm-start
+    from `best_supervised.pt`): full pipeline runs in 8.4s. Logs show
+    `Using value head: gap` and `'value_head_type': 'gap'` propagated to
+    worker MCTS config. 0 crashes.
+
+**Not yet done:** the actual MCTS-200 self-play loop on cloud. This is the
+next vast.ai session — see prompt below.
+
+---
+
+## Prompt for the next session (CLOUD — run Branch D.1)
+
+> I'm running the Branch D.1 training experiment on cloud. The local
+> implementation is complete and tested (see VOLUME_PRETRAIN_RESULTS.md
+> §"Session update — 2026-05-23" — including the GAP head spec, warm-start
+> invariant, and propagation chain). Branch `training-pipeline-fixes`,
+> head commit `60aa4bd` or newer.
 >
-> Short version: we have a strong, stable bot
-> (`models/branchC_volume_pretrain/best_iter_4.pt`, sweeps HA d1/d2/d3 at 100%,
-> beats a competent human) AND a working non-saturated yardstick
-> (`scripts/eval_vs_frozen_anchor.py --sprt`). Step 2 (MCTS-400) screened
-> INCONCLUSIVE with WR 0.552 (CI95 [0.504, 0.600]) — small ~30–40 Elo edge, below
-> the p₁=0.60 promotion bar. **Search depth isn't the binding constraint; the
-> architecture is.** Next axis is Branch D.
+> **The run, one command:**
 >
-> Specifically: **two tasks in order.**
+> ```
+> python scripts/run_training.py \
+>     --config configs/branchD1_gap_mcts200.yaml \
+>     --init-checkpoint models/yngine_volume_pretrain/best_supervised.pt
+> ```
 >
-> 1. **`BatchedEvaluator` parity-check (enabling prereq).** Confirm that turning on
->    `use_shared_evaluator: true` + `num_workers: 4` produces *identical-quality*
->    self-play targets to the serial path. There's an open batched-MCTS sim-loss
->    concern in my notes (T1.1). Suggested: short-config training run (e.g. 1 iter,
->    20 games) under each path, compare resulting checkpoint strengths via the
->    SPRT yardstick. Cheap, local-feasible, gates the next heavy run.
+> Expected wall time: ~16-20h on a 4090 (matches MCTS-200 Branch C; same
+> sim count). Already plumbed: `num_workers: 4` (Step 2's 2.84× speedup,
+> zero crashes), value-grounded warm-start from `best_supervised.pt`,
+> Wilson 0.20 promotion gate, anchor-skip iter 1.
 >
-> 2. **Branch D.1 — GAP value head.** Replace the spatial-flatten value head
->    (~4M params: `Flatten(64·11·11)` → 512 → 256 → 7) with a GAP head (~5K params:
->    1×1 conv → `AdaptiveAvgPool2d(1)` → 64 → 7) in `yinsh_ml/network/model.py`.
->    Train a controlled-comparison run (same init `best_supervised.pt`, same recipe
->    as MCTS-200 Branch C *except* the head), screen vs frozen `best_iter_4` with
->    `eval_vs_frozen_anchor.py --sprt --sprt-p1 0.60`. One variable changed.
+> **Sanity checks at iter-1 (~3h in):**
 >
-> Operational notes: vast.ai box from Step 2 is terminated; spin a fresh one for
-> the actual training run (use `num_workers: 4` from the start — battle-tested
-> 2.84× speedup at MCTS-400 sim depth, zero worker crashes across the full Step 2
-> run). All checkpoints + corpus are local. Branch `training-pipeline-fixes`.
-> Don't re-litigate: training from scratch (not seed warm-start) was deliberate;
-> the MCTS-400 small-but-not-promotion-worthy result is robust (CI95 [0.504, 0.600],
-> 400 games, color-balanced) — don't re-run MCTS-400 hoping for a different number.
+>   - `Using value head: gap` in the launch log
+>   - `'value_head_type': 'gap'` in the per-worker MCTS Config dump
+>   - Trunk loaded clean from `best_supervised.pt` — anchor vs HA(d=1) at
+>     iter 2 (skip_first_n_iterations=1) should hit 100% (40/40), same
+>     as the Branch C baseline — if it doesn't, the trunk warm-start
+>     silently broke and you need to investigate before burning the
+>     rest of the run.
+>
+> **Screen the result** (after the 5-iter run completes):
+>
+> ```
+> python scripts/eval_vs_frozen_anchor.py \
+>     --candidate runs_branchD1/<TIMESTAMP>/checkpoint_iteration_4_ema.pt \
+>     --anchor models/branchC_volume_pretrain/best_iter_4.pt \
+>     --sprt --sprt-p1 0.60 --sprt-max-games 400 \
+>     --output logs/branchD1_iter4_vs_frozen.json
+> ```
+>
+> Interpretation:
+>   - STRONGER (WR > p₁=0.60, lower CI clears 0.60): GAP head is the lever
+>     we wanted. Freeze it, re-anchor against this checkpoint, move to
+>     Branch D.3 (SE blocks) or scale-up.
+>   - INCONCLUSIVE with WR > 0.55: small real edge, not promotion-worthy
+>     (the MCTS-400 outcome). Branch D.2 (enhanced encoding) becomes the
+>     next-highest-prior lever — the head wasn't the binding constraint
+>     alone.
+>   - INCONCLUSIVE with WR ~ 0.50: flat. Value head wasn't the constraint
+>     either. Pivot to D.2 with that framing.
+>   - WEAKER: warm-start broke something. Audit the trunk transfer test
+>     (`test_gap_value_head.py::TestGapWarmStartFromSpatial`) and the
+>     iter-1 anchor sanity check; if those pass, the GAP head's tiny
+>     capacity is starvation. Try the parallel track: re-pretrain the
+>     supervised init with `--value-head-type gap` against the 13.6M
+>     yngine corpus (`scripts/run_supervised_pretraining.py`, ~3h on
+>     4090), then re-launch Branch D.1 from that GAP-native init.
+>
+> **Don't start D.2** until D.1 has at least an SPRT screen. The reason
+> stack: (a) D.2 requires regenerating the 40GB volume corpus with the
+> 15-channel encoder + a fresh ~3h supervised pretrain + a ~20h Branch-C
+> self-play loop — much more cloud time than D.1 alone, (b) "Sequential
+> one-variable tests, not stacked, so each result attributes cleanly"
+> (next-steps doc, §2), (c) if D.1 is a flat result, D.2's premise of
+> "the head was bloated, the encoding is impoverished, fixing both will
+> compound" weakens, and we'd want to revisit the framing.
+>
+> **Operational:** spin a fresh vast.ai 4090 (Step 2's box is terminated).
+> All artifacts local on the user's laptop (`models/yngine_volume_pretrain/`,
+> `models/branchC_volume_pretrain/`, `logs/`). Push the Branch D.1 result
+> checkpoints back via the same gh-release pattern as Step 2 when done
+> (see `mcts400-session-snapshot-2026-05-23` for the recipe).

@@ -175,6 +175,7 @@ def create_model(args) -> tuple:
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
         input_channels=input_channels,
+        value_head_type=args.value_head_type,
     ).to(device)
 
     if args.checkpoint:
@@ -419,6 +420,16 @@ def main():
                        help='ResNet channel width (default: 256)')
     parser.add_argument('--num-blocks', type=int, default=12,
                        help='Number of residual/attention blocks (default: 12)')
+    parser.add_argument('--value-head-type', type=str, default='spatial',
+                       choices=['spatial', 'gap'],
+                       help="Value head architecture: 'spatial' (legacy ~4M "
+                            "params, Flatten(64*11*11)->512->256->out) or 'gap' "
+                            "(Branch D.1, ~17K params, 1x1 conv->GAP->Linear(64, "
+                            "out)). Defaults to 'spatial' for back-compat. Use "
+                            "'gap' to train a GAP-head supervised init from "
+                            "scratch — the parallel-track alternative to "
+                            "warm-starting a spatial-head checkpoint into a "
+                            "fresh GAP head via run_training.py's --init-checkpoint.")
 
     # Output options
     parser.add_argument('--output-dir', type=str, default='models/supervised',
