@@ -585,3 +585,204 @@ next vast.ai session — see prompt below.
 > `models/branchC_volume_pretrain/`, `logs/`). Push the Branch D.1 result
 > checkpoints back via the same gh-release pattern as Step 2 when done
 > (see `mcts400-session-snapshot-2026-05-23` for the recipe).
+
+---
+
+## Session update — 2026-05-24: D.1 v2 ran, NOT_STRONGER, GAP path partially exhausted
+
+### Take 1 (lost to ops failure, no SPRT data)
+
+Launched D.1 v2 (`configs/branchD1_v2_gap_mcts200.yaml`) on a fresh vast.ai 5090
+(instance 37479128, 16GB disk) at 23:25 UTC 2026-05-23. Autopilot installed
+to auto-launch SPRT after training + auto-stop the instance after SPRT.
+
+Training completed in 7.23h. **Then the autopilot stopped the instance before
+the SPRT could finish** (subtle race + a bug — see §"Operational lessons"
+below). The instance entered vast.ai's "scheduling" state when we tried to
+resume it because the underlying 5090 had been claimed by another renter,
+and vast quoted "hours to weeks" wait. Disk artifacts were stranded.
+No SPRT result from this run.
+
+### Take 2 (proper SPRT verdict)
+
+Re-ran on a fresh 5090 (79.116.87.141:30981, 50GB disk) at 11:03 UTC 2026-05-24
+with modified autopilot — **NO auto-stop**, manual termination only. Training
+completed in 5.71h (250 games, 5/5 promotions, anchor 95-100% across all
+evaluated iters). SPRT initially crashed because I forgot to download
+`best_iter_4.pt` to the new box; re-ran the SPRT manually after fix.
+
+#### Result: NOT_STRONGER, decisive in 16 games (~8 min)
+
+| | |
+|---|---|
+| Verdict | **NOT_STRONGER** |
+| Score | candidate **1-15-0** (WR = 0.0625) |
+| Color split | W/B = 0/1 — both colors lost |
+| CI95 | [0.011, 0.283] |
+| LLR | -3.16 (lower boundary at -2.94, crossed) |
+| Trajectory | g=4: 1-3 → g=8: 1-7 → g=12: 1-11 → g=16: 1-15 |
+| Wall | 455s on 5090 |
+
+**Byte-identical to v1's SPRT trajectory** (also 1-15-0, LLR -3.16 in 16
+games). Initially flagged as suspicious but verified as ~30% probability
+coincidence: the LLR formula is deterministic given (wins, losses), and
+"1 win in 16 games" is the *mode* of `Binomial(16, ~6%)` — exactly what
+you'd expect from a true ~6% WR candidate. Both v1 (~17K params, direct
+projection) and v2 (~22K params, hidden Linear) test as similarly weak
+against the spatial-head champion.
+
+Local artifacts: `experiments/branchD1_v2_failed_run/` (SPRT JSON, manifest,
+feedback, tournament history, SUMMARY.md). Checkpoint:
+`models/branchD1_v2_pretrain/checkpoint_iteration_4_ema.pt`.
+
+### What this tells us (and honestly does NOT)
+
+**Definitive:** GAP head + warm-started spatial-trunk fails identically in
+both minimal (v1) and KataGo-canonical (v2) forms. The "missing hidden
+Linear" hypothesis from v1 was wrong — adding it changed nothing.
+
+**Indeterminate** (was previously overstated as "less attractive"): whether
+GAP architecture works AT ALL for this problem. Two theories predict the
+same v1+v2 result but diverge on what to test next:
+
+- **Theory A — warm-start specialization:** the trunk's 30M params are
+  tuned for the spatial head's particular output shape. Brief D.1 self-play
+  (5 iters, ~500 games) can't unlearn that. A GAP-native trunk trained from
+  scratch would not have this problem. → **Path 2 would work.**
+- **Theory B — GAP discards position:** YINSH evaluation needs spatial
+  structure (corners vs center, edges, ring positions). Global average
+  pooling fundamentally throws that away. No trunk can compensate.
+  → **Path 2 wouldn't work no matter what.**
+
+Both theories are consistent with current data. Neither has decisive
+support. **The earlier framing "GAP-native pretrain becomes much less
+attractive" was overconfident** — it implicitly assumed theory B was more
+likely without evidence.
+
+### D.2 vs Path 2 — sequencing decision (and what's in the backlog)
+
+Both are reasonable next experiments at similar cost (~$10-15, ~12h on
+5090). Sequencing call:
+
+**D.2 first.** Reasoning:
+- D.2's question (input-richness ceiling) is *upstream* of head-shape
+  questions. If 6-channel encoding is impoverished, every future
+  experiment — Path 2, D.3, scale-up — is operating with a handicap.
+- D.2's positive result *strengthens* any future Path 2 attempt (richer
+  input → GAP head has more signal to pool over).
+- D.2's negative result tells us encoding isn't the lever and we should
+  return to architecture (where Path 2 lives).
+
+**Path 2 stays in the backlog.** Specifically: re-train supervised init
+from scratch via `scripts/run_supervised_pretraining.py --value-head-type
+gap_v2` on the 13.6M yngine corpus, then re-launch Branch D.1 from that
+GAP-native init. Tests theory A directly. Worth running if:
+- D.2 is inconclusive AND we still want to know whether GAP architecture
+  is viable
+- We come back to the GAP question after D.3/scale-up plateau
+
+Not now: don't compound a known-not-improving change with a new variable,
+and don't burn cloud time on a narrower experiment when a broader one
+(D.2) is teed up.
+
+### Operational lessons (apply to D.2 autopilot)
+
+1. **`vastai stop` is one-way for popular GPUs.** When we stopped the take-1
+   5090, it returned to the rental pool and was claimed by another renter
+   within minutes. Resume = "hours to weeks" wait. Take-2 autopilot was
+   modified to NEVER call stop — write SUMMARY.md + STOP_READY sentinel
+   only, leave box running for manual termination. The ~$0.89/hr idle
+   between SPRT completion and human retrieval is insurance well worth it.
+
+2. **Pre-flight ALL required files.** Take-2 SPRT crashed initially because
+   I downloaded only `best_supervised.pt` (warm-start init) but forgot
+   `best_iter_4.pt` (SPRT anchor). The tmux session died instantly with
+   FileNotFoundError, no log produced, looked like an opaque "SPRT
+   CRASHED" until I checked filesystem. For D.2: the autopilot's first
+   action on box setup should verify all required artifacts exist BEFORE
+   training launches.
+
+3. **The HA(d=1) anchor is a saturated metric.** Both v1 and v2 scored
+   95-100% across all 4 evaluated iters but lost decisively to a stronger
+   opponent in SPRT. Stop celebrating anchor=100% as a positive signal —
+   it's a "didn't break catastrophically" sanity check, nothing more.
+   The frozen-anchor SPRT is the *only* informative discriminator at this
+   point.
+
+4. **Pull artifacts to laptop ASAP after a run.** Don't trust that the box
+   will be available in the morning. Even with no-auto-stop, instances can
+   be interrupted by the host (vast.ai sometimes preempts), can lose
+   network, etc. Treat the box's disk as ephemeral; the laptop is the
+   archive.
+
+### Lifecycle / next session
+
+- Box 79.116.87.141:30981 is still running post-SPRT (per take-2 design).
+  Pull artifacts (done), seed-variation test (running in tmux `sprt_seedtest`),
+  then terminate via vast.ai dashboard.
+- Original v2 take-1 box 37479128 still in "scheduling" — let it sit; if it
+  ever schedules, the original data is there as a free cross-check.
+
+---
+
+## Prompt for the next session — D.2 launch on fresh GPU
+
+> Continuing YINSH ceiling-raising work. Read `VOLUME_PRETRAIN_RESULTS.md`
+> §"Session update — 2026-05-24" for the latest state. TL;DR: D.1 v1 + v2
+> both tested, both lost SPRT 1-15-0 vs frozen `best_iter_4`. **GAP head +
+> warm-start spatial trunk doesn't work.** Whether GAP works AT ALL with
+> a GAP-native trunk (Path 2) is undetermined and kept in backlog. **Next
+> experiment: Branch D.2 — enhanced 15-channel encoding.**
+>
+> Full execution plan lives in `D2_PREP.md` (also already written). Quick
+> version:
+>
+> 1. Spin a fresh vast.ai 5090 with **≥100GB disk** (we'll pull the 13.6M-
+>    position volume corpus, which is ~10-15GB compressed)
+> 2. Setup: git pull `training-pipeline-fixes`, cu128 torch venv, deps,
+>    download `best_supervised.pt` AND `best_iter_4.pt` from the
+>    `mcts400-session-snapshot-2026-05-23` gh release (pre-flight check!)
+> 3. Pull volume corpus: `gh release download mcts400-session-snapshot-2026-05-23
+>    --pattern yngine_volume.npz --dir expert_games/`
+> 4. Regenerate corpus with 15-channel encoder. Path B (recommended cheapest)
+>    needs a script not yet written: `scripts/regenerate_npz_with_enhanced_encoder.py`
+>    — write it (~30 min), runs ~1h on the box. See D2_PREP.md §"Path B"
+>    for the design (decode existing 6ch states → re-encode via
+>    EnhancedStateEncoder → save as new npz; channel 13 / turn-number gets
+>    zeroed, all other 14 channels survive).
+> 5. Supervised pretrain on 15-channel corpus (~3h):
+>    `python scripts/run_supervised_pretraining.py --data expert_games/yngine_volume_15ch.npz
+>     --use-enhanced-encoding --value-head-type spatial --output-dir models/yngine_volume_15ch_pretrain
+>     --epochs 3 --batch-size 512 --lr 1e-3 --num-channels 256 --num-blocks 12`
+>
+>    Note: use **`--value-head-type spatial`**, not gap_v2 — don't compound
+>    a known-failing change. Test the encoding axis in isolation.
+> 6. Self-play loop with `configs/branchD2_enhanced_mcts200.yaml` (already
+>    written, ~7h on 5090), warm-started from the 15-channel pretrain
+> 7. SPRT screen vs frozen `best_iter_4` — same procedure as D.1 v2
+>
+> Updated autopilot for D.2:
+>   - NO auto-stop (take-2 design — manual termination)
+>   - Pre-flight all required files at startup BEFORE training
+>   - Same crash detection + auto-launch SPRT pattern
+>
+> Interpretation matrix for the SPRT verdict:
+>   - STRONGER → encoding is the lever; freeze, move to D.3 or stack with
+>     other architectural changes
+>   - INCONCLUSIVE WR ~ 0.55 → small real edge (like Step 2); useful, not
+>     promotion-worthy; investigate stacking with other axes
+>   - INCONCLUSIVE WR ~ 0.50 or WEAKER → encoding isn't the binding
+>     constraint. Pivot to Path 2 (GAP-native pretrain, see backlog) OR
+>     deeper-trunk / wider-trunk / attention-mechanism experiments
+>
+> Backlog (do NOT prioritize over D.2):
+>   - **Path 2: GAP-native supervised pretrain.** Tests whether GAP arch
+>     can work given a trunk trained from scratch for it. Cost ~12h on
+>     5090. Use `scripts/run_supervised_pretraining.py --value-head-type
+>     gap_v2 ...`. Theory-A test (see §"What this tells us" above).
+>   - **D.3 SE blocks.** Smallest architectural addition with strongest
+>     mechanism-based prior after head/encoding axes. Run after D.2 lands.
+>
+> All checkpoints + corpora are accessible from the gh release. Branch
+> `training-pipeline-fixes`, head commit at session start: TBD (push
+> session updates first).
