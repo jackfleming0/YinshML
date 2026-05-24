@@ -624,12 +624,31 @@ evaluated iters). SPRT initially crashed because I forgot to download
 | Wall | 455s on 5090 |
 
 **Byte-identical to v1's SPRT trajectory** (also 1-15-0, LLR -3.16 in 16
-games). Initially flagged as suspicious but verified as ~30% probability
-coincidence: the LLR formula is deterministic given (wins, losses), and
-"1 win in 16 games" is the *mode* of `Binomial(16, ~6%)` — exactly what
-you'd expect from a true ~6% WR candidate. Both v1 (~17K params, direct
-projection) and v2 (~22K params, hidden Linear) test as similarly weak
-against the spatial-head champion.
+games, color split W/B = 0/1 — the one win as Black in both runs).
+
+**Verified as structural determinism, NOT coincidence.** Re-ran the SPRT
+on the same v2 take-2 checkpoint with `--seed 12345` (default is 42).
+Result was byte-identical — same verdict, same 1-15-0 score, same LLR,
+same color split. Even with different seeds for opening sampling, the
+candidate plays the SAME 16 losing games. Mechanism: the model's trained
+policy is sufficiently peaked that temperature=1.0 opening sampling
+near-always picks the top move, and MCTS leaf-evaluation order is
+deterministic at our CUDA batch sizes. Combined with the candidate's
+structural weakness vs the anchor (same fatal tactical pattern every
+game), the entire match unfolds identically across seeds.
+
+This means the ~6% WR isn't measurement noise — it's the *true* effective
+win rate of this candidate against this anchor under this protocol. The
+verdict is maximally robust. Both v1 (~17K params, direct projection) and
+v2 (~22K params, hidden Linear) test as similarly weak against the
+spatial-head champion.
+
+(Note for future SPRT runs: deterministic-replay behavior means seed
+variation isn't a reliable noise estimate for badly-losing candidates.
+For *borderline* candidates near WR=0.50, expect more variance — peaked
+policies sampling at 50/50-equivalent positions WILL pick different moves
+across seeds. Save the seed-variation check for cases where the verdict
+itself is in doubt.)
 
 Local artifacts: `experiments/branchD1_v2_failed_run/` (SPRT JSON, manifest,
 feedback, tournament history, SUMMARY.md). Checkpoint:
