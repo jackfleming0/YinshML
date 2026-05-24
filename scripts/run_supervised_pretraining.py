@@ -178,13 +178,35 @@ def create_model(args) -> tuple:
         value_head_type=args.value_head_type,
     ).to(device)
 
-    if args.checkpoint:
-        logger.info(f"Loading checkpoint: {args.checkpoint}")
+    # Mutual-exclusion: --resume and --checkpoint do different things.
+    if args.resume and args.checkpoint:
+        raise ValueError(
+            "--resume and --checkpoint are mutually exclusive. "
+            "--checkpoint warm-starts model weights only (optimizer + epoch reset); "
+            "--resume continues a prior run (restores model + optimizer + epoch from "
+            "<output_dir>/last_resume_state.pt)."
+        )
+
+    resume_bundle = None
+    if args.resume:
+        resume_path = Path(args.output_dir) / 'last_resume_state.pt'
+        if not resume_path.exists():
+            raise FileNotFoundError(
+                f"--resume specified but no state file at {resume_path}. "
+                "Remove --resume to start fresh, or check --output-dir."
+            )
+        logger.info(f"Resuming from rich bundle: {resume_path}")
+        resume_bundle = torch.load(resume_path, map_location=device,
+                                   weights_only=False)
+        model.load_state_dict(resume_bundle['model'])
+
+    elif args.checkpoint:
+        logger.info(f"Warm-starting from checkpoint: {args.checkpoint}")
         state_dict = torch.load(args.checkpoint, map_location=device,
                                 weights_only=True)
         model.load_state_dict(state_dict)
 
-    return model, device
+    return model, device, resume_bundle
 
 
 def _value_targets_to_classes(values: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -198,23 +220,55 @@ def _value_targets_to_classes(values: torch.Tensor, num_classes: int) -> torch.T
     return torch.round(normalized).long().clamp(0, num_classes - 1)
 
 
-def train(model, device, train_loader, val_loader, args):
-    """Run supervised training loop."""
+def train(model, device, train_loader, val_loader, args, resume_bundle=None):
+    """Run supervised training loop.
+
+    If resume_bundle is provided (from --resume), restores optimizer state and
+    continues from saved_epoch + 1. The cosine scheduler is recreated fresh with
+    T_max=args.epochs, then advanced saved_epoch steps — this lets a resume
+    pass --epochs N+M to extend the original N-epoch run by M epochs cleanly.
+    """
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
 
-    # LR schedule: cosine annealing
+    # LR schedule: cosine annealing. Built against the CURRENT args.epochs so an
+    # extension call (--resume --epochs N+M) recomputes the curve over the new
+    # total budget. We then advance the scheduler saved_epoch steps to land on
+    # the LR appropriate for the new schedule at that point.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=args.lr / 100
     )
 
+    start_epoch = 1
     best_val_loss = float('inf')
+
+    if resume_bundle is not None:
+        if 'optimizer' in resume_bundle:
+            optimizer.load_state_dict(resume_bundle['optimizer'])
+        saved_epoch = resume_bundle.get('epoch', 0)
+        start_epoch = saved_epoch + 1
+        best_val_loss = resume_bundle.get('best_val_loss', float('inf'))
+        for _ in range(saved_epoch):
+            scheduler.step()
+        logger.info(
+            f"Resumed at epoch {start_epoch}/{args.epochs} | "
+            f"best_val_loss carry-over = {best_val_loss:.4f} | "
+            f"LR = {scheduler.get_last_lr()[0]:.6f}"
+        )
+        if start_epoch > args.epochs:
+            logger.warning(
+                f"Resume state already past --epochs (saved_epoch={saved_epoch} "
+                f">= args.epochs={args.epochs}). Nothing to do. Increase --epochs "
+                f"to extend the run."
+            )
+            return Path(args.output_dir) / 'best_supervised.pt'
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     num_value_classes = model.num_value_classes
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         # --- Training ---
         model.train()
         train_policy_loss = 0.0
@@ -317,6 +371,22 @@ def train(model, device, train_loader, val_loader, args):
             save_path = output_dir / f'supervised_epoch_{epoch}.pt'
             torch.save(model.state_dict(), save_path)
 
+        # Rich resume bundle — overwritten every epoch. Includes optimizer state
+        # and epoch counter so `--resume` continues without reset. Existing
+        # state_dict-only checkpoints above stay untouched for downstream
+        # compatibility (self-play loads them as plain state_dicts).
+        resume_path = output_dir / 'last_resume_state.pt'
+        torch.save({
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'epoch': epoch,
+            'best_val_loss': best_val_loss,
+            'args': {
+                k: v for k, v in vars(args).items()
+                if isinstance(v, (str, int, float, bool, type(None)))
+            },
+        }, resume_path)
+
     # Save final model
     save_path = output_dir / 'supervised_final.pt'
     torch.save(model.state_dict(), save_path)
@@ -410,7 +480,17 @@ def main():
 
     # Model options
     parser.add_argument('--checkpoint', type=str, default=None,
-                       help='Path to checkpoint to resume from')
+                       help='Path to a state_dict to warm-start from (model '
+                            'weights only; optimizer/epoch reset to fresh). '
+                            'For mid-training resume of a prior --output-dir, '
+                            'use --resume instead. Mutually exclusive with --resume.')
+    parser.add_argument('--resume', action='store_true',
+                       help='Resume from <output_dir>/last_resume_state.pt — '
+                            'restores model + optimizer state and continues from '
+                            'saved_epoch + 1. Extends cleanly: pass --epochs '
+                            'higher than the prior run to add more epochs '
+                            '(cosine schedule recomputes over the new total). '
+                            'Mutually exclusive with --checkpoint.')
     parser.add_argument('--device', type=str, default=None,
                        help='Device (cuda/mps/cpu)')
     parser.add_argument('--use-enhanced-encoding', action='store_true',
@@ -468,13 +548,14 @@ def main():
                             persistent_workers=True)
 
     # Create model
-    model, device = create_model(args)
+    model, device, resume_bundle = create_model(args)
     logger.info(f"Model on {device}, "
                 f"{sum(p.numel() for p in model.parameters()):,} parameters")
 
     # Train
     t0 = time.time()
-    best_path = train(model, device, train_loader, val_loader, args)
+    best_path = train(model, device, train_loader, val_loader, args,
+                      resume_bundle=resume_bundle)
     elapsed = time.time() - t0
 
     logger.info(f"Training complete in {elapsed:.0f}s. "
