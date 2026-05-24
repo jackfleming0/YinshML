@@ -39,6 +39,7 @@ from yinsh_ml.game.constants import Player, Position, PieceType  # noqa: E402
 from yinsh_ml.game.game_state import GameState  # noqa: E402
 from yinsh_ml.game.types import Move, MoveType  # noqa: E402
 from yinsh_ml.utils.encoding import StateEncoder  # noqa: E402
+from yinsh_ml.utils.enhanced_encoding import EnhancedStateEncoder  # noqa: E402
 
 logger = logging.getLogger("yngine_corpus")
 
@@ -197,12 +198,22 @@ def main():
     parser.add_argument("--max-games", type=int, default=None,
                         help="cap on games to convert (debug)")
     parser.add_argument("--shard-glob", type=str, default="shard_*.txt")
+    parser.add_argument("--use-enhanced-encoding", action="store_true",
+                        help="Encode states with EnhancedStateEncoder (15 channels) "
+                             "instead of StateEncoder (6 channels). Required for "
+                             "Branch D.2 corpus generation. Move-encoding API is "
+                             "shared so policy indices stay identical between the two.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    encoder = StateEncoder()
+    if args.use_enhanced_encoding:
+        encoder = EnhancedStateEncoder()
+        logger.info("Using EnhancedStateEncoder (15 channels)")
+    else:
+        encoder = StateEncoder()
+        logger.info("Using StateEncoder (6 channels)")
     total_moves_slots = encoder.total_moves
 
     all_states: List[np.ndarray] = []

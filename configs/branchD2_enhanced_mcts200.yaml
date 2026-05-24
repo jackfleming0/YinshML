@@ -1,0 +1,116 @@
+# branchD2_enhanced_mcts200.yaml — Branch D.2: 15-channel enhanced encoding.
+#
+# Single-variable test of "richer input encoding lifts the ceiling." Mirrors
+# wave3_branchC_mcts200.yaml exactly except for `encoding.type: enhanced`,
+# which switches the network from 6-channel basic encoding to 15-channel
+# enhanced encoding (row threats, partial rows, ring mobility, center
+# distance, ring influence, turn number, score differential).
+#
+# See D2_PREP.md for the full execution plan, including the strategic
+# corpus-regeneration decision (Path A/B/C/D) that gates the run.
+#
+# `network.value_head_type` is intentionally NOT set here. Pick at launch
+# time based on the v1/v2 GAP head outcome:
+#   - if D.1 v2 was STRONGER → use 'gap_v2' (compound the wins)
+#   - if D.1 v2 was INCONCLUSIVE/WEAKER → use 'spatial' (don't stack
+#     known-not-improving change with the new variable)
+# Set via either CLI override or a top-level `network: {value_head_type: ...}`
+# stanza added before launch.
+#
+# Warm-start init: a 15-channel supervised checkpoint trained from yngine
+# corpus (see D2_PREP.md §"The strategic decision" for how to generate it).
+#
+# save_dir bumped to runs_branchD2 to keep separate from D.1 results.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_branchD2
+
+encoding:
+  type: enhanced   # <-- THE D.2 KNOB (switches StateEncoder → EnhancedStateEncoder)
+
+# network:
+#   value_head_type: spatial  # or gap_v2 — set at launch based on v2 result
+#                              # (left commented to force a conscious choice)
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 200
+  late_simulations: 100
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 4
+  use_shared_evaluator: false
+  games_per_iteration: 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 100
+  promotion_threshold: 0.20
+  tournament_sliding_window: 3
+  eval_seed: 20260518
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
