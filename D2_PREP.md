@@ -100,13 +100,34 @@ turn-number signal matters depends on how heavily downstream layers
 rely on it — probably small, since the curriculum the original net
 followed (epsilon-mix taper by move number) was implicit not explicit.
 
-**Implementation** (~30 min of code, ~1h to run on 13.6M positions):
-- New script `scripts/regenerate_npz_with_enhanced_encoder.py`
-- Streams the input npz (avoid loading 13.6M × 6 × 11 × 11 = ~6GB into RAM)
-- For each position: decode → re-encode → append
-- Write output npz with same schema (states + policy_indices + values)
+**Implementation: DONE 2026-05-24.** `scripts/regenerate_npz_with_enhanced_encoder.py`:
+- Validates input is 6-channel (rejects already-15-channel with clear error)
+- Loads input states into RAM (~6 GB for 13.6M corpus — fine on ≥64 GB box)
+- Multiprocessing pool with one encoder pair per worker (initializer)
+- Writes output to pre-allocated `np.lib.format.open_memmap` so RAM stays
+  flat during the write phase
+- Output layout matches `convert_npz_to_mmap_shards.py`: directory of
+  `states.npy`, `policy_indices.npy`, `values.npy`, `total_moves.npy`,
+  plus a `NOTES.md` documenting the channel-13 limitation per-corpus
+- Tested in `yinsh_ml/tests/test_regenerate_15ch.py` (6 tests, 18s):
+  end-to-end run, mmap-compatibility, channel-by-channel round-trip
+  fidelity, channel-13 zeroed invariant, metadata passthrough, wrong-
+  channel-count rejection, `--max-positions` truncation
 
-**Cost**: 1-2h CPU on a decent box, ~10-15GB output disk.
+Usage:
+```bash
+python scripts/regenerate_npz_with_enhanced_encoder.py \
+    --input  expert_games/yngine_volume.npz \
+    --output expert_games/yngine_volume_15ch_mmap/ \
+    --workers 16  # default: cpu_count
+```
+
+The output `--output` directory is directly consumable by
+`run_supervised_pretraining.py --data-dir <path>` (mmap-loading path).
+
+**Cost**: ~1-2h CPU on a decent box (13.6M positions, mostly
+EnhancedStateEncoder per-state work). ~10 GB output disk for the
+uncompressed mmap shards (states alone are 13.6M × 15 × 121 × 4 B ≈ 9.9 GB).
 
 ### Path C: Generate a NEW corpus via self-play with current best model
 
@@ -159,18 +180,13 @@ gh release download mcts400-session-snapshot-2026-05-23 \
     --repo jackfleming0/YinshML --pattern yngine_volume.npz \
     --dir expert_games/
 
-# 4. (10 min) Re-encode to 15 channels via decode + re-encode
-# (script: TODO — write `scripts/regenerate_npz_with_enhanced_encoder.py`)
+# 4. (~1-2h CPU) Re-encode to 15 channels via decode + re-encode.
+# Script outputs mmap-shard format directly (no separate npz→mmap step).
 python scripts/regenerate_npz_with_enhanced_encoder.py \
     --input  expert_games/yngine_volume.npz \
-    --output expert_games/yngine_volume_15ch.npz
-
-# 5. (Optional) convert to memmap shards for RAM-light pretraining
-python scripts/convert_npz_to_mmap_shards.py \
-    --input  expert_games/yngine_volume_15ch.npz \
     --output expert_games/yngine_volume_15ch_mmap/
 
-# 6. (~3h on 5090) Pretrain a 15-channel net (use gap_v2 head if v2 was good)
+# 5. (~3h on 5090) Pretrain a 15-channel net (use gap_v2 head if v2 was good)
 python scripts/run_supervised_pretraining.py \
     --data-dir expert_games/yngine_volume_15ch_mmap/ \
     --use-enhanced-encoding \
@@ -179,12 +195,12 @@ python scripts/run_supervised_pretraining.py \
     --epochs 3 --batch-size 512 --lr 1e-3 \
     --num-channels 256 --num-blocks 12
 
-# 7. (~7h on 5090) Run Branch D.2 self-play loop warm-started from that
+# 6. (~7h on 5090) Run Branch D.2 self-play loop warm-started from that
 python scripts/run_training.py \
     --config configs/branchD2_enhanced_mcts200.yaml \
     --init-checkpoint models/yngine_volume_15ch_pretrain/best_supervised.pt
 
-# 8. SPRT screen vs frozen best_iter_4
+# 7. SPRT screen vs frozen best_iter_4
 python scripts/eval_vs_frozen_anchor.py \
     --candidate runs_branchD2/<TS>/iteration_4/checkpoint_iteration_4_ema.pt \
     --anchor models/branchC_volume_pretrain/best_iter_4.pt \
@@ -240,7 +256,10 @@ training run:
 - `configs/branchD2_enhanced_mcts200.yaml`: the Branch C MCTS-200
   config with `encoding.type: enhanced` (Path B + others)
 - `D2_PREP.md`: this doc
-
-Note: the corpus regeneration script (`regenerate_npz_with_enhanced_encoder.py`)
-is NOT written tonight — speculative until v2 outcome is known.
-Writing it is ~30 min when needed.
+- **`scripts/regenerate_npz_with_enhanced_encoder.py`** (added after v2
+  resolved): Path B implementation. Multiprocess decode→re-encode with
+  mmap output. ~1-2h CPU on the 13.6M corpus.
+- **`yinsh_ml/tests/test_regenerate_15ch.py`**: 6 tests pinning the
+  regenerator's invariants — end-to-end runs, mmap-compatibility,
+  channels 0-12+14 round-trip cleanly, channel 13 is all-zeros, metadata
+  passthrough, wrong-channel-count rejection.

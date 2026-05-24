@@ -763,14 +763,18 @@ and don't burn cloud time on a narrower experiment when a broader one
 >    `mcts400-session-snapshot-2026-05-23` gh release (pre-flight check!)
 > 3. Pull volume corpus: `gh release download mcts400-session-snapshot-2026-05-23
 >    --pattern yngine_volume.npz --dir expert_games/`
-> 4. Regenerate corpus with 15-channel encoder. Path B (recommended cheapest)
->    needs a script not yet written: `scripts/regenerate_npz_with_enhanced_encoder.py`
->    — write it (~30 min), runs ~1h on the box. See D2_PREP.md §"Path B"
->    for the design (decode existing 6ch states → re-encode via
->    EnhancedStateEncoder → save as new npz; channel 13 / turn-number gets
->    zeroed, all other 14 channels survive).
+> 4. Regenerate corpus with 15-channel encoder. Path B implementation
+>    landed 2026-05-24 (`scripts/regenerate_npz_with_enhanced_encoder.py`,
+>    tested in `yinsh_ml/tests/test_regenerate_15ch.py`). Just run:
+>    `python scripts/regenerate_npz_with_enhanced_encoder.py
+>     --input expert_games/yngine_volume.npz
+>     --output expert_games/yngine_volume_15ch_mmap/`
+>    Output is mmap-shard format (consumed directly by
+>    `--data-dir` in step 5). ~1-2h CPU on the 13.6M corpus. Channel
+>    13 / turn-number is unrecoverable and gets zeroed; all other 14
+>    channels round-trip cleanly. See D2_PREP.md §"Path B" for details.
 > 5. Supervised pretrain on 15-channel corpus (~3h):
->    `python scripts/run_supervised_pretraining.py --data expert_games/yngine_volume_15ch.npz
+>    `python scripts/run_supervised_pretraining.py --data-dir expert_games/yngine_volume_15ch_mmap/
 >     --use-enhanced-encoding --value-head-type spatial --output-dir models/yngine_volume_15ch_pretrain
 >     --epochs 3 --batch-size 512 --lr 1e-3 --num-channels 256 --num-blocks 12`
 >
