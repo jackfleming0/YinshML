@@ -4,7 +4,8 @@ Run dates: 2026-05-19 → 2026-05-21. Branch: `training-pipeline-fixes`.
 Predecessor context: `WAVE3_CATCHUP.md` (the deferred "option 2" this executes).
 
 Read this first if picking up cold. The companion new-session prompt is at the
-bottom (§"Prompt for the next session").
+bottom (§"Prompt for the next session"). The ranked forward-looking experiment
+queue lives in `EXPERIMENT_BACKLOG.md` — go there to pick the next thing to run.
 
 ---
 
