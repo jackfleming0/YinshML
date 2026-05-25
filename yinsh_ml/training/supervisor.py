@@ -581,6 +581,13 @@ class TrainingSupervisor:
         # vs full round-robin at iter 50: 1225 pairs × 400 = 490,000 games (infeasible)
         tournament_window = self.mode_settings.get('tournament_sliding_window', 5)
 
+        # Mirror the network's encoder / head config into the tournament so
+        # NetworkWrapper instances it constructs for round-robin + anchor eval
+        # match the training architecture (otherwise load_model hard-fails on
+        # 15-ch checkpoints loaded into a 6-ch default wrapper, etc.).
+        tm_use_enhanced_encoding = getattr(self.network, 'use_enhanced_encoding', False)
+        tm_value_head_type = getattr(self.network, 'value_head_type', None)
+
         self.tournament_manager = ModelTournament(
             training_dir=self.save_dir, # Tournaments evaluate models within this run's directory
             device=self.device,
@@ -588,6 +595,8 @@ class TrainingSupervisor:
             sliding_window_size=tournament_window,
             use_ema_for_eval=self._use_ema_for_eval,
             eval_seed=self._eval_seed,
+            use_enhanced_encoding=tm_use_enhanced_encoding,
+            value_head_type=tm_value_head_type,
         )
         ema_state = (
             f"ema_decay={ema_decay}, use_ema_for_eval={self._use_ema_for_eval}"

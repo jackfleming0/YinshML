@@ -64,6 +64,20 @@ logger = logging.getLogger("eval_frozen_anchor")
 DEFAULT_ANCHOR = "models/branchC_volume_pretrain/best_iter_4.pt"
 
 
+def _build_wrapper_for_checkpoint(path: Path, device: str) -> NetworkWrapper:
+    """Construct a NetworkWrapper whose architecture matches the checkpoint at ``path``.
+
+    Anchor and candidate may differ (6-ch vs 15-ch encoder, spatial vs GAP
+    value head). The wrapper's constructor already auto-detects architecture
+    when ``model_path`` is passed — peeks state_dict for input channels,
+    num_channels, num_blocks, value_head_type. We just need to actually pass
+    ``model_path``. The bare-construction-then-load pattern that this script
+    used previously triggered the wrapper's encoder-mismatch hard-fail on any
+    cross-architecture comparison.
+    """
+    return NetworkWrapper(model_path=str(path), device=device)
+
+
 def build_batched_mcts(net: NetworkWrapper, sims: int) -> BatchedMCTS:
     """Pure-neural batched MCTS, matching `run_anchor_eval`'s `_build_anchor_mcts`
     (subtree reuse off so one instance is safe to reuse across games — every
@@ -300,7 +314,7 @@ def main():
 
     anchor_label = args.anchor_label or f"anchor:{args.anchor.parent.name}/{args.anchor.stem}"
     logger.info(f"Loading frozen anchor {anchor_label} from {args.anchor}")
-    anchor_net = NetworkWrapper(device=args.device)
+    anchor_net = _build_wrapper_for_checkpoint(args.anchor, device=args.device)
     anchor_net.load_model(str(args.anchor))
     anchor_mcts = build_batched_mcts(anchor_net, args.num_simulations)
     resolved_device = str(anchor_net.device)
@@ -317,7 +331,7 @@ def main():
         # Disambiguating label: parent dir + stem (two seeds both named best_supervised).
         cand_label = f"{cand_path.parent.name}/{cand_path.stem}"
         logger.info(f"  {cand_label} vs {anchor_label} ...")
-        cand_net = NetworkWrapper(device=args.device)
+        cand_net = _build_wrapper_for_checkpoint(cand_path, device=args.device)
         cand_net.load_model(str(cand_path))
         cand_mcts = build_batched_mcts(cand_net, args.num_simulations)
 
