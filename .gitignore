@@ -57,6 +57,8 @@ configs/local/
 !TECH_DEBT.md
 !D2_PREP.md
 !EXPERIMENT_BACKLOG.md
+!docs/
+!docs/**
 !SESSION_2026-05-21_RECAP.md
 
 !results/
