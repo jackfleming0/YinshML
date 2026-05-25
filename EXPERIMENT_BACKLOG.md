@@ -857,6 +857,48 @@ Conditioned on the D.2 SPRT outcome (currently pending):
 Completed experiments with their results. Don't delete the original write-ups
 above (when they exist) — those are durable knowledge for future calibration.
 
+### Entry format (follow for new entries)
+
+Each Done entry follows this structure. The discipline: front-load the
+verdict, then the **data points that change priors for future experiments**
+— not just "what happened" but "what should we now believe differently."
+
+```markdown
+### <Experiment ID + name> — **<VERDICT>** (<date>)
+
+<One paragraph: what ran, how, total compute. Keep tight.>
+
+**SPRT verdict** (or analogous result block):
+- **<DECISION>** (decision context — boundary crossed, cap hit, etc.)
+- Score, WR, CI95, LLR, color split — whatever the metric set is
+- Duration, $, hardware
+- JSON path, run dir
+
+**The crucial detail:** <one sentence — the single most important fact
+about this result. Often a CI bound, a comparison to a prior result, or a
+specific number that gates downstream interpretation.>
+
+**<Trajectory / comparison table>:** when relevant — Glicko per iter, val
+metrics per epoch, SPRT vs other SPRTs, etc.
+
+**Confirmed/pending findings:** check each item from the "Findings driving
+this backlog" section above. Use ✅ for confirmed, ❌ for falsified, 🟡 for
+pending downstream evidence. Always say WHY in one line.
+
+**Operational lessons logged:** bugs found, infrastructure surprises,
+calibration shifts. Each one a 2-3 line bullet. These are the durable
+knowledge most likely to be forgotten without a written record.
+
+**Next experiments per sequencing matrix:** which branch of the recommended-
+sequencing tree this result puts us on, with the actual queue of next IDs.
+```
+
+Why the structure: when picking up cold, the first question is "what's the
+current state of the priors?" The verdict + crucial detail + confirmed
+findings answer that in ~30 seconds. The operational lessons section
+prevents the most common research-debt failure mode: rediscovering the
+same bug or pattern session after session.
+
 ---
 
 ### Branch D.2 — 15-channel enhanced encoding — **NOT_STRONGER** (2026-05-25)
