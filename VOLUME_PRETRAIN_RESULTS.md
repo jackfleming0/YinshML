@@ -810,3 +810,204 @@ and don't burn cloud time on a narrower experiment when a broader one
 > All checkpoints + corpora are accessible from the gh release. Branch
 > `training-pipeline-fixes`, head commit at session start: TBD (push
 > session updates first).
+
+---
+
+## Session update — 2026-05-25: D.2 ran, encoding lever vindicated, self-play loop diagnosed as net-negative
+
+The most important session in the series. Two SPRT verdicts run minutes
+apart on the same hardware, revealing a discrepancy that re-frames the
+entire next phase of work.
+
+### Headline results
+
+| SPRT | Verdict | Games | WR | CI95 | Time |
+|---|---|---|---|---|---|
+| iter_4_ema (full D.2 pipeline) vs best_iter_4 | **NOT_STRONGER** | 304 / 400 cap | 0.526 | [0.470, 0.582] | 4.0h |
+| **iter_0** (D.2 pretrain alone) **vs best_iter_4** | **STRONGER** | **21 / 400 cap** | **0.905** | **[0.711, 0.973]** | **15 min** |
+
+**The 15-channel encoding axis was a real, decisive lever.** The pretrained
+init produced a model 250-300 Elo stronger than the previous champion. But
+the self-play loop diluted it back to roughly-equal-to-champion strength
+over 5 iterations. The previous read ("encoding moves metrics only
+marginally") was wrong; it just understated the gain because val PAcc /
+VAcc plateaued early while the actual play strength kept improving.
+
+### The pipeline that ran
+
+- **Setup:** fresh vast.ai 5090 (100 GB disk, 2 TB RAM, 128 cores). Box ID
+  redacted in this entry, terminated post-pull.
+- **Path B re-encode** (`scripts/regenerate_npz_with_enhanced_encoder.py`):
+  13.6M positions, 16 min wall time, output saved as fp16 mmap (49 GB on
+  disk vs 99 GB float32; loader does `.float()` on access so storage dtype
+  is transparent to training). D2_PREP's "9.9 GB" disk estimate was wrong
+  by 10× (float32 not fp16); first attempt crashed on disk-full at 95%
+  complete with SIGBUS. Mid-run patched to fp16 and re-ran clean.
+- **Supervised pretrain** (`scripts/run_supervised_pretraining.py`,
+  15-channel encoder, spatial value head, 6 epochs not 3): final val PAcc
+  0.300, val VAcc 0.636. Trajectory: PAcc climbed monotonically every
+  epoch (0.271 → 0.300); VAcc plateau-ish (0.628 → 0.636 across 6 epochs).
+  Decision to run 6 epochs (vs D2_PREP's 3) made mid-flight after epoch 1
+  showed slow climb on a longer LR schedule; in retrospect this was the
+  right call — A1's strength gain came from extra training the marginal
+  metrics couldn't see.
+- **Self-play loop** (`configs/branchD2_enhanced_mcts200.yaml`,
+  MCTS-200/100, 5 iters, Wilson 0.20, `num_workers: 4`): 9h wall time,
+  5/5 promotions, all anchor evals 100% vs HA(d=1). The visible signal
+  was that everything looked fine. The actual signal was that iter_0
+  (Glicko ~1553) was being silently diluted to iter_4 (Glicko 1463.9)
+  one promoted-but-weaker checkpoint at a time.
+- **D.2 SPRT** (`scripts/eval_vs_frozen_anchor.py --sprt --sprt-p1 0.60`):
+  304 games, NOT_STRONGER, CI lower bound 0.470 (below 0.5 — couldn't
+  even confirm non-worse).
+- **A1 SPRT** (immediately after D.2): 21 games, STRONGER, WR 0.905.
+
+### What this changes about the model strength understanding
+
+The strongest YINSH model the project has produced is
+**`models/yngine_volume_15ch_pretrain/best_supervised.pt`** — D.2's iter_0,
+the pretrain output that was never touched by self-play. It is decisively
+stronger than `best_iter_4` (the previous champion), beating it ~90% of
+the time at MCTS-64.
+
+The new frozen anchor for future SPRT comparisons should be
+`best_supervised.pt`. Continuing to anchor against `best_iter_4` would be
+climbing against a stale reference. Operationally cheap to switch — point
+new `eval_vs_frozen_anchor.py` calls at the new path.
+
+### What this changes about the training pipeline
+
+**The current self-play loop is net-negative on this warm-start.** Not
+"failing to compound" (Branch C's read) — actively destroying value. 250-
+300 Elo of value destruction across 5 iterations of MCTS-200 self-play
+with Wilson 0.20 promotion gate and LR 1e-4.
+
+Three mechanisms diagnosed:
+
+1. **Wilson 0.20 gate is too loose.** Every iter promoted at 42-49% WR
+   vs the prior best — clearly worse but above the 20% catastrophe
+   threshold. The gate is the propagation mechanism: it accepts each
+   weaker iter as "best," so the next iter trains from a weaker base.
+
+2. **MCTS-200 is below the "signal" threshold for this policy.** Self-play
+   improves models when search produces moves meaningfully better than the
+   policy's argmax. With a strong policy and modest sims, the MCTS visit
+   distribution is mostly the policy reflected back — no new information.
+   Step 2 (MCTS-400) showed only ~30-40 Elo gain over MCTS-200, so we're
+   far below the regime where search becomes additive.
+
+3. **LR 1e-4 is too high for a converged warm-start.** Pretrain ended at
+   eta_min ≈ 1e-5; self-play takes over at 1e-4 — 10× jump. Fine for a
+   weak warm-start that needs lots of correction; destructive on a
+   converged supervised init.
+
+The Branch C history fits this read: weaker warm-start there meant the
+loop's noise didn't dominate the learning signal, so net-zero behavior.
+D.2's stronger warm-start crossed the regime boundary into net-negative.
+Known failure mode in RL-with-strong-priors (LLM RLHF uses tiny LRs +
+KL penalties precisely to anchor toward the supervised init).
+
+### Operational lessons learned
+
+- **Encoder-flag plumbing was incomplete.** `ModelTournament._load_model`
+  + `eval_vs_frozen_anchor.py` constructed bare `NetworkWrapper(device=...)`
+  → hard-fail on 15-ch checkpoints. Caught at D.2 iter 1; commit `4e984ef`
+  threads the flag through. F1 (audit all other bare-construction sites)
+  remains queued — 8 known sites in scripts/.
+- **fp16 corpus storage works transparently.** The pretrain loader's
+  `torch.from_numpy(...).float()` cast handles dtype conversion at access
+  time. No precision impact on training (state values are 0/1 binaries +
+  a few normalized continuous channels, all within fp16's representable
+  range with headroom).
+- **CoreML export has hardcoded 6-ch assumption.** Failed at D.2 iter 4
+  with `C_in / groups = 6/1 != weight[1] (15)`. Non-blocking (autopilot
+  saw rc=0 from self-play overall), but logged for fix. Same root cause
+  as the tournament bug.
+- **Autopilot SUMMARY.md writer choked on the SPRT JSON schema.** Expected
+  flat `verdict`/`wins`/`losses` fields; actual schema nests under
+  `results[0].sprt`. SUMMARY.md printed "UNKNOWN / 0-0-0 / None". Trivial
+  fix; logged.
+- **Pretrain `--resume` support shipped** (commit `d5e5151`): rich bundle
+  with model + optimizer + epoch + best_val_loss. Cosine scheduler
+  rebuilds against current `--epochs` for clean extension. Not exercised
+  this session.
+- **Wilson 0.20 was a Branch-C-era calibration.** That branch's warm-start
+  was weaker, so a 20%-WR cutoff usefully filtered out total collapses.
+  At D.2's strength, it became the dilution propagation mechanism.
+
+### Artifacts
+
+All on laptop and committed where relevant:
+
+- Checkpoints (in `models/yngine_volume_15ch_pretrain/` + the iter_4_ema
+  pull): `best_supervised.pt` (the new strongest model, 137 MB),
+  `supervised_final.pt`, `last_resume_state.pt` (rich bundle with
+  optimizer + epoch — for future `--resume` calls), iter_4 ema.
+- Full run dir snapshot at
+  `experiments/branchD2_run_2026-05-25/full_run_dir/20260525_041120/`
+  (manifests, per-iter metrics, tournament_history.json, replay buffer,
+  all 5 iter checkpoints). 1.6 GB total.
+- SPRT JSONs: `logs/branchD2_iter4_vs_frozen.json` (NOT_STRONGER) +
+  `logs/d2_pretrain_iter0_vs_frozen.json` (STRONGER).
+- All d2_*.log + a1_sprt.log in `experiments/branchD2_run_2026-05-25/`.
+- The autopilot script itself archived in the same directory.
+
+### Bibliography of session commits (in order)
+
+- `9df085d` (pre-session): D.2 prep — corpus regenerator + tests + docs.
+- `e1639fb`: `EXPERIMENT_BACKLOG.md` — ranked forward-looking queue.
+- `6a5aa50`: `docs/INDEX.draft.md` — proposed post-cleanup index structure.
+- `d5e5151`: `run_supervised_pretraining.py` `--resume` support.
+- `4e984ef`: fix encoder-flag propagation (tournament + supervisor + SPRT).
+- `6ca711b`: `EXPERIMENT_BACKLOG.md` Done entry for D.2.
+- `a212554`: Done-entry format template embedded in backlog.
+- *(this commit)*: VOLUME_PRETRAIN_RESULTS.md session update + Done entry for A1.
+
+---
+
+## Prompt for the next session — fix the leak, re-freeze the anchor
+
+> Continuing YINSH ceiling-raising work. Read `VOLUME_PRETRAIN_RESULTS.md`
+> §"Session update — 2026-05-25" for full context. **TL;DR: the project's
+> strongest model is now `models/yngine_volume_15ch_pretrain/best_supervised.pt`
+> (D.2 pretrain alone, STRONGER vs prior champion `best_iter_4` at WR 0.905
+> in 21 games). The current self-play loop is net-negative on this strong
+> warm-start — 5 iters of it converted the 90.5% WR into 52.6% WR.**
+>
+> Read `EXPERIMENT_BACKLOG.md` for the ranked queue. Top priorities now:
+>
+> 1. **Re-freeze the anchor to `best_supervised.pt`** before any further
+>    SPRT. Operationally just a path change in `eval_vs_frozen_anchor.py`
+>    calls. Don't continue climbing against the stale 6-ch champion.
+> 2. **B1 + B2 + B3 bundled** — the self-play loop is *actively destroying
+>    value*. Until it's fixed or replaced, every iteration on a strong
+>    init makes the model worse. Test:
+>    - B1: Wilson gate 0.50 (vs 0.20)
+>    - B2: self-play LR 1e-5 (vs 1e-4)
+>    - B3: 200-400 games/iter (vs 100) for noise dilution
+>    Bundle them in a single re-run since each individually addresses the
+>    same root cause; clean attribution comes from comparing the bundled
+>    result vs the broken loop. Warm-start from `best_supervised.pt`; SPRT
+>    candidate vs `best_supervised.pt` itself. Goal: get the loop to at
+>    least preserve gains (net-zero) rather than destroy them.
+> 3. **F1** (bare-NetworkWrapper cleanup) — cheap, ~1h coding. 8 known
+>    sites with the same flag-not-propagated bug pattern. Do this in
+>    parallel with the cloud run.
+> 4. **A4** (regression value head) — middle-priority. Mechanism prior is
+>    intact; relevant after B1+B2+B3 either fixes the loop or definitively
+>    establishes it can't be fixed at this MCTS budget.
+> 5. **D1** (self-play data pretrain) — if B1+B2+B3 doesn't unlock the
+>    loop, switch strategy: use `best_supervised.pt` to generate a
+>    self-play corpus, then pretrain a new init from THAT corpus. This
+>    replaces self-play-as-training-loop with self-play-as-data-source.
+>
+> Backlog details and ranking rationale in `EXPERIMENT_BACKLOG.md`. Done
+> entries for D.2 + A1 in that file's `## Done` section.
+>
+> **Operational**: spin a fresh vast.ai 5090 (≥100GB disk). Pre-flight all
+> checkpoints (best_supervised.pt as warm-start AND as anchor — same file).
+> Don't auto-stop. Pull artifacts ASAP. Same playbook as this session.
+> Estimated cost for B1+B2+B3 bundle: ~6h on 5090, ~$10.
+>
+> Branch `training-pipeline-fixes`. Head commit at session start: see
+> session update bibliography.

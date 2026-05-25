@@ -99,6 +99,44 @@ was broken, and it's now deleted. No landmine there.
   `AttributeError: 'TensorPool' object has no attribute 'get_tensor'`. Tests
   need to be ported; production code is unaffected.
 
+- **Bare `NetworkWrapper(device=...)` construction sites (discovered 2026-05-25):**
+  the wrapper's auto-detection of input channels + value-head type runs only
+  when `model_path` is passed to `__init__`. Scripts that use the two-step
+  pattern `NetworkWrapper(device=...); .load_model(path)` skip auto-detection
+  and hard-fail with "Encoder channel mismatch" on cross-architecture loads.
+  Critical sites fixed mid-D.2 run (commit `4e984ef`): `tournament.py:_load_model`
+  + `eval_vs_frozen_anchor.py`. Remaining sites with the same pattern:
+  - `scripts/play_step.py:228`
+  - `scripts/cross_era_tournament.py:48`
+  - `scripts/eval_compare_checkpoints.py:144`
+  - `scripts/gpu_probe.py:47`
+  - `scripts/tier_a_threaded_parity.py:244`
+  - `scripts/replay_h2h_game.py:157, 159`
+  - `scripts/eval_head_to_head.py:190`
+  - `scripts/play_vs_model_mcts.py:322`
+  Fix pattern: replace `NetworkWrapper(device=...)` followed by
+  `.load_model(path)` with `NetworkWrapper(model_path=path, device=...)`.
+  Tracked as backlog item F1.
+
+- **CoreML export has hardcoded 6-channel assumption (discovered 2026-05-25):**
+  failed at D.2 iter 4 export step with `C_in / groups = 6/1 != weight[1] (15)`.
+  Same root cause as the `NetworkWrapper(device=...)` bug — the CoreML
+  conversion script doesn't propagate the encoding flag. Non-blocking
+  (autopilot saw rc=0 from self-play overall; CoreML failure is local to
+  the export step), but blocks shipping any 15-ch model to the iOS app
+  until fixed. Inspect `yinsh_ml/network/wrapper.py::NetworkWrapper.export_coreml`
+  (or wherever the export lives) and thread `use_enhanced_encoding` through
+  to the dummy input shape construction.
+
+- **Autopilot SUMMARY.md writer schema mismatch (discovered 2026-05-25):**
+  the autopilot's Python stub at the end of `d2_autopilot.sh` was written
+  assuming the SPRT JSON has flat top-level fields (`verdict`, `wins`,
+  `losses`). Actual schema is `{config: ..., results: [{...sprt: {...}}],
+  elapsed_seconds: ...}` — fields nested under `results[0].sprt`. SUMMARY.md
+  printed "UNKNOWN / 0-0-0 / None" for every D.2 run. Trivial fix: index
+  `data["results"][0]` then read from there or its `sprt` sub-dict. Logged
+  for the next autopilot script reuse.
+
 ## 5. Process note (the durable lesson)
 
 The bug surfaced *only* because the yardstick build included a **positive control**

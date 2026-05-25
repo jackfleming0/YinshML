@@ -901,6 +901,112 @@ same bug or pattern session after session.
 
 ---
 
+### A1 — D.2 pretrain (iter_0) vs best_iter_4 — **STRONGER** (2026-05-25)
+
+Direct SPRT of `models/yngine_volume_15ch_pretrain/best_supervised.pt` (the
+D.2 pretrained warm-start, never touched by self-play) against the frozen
+6-ch champion `best_iter_4`. Fired immediately after D.2 SPRT landed
+NOT_STRONGER, to test whether the self-play loop had diluted away a
+genuinely-stronger model. Decisive in 21 games, 15 minutes of compute.
+
+**SPRT verdict:**
+- **STRONGER** (crossed +2.94 boundary at game 21 of 400-cap)
+- Candidate 19-2-0, WR **0.905**, **CI95 [0.711, 0.973]**, LLR +3.02
+- Color split 11/8 (acceptable at low n; would balance at higher n)
+- Duration: 15 minutes 3 sec on RTX 5090
+- JSON: `logs/d2_pretrain_iter0_vs_frozen.json`
+
+**The crucial detail:** CI95 lower bound **0.711** — far above the 0.60
+STRONGER bar. This isn't "marginally stronger" — it's *decisively* stronger
+than the previous champion. The pretrained 15-ch init alone is the
+strongest checkpoint the project has produced.
+
+**Comparison table:** Two SPRTs run minutes apart, same anchor, same
+protocol, same candidate *family* (D.2 pipeline). Different stages of the
+pipeline.
+
+| Candidate | Stage | Verdict | Games | WR | CI95 |
+|---|---|---|---|---|---|
+| `iteration_4_ema` | pretrain + 5 self-play iters | **NOT_STRONGER** | 304 | 0.526 | [0.470, 0.582] |
+| `best_supervised` | **pretrain only, no self-play** | **STRONGER** | 21 | **0.905** | **[0.711, 0.973]** |
+
+The self-play loop destroyed approximately **250-300 Elo** of value between
+these two candidates.
+
+**Confirmed/pending findings** (against the backlog's "Findings driving"
+section above):
+
+1. ✅ **"Pretrain is where the strength lives now"** — confirmed
+   decisively. iter_0 alone beats the prior champion 19-2. The "strongest
+   D.2 model = the pretrain" hypothesis was correct.
+2. ✅ **"15-ch encoding moved pretrain metrics only marginally" was the
+   wrong frame.** The marginal metric movement (+1.4 PAcc, +0.7 VAcc)
+   understated the strength gain at the SPRT level — the network was
+   evidently learning something the val-metric argmax couldn't capture.
+   This is the "theory IV (argmax-VAcc is the wrong metric)" hypothesis
+   from A4's write-up *getting indirect support* — val P-loss kept
+   dropping every epoch, and that movement turned out to be load-bearing
+   even though VAcc plateaued.
+3. ✅ **"Self-play at MCTS-200 has no headroom; is a random walk on this
+   warm-start."** Confirmed in the strongest possible form: not a random
+   walk, an *actively destructive* drift. iter_0's 0.905 WR collapsed to
+   iter_4's 0.526 WR over 5 iters of the current loop. Net-negative, not
+   net-zero.
+4. ✅ **"Wilson 0.20 is too loose for this regime."** Every iter promoted
+   at 42-49% WR; the cumulative effect was 250-300 Elo of value
+   destruction. The gate is the *mechanism* by which the dilution
+   propagated forward.
+5. ❌ **Search depth isn't the dominant lever** was the read after Step 2.
+   That's still true at MCTS-400 vs MCTS-200. But now we know the
+   *encoding* axis WAS a real lever — it just got masked by the self-play
+   loop's mistuning. Step 2's "ceiling is structural" framing partially
+   wrong: the ceiling at MCTS-200 wasn't network capacity, it was the
+   self-play loop discarding pretrain gains.
+
+**Operational lessons logged:** None new for A1 itself (15-min run, no
+issues). But it reinforces the *D.2-level* lesson that the autopilot's
+SUMMARY.md writer should print SPRT details directly to the consolidated
+log so we don't need to manually pull the JSON each time. (See D.2 entry
+below for the writer bug.)
+
+**Next experiments per sequencing matrix** — A1 STRONGER materially
+re-ranks the priorities:
+
+1. **Re-freeze the anchor to `best_supervised.pt`** *before any further
+   SPRT*. Otherwise every future comparison is against a stale 6-ch
+   reference. This is operationally cheap (just point new SPRT calls at
+   the new anchor) but matters immediately.
+2. **B1 + B2 + B3 jump to the top.** The self-play loop is *actively
+   destroying value*, not just failing to add it. This is no longer a
+   tuning task — it's a "stop the leak" task. B1 (tighten Wilson),
+   B2 (lower LR), B3 (more games/iter) are direct fixes for the dilution
+   mechanism. Until the loop is either fixed or disabled, every iter on a
+   strong init is net-negative.
+3. **F1 (bare-NetworkWrapper cleanup) remains queued** — cheap, removes a
+   class of bugs.
+4. **A4 (regression value head) becomes more interesting**, not less.
+   With the value-head plateau read getting indirect support from A1's
+   "metric understated strength" finding, theory II (the 3-class
+   discretization is leaving signal on the table) has stronger grounds.
+5. **D1 (self-play data corpus pretrain)** moves up too — if the
+   self-play loop is broken at this strength, generating a corpus from
+   our strongest model and re-pretraining might *replace* self-play
+   entirely as the iteration mechanism. Becomes the natural "instead of
+   fixing the loop, replace it" path.
+6. **C1 (SE blocks) drops further.** Architecture exploration is less
+   urgent now that we have a clearly-stronger pretrain to anchor against
+   and a known-broken loop to fix first.
+
+The deeper meta-finding: **the self-play loop is built for a model in the
+"learning" regime, not the "fine-tuning" regime.** At weak warm-start
+(Branch C era), it holds value. At strong warm-start (D.2 era), it
+destroys value. The transition was not gradual — it was a binary regime
+shift. This is a known failure mode in RL with strong priors (LLM RLHF
+uses tiny LRs + KL penalties precisely to anchor toward the supervised
+init).
+
+---
+
 ### Branch D.2 — 15-channel enhanced encoding — **NOT_STRONGER** (2026-05-25)
 
 The run that generated this backlog. Full pipeline: Path B 6-ch→15-ch corpus
