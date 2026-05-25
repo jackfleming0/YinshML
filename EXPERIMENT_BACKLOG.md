@@ -35,8 +35,11 @@ a clear next step, this file is the first thing to read.
 
 - **Active run:** Branch D.2 (15-channel enhanced encoding). In iter 5/5 of the
   self-play loop at time of writing. SPRT verdict pending.
-- **Current frozen anchor:** `models/branchC_volume_pretrain/best_iter_4.pt`
-  (the Branch C MCTS-200 result, ~6-ch encoding).
+- **Current frozen anchor:** `models/yngine_volume_15ch_pretrain/best_supervised.pt`
+  (the D.2 15-ch pretrained warm-start; re-frozen 2026-05-25 after A1 SPRT
+  showed it STRONGER than the prior `best_iter_4` anchor at WR 0.905, CI95
+  [0.711, 0.973]). Prior anchor: `models/branchC_volume_pretrain/best_iter_4.pt`
+  (Branch C, 6-ch).
 - **Last decisive SPRT verdicts:**
   - 2026-05-24: D.1 v2 (GAP value head) — **NOT_STRONGER** (1-15-0, structural
     determinism verified). GAP + warm-started spatial trunk doesn't work.
