@@ -31,24 +31,36 @@ a clear next step, this file is the first thing to read.
 
 ---
 
-## Status snapshot (as of 2026-05-25)
+## Status snapshot (as of 2026-05-26 14:00 UTC)
 
-- **Active run:** B1+B2+B3 — stop-the-leak self-play (tightened gate 0.50,
-  lr 1e-5, games_per_iter 200, games_per_match 200). Launched 23:35 UTC on
-  RTX 5090 vast.ai box. Run dir `runs_branchB1B2B3/20260525_233508`. Budget
-  17h from launch, ends ~16:35 UTC 2026-05-26. See "B1+B2+B3 — in progress"
-  write-up below for decision tree mapping outcomes to next experiment.
+- **B1+B2+B3 complete (2026-05-26).** Verdict: NOT_STRONGER, WR 0.468, CI95
+  [0.370, 0.568]. Loop went from net-destructive (D.2) to net-neutral, but
+  not yet additive. The iter_4 promotion in the within-loop arena was a
+  statistical false positive — SPRT re-sample shows true WR ≈ 0.47 vs
+  iter_0. See "B1+B2+B3" Done entry below for the full readout and
+  next-experiment recommendation (A4 + D1-partial, with gate-rule
+  refinement as operational sub-task).
+- **No active run.** Cloud box idle.
 - **Current frozen anchor:** `models/yngine_volume_15ch_pretrain/best_supervised.pt`
   (the D.2 15-ch pretrained warm-start; re-frozen 2026-05-25 after A1 SPRT
   showed it STRONGER than the prior `best_iter_4` anchor at WR 0.905, CI95
   [0.711, 0.973]). Prior anchor: `models/branchC_volume_pretrain/best_iter_4.pt`
   (Branch C, 6-ch).
 - **Last decisive SPRT verdicts:**
-  - 2026-05-24: D.1 v2 (GAP value head) — **NOT_STRONGER** (1-15-0, structural
-    determinism verified). GAP + warm-started spatial trunk doesn't work.
-  - 2026-05-23: Step 2 (MCTS-400 self-play) — **INCONCLUSIVE** at the 400-game
-    cap. Small real edge (WR 0.552, CI95 [0.504, 0.600]). Search depth alone is
-    not the dominant lever.
+  - 2026-05-26: B1+B2+B3 (stop-the-leak) — **NOT_STRONGER** (44-50-0,
+    WR 0.468, CI95 [0.370, 0.568]). Loop neutralized but not additive on
+    the strong warm-start. Next: A4 (regression value head, code prepped)
+    + D1-partial (pretrain on the saved 12 MB buffer) + gate-rule
+    refinement.
+  - 2026-05-25: A1 (D.2 iter_0 / best_supervised vs best_iter_4) —
+    **STRONGER** (19-2-0, WR 0.905, CI95 [0.711, 0.973]). New anchor.
+  - 2026-05-25: D.2 (15-ch + MCTS-200 self-play, 5 iters) —
+    **NOT_STRONGER** (160-144-0, WR 0.526, CI95 [0.470, 0.582] vs the OLD
+    anchor `best_iter_4`). Self-play loop destroyed pretrain gains.
+  - 2026-05-24: D.1 v2 (GAP value head) — **NOT_STRONGER** (1-15-0).
+    GAP + warm-started spatial trunk doesn't work.
+  - 2026-05-23: Step 2 (MCTS-400 self-play) — **INCONCLUSIVE** at the
+    400-game cap. Search depth alone is not the dominant lever.
 
 ---
 
@@ -435,6 +447,15 @@ wait. If not, we need a structural change (A4/D1), not a knob tweak.
 **While the run goes** (CPU-only work during GPU-bound self-play): F1
 (bare-NetworkWrapper cleanup), A4 code changes (so the next experiment is
 launch-ready), D1 sketch (verify MCTS-target dump path exists).
+
+**Replay buffer kept (2026-05-26 12:38 UTC):** 12 MB compressed
+(~2.2 GB uncompressed, ~50K MCTS-target samples across 5 self-play
+iters with the warm-start teacher) saved to
+`experiments/branchB1B2B3_run_2026-05-26/full_run_dir/20260525_233508/replay_buffer.pkl.gz`.
+Useful for D1 as a partial corpus from a strong teacher — already
+generated via the supervisor's proper batched MCTS path with subtree
+reuse. Lets D1 test "does pretrain on MCTS targets beat pretrain on
+yngine outcomes?" without the 10-15h generation cost up front.
 
 **Definition of done:** SPRT JSON at `logs/branchB1B2B3_iter4_vs_anchor.json`,
 plus Done entry below following the standard template, plus the next
@@ -1001,6 +1022,139 @@ current state of the priors?" The verdict + crucial detail + confirmed
 findings answer that in ~30 seconds. The operational lessons section
 prevents the most common research-debt failure mode: rediscovering the
 same bug or pattern session after session.
+
+---
+
+### B1+B2+B3 — stop-the-leak bundled run — **NOT_STRONGER** (loop neutralized but not additive) (2026-05-26)
+
+Five-iteration MCTS-200 self-play from `best_supervised.pt` warm-start
+with three knobs bundled: B1 (gate 0.50 + games_per_match 200), B2
+(lr 1e-5), B3 (games_per_iter 200). Total: 12.39h self-play + 1.08h
+SPRT = **~13.5h on RTX 5090**. Run dir `runs_branchB1B2B3/20260525_233508`.
+
+**SPRT verdict:**
+- **NOT_STRONGER** (crossed -2.94 boundary at game 94 of 400-cap)
+- Candidate 44-50-0, WR **0.468**, CI95 **[0.370, 0.568]**, LLR -3.135
+- Color split cand_white=24, cand_black=20 (acceptable at low n)
+- Duration: 65 min, RTX 5090
+- JSON: `logs/branchB1B2B3_iter4_ema_vs_anchor.json`
+
+**The crucial detail:** SPRT WR (0.468) is **statistically identical
+to iter_1's and iter_2's in-loop arena WRs** (0.465, 0.468 — the
+reverted candidates). The iter_4 in-loop arena bump to 0.516 — which
+the gate promoted — was sampling noise. Under independent re-sampling,
+iter_4's true WR vs iter_0 is ~0.47. **The loop did not produce a
+model that meaningfully beats the warm-start.**
+
+**Headline comparison vs D.2** (after refreezing the anchor to
+`best_supervised.pt`):
+
+| Run | Loop | Anchor | Verdict | WR | CI95 |
+|---|---|---|---|---|---|
+| D.2 | iter_4_ema, lr 1e-4 | OLD `best_iter_4` (weaker) | NOT_STRONGER | 0.526 | [0.470, 0.582] |
+| B1+B2+B3 | iter_4_ema, lr 1e-5 | NEW `best_supervised` (strong) | NOT_STRONGER | 0.468 | [0.370, 0.568] |
+
+Both translate to "≈ same strength as starting checkpoint." But D.2
+was vs the weaker anchor and only barely held; B1B2B3 was vs the new
+strong anchor and held at neutral. The much harder bar makes B1B2B3
+the meaningfully more rigorous test — **and the loop is no longer
+net-destructive.**
+
+**Within-run iter-by-iter** (gate-relevant WR vs iter_0):
+
+| Cand | WR | Elo | Wilson Gate | Decision |
+|---|---|---|---|---|
+| iter 1 | 46.5% | 1476.7 | wins=186/400, CI95 [0.417, 0.514] | REVERT |
+| iter 2 | 46.8% | 1496.0 | wins=187/400, CI95 [0.419, 0.516] | REVERT |
+| iter 3 | 48.4% | 1492.7 | (similar CI band) | REVERT |
+| iter 4 | 51.6% | 1507.3 | (point estimate > 0.50) | **PROMOTED** (false positive per SPRT) |
+
+iter 1 Glicko drop vs iter_0 was **-23** here (1500 → 1476.7) vs D.2's
+**-107**. That's the **B2 (lr 1e-5)** effect: ~80 Glicko of value
+preservation. The within-loop arena trend (46.5→46.8→48.4→51.6) is
+weakly suggestive that buffer accumulation surfaces signal — but SPRT
+rules out a *decisive* gain at 5 iters.
+
+**Confirmed findings** (against backlog "Findings driving" section):
+
+1. ✅ **B1 (gate at 0.50) works.** Rejected 3/4 borderline candidates.
+   The "CI straddles threshold" warning is useful UX.
+2. ✅ **B2 (lr 1e-5) prevents destruction.** -23 Glicko vs D.2's
+   -107 on iter 1 = ~80 Glicko preserved. Direct evidence the LR
+   step at warm-start handoff was the primary destruction mechanism.
+3. ✅ **B3 (games_per_iter 200) tightens gate signal.** 400-game
+   arena gives ~±5% CI — useful, but the iter_4 false positive proves
+   even this isn't tight enough for borderline-true-WR cases.
+4. ❌ **None of B1+B2+B3 produces an *additive* loop.** The loop
+   holds at iter_0's strength but cannot improve on it. The
+   improvement *mechanism* is missing, not the *preservation*
+   mechanism. Confirms the deeper hypothesis from D.2 was right:
+   knob-tweaking can stop destruction; structural change is needed
+   for actual progress.
+5. 🟡 **Replay-buffer accumulation MAY help with more time.** The
+   in-loop uptrend (46.5→48.4) is suggestive but not significant. A
+   longer run (10+ iters) might surface a real-but-slow improvement.
+   Not worth testing directly — A4/D1 have higher mechanism-based
+   priors.
+
+**Operational lessons logged:**
+
+- **`--export-every 0` CLI override is broken.** CoreML export ran at
+  iter 5 despite the flag because `run_training.py:254` does
+  `export_every = args.export_every or int(...)` — Python's "0 is
+  falsy" bug. Fix: `args.export_every if args.export_every is not None else ...`.
+  CoreML export crashed (known 6-vs-15 ch bug) but was wrapped in
+  try/except so non-fatal. Cosmetic, low priority.
+- **Gate uses point-estimate, not Wilson lower bound.** iter_4 promoted
+  at 51.6% (Wilson lower ~0.467 < 0.50) but SPRT re-sample shows true
+  WR 0.468. Wilson-lower-vs-threshold would have correctly rejected.
+  **Recommended gate-rule refinement before A4/D1:** require Wilson
+  lower bound ≥ threshold (not point estimate). Trivial code change in
+  TrainingSupervisor's gate path. Worth doing — otherwise every future
+  run risks a "false-positive promotion → next iter trains from a
+  noisy iter_N → potentially propagates the noise" failure mode.
+- **Replay buffer preserved** (~50K MCTS-target samples, 12 MB gzip):
+  `experiments/branchB1B2B3_run_2026-05-26/.../replay_buffer.pkl.gz`.
+  Generated by the strong warm-start over 5 self-play iters with
+  proper batched MCTS + subtree reuse. Lets D1 test the "MCTS-target
+  pretrain beats yngine-outcome pretrain" hypothesis on a partial
+  corpus without paying the 10-15h generation cost up front.
+- **Promoted iter_4 checkpoint preserved** at
+  `models/yngine_volume_15ch_pretrain_b1b2b3_iter4/iter4{,_ema}.pt`.
+  Even though SPRT rules out decisive gain, it's the strongest
+  *output* of any self-play loop we've run — keep for forensic
+  comparisons / future warm-start ablations.
+
+**Next experiments per decision matrix** (lands in
+"NOT_STRONGER preserved + mixed promote/revert" cell):
+
+1. **A4 (regression value head) — highest priority.** Code already
+   prepped (commit `343aab6`). Only missing piece: plumb `value_mode`
+   through `run_training.py` for self-play side (Phase 1.5). The
+   value-target hypothesis (theory II) is the only mechanism-level
+   reason we have to expect the loop to become additive. Cost: ~12h
+   pretrain + self-play + SPRT.
+2. **D1-partial — cheap parallel probe.** Pretrain on the existing
+   12 MB buffer (no new generation cost — ~3-5h pretrain only). If
+   even a partial corpus shows lift on SPRT, full 100K D1 is
+   justified. If no lift, value-target signal saturation is confirmed
+   (favors A4 path over D1 generation).
+3. **A4 + D1-partial combined.** Pretrain with both `--value-mode
+   regression` AND the buffer's MCTS targets. Highest mechanism-based
+   prior, lowest generation cost. Likely the actual right next step.
+4. **Gate-rule refinement** (operational sub-task, ~30min code).
+   Require Wilson lower bound ≥ threshold instead of point estimate.
+   Should land before any A4/D1 run.
+
+**Deeper meta-finding:** the regime split flagged in the A1 entry
+("self-play loop built for learning regime, breaks on strong warm
+start") is now refined: **lower LR + tighter gate move the loop from
+'actively destructive' to 'neutral'.** What remains broken is the
+*additive* mechanism — the loop cannot produce iter_N+1 stronger than
+iter_N. The mechanism-level candidates: (a) value targets too coarse
+(A4), (b) policy targets noise-limited at MCTS-200 (would need higher
+sims — already ruled out by Step 2), (c) corpus diversity too narrow
+(D1). A4 and D1 are the remaining live hypotheses.
 
 ---
 

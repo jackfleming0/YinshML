@@ -1,0 +1,14 @@
+{
+    "avg_game_length": 65.485,
+    "avg_ring_mobility": 0.0,
+    "win_rate": 1.0,
+    "draw_rate": 0.0,
+    "policy_loss": 1.153875754021182,
+    "value_loss": 8.813246689220467,
+    "tournament_rating": 1500.0,
+    "tournament_win_rate": 0.0,
+    "anchor_win_rate": null,
+    "anchor_eval": {},
+    "anchor_eval_mcts": {},
+    "timestamp": 1779758791.8953257
+}
