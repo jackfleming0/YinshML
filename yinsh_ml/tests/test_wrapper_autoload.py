@@ -81,6 +81,65 @@ def test_constructor_autoload_round_trips_6ch():
         )
 
 
+def test_constructor_autoload_detects_regression_value_mode():
+    """A regression-mode 15-ch checkpoint round-trips through the constructor
+    auto-detect path without the caller passing value_mode.
+
+    This is the A4 phase 1.5 wiring: regression-trained pretrains saved via
+    `--value-mode regression` must load cleanly into self-play (run_training.py
+    constructs the wrapper without passing value_mode). Without this
+    auto-detect, the wrapper would build a classification head (7 outputs)
+    and load_model would hard-fail on the 1-output checkpoint.
+    """
+    nw_save = NetworkWrapper(device="cpu", use_enhanced_encoding=True, value_mode="regression")
+    assert nw_save.network.value_mode == "regression"
+    _populate_bn_stats(nw_save, channels=15)
+
+    x = torch.randn(1, 15, 11, 11)
+    with torch.no_grad():
+        _, v0 = nw_save.network(x)
+    assert v0.shape == (1,), "regression mode value output should be (B,) shape"
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "15ch_regression.pt")
+        nw_save.save_model(path)
+
+        # Construct fresh — NO value_mode kwarg. Auto-detect must flip it
+        # to 'regression' based on the checkpoint's last value-head Linear's
+        # out_features == 1.
+        nw_load = NetworkWrapper(model_path=path, device="cpu")
+        assert nw_load.network.value_mode == "regression", (
+            "constructor should have auto-detected regression mode from the "
+            "checkpoint's last value-head layer output dim (== 1). Got "
+            f"value_mode={nw_load.network.value_mode}"
+        )
+
+        with torch.no_grad():
+            _, v1 = nw_load.network(x)
+        assert torch.allclose(v0, v1, atol=1e-5), "regression value diverged after autoload"
+
+
+def test_constructor_autoload_keeps_classification_default():
+    """Classification-mode round-trip: no false-positive switch to regression.
+    The default kwarg is value_mode='classification'; a 7-class checkpoint
+    must keep it.
+    """
+    nw_save = NetworkWrapper(device="cpu", use_enhanced_encoding=True)  # default mode
+    assert nw_save.network.value_mode == "classification"
+    _populate_bn_stats(nw_save, channels=15)
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "15ch_classification.pt")
+        nw_save.save_model(path)
+
+        nw_load = NetworkWrapper(model_path=path, device="cpu")
+        assert nw_load.network.value_mode == "classification", (
+            "constructor must keep classification when checkpoint's last "
+            "value-head layer has > 1 output dim. Got "
+            f"value_mode={nw_load.network.value_mode}"
+        )
+
+
 def test_bare_construct_then_load_15ch_into_6ch_wrapper_hard_fails():
     """The unsafe pattern (bare construct, then load mismatched checkpoint)
     must hard-fail with a clear error. This is the guard that surfaced the

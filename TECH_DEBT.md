@@ -145,3 +145,80 @@ The bug surfaced *only* because the yardstick build included a **positive contro
 When building any measurement instrument, include a known-*different* control, not
 only a known-same one — a flat "all inconclusive" is the signature of a dead
 instrument.
+
+---
+
+# Tech Debt — Phase-Weight Bug from Magic Channel Indexing (FIXED 2026-05-26)
+
+## What was wrong
+
+`yinsh_ml/training/trainer.py`'s local `decode_phase` helper read `state[5]`
+unconditionally to classify a sample's game phase. That was correct for the
+6-channel basic encoder (`CH_GAME_PHASE = 5`) but silently wrong for the
+15-channel enhanced encoder, where `CH_GAME_PHASE = 12` and channel 5 is a
+row-threat channel. Because row-threats are sparse on most positions, the
+avg-abs classifier always returned < 0.2 and labelled every 15-ch sample
+`RING_PLACEMENT`.
+
+## Blast radius
+
+`self.phases` (per-sample phase labels) flows directly into
+`ReplayBuffer.sample_batch`'s phase-aware weighting at `trainer.py:446-447`:
+
+```python
+for i, phase in enumerate(self.phases):
+    p[i] *= phase_weights.get(phase, 1.0)
+```
+
+With every sample mis-labelled `RING_PLACEMENT`, the configured
+`phase_weights: {MAIN_GAME: 2.0, RING_PLACEMENT: 1.0, RING_REMOVAL: 0.5}`
+boost was silently disabled — every sample got 1.0 regardless. **MAIN_GAME
+positions were under-sampled by 2× across all 15-channel runs (D.2 and
+B1+B2+B3).**
+
+Real phase mix (verified post-fix, on the B1+B2+B3 buffer):
+`MAIN_GAME=75.6%, RING_PLACEMENT=16.0%, RING_REMOVAL=8.4%`.
+
+## What was done
+
+- Added `NUM_CHANNELS = 6` + `CH_GAME_PHASE = 5` (and the other channel
+  constants for symmetry) to `StateEncoder` in `yinsh_ml/utils/encoding.py`.
+- Added `phase_channel_index(num_channels)` and `decode_phase_from_state(state)`
+  utilities in the same module — single source of truth that dispatches by
+  channel count to the correct named constant on each encoder. Raises on
+  unknown channel counts so a new encoder can't silently fall through.
+- Trainer now imports and delegates to `decode_phase_from_state`. The local
+  helper is gone.
+- Regression tests in `yinsh_ml/tests/test_decode_phase_cross_encoder.py`
+  pin both the 6-ch and 15-ch contracts, the named-constant alignment, and
+  the failure mode when channel 5 carries arbitrary (non-phase) data in
+  the 15-ch encoder.
+
+## The durable lesson
+
+**Magic channel indices fail silently when you add channels.** A
+`state[5]` lookup is correct under one encoder schema and quietly wrong
+under another. The avg-abs classification thresholds happened to be lax
+enough that the wrong channel STILL gave plausible-looking labels — just
+all the same one.
+
+Things to do consistently going forward:
+
+1. **Named channel constants on every encoder class.** Magic indices are
+   banned in cross-encoder code paths. (Done for both encoders now.)
+2. **Encoder-aware utilities live in the encoding module**, not in each
+   consumer. `decode_phase_from_state(state)` is the only function that
+   should know about channel layouts; everything else calls it.
+3. **Tests cover BOTH encoders for shared utilities.** If a utility
+   takes a state tensor as input and has any channel-aware logic, the
+   test matrix must include 6-ch and 15-ch states.
+4. **Unknown encoder = loud error.** The `phase_channel_index` helper
+   raises on unrecognized channel counts. A silent fallback to "5" was
+   the failure mode for years.
+
+The dead "all-same label" output is the same kind of failure signature as
+the dead MCTS engine (§5 above): when a measurement says the same thing
+for every input, that's the smell that something is broken upstream.
+Positive controls (deliberately different inputs that SHOULD produce
+different labels) catch this; uniform-looking output should always be
+investigated.

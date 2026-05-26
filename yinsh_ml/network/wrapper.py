@@ -121,6 +121,36 @@ class NetworkWrapper:
                             and v.dim() == 2
                         )
                         value_head_type = 'gap_v2' if n_linears >= 2 else 'gap'
+            # Auto-detect value_mode + num_value_classes from the LAST Linear
+            # weight in the value head:
+            #   classification → out_features == num_value_classes (e.g. 7)
+            #   regression     → out_features == 1
+            # Only override if the caller didn't specify the mode explicitly
+            # — explicit kwarg wins (parallel to value_head_type's policy).
+            # The default value_mode kwarg is 'classification', so we detect
+            # 'regression' from the checkpoint OR keep the default. To
+            # distinguish "caller passed classification" from "caller didn't
+            # care", we check the LAST linear's shape and switch only when
+            # it clearly indicates regression. (Symmetric to value_head_type's
+            # `is None` check, but value_mode has a non-None default so we
+            # use the checkpoint as the ground truth when it disagrees.)
+            value_head_linear_weights = [
+                (int(k.split('.')[1]), v) for k, v in sd.items()
+                if k.startswith('value_head.') and k.endswith('.weight') and v.dim() == 2
+            ]
+            if value_head_linear_weights:
+                value_head_linear_weights.sort(key=lambda kv: kv[0])
+                last_linear_weight = value_head_linear_weights[-1][1]
+                ckpt_out_dim = int(last_linear_weight.shape[0])
+                if ckpt_out_dim == 1:
+                    # Regression checkpoint. Override the caller's
+                    # classification default if it wasn't deliberately set.
+                    if value_mode == 'classification':
+                        value_mode = 'regression'
+                elif ckpt_out_dim > 1:
+                    # Classification checkpoint with N=ckpt_out_dim classes.
+                    if value_mode == 'classification':
+                        num_value_classes = ckpt_out_dim
         if num_channels is None:
             num_channels = 256
         if num_blocks is None:

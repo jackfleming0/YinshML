@@ -1099,6 +1099,51 @@ rules out a *decisive* gain at 5 iters.
 
 **Operational lessons logged:**
 
+- **🚨 PHASE-WEIGHT BUG (discovered 2026-05-26 during D1-partial prep).**
+  `yinsh_ml/training/trainer.py`'s local `decode_phase` helper read
+  `state[5]` unconditionally — correct for the 6-channel basic encoder
+  (CH_GAME_PHASE=5) but silently wrong for the 15-channel enhanced
+  encoder where channel 5 is a sparse row-threat channel and
+  CH_GAME_PHASE=12. As a result, **every position in every 15-channel
+  run's replay buffer was labelled RING_PLACEMENT.** The mislabelling
+  flowed through `ReplayBuffer.sample_batch`'s phase-aware weighting
+  (`trainer.py:446-447`), where the configured
+  `phase_weights: MAIN_GAME=2.0` weight was silently disabled. Every
+  sample got the RING_PLACEMENT weight (1.0) regardless of actual
+  phase.
+
+  **Real phase mix (verified post-fix, on the B1+B2+B3 buffer):**
+  `MAIN_GAME=75.6%, RING_PLACEMENT=16.0%, RING_REMOVAL=8.4%`.
+
+  **Affected runs:** D.2, B1+B2+B3 (both 15-ch). MAIN_GAME positions
+  were under-sampled by 2× across both runs.
+
+  **Hypothesis worth testing in the next experiment:** part of the
+  reason the self-play loop couldn't become additive may be that
+  the most-important phase (MAIN_GAME — where the actual game tactics
+  happen) was under-sampled by 2× throughout training. A re-run with
+  the fix applied could legitimately surface improvement that the
+  buggy weighting was suppressing. This adds a **fourth knob option
+  (correct sampling)** to the B-experiment family that wasn't on
+  any previous list.
+
+  **Fix (landed in this work):** added `CH_GAME_PHASE` named constant
+  to `StateEncoder` (basic), plus `phase_channel_index(num_channels)`
+  and `decode_phase_from_state(state)` utility in `encoding.py` as
+  single sources of truth. Trainer now imports + delegates to that
+  utility. Regression tests in `yinsh_ml/tests/test_decode_phase_cross_encoder.py`
+  pin the contract for both encoders + reject unknown channel counts.
+  See also `TECH_DEBT.md` entry.
+
+- **Buffer is 63% zero-policy rows.** Of 100K samples, ~63% have
+  all-zero `move_probs` — likely a mix of terminal-position dummies
+  and early-game positions where MCTS visit distributions weren't
+  captured (the supervisor's self-play appends a dummy zero policy
+  at game end, plus some RING_PLACEMENT moves may bypass MCTS). The
+  D1-partial corpus is effectively ~36K samples, not 100K. The
+  converter at `scripts/convert_replay_buffer_to_mmap.py` filters
+  these out before saving.
+
 - **`--export-every 0` CLI override is broken.** CoreML export ran at
   iter 5 despite the flag because `run_training.py:254` does
   `export_every = args.export_every or int(...)` — Python's "0 is
