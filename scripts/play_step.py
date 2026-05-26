@@ -225,8 +225,7 @@ def play_ai_response(s: Session) -> Optional[str]:
     if g.current_player == human_color:
         return None  # Not AI's turn
 
-    net = NetworkWrapper(device=s.device)
-    net.load_model(s.checkpoint)
+    net = NetworkWrapper(model_path=s.checkpoint, device=s.device)
     mcts = _build_mcts(net, s.mcts_sims)
     valid = g.get_valid_moves()
     if not valid:

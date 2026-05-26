@@ -33,8 +33,11 @@ a clear next step, this file is the first thing to read.
 
 ## Status snapshot (as of 2026-05-25)
 
-- **Active run:** Branch D.2 (15-channel enhanced encoding). In iter 5/5 of the
-  self-play loop at time of writing. SPRT verdict pending.
+- **Active run:** B1+B2+B3 — stop-the-leak self-play (tightened gate 0.50,
+  lr 1e-5, games_per_iter 200, games_per_match 200). Launched 23:35 UTC on
+  RTX 5090 vast.ai box. Run dir `runs_branchB1B2B3/20260525_233508`. Budget
+  17h from launch, ends ~16:35 UTC 2026-05-26. See "B1+B2+B3 — in progress"
+  write-up below for decision tree mapping outcomes to next experiment.
 - **Current frozen anchor:** `models/yngine_volume_15ch_pretrain/best_supervised.pt`
   (the D.2 15-ch pretrained warm-start; re-frozen 2026-05-25 after A1 SPRT
   showed it STRONGER than the prior `best_iter_4` anchor at WR 0.905, CI95
@@ -354,6 +357,69 @@ classification path stays default).
   invalidate (delete) any prior buffer when switching modes.
 - Does the EMA path need adjusting? Same network, same parameters — should
   be fine, but worth a smoke test.
+
+---
+
+### B1+B2+B3 — in progress (launched 2026-05-25 23:35 UTC)
+
+Bundled stop-the-leak run. All three knobs changed in a single config
+(`configs/branchB1B2B3_mcts200.yaml`) and launched together with warm-start
+from `best_supervised.pt` (the refrozen anchor). Run dir
+`runs_branchB1B2B3/20260525_233508` on RTX 5090.
+
+| Knob | Value (was → now) |
+|---|---|
+| B1 `arena.promotion_threshold` | 0.20 → 0.50 |
+| B1 `arena.games_per_match` | 100 → 200 |
+| B2 `trainer.lr` | 1e-4 → 1e-5 |
+| B3 `self_play.games_per_iteration` | 100 → 200 |
+| (unchanged) encoding | enhanced (15-ch) |
+| (unchanged) num_iterations | 5 |
+
+**Attribution caveat (logged before result is known):** because three knobs
+move together, a STRONGER verdict cannot attribute the gain to a specific
+knob. We are deliberately bundling because (a) the priors on each knob being
+individually load-bearing are similar — they all target the same dilution
+mechanism — and (b) attribution ablations would each cost 4-6h, eating
+budget that's better spent compounding gains. **Policy decided 2026-05-25
+during planning:** if STRONGER, skip attribution; proceed directly to A4 to
+compound. If NOT_STRONGER, use the decision matrix below to pick the next
+experiment.
+
+**Decision matrix — outcome → next experiment**
+
+Three independent axes of evidence the run will produce: (1) SPRT verdict
+vs `best_supervised.pt`, (2) gate behavior across 5 iters, (3) Glicko
+trajectory shape.
+
+|  | All 5 promote | Mixed promote/revert | 0 promote (stuck at iter_0) |
+|---|---|---|---|
+| **STRONGER** (CI95 lower > 0.50) | Loop unambiguously works → **A4** to compound | Same → **A4** | (contradictory — gate wouldn't reject in a STRONGER world) |
+| **NOT_STRONGER, preserved** (CI hugs 0.50) | (rare) | Leak fixed, no gain → **A4** *or* **D1** | Gate froze us at iter_0 → **B4** (disable gate as negative control) |
+| **NOT_STRONGER, leaks** (CI clearly < 0.50) | Gate ineffective → **B4** + escalate | Tuning insufficient → **A4** mandatory, **D1** parallel | Worst case (gate too tight AND no signal) → **A4** + **D1** in series |
+
+**Prior probabilities** (recorded so we can calibrate later): p≈0.55
+preserved-no-gain, p≈0.25 STRONGER, p≈0.20 still-leaks. Reasoning: B1+B2
+should at minimum *prevent* destruction (gate now rejects when iter_N+1 is
+worse than iter_N), so the "leak" outcome requires both the gate AND the
+LR fix to be insufficient — unlikely. B3 adds signal volume but may not
+add signal *quality*, so STRONGER requires the volume to be load-bearing,
+which is a weaker prior.
+
+**Why bundled now and not staged:** A1 showed the warm-start is decisively
+strong. Every additional D.2-style run on top of it costs ~12h of
+value-destruction. The fastest way to learn whether the loop is
+fundamentally salvageable in the fine-tuning regime is to throw all three
+plausibly-helpful knobs at it. If salvageable, downstream attribution can
+wait. If not, we need a structural change (A4/D1), not a knob tweak.
+
+**While the run goes** (CPU-only work during GPU-bound self-play): F1
+(bare-NetworkWrapper cleanup), A4 code changes (so the next experiment is
+launch-ready), D1 sketch (verify MCTS-target dump path exists).
+
+**Definition of done:** SPRT JSON at `logs/branchB1B2B3_iter4_vs_anchor.json`,
+plus Done entry below following the standard template, plus the next
+experiment kicked off (or queued with config ready) per the matrix above.
 
 ---
 

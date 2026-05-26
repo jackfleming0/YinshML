@@ -241,8 +241,7 @@ def main() -> int:
     # Force CPU on the parent network so all three paths execute identical
     # arithmetic. Workers default to CPU on Mac (no CUDA branch), and the
     # threaded path inherits the parent device.
-    network = NetworkWrapper(device="cpu")
-    network.load_model(args.model)
+    network = NetworkWrapper(model_path=args.model, device="cpu")
     network.network.eval()
 
     results: Dict[str, PathStats] = {}

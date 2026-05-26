@@ -154,10 +154,8 @@ def main():
     logger.info(f"White: iter_{args.white_iter} from {white_ckpt}")
     logger.info(f"Black: iter_{args.black_iter} from {black_ckpt}")
 
-    white_net = NetworkWrapper(device=device)
-    white_net.load_model(str(white_ckpt))
-    black_net = NetworkWrapper(device=device)
-    black_net.load_model(str(black_ckpt))
+    white_net = NetworkWrapper(model_path=str(white_ckpt), device=device)
+    black_net = NetworkWrapper(model_path=str(black_ckpt), device=device)
 
     summaries = []
     for g in range(args.num_games):
