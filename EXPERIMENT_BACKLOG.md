@@ -44,7 +44,72 @@ a clear next step, this file is the first thing to read.
 - **Next experiment is B1+B2+B3 re-run** on the fixed code (`training-pipeline-fixes`
   HEAD). Same config, same warm-start, ~13.5h. Must precede any other
   15-channel experiment.
-- **No active run.** Cloud box idle.
+- **Active run:** B1+B2+B3 RE-RUN on the post-fix code. Launched
+  15:04 UTC 2026-05-26 on commit cd31d33. Phase-weight fix VERIFIED
+  empirically (iter 1 buffer: MAIN_GAME 76.9%, RING_PLACEMENT 15.1%,
+  RING_REMOVAL 8.0%). **Iter 2 candidate hit WR 0.517 vs iter_0
+  (vs 0.465 in the invalidated run)** — first real evidence the fix
+  produces stronger candidates. Iter 2 PROMOTED via the Elo-override
+  path despite Wilson REJECT (CI95 [0.469, 0.566] straddled 0.50).
+  iter 3+ trains from iter_1 — first 15-ch run to move off the
+  warm-start. Run continues; gate-override behavior queued as a
+  next-session fix target (see "Gate-override path is permissive"
+  follow-up note below).
+
+### Gate-override path is permissive — fix queued for post-run
+
+Observed in iter 2 of the B1+B2+B3 RE-RUN (2026-05-26 19:26 UTC):
+
+```
+Wilson Gate Check: wins=207/400 (win_rate=0.517, SE=0.025,
+                   CI95=[0.469, 0.566], threshold=0.5) -> REJECT
+✅ NEW BEST: Copied checkpoint_iteration_1.pt to best_model.pt
+Decision: ✅ NEW BEST (promoted to best model)
+```
+
+Wilson said REJECT (lower bound 0.469 < 0.50 threshold) — but
+`supervisor.py:1731-1736` ran a third branch that promoted on
+`candidate_elo > best_model_elo` regardless. Comment in code calls
+this intentional ("Wilson failed but Elo improved"), but it means
+**the Wilson gate is effectively advisory** — any candidate with
+higher Glicko Elo gets promoted even when Wilson explicitly rejects.
+
+The `wilson_attempted_no_data` fail-closed defense added 2026-05-26
+only catches the "Wilson couldn't run" case, not the "Wilson ran and
+said no" case. That's a second branch that wasn't on our radar at
+the time.
+
+**Why we're not fixing mid-run:** the user (2026-05-26 ~19:45 UTC)
+chose to let the run continue rather than kill and patch — there's
+real signal in the iter 2 promotion (WR climbed from 46.5% → 51.7%
+under the corrected training) and the gate's permissive behavior is
+known, not catastrophic. Future iter regressions self-correct given
+the gate works correctly elsewhere (Wilson-rejects + Elo-also-down
+= REVERT, which we observed in the invalidated run's iter 1-3).
+
+**Patch shape for next session** (~30 min, before any other run):
+Tighten the elif branch at supervisor.py:1731 so Elo override is
+only allowed when `perform_wilson_check == False` (Wilson wasn't run
+because of equality with best, no prior best, etc.). When Wilson WAS
+run and said REJECT, the loop should fall through to "kept current
+best" instead of overriding via Elo.
+
+```python
+# Proposed:
+elif candidate_elo > self.best_model_elo and not perform_wilson_check:
+    # Elo override is only valid when Wilson didn't speak.
+    promote = True
+    self.logger.info(f"... Elo improved ({candidate_elo:.1f} > {self.best_model_elo:.1f})")
+```
+
+Add a regression test in `test_supervisor_gate_fail_closed.py` that
+asserts: when Wilson ran, returned False, and Elo is up → outcome is
+"kept" not "promoted."
+
+This is the right time to land this: we now have *two* concrete
+failure modes documented (iter_4 in invalidated run, iter 2 in
+re-run) that both promoted via the Elo override when the gate
+intended to reject. The patch is justified.
 - **Current frozen anchor:** `models/yngine_volume_15ch_pretrain/best_supervised.pt`
   (the D.2 15-ch pretrained warm-start; re-frozen 2026-05-25 after A1 SPRT
   showed it STRONGER than the prior `best_iter_4` anchor at WR 0.905, CI95
