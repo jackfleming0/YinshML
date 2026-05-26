@@ -709,20 +709,35 @@ outcome. Better targets → higher achievable VAcc → stronger warm-start.
   6-ch corpus.
 
 **Methodology:**
-1. Pick teacher: probably `models/branchC_volume_pretrain/best_iter_4.pt`
-   (strongest known model) but using the 15-ch encoder for its play.
-   Requires loading the 6-ch checkpoint into a 15-ch wrapper — that's a
-   *re-encoding* problem; the network's first conv has 6 channels not 15.
-   So actually NO: use D.2's iter_0 (genuinely 15-ch).
-2. Generate ~100K games via `run_large_scale_selfplay.py` or
-   `scripts/generate_heuristic_games.py`-style infrastructure (need to
-   verify which supports MCTS targets).
-3. Convert game records → npz with `policy_indices` (visit-distribution
-   argmax) and `values` (final outcome OR rolled-out value at root —
-   whichever is logged).
-4. Convert npz → mmap shards (`scripts/convert_npz_to_mmap_shards.py`).
-5. Pretrain on the mmap shards.
-6. SPRT the resulting init vs `best_iter_4`.
+1. Pick teacher: `models/yngine_volume_15ch_pretrain/best_supervised.pt`
+   (refrozen anchor, A1 verified STRONGER vs the prior Branch C
+   champion — A1 result re-points D1 here away from `best_iter_4`).
+   Genuinely 15-ch, no re-encoding problem.
+2. **Generator script does NOT exist** — D1-sketch finding 2026-05-25.
+   The closest is `scripts/run_selfplay_worker.py` which calls
+   `SelfPlay.generate_games()` and prints the count but throws the
+   results away. The data tuple from `generate_games` IS the right
+   shape: per-game `(states, policies, values, history)` where
+   `policies` are MCTS visit distributions and `values` are MCTS root
+   values per position (Fix #1 in self_play.py:1647). Connector
+   script needed (~2-3h coding):
+   - Load teacher with auto-detect: `NetworkWrapper(model_path=...)`
+   - Loop `SelfPlay.generate_games(batch)` in chunks of ~1000 games
+   - **Scatter** per-position `policies` (over valid moves) into the
+     full 7433-slot move-encoder space before saving — pretrain
+     expects shape `(N, total_moves)` for soft targets, or `(N,)`
+     argmax indices for hard targets. Soft preferred (more signal).
+   - Save as npz with `states.npy`, `policies.npy` (soft, `(N, 7433)`)
+     or `policy_indices.npy` (argmax, `(N,)`), and `values.npy` (`(N,)`).
+     Schema matches `run_supervised_pretraining.py:97-114`.
+   - Resume support — persist a "games-done" counter so crashes don't
+     restart from zero (100K games is ~10-15h on 5090).
+3. Convert npz → mmap shards (`scripts/convert_npz_to_mmap_shards.py`,
+   already exists, schema-agnostic).
+4. Pretrain on the mmap shards via existing
+   `scripts/run_supervised_pretraining.py --data-dir <mmap_dir>
+   --use-enhanced-encoding --value-head-type spatial --epochs 6`.
+5. SPRT the resulting init vs `best_supervised.pt` (new anchor).
 
 **Cost:**
 - Game generation: ~10-15h, ~$20.
