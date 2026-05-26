@@ -31,15 +31,19 @@ a clear next step, this file is the first thing to read.
 
 ---
 
-## Status snapshot (as of 2026-05-26 14:00 UTC)
+## Status snapshot (as of 2026-05-26 ~14:45 UTC)
 
-- **B1+B2+B3 complete (2026-05-26).** Verdict: NOT_STRONGER, WR 0.468, CI95
-  [0.370, 0.568]. Loop went from net-destructive (D.2) to net-neutral, but
-  not yet additive. The iter_4 promotion in the within-loop arena was a
-  statistical false positive — SPRT re-sample shows true WR ≈ 0.47 vs
-  iter_0. See "B1+B2+B3" Done entry below for the full readout and
-  next-experiment recommendation (A4 + D1-partial, with gate-rule
-  refinement as operational sub-task).
+- **B1+B2+B3 ran but is INVALIDATED.** Post-run cleanup uncovered a
+  phase-weight bug in `trainer.py`'s `decode_phase` (read magic `state[5]`,
+  correct for 6-ch but wrong for 15-ch where CH_GAME_PHASE=12). MAIN_GAME
+  positions under-sampled by 2× throughout both D.2 AND B1+B2+B3 training.
+  Conclusions from both runs about how the self-play loop behaved are
+  contaminated. See B1+B2+B3 Done entry for the invalidation banner +
+  what stays valid (bug discovery, gate fail-closed defense, A4 phase 1.5
+  wiring, buffer converter, named channel constants).
+- **Next experiment is B1+B2+B3 re-run** on the fixed code (`training-pipeline-fixes`
+  HEAD). Same config, same warm-start, ~13.5h. Must precede any other
+  15-channel experiment.
 - **No active run.** Cloud box idle.
 - **Current frozen anchor:** `models/yngine_volume_15ch_pretrain/best_supervised.pt`
   (the D.2 15-ch pretrained warm-start; re-frozen 2026-05-25 after A1 SPRT
@@ -47,20 +51,28 @@ a clear next step, this file is the first thing to read.
   [0.711, 0.973]). Prior anchor: `models/branchC_volume_pretrain/best_iter_4.pt`
   (Branch C, 6-ch).
 - **Last decisive SPRT verdicts:**
-  - 2026-05-26: B1+B2+B3 (stop-the-leak) — **NOT_STRONGER** (44-50-0,
-    WR 0.468, CI95 [0.370, 0.568]). Loop neutralized but not additive on
-    the strong warm-start. Next: A4 (regression value head, code prepped)
-    + D1-partial (pretrain on the saved 12 MB buffer) + gate-rule
-    refinement.
+  - 2026-05-26: B1+B2+B3 — **SPRT verdict NOT_STRONGER (44-50-0,
+    WR 0.468, CI95 [0.370, 0.568]), but INTERPRETATION INVALIDATED.**
+    The training ran under the phase-weight bug; the measurement is of
+    a model trained with broken phase sampling. Re-run on the fixed
+    code is the next experiment.
   - 2026-05-25: A1 (D.2 iter_0 / best_supervised vs best_iter_4) —
     **STRONGER** (19-2-0, WR 0.905, CI95 [0.711, 0.973]). New anchor.
-  - 2026-05-25: D.2 (15-ch + MCTS-200 self-play, 5 iters) —
-    **NOT_STRONGER** (160-144-0, WR 0.526, CI95 [0.470, 0.582] vs the OLD
-    anchor `best_iter_4`). Self-play loop destroyed pretrain gains.
+    *Unaffected by the phase-weight bug — A1 is a pretrain checkpoint
+    comparison, not a self-play loop test.*
+  - 2026-05-25: D.2 — **NOT_STRONGER** (160-144-0, WR 0.526, CI95
+    [0.470, 0.582] vs OLD anchor `best_iter_4`). **Same phase-weight
+    bug exposure as B1+B2+B3.** "Loop destroyed value" framing may
+    have over-called what was really "loop trained with wrong phase
+    weights." The verdict against the OLD anchor still holds as a
+    measurement; the interpretation about loop behavior doesn't.
   - 2026-05-24: D.1 v2 (GAP value head) — **NOT_STRONGER** (1-15-0).
-    GAP + warm-started spatial trunk doesn't work.
+    Same exposure as D.2 / B1+B2+B3 (15-ch run). The structural
+    determinism verification is independent of the bug; the
+    interpretation about GAP-vs-spatial is contaminated.
   - 2026-05-23: Step 2 (MCTS-400 self-play) — **INCONCLUSIVE** at the
-    400-game cap. Search depth alone is not the dominant lever.
+    400-game cap. **6-channel run — UNAFFECTED by the phase-weight
+    bug.** Search-depth-isn't-the-lever conclusion still stands.
 
 ---
 
@@ -1025,12 +1037,64 @@ same bug or pattern session after session.
 
 ---
 
-### B1+B2+B3 — stop-the-leak bundled run — **NOT_STRONGER** (loop neutralized but not additive) (2026-05-26)
+### B1+B2+B3 — stop-the-leak bundled run — **INVALIDATED** (training operated under the phase-weight bug; re-run pending) (2026-05-26)
+
+> 🚨 **INVALIDATED 2026-05-26 (~14:30 UTC).** During post-run cleanup we
+> discovered a long-standing bug in `trainer.py`'s `decode_phase` helper:
+> it read `state[5]` unconditionally to label each sample's game phase,
+> which is correct for the 6-channel basic encoder but wrong for the
+> 15-channel enhanced encoder (where CH_GAME_PHASE=12 and channel 5
+> carries sparse row-threat data). Every 15-channel sample was labelled
+> `RING_PLACEMENT`, silently disabling the configured
+> `phase_weights: MAIN_GAME=2.0` boost in `sample_batch`. **MAIN_GAME
+> positions were under-sampled by 2× throughout B1+B2+B3 training.**
+>
+> This means the network B1+B2+B3 trained is NOT the network the
+> configuration was supposed to produce. Every "how the loop behaved"
+> conclusion derived from this run is a measurement of a different
+> system than the one we thought we were testing.
+>
+> **What stays valid** (independent of training quality):
+> - The phase-weight bug discovery itself (see Operational lessons +
+>   TECH_DEBT.md).
+> - The gate fail-closed defense (logic, not data).
+> - The A4 phase 1.5 auto-detect wiring.
+> - The buffer converter + filter logic.
+> - The named channel constants on both encoders.
+>
+> **What's invalidated:**
+> - "B1/B2/B3 confirmed working" — gate operated on H2H games between
+>   buggy-trained networks; we can't infer it would behave the same on
+>   correctly-trained networks.
+> - The Glicko-drop comparison vs D.2 (-23 vs -107) — both runs had the
+>   same bug, so the ratio compares buggy to buggy.
+> - The SPRT verdict's *interpretation* — the WR 0.468 result is a real
+>   measurement, but of a model trained with broken phase sampling. We
+>   don't actually know what iter_4 would have looked like under correct
+>   training.
+> - The decision-matrix outcome (cell mapping → next experiment).
+>
+> **Same exposure: D.2.** D.2 was also a 15-channel run trained under
+> the buggy `decode_phase`. Its conclusions about the self-play loop
+> destroying value should be treated with the same skepticism — the
+> "loop destroyed value" framing might have over-called what was really
+> "loop trained with wrong phase weights and hit a different fixed
+> point." A1's STRONGER verdict (pretrain vs old anchor) is unaffected
+> because pretraining doesn't use the trainer's phase weighting.
+>
+> **Re-run plan:** see `## Recommended sequencing` below — B1+B2+B3 must
+> be re-run on the fixed code BEFORE any other experiment, because the
+> "loop neutralized vs additive" question is now genuinely open. The
+> two prior 15-ch results don't answer it. Re-launch is one command on
+> the cloud box once the fix is pulled.
+
+---
 
 Five-iteration MCTS-200 self-play from `best_supervised.pt` warm-start
 with three knobs bundled: B1 (gate 0.50 + games_per_match 200), B2
 (lr 1e-5), B3 (games_per_iter 200). Total: 12.39h self-play + 1.08h
 SPRT = **~13.5h on RTX 5090**. Run dir `runs_branchB1B2B3/20260525_233508`.
+**Trained under the phase-weight bug — see invalidation banner above.**
 
 **SPRT verdict:**
 - **NOT_STRONGER** (crossed -2.94 boundary at game 94 of 400-cap)
@@ -1075,27 +1139,22 @@ preservation. The within-loop arena trend (46.5→46.8→48.4→51.6) is
 weakly suggestive that buffer accumulation surfaces signal — but SPRT
 rules out a *decisive* gain at 5 iters.
 
-**Confirmed findings** (against backlog "Findings driving" section):
+**Confirmed findings:** ⚠️ **INVALIDATED.** Each item below
+described a behavior of the self-play loop derived from this run's
+training. With the phase-weight bug now known (MAIN_GAME positions
+under-sampled by 2× throughout), every conclusion about *how the
+loop behaved* is measuring a different system than the one the config
+was supposed to test. The full original list (B1/B2/B3 individually
+"confirmed," the loop's "preservation but not addition" framing,
+the "replay-buffer accumulation may help" caveat) has been struck —
+those questions are genuinely open and must be re-answered on the
+fixed code.
 
-1. ✅ **B1 (gate at 0.50) works.** Rejected 3/4 borderline candidates.
-   The "CI straddles threshold" warning is useful UX.
-2. ✅ **B2 (lr 1e-5) prevents destruction.** -23 Glicko vs D.2's
-   -107 on iter 1 = ~80 Glicko preserved. Direct evidence the LR
-   step at warm-start handoff was the primary destruction mechanism.
-3. ✅ **B3 (games_per_iter 200) tightens gate signal.** 400-game
-   arena gives ~±5% CI — useful, but the iter_4 false positive proves
-   even this isn't tight enough for borderline-true-WR cases.
-4. ❌ **None of B1+B2+B3 produces an *additive* loop.** The loop
-   holds at iter_0's strength but cannot improve on it. The
-   improvement *mechanism* is missing, not the *preservation*
-   mechanism. Confirms the deeper hypothesis from D.2 was right:
-   knob-tweaking can stop destruction; structural change is needed
-   for actual progress.
-5. 🟡 **Replay-buffer accumulation MAY help with more time.** The
-   in-loop uptrend (46.5→48.4) is suggestive but not significant. A
-   longer run (10+ iters) might surface a real-but-slow improvement.
-   Not worth testing directly — A4/D1 have higher mechanism-based
-   priors.
+What remains in the SPRT data: the candidate trained under buggy
+phase weights landed at WR 0.468 vs `best_supervised`. That's an
+honest measurement of *the model that was actually produced*, not
+of *the model the config aimed to produce*. The two are not the
+same network.
 
 **Operational lessons logged:**
 
@@ -1170,36 +1229,65 @@ rules out a *decisive* gain at 5 iters.
   *output* of any self-play loop we've run — keep for forensic
   comparisons / future warm-start ablations.
 
-**Next experiments per decision matrix** (lands in
-"NOT_STRONGER preserved + mixed promote/revert" cell):
+**Next experiments — REPRIORITIZED 2026-05-26 post-invalidation:**
 
-1. **A4 (regression value head) — highest priority.** Code already
-   prepped (commit `343aab6`). Only missing piece: plumb `value_mode`
-   through `run_training.py` for self-play side (Phase 1.5). The
-   value-target hypothesis (theory II) is the only mechanism-level
-   reason we have to expect the loop to become additive. Cost: ~12h
-   pretrain + self-play + SPRT.
-2. **D1-partial — cheap parallel probe.** Pretrain on the existing
-   12 MB buffer (no new generation cost — ~3-5h pretrain only). If
-   even a partial corpus shows lift on SPRT, full 100K D1 is
-   justified. If no lift, value-target signal saturation is confirmed
-   (favors A4 path over D1 generation).
-3. **A4 + D1-partial combined.** Pretrain with both `--value-mode
-   regression` AND the buffer's MCTS targets. Highest mechanism-based
-   prior, lowest generation cost. Likely the actual right next step.
-4. **Gate-rule refinement** (operational sub-task, ~30min code).
-   Require Wilson lower bound ≥ threshold instead of point estimate.
-   Should land before any A4/D1 run.
+1. **B1+B2+B3 RE-RUN — highest priority, must come before any other
+   15-channel experiment.** Same config (`configs/branchB1B2B3_mcts200.yaml`),
+   same warm-start (`best_supervised.pt`). The fix lives in
+   `trainer.py` automatically — pulling the latest `training-pipeline-fixes`
+   branch is sufficient. The re-run answers the actual question this
+   experiment was designed to answer: does the bundle of B1/B2/B3
+   knobs salvage the self-play loop on a strong warm-start? We don't
+   know the answer; the prior run measured a different system. Cost:
+   ~13.5h on RTX 5090 (~13.5h self-play + SPRT). See "B1+B2+B3 re-launch
+   plan" subsection below for the exact command.
 
-**Deeper meta-finding:** the regime split flagged in the A1 entry
-("self-play loop built for learning regime, breaks on strong warm
-start") is now refined: **lower LR + tighter gate move the loop from
-'actively destructive' to 'neutral'.** What remains broken is the
-*additive* mechanism — the loop cannot produce iter_N+1 stronger than
-iter_N. The mechanism-level candidates: (a) value targets too coarse
-(A4), (b) policy targets noise-limited at MCTS-200 (would need higher
-sims — already ruled out by Step 2), (c) corpus diversity too narrow
-(D1). A4 and D1 are the remaining live hypotheses.
+2. **A4 (regression value head)** — code prepped (commits `343aab6`
+   + `2070650` for the auto-detect). Wait for the B1+B2+B3 re-run to
+   complete first — if the re-run is value-additive, A4 stacks; if
+   still neutral, A4 is the next structural change to test.
+
+3. **D1-partial** — pretrain on the saved buffer (`replay_buffer.pkl.gz`,
+   ~36K usable samples after filtering). The buffer ITSELF is unaffected
+   by the phase-weight bug (its contents are MCTS self-play targets
+   produced by the teacher network, not gradient-update outputs). The
+   training that *consumed* the buffer was buggy, but the buffer's
+   data is what it is. Still a useful D1 corpus. Wait for B1+B2+B3
+   re-run for sequencing.
+
+4. **B1+B2+B3 re-run + phase-weight fix is now a single test.** The
+   "fourth knob" framing from the prior write-up (correct phase
+   sampling) is no longer a separate experiment — it's table stakes
+   for any 15-channel run going forward.
+
+**B1+B2+B3 re-launch plan (cloud box, fresh clone of fixed code):**
+
+```bash
+ssh -p 32740 root@85.10.218.46
+# Clean slate: drop the old run dirs to avoid resume confusion
+cd /root/YinshML
+rm -rf runs_branchB1B2B3
+# Pull latest fix
+git fetch origin && git reset --hard origin/training-pipeline-fixes
+# Launch — same config, same warm-start, --export-every 0 to suppress
+# the CoreML crash at the end (cosmetic).
+. venv/bin/activate
+RUN_LOG=logs/branchB1B2B3_rerun_$(date +%Y%m%d_%H%M%S).log
+echo $RUN_LOG > /root/YinshML/.current_run_log
+tmux new-session -d -s b1b2b3_rerun "cd /root/YinshML && . venv/bin/activate && python -u scripts/run_training.py --config configs/branchB1B2B3_mcts200.yaml --init-checkpoint models/yngine_volume_15ch_pretrain/best_supervised.pt --export-every 0 2>&1 | tee $RUN_LOG; echo === DONE === ; sleep 600"
+```
+
+Sanity to verify before walking away (one-liner): `grep -E "Phase mix|MAIN_GAME=" /root/YinshML/$(cat /root/YinshML/.current_run_log)` should show MAIN_GAME ~70-80% **after the first iter's data is in the buffer** — confirms the fix is active. If the buffer is still 100% RING_PLACEMENT, the fix didn't land.
+
+**Deeper meta-finding:** ⚠️ **INVALIDATED.** The original framing
+here claimed B1+B2+B3 had moved the loop from "actively destructive"
+to "neutral but not additive," and that the "additive mechanism" was
+the structural gap to close (favoring A4/D1). All three pieces of
+that framing rested on the contaminated WR/Glicko numbers. We don't
+actually know whether the loop was destructive, neutral, or additive
+under the configured knobs — we only know what happened under buggy
+phase weighting. The re-run on the fixed code is the next data point
+that can speak to this question.
 
 ---
 
@@ -1310,6 +1398,19 @@ init).
 ---
 
 ### Branch D.2 — 15-channel enhanced encoding — **NOT_STRONGER** (2026-05-25)
+
+> ⚠️ **Caveat added 2026-05-26.** D.2 ran under the same phase-weight
+> bug as B1+B2+B3 (15-channel encoder + `decode_phase` reading
+> `state[5]`, which is a row-threat channel in the 15-ch layout —
+> NOT the phase channel). MAIN_GAME positions were under-sampled by 2×
+> throughout D.2 training. The SPRT measurement (WR 0.526 vs old anchor)
+> stands as a real comparison of the trained models, but the *interpretation*
+> ("self-play loop destroyed pretrain gains") may have over-called what
+> was really "loop trained under wrong phase weights settled at a different
+> fixed point." A1's STRONGER verdict for the pretrain checkpoint is
+> unaffected (pretraining doesn't use the trainer's phase weighting).
+> See B1+B2+B3 invalidation banner above for the full discussion.
+
 
 The run that generated this backlog. Full pipeline: Path B 6-ch→15-ch corpus
 re-encoding (~16 min, 13.6M positions fp16 mmap) → 6-epoch supervised
