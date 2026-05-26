@@ -25,6 +25,12 @@ experiments/**/*.npz
 !pyproject.toml
 !requirements.txt
 !setup.py
+# Analysis board (position composer + alignment loop scripts). Source is
+# allowlisted; generated run outputs (positions, measurements, reports,
+# charts) live under loop/runs/<timestamp>/ and stay ignored.
+!analysis_board/
+!analysis_board/**
+analysis_board/loop/runs/
 
 # Allowed root-level documentation
 !CLAUDE.md

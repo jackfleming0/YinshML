@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>YINSH analysis</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <main class="board-area">
+      <div class="mode-row">
+        <div class="mode-toggle" role="tablist">
+          <button class="mode-btn active" data-mode="setup" role="tab" aria-selected="true">Setup</button>
+          <button class="mode-btn" data-mode="play" role="tab" aria-selected="false">Play</button>
+        </div>
+        <div class="play-controls" id="play-controls" hidden>
+          <div class="turn-badge" id="turn-badge" data-side="WHITE">
+            <span class="turn-disc" aria-hidden="true"></span>
+            <span class="turn-text">
+              <strong id="turn-side">WHITE</strong> to move
+              <span class="turn-phase" id="turn-phase"></span>
+            </span>
+          </div>
+          <button id="undo" class="secondary" disabled title="Undo last move">↶ Undo</button>
+          <label class="auto-eval-toggle" title="When on, every move triggers /api/evaluate with the current sim budget. Sub-second at num_sims=0 (raw policy); multi-second at high MCTS budgets. Turn off if you want to play several moves quickly without waiting on inference.">
+            <input type="checkbox" id="auto-eval" checked /> auto-evaluate
+          </label>
+        </div>
+      </div>
+      <div class="board-wrap">
+        <canvas id="board" width="760" height="760" aria-label="YINSH board"></canvas>
+        <div class="hint" id="board-hint">Drag a piece from the palette onto a board intersection. Right-click to erase.</div>
+      </div>
+    </main>
+
+    <aside class="controls">
+      <header>
+        <h1>YINSH analysis</h1>
+        <p class="subtitle">Compose a position, ask the network.</p>
+      </header>
+
+      <section class="block">
+        <label class="field">
+          <span>Model</span>
+          <select id="model"></select>
+        </label>
+
+        <label class="field">
+          <span>Phase</span>
+          <select id="phase">
+            <option value="RING_PLACEMENT">Ring placement</option>
+            <option value="MAIN_GAME" selected>Main game</option>
+            <option value="ROW_COMPLETION">Row completion</option>
+            <option value="RING_REMOVAL">Ring removal</option>
+          </select>
+        </label>
+
+        <fieldset class="field side-field">
+          <span>Side to move</span>
+          <div class="radio-row">
+            <label><input type="radio" name="side" value="WHITE" checked /> White</label>
+            <label><input type="radio" name="side" value="BLACK" /> Black</label>
+          </div>
+        </fieldset>
+
+        <div class="derived-stats" id="derived-stats">
+          <div class="stat">
+            <span class="stat-label">White</span>
+            <span class="stat-line"><span id="white-rings-count">0</span> rings · score <strong id="white-score-derived">0</strong></span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Black</span>
+            <span class="stat-line"><span id="black-rings-count">0</span> rings · score <strong id="black-score-derived">0</strong></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="block palette-block" id="palette-block">
+        <div class="block-title">Pieces <span class="block-hint">drag onto the board</span></div>
+        <div class="palette" id="palette">
+          <button class="tool" data-tool="WHITE_RING" title="White ring">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="9" fill="#fafafa" stroke="#161616" stroke-width="1.4"/><circle r="5.2" fill="#dcdcdc" stroke="#161616" stroke-width="1.0"/></svg></span>
+            <span class="label">W ring</span>
+          </button>
+          <button class="tool" data-tool="BLACK_RING" title="Black ring">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="9" fill="#1f1f1f" stroke="#070707" stroke-width="1.4"/><circle r="5.2" fill="#cfd2d6" stroke="#070707" stroke-width="1.0"/></svg></span>
+            <span class="label">B ring</span>
+          </button>
+          <button class="tool" data-tool="WHITE_MARKER" title="White marker">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="7" fill="#fafafa" stroke="#161616" stroke-width="1.2"/></svg></span>
+            <span class="label">W mark</span>
+          </button>
+          <button class="tool" data-tool="BLACK_MARKER" title="Black marker">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="7" fill="#1f1f1f" stroke="#070707" stroke-width="1.2"/></svg></span>
+            <span class="label">B mark</span>
+          </button>
+          <button class="tool" data-tool="ERASE" title="Eraser (or right-click pieces)">
+            <span class="swatch eraser">⌫</span>
+            <span class="label">Erase</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="block">
+        <label class="field">
+          <span>MCTS sims <em>(0 = raw policy)</em></span>
+          <input id="num-sims" type="number" value="0" min="0" max="2000" step="50" />
+        </label>
+
+        <div class="actions">
+          <button id="evaluate" class="primary">Evaluate</button>
+          <button id="clear" class="secondary">Clear board</button>
+        </div>
+      </section>
+
+      <section class="block result" id="result">
+        <div class="status" id="status">Compose a position and click Evaluate.</div>
+
+        <div class="value-row" id="value-row" hidden>
+          <span class="value-label" id="value-label">Search avg</span>
+          <div class="value-bar"><div class="value-fill" id="value-fill"></div><div class="value-zero"></div></div>
+          <span class="value-num" id="value-num">—</span>
+        </div>
+        <div class="value-row" id="best-value-row" hidden>
+          <span class="value-label">Best move</span>
+          <div class="value-bar"><div class="value-fill" id="best-value-fill"></div><div class="value-zero"></div></div>
+          <span class="value-num" id="best-value-num">—</span>
+        </div>
+        <div class="value-help" id="value-help" hidden>
+          <strong>Search avg</strong>: visit-weighted average across all simulated lines (trends to 0 with more sims).
+          <strong>Best move</strong>: network value at the position after the top move — closer to "is this winning."
+        </div>
+
+        <ol class="top-moves" id="top-moves"></ol>
+      </section>
+
+      <section class="block history-block" id="history-block" hidden>
+        <h2 class="history-title">Move history</h2>
+        <ol class="move-history" id="move-history"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
