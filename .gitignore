@@ -11,15 +11,17 @@
 configs/local/
 !experiments/
 !experiments/**
-# Exclude large training artifacts inside experiments/ — checkpoints,
-# replay buffers, optimizer state. GitHub rejects >100MB files; these
-# are recoverable from logs/metrics and shouldn't be in the repo.
-experiments/**/checkpoint_iteration_*.pt
-experiments/**/iteration_*/checkpoint_*.pt
-experiments/**/iteration_*/optimizer_*.pt
-experiments/**/last_resume_state.pt
-experiments/**/replay_buffer.pkl
-experiments/**/replay_buffer.pkl.gz
+# Exclude ALL training-artifact binaries inside experiments/ — checkpoints,
+# replay buffers, optimizer state, exported models. GitHub rejects >100MB
+# files; these are recoverable from logs/metrics and shouldn't be in the
+# repo. Configs (yaml), metrics (json), and tournament logs stay tracked.
+experiments/**/*.pt
+experiments/**/*.pkl
+experiments/**/*.pkl.gz
+experiments/**/*.mlpackage
+experiments/**/*.mlmodel
+experiments/**/*.npy
+experiments/**/*.npz
 !pyproject.toml
 !requirements.txt
 !setup.py

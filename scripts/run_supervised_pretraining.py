@@ -171,12 +171,16 @@ def create_model(args) -> tuple:
     )
 
     input_channels = 15 if args.use_enhanced_encoding else 6
-    model = YinshNetwork(
+    model_kwargs = dict(
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
         input_channels=input_channels,
         value_head_type=args.value_head_type,
-    ).to(device)
+        value_mode=args.value_mode,
+    )
+    if args.value_mode == 'classification' and args.num_value_classes is not None:
+        model_kwargs['num_value_classes'] = args.num_value_classes
+    model = YinshNetwork(**model_kwargs).to(device)
 
     # Mutual-exclusion: --resume and --checkpoint do different things.
     if args.resume and args.checkpoint:
@@ -267,6 +271,7 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     num_value_classes = model.num_value_classes
+    is_regression = (model.value_mode == 'regression')
 
     for epoch in range(start_epoch, args.epochs + 1):
         # --- Training ---
@@ -286,8 +291,7 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
 
             optimizer.zero_grad()
 
-            pred_logits, _ = model(states)
-            value_logits = model._value_logits  # populated in forward()
+            pred_logits, value_pred = model(states)
 
             # Policy loss: cross-entropy against expert moves.
             # Branch on target schema: 1-D int targets → integer-target CE;
@@ -300,11 +304,18 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
                 policy_loss = -(policies * log_probs).sum(dim=1).mean()
                 expert_moves = policies.argmax(dim=1)
 
-            # Value loss: cross-entropy on discretized outcome classes.
-            # Mirrors yinsh_ml/training/trainer.py — same loss surface as
-            # self-play so the warm-start checkpoint isn't washed out on iter 1.
-            target_class = _value_targets_to_classes(values, num_value_classes)
-            value_loss = F.cross_entropy(value_logits, target_class)
+            # Value loss: branch on value_mode.
+            if is_regression:
+                # Scalar tanh head against raw value target. value_pred is
+                # already (B,) from YinshNetwork.forward in regression mode.
+                value_loss = F.mse_loss(value_pred, values.float())
+            else:
+                # Cross-entropy on discretized outcome classes. Mirrors
+                # yinsh_ml/training/trainer.py — same loss surface as self-play
+                # so the warm-start checkpoint isn't washed out on iter 1.
+                value_logits = model._value_logits  # populated in forward()
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                value_loss = F.cross_entropy(value_logits, target_class)
 
             # Combined loss
             loss = policy_loss + args.value_weight * value_loss
@@ -321,8 +332,19 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
             pred_moves = pred_logits.argmax(dim=1)
             train_correct += (pred_moves == expert_moves).sum().item()
 
-            pred_class = value_logits.argmax(dim=1)
-            train_value_correct += (pred_class == target_class).sum().item()
+            # Value accuracy: in classification mode = argmax class match;
+            # in regression mode = sign accuracy (proxy — does the model
+            # at least predict the right side of zero?). Classification's
+            # argmax accuracy is the metric flagged as "argmax-VAcc plateau"
+            # in the A4 hypothesis; sign accuracy is the regression analog.
+            if is_regression:
+                train_value_correct += (
+                    torch.sign(value_pred) == torch.sign(values.float())
+                ).sum().item()
+            else:
+                pred_class = model._value_logits.argmax(dim=1)
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                train_value_correct += (pred_class == target_class).sum().item()
             train_total += len(states)
 
             batch_count += 1
@@ -398,8 +420,11 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
 def evaluate(model, device, data_loader, num_value_classes) -> tuple:
     """Evaluate model on a dataset.
 
-    Returns (policy_loss, value_ce_loss, policy_top1_accuracy, value_class_accuracy).
+    Returns (policy_loss, value_loss, policy_top1_accuracy, value_accuracy).
+    In classification mode, value_loss is CE and value_accuracy is class argmax match.
+    In regression mode, value_loss is MSE and value_accuracy is sign accuracy.
     """
+    is_regression = (model.value_mode == 'regression')
     model.eval()
     total_policy = 0.0
     total_value = 0.0
@@ -413,8 +438,7 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
             policies = policies.to(device)
             values = values.to(device)
 
-            pred_logits, _ = model(states)
-            value_logits = model._value_logits
+            pred_logits, value_pred = model(states)
 
             if policies.dim() == 1:
                 expert_moves = policies.long()
@@ -424,8 +448,12 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
                 policy_loss = -(policies * log_probs).sum(dim=1).mean()
                 expert_moves = policies.argmax(dim=1)
 
-            target_class = _value_targets_to_classes(values, num_value_classes)
-            value_loss = F.cross_entropy(value_logits, target_class)
+            if is_regression:
+                value_loss = F.mse_loss(value_pred, values.float())
+            else:
+                value_logits = model._value_logits
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                value_loss = F.cross_entropy(value_logits, target_class)
 
             total_policy += policy_loss.item() * len(states)
             total_value += value_loss.item() * len(states)
@@ -433,8 +461,14 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
             pred_moves = pred_logits.argmax(dim=1)
             correct += (pred_moves == expert_moves).sum().item()
 
-            pred_class = value_logits.argmax(dim=1)
-            value_correct += (pred_class == target_class).sum().item()
+            if is_regression:
+                value_correct += (
+                    torch.sign(value_pred) == torch.sign(values.float())
+                ).sum().item()
+            else:
+                pred_class = model._value_logits.argmax(dim=1)
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                value_correct += (pred_class == target_class).sum().item()
             total += len(states)
 
     n = len(data_loader.dataset)
@@ -500,6 +534,22 @@ def main():
                        help='ResNet channel width (default: 256)')
     parser.add_argument('--num-blocks', type=int, default=12,
                        help='Number of residual/attention blocks (default: 12)')
+    parser.add_argument('--value-mode', type=str, default='classification',
+                       choices=['classification', 'regression'],
+                       help="Value-head loss structure. 'classification' "
+                            "(default) discretizes the outcome into "
+                            "num_value_classes bins and trains with "
+                            "F.cross_entropy — matches the self-play "
+                            "trainer so the warm-start isn't washed out. "
+                            "'regression' trains a scalar tanh head with "
+                            "F.mse_loss against the raw value target — "
+                            "Branch A4 hypothesis: the 3-class CE plateau "
+                            "is target-discretization, not capacity. "
+                            "Self-play trainer must match if you intend "
+                            "to chain pretrain -> self-play.")
+    parser.add_argument('--num-value-classes', type=int, default=None,
+                       help='Override num_value_classes for classification mode '
+                            '(default: model default of 7). Ignored in regression mode.')
     parser.add_argument('--value-head-type', type=str, default='spatial',
                        choices=['spatial', 'gap', 'gap_v2'],
                        help="Value head architecture: 'spatial' (legacy ~4M "

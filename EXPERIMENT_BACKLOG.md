@@ -311,12 +311,31 @@ caused by representation loss in the target structure, this fixes it directly.
 
 **Methodology:**
 
-Phase 1 — Add regression head support to `run_supervised_pretraining.py`:
-- The wrapper already has `value_mode='regression'`. Plumb through a CLI
-  flag: `--value-mode {classification, regression}`.
-- Change the loss function in `train()`: if regression mode, use MSE against
-  the float value; if classification, use the current CE branch.
-- Save under a new path: `models/yngine_volume_15ch_pretrain_regr/`.
+Phase 1 — Add regression head support to `run_supervised_pretraining.py`
+**— prepped 2026-05-25 during B1B2B3 run:**
+- ✅ `--value-mode {classification, regression}` CLI flag added (default
+  classification; back-compat preserved).
+- ✅ `--num-value-classes` override added (classification mode only).
+- ✅ Training + eval loops branch on `model.value_mode`: regression uses
+  `F.mse_loss(value_pred, values)` against the scalar tanh output;
+  classification keeps the CE-on-discretized-classes path.
+- ✅ Value-accuracy metric branches: regression logs *sign accuracy*
+  (proxy — does the model predict the right side of zero?); classification
+  keeps argmax-class accuracy.
+- ✅ Smoke-tested both paths construct and forward correctly (regression
+  returns `(B,)` value tensor; MSE loss computes cleanly).
+- Save under a new path when actually run: `models/yngine_volume_15ch_pretrain_regr/`.
+
+Phase 1.5 — Self-play side wiring (DEFERRED until we actually run A4):
+- `scripts/run_training.py:452` constructs `NetworkWrapper` without
+  passing `value_mode`. A regression-trained checkpoint loaded here will
+  hard-fail at `load_model` because the value head's final-layer output
+  dim is 1 (regression) vs `num_value_classes` (classification). The
+  hard-fail is *desired* — louder than silent misload.
+- When A4 actually runs, fix by either (a) adding `value_mode` as a
+  config knob in the training YAML, or (b) auto-detecting from the
+  checkpoint's last value-head layer output dim (parallel to existing
+  encoding / capacity auto-detect in `wrapper.py:160`). Prefer (b).
 
 Phase 2 — Decide on self-play matching:
 - Option A: also switch self-play to regression. Requires changes in
