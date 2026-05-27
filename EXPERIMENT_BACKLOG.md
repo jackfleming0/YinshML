@@ -127,6 +127,31 @@ end of the active run.
 - ~15% optimizer state surviving revert and accumulating bad-direction momentum
 - ~5% buffer mode collapse / something I haven't thought of
 
+**Updated priors after diagnostics** (2026-05-27 evening, post-SPRT —
+see `experiments/branchB1B2B3_rerun2_2026-05-27/POST_RUN_DIAGNOSTICS.md`
+for the full report):
+
+- ~60-70% pure noise (now the leading hypothesis)
+- ~30-40% heuristic-weight annealing (still untested; requires GPU re-run)
+- **0% optimizer state surviving revert** — ❌ ELIMINATED by code
+  inspection. `supervisor.py`'s revert path explicitly calls
+  `_reinitialize_optimizers()` (default-on via `reset_optimizer_on_revert`),
+  which creates fresh `optim.Adam(...)` and `optim.SGD(...)` instances.
+  No carried state across reverts.
+- **0% buffer composition** — ❌ ELIMINATED by 3-way buffer comparison
+  (D.2 buggy vs B1B2B3 original buggy vs B1B2B3 RE-RUN #2 fixed). All
+  three buffers have ~76% MAIN_GAME (true distribution), stable
+  ~64-move game length, similar policy sparsity. One small shift in
+  the fixed run: 14.8% extreme-value samples vs ~11% in buggy runs —
+  consistent with "MAIN_GAME-emphasized training produces more
+  decisive games," not a drift cause.
+
+The "3 data points = noise" discipline rule is now the leading
+explanation. If the next experiment (A4 + D1-partial) also lands
+NOT_STRONGER and we still care about the drift question, Mechanism 1
+(heuristic_weight_end=0.3 re-run) is the only remaining structural
+alternative to test.
+
 **Discipline (carry forward):** when observing a "trend" across 2-3
 data points each with ±5% CI, default to noise. Require 5+ data points
 or a mechanism-level argument before claiming structural drift.
