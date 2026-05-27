@@ -17,7 +17,7 @@ import json
 import logging
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -180,6 +180,135 @@ def value_gain_chart(rows: List[Dict[str, Any]], top_sim: int, out_path: Path) -
     plt.close(fig)
 
 
+def main_game_breakdown(
+    rows: List[Dict[str, Any]],
+    top_sim: int,
+    bucket_key: str,
+    bucket_edges: List[int],
+    label: str,
+) -> str:
+    """Bin MAIN_GAME-only positions by some integer key (move_number,
+    n_legal_moves) and report rank-of-final-best stats per bucket.
+
+    Restricted to MAIN_GAME because the per-phase split already shows
+    RING_REMOVAL / ROW_COMPLETION at 87% top-1 — including them here would
+    create an artifact where the "late-move" bucket looks well-aligned just
+    because capture sequences happen late. Stripping the phase signal lets
+    us isolate the "competence vs game time" question Jack raised.
+    """
+    key = str(top_sim)
+    filtered = [r for r in rows
+                if r["phase"] == "MAIN_GAME"
+                and key in r["mcts"]
+                and "error" not in r["mcts"][key]]
+
+    def bucket_label(value: int) -> str:
+        for i in range(len(bucket_edges) - 1):
+            lo, hi = bucket_edges[i], bucket_edges[i + 1]
+            if lo <= value < hi:
+                return f"{lo}–{hi - 1}"
+        return f"{bucket_edges[-1]}+"
+
+    def value_for(row: Dict[str, Any]) -> Optional[int]:
+        if bucket_key == "move_number":
+            v = row.get("meta", {}).get("move_number")
+            return int(v) if isinstance(v, (int, float)) else None
+        if bucket_key == "n_legal_moves":
+            return int(row.get("n_legal_moves", 0))
+        return None
+
+    by_bucket: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in filtered:
+        v = value_for(r)
+        if v is None:
+            continue
+        by_bucket[bucket_label(v)].append(r)
+
+    if not by_bucket:
+        return f"_(no MAIN_GAME data for {label} breakdown)_"
+
+    lines = [
+        f"| {label} | N | mean rank | %top1 | %misaligned (≥3) | mean value_gain | %costly |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    # Sort by the numeric start of the bucket label for natural ordering.
+    def sort_key(bucket: str) -> int:
+        digits = bucket.split("–")[0].rstrip("+")
+        try:
+            return int(digits)
+        except ValueError:
+            return 0
+
+    for bucket in sorted(by_bucket.keys(), key=sort_key):
+        bucket_rows = by_bucket[bucket]
+        ranks = [r["mcts"][key]["rank_of_final_best"] for r in bucket_rows]
+        gains = [r["mcts"][key].get("value_gain_over_raw") for r in bucket_rows]
+        gains = [g for g in gains if g is not None]
+        n = len(bucket_rows)
+        mean_rank = float(np.mean(ranks))
+        pct_top1 = sum(1 for r in ranks if r == 0) / n * 100
+        pct_misaligned = sum(1 for r in ranks if r >= 3) / n * 100
+        mean_gain = float(np.mean(gains)) if gains else 0.0
+        pct_costly = sum(1 for g in gains if g >= 0.1) / len(gains) * 100 if gains else 0.0
+        lines.append(
+            f"| {bucket} | {n} | {mean_rank:.2f} | {pct_top1:.1f}% | "
+            f"{pct_misaligned:.1f}% | {mean_gain:+.3f} | {pct_costly:.1f}% |"
+        )
+    return "\n".join(lines)
+
+
+def main_game_scatter(
+    rows: List[Dict[str, Any]],
+    top_sim: int,
+    x_key: str,
+    x_label: str,
+    out_path: Path,
+) -> None:
+    """Scatter of rank-of-final-best vs an integer per-row key (MAIN_GAME only),
+    with binned-mean overlay so the trend (if any) is visible through the noise."""
+    key = str(top_sim)
+    pts: List[Tuple[float, float]] = []
+    for r in rows:
+        if r["phase"] != "MAIN_GAME":
+            continue
+        if key not in r["mcts"] or "error" in r["mcts"][key]:
+            continue
+        if x_key == "move_number":
+            xv = r.get("meta", {}).get("move_number")
+        elif x_key == "n_legal_moves":
+            xv = r.get("n_legal_moves")
+        else:
+            continue
+        if xv is None:
+            continue
+        pts.append((float(xv), float(r["mcts"][key]["rank_of_final_best"])))
+    if not pts:
+        return
+
+    xs, ys = zip(*pts)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.scatter(xs, ys, alpha=0.4, s=22, color="#2563eb")
+    # Binned mean
+    nbins = min(8, max(3, len(set(int(x) for x in xs)) // 3))
+    bins = np.linspace(min(xs), max(xs), nbins + 1)
+    bin_idx = np.digitize(xs, bins)
+    bm_x, bm_y = [], []
+    for b in range(1, len(bins)):
+        in_bin = [y for x, y, i in zip(xs, ys, bin_idx) if i == b]
+        if in_bin:
+            bm_x.append((bins[b - 1] + bins[b]) / 2)
+            bm_y.append(np.mean(in_bin))
+    ax.plot(bm_x, bm_y, "o-", color="#b45309", linewidth=2, label="bin mean")
+    ax.axhline(2.5, color="#999", linestyle="--", linewidth=1, label="rank≥3 (misaligned)")
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(f"rank_of_final_best at {top_sim} sims")
+    ax.set_title(f"MAIN_GAME alignment vs {x_label.lower()}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def value_drift_chart(rows: List[Dict[str, Any]], sims: List[int], out_path: Path) -> None:
     """Two-panel chart: mean root_q vs sims (left), mean best_move_value vs sims (right)."""
     xs = [0] + [s for s in sims if s > 0]
@@ -304,6 +433,12 @@ def main() -> None:
         rank_histogram_chart(rows, top_sim, charts_dir / "rank_histogram.png")
         entropy_vs_rank_chart(rows, top_sim, charts_dir / "entropy_vs_rank.png")
         value_gain_chart(rows, top_sim, charts_dir / "value_gain.png")
+        # MAIN_GAME-only breakdowns separating the "competence over game time"
+        # signal from the phase / branching-factor confounds.
+        main_game_scatter(rows, top_sim, "move_number", "Move number",
+                          charts_dir / "rank_vs_move_number.png")
+        main_game_scatter(rows, top_sim, "n_legal_moves", "Legal moves",
+                          charts_dir / "rank_vs_n_legal.png")
 
     # Compose markdown
     md_lines = [
@@ -322,10 +457,26 @@ def main() -> None:
         "",
     ]
     if top_sim > 0:
+        # Move-number buckets — chosen to span early/mid/late MAIN_GAME without
+        # overlapping the RING_PLACEMENT range. Adjust if game lengths shift.
+        move_buckets = [11, 20, 30, 45, 60, 80]
+        legal_buckets = [5, 15, 25, 35, 45, 55, 70]
         md_lines.extend([
             f"## rank-of-final-best at {top_sim} sims, by phase",
             "",
             rank_histogram_per_phase(rows, top_sim),
+            "",
+            "## MAIN_GAME alignment vs move number",
+            "",
+            "Stripped of RING_PLACEMENT / RING_REMOVAL / ROW_COMPLETION (which have their own per-phase numbers above) to isolate the *competence-over-game-time* signal from phase artifacts.",
+            "",
+            main_game_breakdown(rows, top_sim, "move_number", move_buckets, "Move #"),
+            "",
+            "## MAIN_GAME alignment vs branching factor",
+            "",
+            "Possible confound for the move-number breakdown — late-game positions have fewer rings and tighter board state, which lowers the legal-move count. Binning by `n_legal_moves` directly separates the two.",
+            "",
+            main_game_breakdown(rows, top_sim, "n_legal_moves", legal_buckets, "n_legal"),
             "",
             f"## 10 worst-misaligned positions at {top_sim} sims",
             "",
@@ -342,6 +493,10 @@ def main() -> None:
             "![Entropy vs rank](charts/entropy_vs_rank.png)",
             "",
             "![Value cost of misalignment](charts/value_gain.png)",
+            "",
+            "![MAIN_GAME alignment vs move number](charts/rank_vs_move_number.png)",
+            "",
+            "![MAIN_GAME alignment vs legal-move count](charts/rank_vs_n_legal.png)",
             "",
         ])
 

@@ -109,56 +109,119 @@ const state = {
   moveMaker: null,           // engine's _move_maker, threaded through /api/move to keep
                              // capture sequences correct across the stateless server's
                              // GameState rebuilds. Null outside of capture sequences.
+  lineMode: null,            // null when not walking a line. When active:
+                             //   { pvIndex, topMoveDesc, baseSnapshot, steps, currentStep }
+                             // Setup/Play interactions are disabled while non-null.
 };
 
 // ---------- Rendering ----------
+// Palette tuned for the "serious analysis tool" aesthetic — deeper saturated
+// blue-gray tile, restrained piece colors with subtle specular highlights,
+// doubled drop shadows for piece weight. Matches the visual-style preference
+// for deep saturated darks + low-opacity borders + gentle corners.
 const COLORS = {
-  bg: "#f6f5f1",
-  tile: "#c9d8e1",
-  tile2: "#b3c6d2",
-  tileEdge: "#8aa1ae",
-  grid: "#212528",
-  gridDot: "#3a4250",
-  label: "#5b6571",
-  whiteRingFill: "#fafafa",
-  whiteRingInner: "#dcdcdc",
-  whiteRingEdge: "#161616",
-  blackRingFill: "#1f1f1f",
-  blackRingInner: "#cfd2d6",
-  blackRingEdge: "#070707",
-  whiteMarker: "#fafafa",
-  blackMarker: "#1f1f1f",
-  markerEdge: "#161616",
-  hoverFill: "rgba(37, 99, 235, 0.15)",
+  bg: "#eeece6",
+  tile1: "#b4c8d4",          // top of board gradient
+  tile2: "#94aab9",          // bottom of board gradient
+  tileEdgeOuter: "#6a7e8c",
+  tileEdgeInner: "rgba(255, 255, 255, 0.35)",
+  grid: "#1a2128",
+  gridDot: "#384654",
+  label: "#4a5563",
+  labelMuted: "#7a8694",
+  // Pieces — multi-stop gradients keyed off these. Pure-black/pure-white
+  // looks fake; warm-white and cool-charcoal feel like physical objects.
+  whiteRingCore: "#f9f6ee",
+  whiteRingEdge: "#bfb7a6",
+  whiteRingStroke: "#1f1d18",
+  blackRingCore: "#34373d",
+  blackRingEdge: "#0d0f12",
+  blackRingStroke: "#040506",
+  ringInnerHole: "#aabccb",   // sits over the board, just slightly darker
+  whiteMarkerCore: "#f7f5ed",
+  whiteMarkerEdge: "#c3bcab",
+  blackMarkerCore: "#2a2d33",
+  blackMarkerEdge: "#080a0d",
+  markerStroke: "#1a1817",
+  specularHighlight: "rgba(255, 255, 255, 0.55)",
+  pieceShadowNear: "rgba(15, 20, 28, 0.30)",
+  pieceShadowFar: "rgba(15, 20, 28, 0.12)",
+  hoverFill: "rgba(37, 99, 235, 0.18)",
   hoverStroke: "#2563eb",
-  arrowSrc: "#f59e0b",
-  arrowDst: "#2563eb",
+  selectStroke: "#1d4ed8",
+  selectGlow: "rgba(37, 99, 235, 0.45)",
+  arrowSrc: "#d97706",        // deeper amber than #f59e0b
+  arrowDst: "#1d4ed8",        // deeper indigo for crispness on the tile
 };
 
-function drawBoard(ctx, geom) {
-  const W = ctx.canvas.width, H = ctx.canvas.height;
-  ctx.clearRect(0, 0, W, H);
+// Off-screen cache for the static board background (tile gradient, noise,
+// grid lines, dots, labels). Drawn once at init; composited each frame so
+// the noise + labels + grid don't get re-rasterized on every piece move.
+let _boardBgCache = null;
 
-  // Tile background (rounded rect with gradient)
-  const tilePad = 18;
+function buildBoardBackground(geom, W, H) {
+  const off = document.createElement("canvas");
+  off.width = W;
+  off.height = H;
+  const bctx = off.getContext("2d");
+
+  const tilePad = 22;
   const tileX = geom.padLeft - tilePad;
   const tileY = geom.padTop - tilePad;
   const tileW = W - geom.padLeft - geom.padRight + 2 * tilePad;
   const tileH = H - geom.padTop - geom.padBottom + 2 * tilePad;
-  const grad = ctx.createLinearGradient(0, tileY, 0, tileY + tileH);
-  grad.addColorStop(0, COLORS.tile);
-  grad.addColorStop(1, COLORS.tile2);
-  ctx.fillStyle = grad;
-  roundRect(ctx, tileX, tileY, tileW, tileH, 12);
-  ctx.fill();
-  ctx.strokeStyle = COLORS.tileEdge;
-  ctx.lineWidth = 1;
-  ctx.stroke();
 
-  // Grid lines: three forward hex axes
-  ctx.strokeStyle = COLORS.grid;
-  ctx.lineWidth = 0.9;
-  ctx.globalAlpha = 0.55;
+  // 1. Tile drop shadow (subtle, gives the board lift off the page)
+  bctx.save();
+  bctx.shadowColor = "rgba(15, 20, 28, 0.18)";
+  bctx.shadowBlur = 20;
+  bctx.shadowOffsetX = 0;
+  bctx.shadowOffsetY = 6;
+  bctx.fillStyle = COLORS.tile1;
+  roundRect(bctx, tileX, tileY, tileW, tileH, 14);
+  bctx.fill();
+  bctx.restore();
+
+  // 2. Tile gradient fill
+  const grad = bctx.createLinearGradient(0, tileY, 0, tileY + tileH);
+  grad.addColorStop(0, COLORS.tile1);
+  grad.addColorStop(1, COLORS.tile2);
+  bctx.fillStyle = grad;
+  roundRect(bctx, tileX, tileY, tileW, tileH, 14);
+  bctx.fill();
+
+  // 3. Subtle noise overlay — paper-grain effect. ~5% intensity so it reads
+  // as texture rather than dirt. Generated once into ImageData and clipped
+  // to the tile rect.
+  bctx.save();
+  bctx.beginPath();
+  roundRect(bctx, tileX + 1, tileY + 1, tileW - 2, tileH - 2, 13);
+  bctx.clip();
+  const noiseImg = bctx.createImageData(Math.ceil(tileW), Math.ceil(tileH));
+  const nd = noiseImg.data;
+  for (let i = 0; i < nd.length; i += 4) {
+    const v = (Math.random() * 14) | 0;   // 0-13
+    nd[i] = nd[i + 1] = nd[i + 2] = v < 7 ? 0 : 255;
+    nd[i + 3] = 7;                         // ~3% alpha — barely visible
+  }
+  bctx.putImageData(noiseImg, tileX, tileY);
+  bctx.restore();
+
+  // 4. Inner highlight border + outer edge — doubled border per visual-style
+  bctx.strokeStyle = COLORS.tileEdgeInner;
+  bctx.lineWidth = 1;
+  roundRect(bctx, tileX + 1.5, tileY + 1.5, tileW - 3, tileH - 3, 13);
+  bctx.stroke();
+  bctx.strokeStyle = COLORS.tileEdgeOuter;
+  bctx.lineWidth = 1;
+  roundRect(bctx, tileX, tileY, tileW, tileH, 14);
+  bctx.stroke();
+
+  // 5. Grid lines — three forward hex axes, restrained opacity
+  bctx.strokeStyle = COLORS.grid;
+  bctx.lineWidth = 0.85;
+  bctx.globalAlpha = 0.42;
+  bctx.lineCap = "round";
   const FWD = [[0, 1], [1, 0], [1, 1]];
   for (const { col, row } of ALL_POSITIONS) {
     const a = geom.posToPixel(col, row);
@@ -167,45 +230,56 @@ function drawBoard(ctx, geom) {
       const nr = row + dr;
       if (!isValidPos(nc, nr)) continue;
       const b = geom.posToPixel(nc, nr);
-      ctx.beginPath();
-      ctx.moveTo(a.px, a.py);
-      ctx.lineTo(b.px, b.py);
-      ctx.stroke();
+      bctx.beginPath();
+      bctx.moveTo(a.px, a.py);
+      bctx.lineTo(b.px, b.py);
+      bctx.stroke();
     }
   }
-  ctx.globalAlpha = 1;
+  bctx.globalAlpha = 1;
 
-  // Position dots
-  ctx.fillStyle = COLORS.gridDot;
+  // 6. Position dots — small gradient for depth
   for (const { col, row } of ALL_POSITIONS) {
     const { px, py } = geom.posToPixel(col, row);
-    ctx.beginPath();
-    ctx.arc(px, py, 2.2, 0, Math.PI * 2);
-    ctx.fill();
+    const dotGrad = bctx.createRadialGradient(px - 0.6, py - 0.6, 0, px, py, 2.6);
+    dotGrad.addColorStop(0, COLORS.gridDot);
+    dotGrad.addColorStop(1, "rgba(20, 28, 40, 0.6)");
+    bctx.fillStyle = dotGrad;
+    bctx.beginPath();
+    bctx.arc(px, py, 2.4, 0, Math.PI * 2);
+    bctx.fill();
   }
 
-  // Axis labels — column letters at bottom, row numbers at left
-  ctx.fillStyle = COLORS.label;
-  ctx.font = "12px ui-serif, Georgia, serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
+  // 7. Axis labels — serif, two-tone (column letters muted, rows muted)
+  bctx.font = "600 13px 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif";
+  bctx.fillStyle = COLORS.label;
+  bctx.textAlign = "center";
+  bctx.textBaseline = "middle";
   for (const col of COLUMNS) {
     const rows = VALID_POSITIONS[col];
     const bottomRow = rows[0];
     const { px, py } = geom.posToPixel(col, bottomRow);
-    ctx.fillText(col, px, py + 22);
+    bctx.fillText(col, px, py + 24);
   }
-  ctx.textAlign = "right";
+  bctx.textAlign = "right";
   for (let row = 1; row <= 11; row++) {
-    // Find leftmost column that has this row
     let leftCol = null;
     for (const col of COLUMNS) {
       if (isValidPos(col, row)) { leftCol = col; break; }
     }
     if (!leftCol) continue;
     const { px, py } = geom.posToPixel(leftCol, row);
-    ctx.fillText(String(row), px - 18, py);
+    bctx.fillText(String(row), px - 20, py);
   }
+
+  return off;
+}
+
+function drawBoard(ctx, geom) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (!_boardBgCache) _boardBgCache = buildBoardBackground(geom, W, H);
+  ctx.drawImage(_boardBgCache, 0, 0);
 }
 
 function drawPieces(ctx, geom) {
@@ -226,51 +300,147 @@ function drawPieces(ctx, geom) {
 }
 
 function drawRing(ctx, x, y, outerR, innerR, color) {
-  // Outer disk with radial gradient for depth
   const isWhite = color === "white";
-  const grad = ctx.createRadialGradient(x - outerR * 0.3, y - outerR * 0.3, outerR * 0.1, x, y, outerR);
+
+  // -- 1. Doubled drop shadow: near (tight, denser) + far (soft, atmospheric)
+  ctx.save();
+  ctx.shadowColor = COLORS.pieceShadowFar;
+  ctx.shadowBlur = outerR * 0.9;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = outerR * 0.20;
+  // Render an invisible disk to project the shadow without drawing the body
+  ctx.fillStyle = "rgba(0,0,0,0.001)";
+  ctx.beginPath(); ctx.arc(x, y, outerR, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.shadowColor = COLORS.pieceShadowNear;
+  ctx.shadowBlur = outerR * 0.32;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = outerR * 0.10;
+
+  // -- 2. Outer body — multi-stop radial gradient with specular highlight
+  const coreColor = isWhite ? COLORS.whiteRingCore : COLORS.blackRingCore;
+  const edgeColor = isWhite ? COLORS.whiteRingEdge : COLORS.blackRingEdge;
+  const grad = ctx.createRadialGradient(
+    x - outerR * 0.32, y - outerR * 0.34, outerR * 0.08,
+    x, y, outerR * 1.02,
+  );
   if (isWhite) {
     grad.addColorStop(0, "#ffffff");
-    grad.addColorStop(1, "#d6d6d2");
+    grad.addColorStop(0.25, coreColor);
+    grad.addColorStop(0.85, "#d8d2c1");
+    grad.addColorStop(1, edgeColor);
   } else {
-    grad.addColorStop(0, "#3b3b3d");
-    grad.addColorStop(1, "#0c0c0e");
+    grad.addColorStop(0, "#52555c");
+    grad.addColorStop(0.30, coreColor);
+    grad.addColorStop(0.85, "#1c1f24");
+    grad.addColorStop(1, edgeColor);
   }
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.arc(x, y, outerR, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = isWhite ? COLORS.whiteRingEdge : COLORS.blackRingEdge;
+  ctx.restore();
+
+  // -- 3. Outer edge stroke (thin, off-black for both colors so the rings
+  //       feel like they share a material category — chess.com-like discipline)
+  ctx.strokeStyle = isWhite ? COLORS.whiteRingStroke : COLORS.blackRingStroke;
   ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.arc(x, y, outerR, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Inner cutout (the ring's hole) — fill with board-tile color for "see-through" effect
-  ctx.fillStyle = "rgba(180, 200, 212, 0.95)";
+  // -- 4. Inner hole — punched-through effect: gradient from a slightly
+  //       darker board-tile shade at center to the ring's body color at the
+  //       inner edge. Looks like a real hole, not a painted disc.
+  const holeGrad = ctx.createRadialGradient(
+    x - innerR * 0.2, y - innerR * 0.2, 0,
+    x, y, innerR,
+  );
+  holeGrad.addColorStop(0, "#9aacba");
+  holeGrad.addColorStop(0.7, COLORS.ringInnerHole);
+  holeGrad.addColorStop(1, isWhite ? "#a8b8c5" : "#7e8c98");
+  ctx.fillStyle = holeGrad;
   ctx.beginPath();
   ctx.arc(x, y, innerR, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = isWhite ? COLORS.whiteRingEdge : COLORS.blackRingEdge;
-  ctx.lineWidth = 1.0;
+  ctx.strokeStyle = isWhite ? COLORS.whiteRingStroke : COLORS.blackRingStroke;
+  ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  ctx.arc(x, y, innerR, 0, Math.PI * 2);
   ctx.stroke();
+
+  // -- 5. Specular highlight — small crescent at upper-left for both colors,
+  //       restrained alpha so it reads as material polish, not glare
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, outerR - 1, 0, Math.PI * 2);
+  ctx.arc(x, y, innerR + 1, 0, Math.PI * 2, true);
+  ctx.clip("evenodd");
+  const specGrad = ctx.createRadialGradient(
+    x - outerR * 0.40, y - outerR * 0.45, 0,
+    x - outerR * 0.40, y - outerR * 0.45, outerR * 0.55,
+  );
+  specGrad.addColorStop(0, isWhite ? "rgba(255,255,255,0.75)" : "rgba(255,255,255,0.32)");
+  specGrad.addColorStop(0.7, "rgba(255,255,255,0.04)");
+  specGrad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = specGrad;
+  ctx.fillRect(x - outerR, y - outerR, outerR * 2, outerR * 2);
+  ctx.restore();
 }
 
 function drawMarker(ctx, x, y, r, color) {
   const isWhite = color === "white";
-  const grad = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+
+  // Soft drop shadow (single — markers sit lower than rings)
+  ctx.save();
+  ctx.shadowColor = COLORS.pieceShadowNear;
+  ctx.shadowBlur = r * 0.55;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = r * 0.18;
+
+  const coreColor = isWhite ? COLORS.whiteMarkerCore : COLORS.blackMarkerCore;
+  const edgeColor = isWhite ? COLORS.whiteMarkerEdge : COLORS.blackMarkerEdge;
+  const grad = ctx.createRadialGradient(
+    x - r * 0.30, y - r * 0.32, r * 0.05,
+    x, y, r * 1.02,
+  );
   if (isWhite) {
     grad.addColorStop(0, "#ffffff");
-    grad.addColorStop(1, "#cccccc");
+    grad.addColorStop(0.4, coreColor);
+    grad.addColorStop(1, edgeColor);
   } else {
-    grad.addColorStop(0, "#3b3b3d");
-    grad.addColorStop(1, "#0c0c0e");
+    grad.addColorStop(0, "#484c54");
+    grad.addColorStop(0.4, coreColor);
+    grad.addColorStop(1, edgeColor);
   }
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = COLORS.markerEdge;
-  ctx.lineWidth = 1.0;
+  ctx.restore();
+
+  ctx.strokeStyle = COLORS.markerStroke;
+  ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.stroke();
+
+  // Small specular for markers too (subtler than rings)
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r - 0.5, 0, Math.PI * 2);
+  ctx.clip();
+  const specGrad = ctx.createRadialGradient(
+    x - r * 0.35, y - r * 0.40, 0,
+    x - r * 0.35, y - r * 0.40, r * 0.5,
+  );
+  specGrad.addColorStop(0, isWhite ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.22)");
+  specGrad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = specGrad;
+  ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  ctx.restore();
 }
 
 function drawHover(ctx, geom) {
@@ -289,23 +459,34 @@ function drawHover(ctx, geom) {
 }
 
 function drawSelection(ctx, geom) {
-  // In Play mode: highlight the selected source ring + its legal destinations.
   if (state.mode !== "play" || !state.selectedSource) return;
   const { col, row } = state.selectedSource;
   const { px, py } = geom.posToPixel(col, row);
-  // Selected source: blue ring outline
-  ctx.strokeStyle = COLORS.hoverStroke;
-  ctx.lineWidth = 2.4;
+
+  // Soft outer glow for the selected piece
+  ctx.save();
+  ctx.shadowColor = COLORS.selectGlow;
+  ctx.shadowBlur = geom.scale * 0.45;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = COLORS.selectStroke;
+  ctx.lineWidth = 2.6;
   ctx.beginPath();
   ctx.arc(px, py, geom.scale * 0.48, 0, Math.PI * 2);
   ctx.stroke();
-  // Destinations: small blue dots
+  ctx.restore();
+
+  // Legal destinations — small filled dots with subtle gradient
   const dests = legalDestinationsFrom(state.selectedSource);
-  ctx.fillStyle = COLORS.hoverStroke;
   for (const d of dests) {
     const pt = geom.posToPixel(d.col, d.row);
+    const r = geom.scale * 0.12;
+    const grad = ctx.createRadialGradient(pt.px - r * 0.3, pt.py - r * 0.3, 0, pt.px, pt.py, r);
+    grad.addColorStop(0, "#60a5fa");
+    grad.addColorStop(1, COLORS.selectStroke);
+    ctx.fillStyle = grad;
     ctx.beginPath();
-    ctx.arc(pt.px, pt.py, geom.scale * 0.10, 0, Math.PI * 2);
+    ctx.arc(pt.px, pt.py, r, 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -315,23 +496,35 @@ function drawArrow(ctx, geom) {
   const { from, to } = state.hoverArrow;
   if (!from) return;
   const a = geom.posToPixel(from.col, from.row);
+
+  // Soft drop shadow on all annotation strokes — makes them sit cleanly
+  // on top of pieces without competing visually.
+  ctx.save();
+  ctx.shadowColor = "rgba(15, 20, 28, 0.25)";
+  ctx.shadowBlur = 6;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 1;
+
   if (!to) {
     // Single-position move (placement / removal): ring of accent
     ctx.strokeStyle = COLORS.arrowDst;
-    ctx.lineWidth = 2.2;
+    ctx.lineWidth = 2.6;
     ctx.beginPath();
     ctx.arc(a.px, a.py, geom.scale * 0.46, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.restore();
     return;
   }
+
   const b = geom.posToPixel(to.col, to.row);
-  // From circle
+  // From circle (origin marker — amber)
   ctx.strokeStyle = COLORS.arrowSrc;
-  ctx.lineWidth = 2.0;
+  ctx.lineWidth = 2.4;
   ctx.beginPath();
   ctx.arc(a.px, a.py, geom.scale * 0.46, 0, Math.PI * 2);
   ctx.stroke();
-  // Arrow shaft + head
+
+  // Shaft
   const dx = b.px - a.px, dy = b.py - a.py;
   const len = Math.hypot(dx, dy);
   const ux = dx / len, uy = dy / len;
@@ -340,13 +533,15 @@ function drawArrow(ctx, geom) {
   const sx = a.px + ux * startOffset, sy = a.py + uy * startOffset;
   const ex = b.px - ux * endOffset, ey = b.py - uy * endOffset;
   ctx.strokeStyle = COLORS.arrowDst;
-  ctx.lineWidth = 2.4;
+  ctx.lineWidth = 3.0;
+  ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(sx, sy);
   ctx.lineTo(ex, ey);
   ctx.stroke();
-  // Arrowhead
-  const ah = 10, aw = 7;
+
+  // Arrowhead (filled triangle)
+  const ah = 11, aw = 7.5;
   ctx.fillStyle = COLORS.arrowDst;
   ctx.beginPath();
   ctx.moveTo(ex, ey);
@@ -354,12 +549,14 @@ function drawArrow(ctx, geom) {
   ctx.lineTo(ex - ux * ah + uy * aw, ey - uy * ah - ux * aw);
   ctx.closePath();
   ctx.fill();
-  // To circle
+
+  // Destination circle
   ctx.strokeStyle = COLORS.arrowDst;
-  ctx.lineWidth = 2.0;
+  ctx.lineWidth = 2.4;
   ctx.beginPath();
   ctx.arc(b.px, b.py, geom.scale * 0.46, 0, Math.PI * 2);
   ctx.stroke();
+  ctx.restore();
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -421,6 +618,7 @@ function ghostMarkup(tool) {
 
 palette.addEventListener("mousedown", (ev) => {
   if (state.mode !== "setup") return;   // palette disabled in play mode
+  if (state.lineMode) return;            // and in line mode
   const btn = ev.target.closest(".tool");
   if (!btn) return;
   ev.preventDefault();
@@ -476,6 +674,8 @@ canvas.addEventListener("mouseleave", () => {
 });
 
 canvas.addEventListener("click", (ev) => {
+  // While walking a PV the board is display-only — clicks are ignored.
+  if (state.lineMode) return;
   const rect = canvas.getBoundingClientRect();
   const cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
   if (state.mode === "setup") {
@@ -483,7 +683,6 @@ canvas.addEventListener("click", (ev) => {
     handlePlace(cx, cy, state.armedTool);
     return;
   }
-  // Play mode
   handlePlayClick(cx, cy);
 });
 
@@ -751,6 +950,40 @@ const blackRingsCountEl = $("black-rings-count");
 const whiteScoreEl = $("white-score-derived");
 const blackScoreEl = $("black-score-derived");
 const numSims = $("num-sims");
+const evalModeEl = $("eval-mode");
+const heuristicWeightEl = $("heuristic-weight");
+const heuristicWeightField = $("heuristic-weight-field");
+const cPuctEl = $("c-puct");
+const fpuReductionEl = $("fpu-reduction");
+const resetAdvancedBtn = $("reset-advanced");
+
+// Advanced-MCTS defaults — kept here as the single source of truth for
+// the reset button and the server-side defaults (they must agree).
+const MCTS_DEFAULTS = {
+  evaluation_mode: "pure_neural",
+  heuristic_weight: 0.5,
+  c_puct: 1.0,
+  fpu_reduction: 0.25,
+};
+
+function syncHeuristicWeightEnabled() {
+  // The heuristic_weight knob is meaningless in pure_neural mode — disable
+  // it visually so the user doesn't tweak a dial that has no effect.
+  const mode = evalModeEl.value;
+  const disabled = (mode === "pure_neural");
+  heuristicWeightEl.disabled = disabled;
+  heuristicWeightField.style.opacity = disabled ? "0.55" : "1";
+}
+
+evalModeEl.addEventListener("change", syncHeuristicWeightEnabled);
+resetAdvancedBtn.addEventListener("click", () => {
+  evalModeEl.value = MCTS_DEFAULTS.evaluation_mode;
+  heuristicWeightEl.value = MCTS_DEFAULTS.heuristic_weight;
+  cPuctEl.value = MCTS_DEFAULTS.c_puct;
+  fpuReductionEl.value = MCTS_DEFAULTS.fpu_reduction;
+  syncHeuristicWeightEnabled();
+});
+syncHeuristicWeightEnabled();
 const evalBtn = $("evaluate");
 const clearBtn = $("clear");
 const statusEl = $("status");
@@ -774,6 +1007,13 @@ const turnBadge = $("turn-badge");
 const turnSideEl = $("turn-side");
 const turnPhaseEl = $("turn-phase");
 const sideFieldEl = document.querySelector(".side-field");
+const lineNav = $("line-nav");
+const lineMoveDescEl = $("line-move-desc");
+const lineStepCounterEl = $("line-step-counter");
+const lineJustPlayedEl = $("line-just-played");
+const linePrevBtn = $("line-prev");
+const lineNextBtn = $("line-next");
+const lineReturnBtn = $("line-return");
 
 clearBtn.addEventListener("click", () => {
   state.pieces.clear();
@@ -876,6 +1116,12 @@ function currentPayload() {
     num_sims: Math.max(0, parseInt(numSims.value, 10) || 0),
     top_k: 8,
     move_maker: state.moveMaker,
+    // Advanced MCTS knobs — server falls back to training defaults if absent,
+    // but we always send to keep the cache key stable across requests.
+    evaluation_mode: evalModeEl.value,
+    heuristic_weight: parseFloat(heuristicWeightEl.value) || MCTS_DEFAULTS.heuristic_weight,
+    c_puct: parseFloat(cPuctEl.value) || MCTS_DEFAULTS.c_puct,
+    fpu_reduction: parseFloat(fpuReductionEl.value) || MCTS_DEFAULTS.fpu_reduction,
   };
 }
 
@@ -945,12 +1191,19 @@ function renderResult(data) {
     render();
     return;
   }
-  // Value bars — values ∈ [-1, 1] for side_to_move.
-  const v = Math.max(-1, Math.min(1, data.value));
+  // Value bars — pure_neural values ∈ [-1, 1] for side_to_move; hybrid /
+  // pure_heuristic produce unbounded heuristic-units scores (the heuristic's
+  // 7-feature weighted sum isn't tanh'd), so we display the raw number but
+  // clamp the bar render to [-1, 1] to keep the UI sane.
+  const mode = (evalModeEl && evalModeEl.value) || "pure_neural";
+  const heuristicMode = mode !== "pure_neural";
+  const v = data.value;
+  const vBar = Math.max(-1, Math.min(1, v));
   valueRow.hidden = false;
-  valueLabel.textContent = `Search avg (${data.side_to_move})`;
-  valueNum.textContent = v.toFixed(3);
-  paintValueBar(valueFill, v);
+  const modeTag = heuristicMode ? " · heuristic units" : "";
+  valueLabel.textContent = `Search avg (${data.side_to_move})${modeTag}`;
+  valueNum.textContent = heuristicMode ? v.toFixed(2) : v.toFixed(3);
+  paintValueBar(valueFill, vBar);
 
   if (data.best_move_value !== null && data.best_move_value !== undefined) {
     const bv = Math.max(-1, Math.min(1, data.best_move_value));
@@ -964,17 +1217,40 @@ function renderResult(data) {
 
   // Top moves
   topMovesEl.innerHTML = "";
+  // Sign of the headline search_avg — used to flag rows whose after-value
+  // disagrees. For heuristic modes, the headline is in heuristic units so
+  // sign is still comparable to the network's [-1, 1] best_move_value.
+  const headlineSign = Math.sign(data.value || 0);
   data.top_moves.forEach((mv, i) => {
     const li = document.createElement("li");
     if (i === 0) li.classList.add("top");
     li.dataset.idx = i;
+    // Per-row best_move_value cell — sign-colored, with a row-level
+    // "divergent" flag when the sign disagrees with the headline search_avg.
+    let bmvClass = "unknown";
+    let bmvText = "—";
+    let bmv = mv.best_move_value;
+    if (typeof bmv === "number") {
+      bmvText = (bmv >= 0 ? "+" : "") + bmv.toFixed(2);
+      if (Math.abs(bmv) < 0.05) bmvClass = "neutral";
+      else if (bmv > 0) bmvClass = "positive";
+      else bmvClass = "negative";
+      // Flag opposite-sign divergence: only meaningful when both have
+      // a clear sign (skip near-zero noise on either side).
+      const bmvSign = Math.sign(bmv);
+      if (headlineSign !== 0 && bmvSign !== 0 && bmvSign !== headlineSign && Math.abs(bmv) > 0.05) {
+        li.classList.add("divergent");
+      }
+    }
     li.innerHTML = `
       <span class="rank">${i + 1}.</span>
       <span class="move-desc">${formatMove(mv)}</span>
+      <span class="bmv ${bmvClass}" title="best_move_value — network value at position after this move (side-to-move POV)">${bmvText}</span>
       <span class="prob-cell">
         ${mv.visits !== undefined ? `<span class="visits">${mv.visits}v</span>` : ""}
         <span class="prob-bar"><span class="prob-fill" style="width:${(mv.prob * 100).toFixed(1)}%"></span></span>
         <span class="prob-num">${(mv.prob * 100).toFixed(1)}%</span>
+        <button class="step-into" type="button">▶</button>
       </span>`;
     li.addEventListener("mouseenter", () => {
       state.hoverArrow = moveToArrow(mv);
@@ -984,11 +1260,13 @@ function renderResult(data) {
       state.hoverArrow = null;
       render();
     });
-    li.addEventListener("click", () => {
+    li.addEventListener("click", (ev) => {
+      // Don't trigger the row-click action if the user clicked the step-into
+      // button inside it.
+      if (ev.target.closest(".step-into")) return;
       if (state.mode !== "play") return;
-      if (state.busy) return;   // prevent double-clicks during in-flight move
-      // Click a top-move to apply it — handles REMOVE_MARKERS and any move
-      // type uniformly without needing custom click flows on the board.
+      if (state.busy) return;
+      if (state.lineMode) return;
       applyMove({
         type: mv.type,
         source: mv.source,
@@ -997,6 +1275,19 @@ function renderResult(data) {
       });
     });
     if (state.mode === "play") li.style.cursor = "pointer";
+    // Step-into-line button (▶). Only meaningful when MCTS produced a PV.
+    const stepBtn = li.querySelector(".step-into");
+    if (stepBtn) {
+      const hasPv = Array.isArray(mv.principal_variation) && mv.principal_variation.length > 0;
+      stepBtn.disabled = !hasPv;
+      stepBtn.title = hasPv
+        ? "Step into this line on the board"
+        : "Need MCTS sims > 0 to see the principal variation";
+      stepBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (hasPv) enterLineMode(i);
+      });
+    }
     topMovesEl.appendChild(li);
   });
 
@@ -1134,6 +1425,147 @@ function formatMoveShort(mv) {
   if (mv.type === "REMOVE_MARKERS") return `−row [${(mv.markers || []).join(",")}]`;
   return mv.description || "?";
 }
+
+// ---------- Line mode (step-through PV) ----------
+function enterLineMode(pvIndex) {
+  if (!state.lastResult || !state.lastResult.top_moves) return;
+  const topMove = state.lastResult.top_moves[pvIndex];
+  if (!topMove || !Array.isArray(topMove.principal_variation) || topMove.principal_variation.length === 0) {
+    setStatus("No principal variation available for that move.", "error");
+    return;
+  }
+
+  // If already in a line, return to the base first so we restore cleanly
+  // before switching to the new line.
+  if (state.lineMode) exitLineMode({ silent: true });
+
+  // Snapshot the "real" position so we can restore it on Return.
+  const baseSnapshot = {
+    pieces: new Map(state.pieces),
+    phase: phaseSel.value,
+    sideToMove: currentSide(),
+    moveMaker: state.moveMaker,
+    lastResult: state.lastResult,
+    legalMoves: state.legalMoves,
+    gameOver: state.gameOver,
+    winner: state.winner,
+  };
+
+  // Build steps array. Step 0 = base position (the real one we'll return to).
+  // Steps 1..N = position-after each successive PV move.
+  const basePayload = currentPositionPayload();
+  const steps = [
+    { position: basePayload, move: null, player: null },
+  ];
+  for (const pvStep of topMove.principal_variation) {
+    steps.push({
+      position: pvStep.position_after,
+      move: pvStep.move,
+      player: pvStep.player,
+    });
+  }
+
+  state.lineMode = {
+    pvIndex,
+    topMoveDesc: topMove.description,
+    baseSnapshot,
+    steps,
+    currentStep: 0,
+  };
+  document.body.classList.add("line-mode");
+  lineNav.hidden = false;
+  // Start at step 1 (= after the chosen top move). Step 0 is "rewind to base",
+  // which the user can navigate back to via ← prev.
+  applyLineStep(1);
+}
+
+function applyLineStep(idx) {
+  if (!state.lineMode) return;
+  const N = state.lineMode.steps.length;
+  idx = Math.max(0, Math.min(N - 1, idx));
+  state.lineMode.currentStep = idx;
+  const step = state.lineMode.steps[idx];
+  applyNewPosition(step.position);
+  // Selection state from real mode doesn't apply mid-line.
+  state.selectedSource = null;
+  // Show the move that landed us at this step (none at step 0).
+  if (step.move) {
+    state.hoverArrow = moveToArrow(step.move);
+  } else {
+    state.hoverArrow = null;
+  }
+  updateLineNav();
+  render();
+}
+
+function exitLineMode(opts = {}) {
+  if (!state.lineMode) return;
+  const snap = state.lineMode.baseSnapshot;
+  // Restore pieces map
+  state.pieces.clear();
+  for (const [k, v] of snap.pieces) state.pieces.set(k, v);
+  phaseSel.value = snap.phase;
+  const sideRadio = document.querySelector(`input[name="side"][value="${snap.sideToMove}"]`);
+  if (sideRadio) sideRadio.checked = true;
+  state.moveMaker = snap.moveMaker;
+  state.lastResult = snap.lastResult;
+  state.legalMoves = snap.legalMoves;
+  state.gameOver = snap.gameOver;
+  state.winner = snap.winner;
+  state.lineMode = null;
+  state.hoverArrow = null;
+  state.selectedSource = null;
+  document.body.classList.remove("line-mode");
+  lineNav.hidden = true;
+  updateDerivedStats();
+  updateTurnBadge(snap.sideToMove, snap.phase);
+  // Re-display the prior evaluation result if we have it.
+  if (snap.lastResult) renderResult(snap.lastResult);
+  render();
+  if (!opts.silent) setStatus("Returned to analysis position.", null);
+}
+
+function updateLineNav() {
+  if (!state.lineMode) return;
+  const { topMoveDesc, steps, currentStep } = state.lineMode;
+  const totalPlies = steps.length - 1;  // step 0 is the base, not a played ply
+  lineMoveDescEl.textContent = topMoveDesc;
+  lineStepCounterEl.textContent = `step ${currentStep}/${totalPlies}`;
+  if (currentStep === 0) {
+    lineJustPlayedEl.textContent = "← rewound to base position";
+    lineJustPlayedEl.classList.remove("tentative");
+  } else {
+    const step = steps[currentStep];
+    const playerTag = step.player ? `${step.player[0]}:` : "";
+    const desc = step.move ? formatMoveShort(step.move) : "";
+    // Show visit count for this ply — lets the user see when MCTS's
+    // confidence has dropped. Single-digit visits = tentative; that gets
+    // a visual flag too.
+    const visits = step.move && state.lineMode && state.lineMode.steps[currentStep] ?
+      (state.lastResult?.top_moves?.[state.lineMode.pvIndex]?.principal_variation?.[currentStep - 1]?.visits) : null;
+    const visitsTag = (typeof visits === "number") ? ` (${visits}v)` : "";
+    lineJustPlayedEl.textContent = `${playerTag} ${desc}${visitsTag}`;
+    lineJustPlayedEl.classList.toggle("tentative", typeof visits === "number" && visits < 10);
+  }
+  linePrevBtn.disabled = currentStep <= 0;
+  lineNextBtn.disabled = currentStep >= steps.length - 1;
+}
+
+linePrevBtn.addEventListener("click", () => {
+  if (state.lineMode) applyLineStep(state.lineMode.currentStep - 1);
+});
+lineNextBtn.addEventListener("click", () => {
+  if (state.lineMode) applyLineStep(state.lineMode.currentStep + 1);
+});
+lineReturnBtn.addEventListener("click", () => exitLineMode());
+
+// Keyboard nav for line walking — left/right arrows step, Esc returns.
+document.addEventListener("keydown", (ev) => {
+  if (!state.lineMode) return;
+  if (ev.key === "ArrowLeft") { ev.preventDefault(); applyLineStep(state.lineMode.currentStep - 1); }
+  else if (ev.key === "ArrowRight") { ev.preventDefault(); applyLineStep(state.lineMode.currentStep + 1); }
+  else if (ev.key === "Escape") { ev.preventDefault(); exitLineMode(); }
+});
 
 // ---------- Boot ----------
 loadModels();

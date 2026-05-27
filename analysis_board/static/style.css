@@ -1,23 +1,29 @@
 /* YINSH analysis board — light, BGA-inspired. */
 
 :root {
-  --bg: #f6f5f1;
-  --board-tile: #c9d8e1;
-  --board-tile-2: #b3c6d2;
-  --board-grid: #1a1d22;
-  --board-dot: #495260;
-  --ink: #1a1d22;
-  --ink-dim: #5b6571;
-  --ink-faint: #9aa3af;
-  --rule: #d9d8d2;
+  /* Background slightly warmer + a touch more atmospheric so the polished
+     board reads as the focal element rather than a stark cutout. Deeper
+     ink range, restrained saturation per visual-style preference. */
+  --bg: #ecead0;
+  --bg-soft: #f3f1da;
+  --board-tile: #b4c8d4;
+  --board-tile-2: #94aab9;
+  --board-grid: #1a2128;
+  --board-dot: #384654;
+  --ink: #15191e;
+  --ink-dim: #4a5563;
+  --ink-faint: #8b95a3;
+  --rule: #d6d2bf;
   --surface: #ffffff;
-  --surface-2: #efeee8;
+  --surface-2: #f2efe1;
   --accent: #2563eb;
   --accent-dim: #93b8f6;
   --positive: #15803d;
   --negative: #b91c1c;
   --warn: #b45309;
-  --shadow: 0 1px 2px rgba(20, 22, 27, 0.06), 0 4px 12px rgba(20, 22, 27, 0.05);
+  /* Doubled shadows — direct (tight) + indirect (atmospheric) at low opacity */
+  --shadow: 0 1px 2px rgba(20, 22, 27, 0.06), 0 6px 18px rgba(20, 22, 27, 0.07);
+  --shadow-lift: 0 1px 3px rgba(20, 22, 27, 0.08), 0 10px 28px rgba(20, 22, 27, 0.10);
   --radius: 8px;
 }
 
@@ -26,9 +32,11 @@
 html, body {
   margin: 0;
   padding: 0;
-  background: var(--bg);
+  background:
+    radial-gradient(circle at 30% 0%, var(--bg-soft) 0%, var(--bg) 55%);
   color: var(--ink);
   font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  min-height: 100vh;
 }
 
 .app {
@@ -94,6 +102,110 @@ html, body {
 .play-controls .secondary {
   padding: 4px 10px;
   font-size: 12px;
+}
+
+/* Line-mode navigation bar — sits above the board when walking a PV. */
+.line-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: #eff5ff;
+  border: 1px solid #93b8f6;
+  border-radius: 8px;
+  padding: 10px 14px;
+  width: 100%;
+  max-width: 760px;
+  box-shadow: var(--shadow);
+}
+.line-nav-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--ink);
+  flex-wrap: wrap;
+}
+.line-nav-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  font-weight: 600;
+}
+.line-nav-move {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ink);
+  font-weight: 600;
+}
+.line-nav-step {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.line-nav-just-played {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ink-dim);
+  padding-left: 4px;
+  border-left: 1px solid #c5d8ff;
+}
+.line-nav-just-played:empty { display: none; }
+.line-nav-just-played.tentative {
+  color: var(--warn);
+  font-style: italic;
+}
+.line-nav-just-played.tentative::after {
+  content: " · tentative";
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: 4px;
+  opacity: 0.7;
+}
+.line-nav-controls {
+  display: flex;
+  gap: 6px;
+}
+.line-nav-controls button {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.line-nav-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* When in line mode, dim out the setup/play controls so they don't look
+   like they'll do anything. */
+body.line-mode .palette,
+body.line-mode .field input,
+body.line-mode .field select,
+body.line-mode #evaluate,
+body.line-mode #clear,
+body.line-mode .mode-toggle {
+  opacity: 0.45;
+  pointer-events: none;
+}
+body.line-mode .controls .actions { opacity: 0.45; pointer-events: none; }
+
+/* Step-into-line button on each top-moves row. */
+.top-moves .step-into {
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+.top-moves .step-into:hover {
+  background: #eff5ff;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.top-moves .step-into:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 /* Big, unambiguous side-to-move + phase badge */
@@ -191,16 +303,17 @@ html, body {
 
 .board-wrap {
   background: var(--surface);
-  border-radius: var(--radius);
-  padding: 12px;
-  box-shadow: var(--shadow);
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: var(--shadow-lift);
   position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.6);
 }
 
 #board {
   display: block;
-  background: var(--bg);
-  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  border-radius: 10px;
   cursor: crosshair;
   user-select: none;
   touch-action: none;
@@ -400,6 +513,57 @@ select:focus, input[type="number"]:focus {
 
 .actions { display: flex; gap: 8px; margin-top: 4px; }
 
+/* Advanced MCTS — collapsible to stay out of the way for default users. */
+.advanced-mcts {
+  margin-top: 2px;
+}
+.advanced-mcts summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 0;
+  user-select: none;
+  outline: none;
+}
+.advanced-mcts summary:hover { color: var(--ink); }
+.advanced-mcts summary::-webkit-details-marker { color: var(--ink-faint); }
+.advanced-mcts[open] summary { margin-bottom: 8px; }
+.advanced-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: 6px;
+}
+.advanced-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 8px;
+  padding: 0 4px;
+}
+.field input:disabled, .field select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.link-button:hover { color: #1d4ed8; }
+
 button.primary, button.secondary {
   border-radius: 6px;
   padding: 8px 14px;
@@ -492,9 +656,9 @@ button.secondary:hover { background: var(--surface-2); }
 }
 .top-moves li {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 6px 8px;
   border-radius: 6px;
   cursor: pointer;
@@ -548,3 +712,25 @@ button.secondary:hover { background: var(--surface-2); }
   font-size: 11px;
   color: var(--ink-faint);
 }
+
+/* Per-row best_move_value — sign-colored so opposite-sign divergences
+   pop visually. "after" = value of the resulting position after this
+   move, in side-to-move's POV. */
+.top-moves .bmv {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  min-width: 42px;
+  text-align: center;
+}
+.top-moves .bmv.positive { color: var(--positive); background: #d6f0dc; }
+.top-moves .bmv.negative { color: var(--negative); background: #fde2e2; }
+.top-moves .bmv.neutral { color: var(--ink-faint); }
+.top-moves .bmv.unknown { color: var(--ink-faint); }
+/* Visually flag rows where the after-value sign disagrees with the
+   headline search_avg sign — that's the "MCTS-confidently-wrong-at-root,
+   accurate-one-ply-deeper" pattern worth surfacing. */
+.top-moves li.divergent { border-left: 3px solid var(--warn); padding-left: 5px; }

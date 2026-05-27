@@ -28,6 +28,19 @@
           </label>
         </div>
       </div>
+      <div class="line-nav" id="line-nav" hidden>
+        <div class="line-nav-info">
+          <span class="line-nav-label">Walking line</span>
+          <span class="line-nav-move" id="line-move-desc">—</span>
+          <span class="line-nav-step" id="line-step-counter">step 0/0</span>
+          <span class="line-nav-just-played" id="line-just-played"></span>
+        </div>
+        <div class="line-nav-controls">
+          <button id="line-prev" class="secondary" disabled>← prev</button>
+          <button id="line-next" class="secondary" disabled>next →</button>
+          <button id="line-return" class="primary">↩ Return</button>
+        </div>
+      </div>
       <div class="board-wrap">
         <canvas id="board" width="760" height="760" aria-label="YINSH board"></canvas>
         <div class="hint" id="board-hint">Drag a piece from the palette onto a board intersection. Right-click to erase.</div>
@@ -107,6 +120,36 @@
           <span>MCTS sims <em>(0 = raw policy)</em></span>
           <input id="num-sims" type="number" value="0" min="0" max="2000" step="50" />
         </label>
+
+        <details class="advanced-mcts" id="advanced-mcts">
+          <summary>Advanced MCTS</summary>
+          <div class="advanced-grid">
+            <label class="field">
+              <span>Evaluation mode <em>(leaf value source)</em></span>
+              <select id="eval-mode">
+                <option value="pure_neural" selected>Pure neural (default)</option>
+                <option value="hybrid">Hybrid (neural + heuristic blend)</option>
+                <option value="pure_heuristic">Pure heuristic</option>
+              </select>
+            </label>
+            <label class="field" id="heuristic-weight-field">
+              <span>Heuristic weight <em>(blend coefficient)</em></span>
+              <input id="heuristic-weight" type="number" value="0.5" min="0" max="1" step="0.05" />
+            </label>
+            <label class="field">
+              <span>c_puct <em>(exploration; 1.0 default, ~2.0 KataGo)</em></span>
+              <input id="c-puct" type="number" value="1.0" min="0" max="5" step="0.1" />
+            </label>
+            <label class="field">
+              <span>fpu_reduction <em>(unvisited-child penalty)</em></span>
+              <input id="fpu-reduction" type="number" value="0.25" min="0" max="1" step="0.05" />
+            </label>
+          </div>
+          <div class="advanced-hint">
+            Defaults match training. Changes apply on next Evaluate.
+            <button id="reset-advanced" type="button" class="link-button">reset</button>
+          </div>
+        </details>
 
         <div class="actions">
           <button id="evaluate" class="primary">Evaluate</button>

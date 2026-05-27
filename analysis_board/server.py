@@ -123,30 +123,132 @@ def get_wrapper(model_id: str) -> NetworkWrapper:
     return _wrapper_cache[model_id]
 
 
-def get_mcts(model_id: str, num_sims: int):
-    key = (model_id, num_sims)
+def get_mcts(
+    model_id: str,
+    num_sims: int,
+    *,
+    c_puct: float = 1.0,
+    fpu_reduction: float = 0.25,
+    evaluation_mode: str = "pure_neural",
+    heuristic_weight: float = 0.5,
+):
+    """Cached MCTS instance keyed by all params that change search behaviour.
+
+    Cache size is bounded in practice — users explore a small set of
+    (model × num_sims × c_puct × fpu × mode) combinations per session.
+    Each instance holds a network reference (shared via the wrapper cache)
+    and a small policy tree, so memory growth per cache entry is modest.
+    """
+    key = (
+        model_id, num_sims,
+        round(float(c_puct), 3),
+        round(float(fpu_reduction), 3),
+        str(evaluation_mode),
+        round(float(heuristic_weight), 3),
+    )
     if key not in _mcts_cache:
         # Lazy import — MCTS pulls a wide chain of training-side deps.
         from yinsh_ml.training.self_play import MCTS  # noqa: WPS433
 
         wrapper = get_wrapper(model_id)
-        log.info("constructing MCTS(model=%s, sims=%d)", model_id, num_sims)
+        heuristic_evaluator = None
+        if evaluation_mode in ("pure_heuristic", "hybrid"):
+            from yinsh_ml.heuristics.evaluator import YinshHeuristics  # noqa: WPS433
+            # Per evaluator.py:60 docstring: MCTS callers should disable
+            # forced-sequence detection since MCTS does the lookahead itself,
+            # ~30× heuristic speedup with no search-quality loss.
+            heuristic_evaluator = YinshHeuristics(enable_forced_sequence_detection=False)
+        log.info(
+            "constructing MCTS(model=%s, sims=%d, c_puct=%.2f, fpu=%.2f, mode=%s, hw=%.2f)",
+            model_id, num_sims, c_puct, fpu_reduction, evaluation_mode, heuristic_weight,
+        )
         _mcts_cache[key] = MCTS(
             network=wrapper,
-            evaluation_mode="pure_neural",
+            evaluation_mode=evaluation_mode,
+            heuristic_evaluator=heuristic_evaluator,
+            heuristic_weight=heuristic_weight,
             num_simulations=num_sims,
-            late_simulations=num_sims,  # same budget across the game
+            late_simulations=num_sims,
             simulation_switch_ply=999,
+            c_puct=c_puct,
+            fpu_reduction=fpu_reduction,
             initial_temp=1.0,
             final_temp=1.0,
             annealing_steps=1,
             dirichlet_alpha=0.0,
             epsilon_mix_start=0.0,
             epsilon_mix_end=0.0,
-            enable_subtree_reuse=False,  # each /evaluate is a fresh position
+            # Subtree reuse must be ENABLED for the analysis board so the
+            # root tree survives `search()` and we can extract principal
+            # variations afterward. We compensate by calling
+            # `mcts.reset_tree()` before every /api/evaluate search so each
+            # call is from a fresh root — no stale subtree carryover.
+            enable_subtree_reuse=True,
             mcts_metrics=None,
         )
     return _mcts_cache[key]
+
+
+def _extract_pv_for_move(root, top_move, depth: int = 5, min_visits: int = 10):
+    """Extract the principal variation starting with ``top_move``.
+
+    Returns a list of (Move, visit_count) tuples — the chosen top move first,
+    then descending through its subtree by highest-visit child. Stops at
+    ``depth`` plies or when a node's best child has fewer than ``min_visits``
+    visits (search hasn't explored enough to trust that step).
+    """
+    pv = []
+    first_child = root.children.get(top_move)
+    if first_child is None:
+        return pv
+    pv.append((top_move, int(first_child.visit_count)))
+    current = first_child
+    for _ in range(depth - 1):
+        if not current.children:
+            break
+        best_move, best_child = max(
+            current.children.items(),
+            key=lambda kv: kv[1].visit_count,
+        )
+        if best_child.visit_count < min_visits:
+            break
+        pv.append((best_move, int(best_child.visit_count)))
+        current = best_child
+    return pv
+
+
+def _serialize_pv(base_state: GameState, pv_steps):
+    """For each PV step, apply the move to a copy of the state and emit
+    a serialized position-after payload. The frontend uses these to swap
+    the board to each step instantly when the user walks the line.
+
+    The Move objects from MCTS may have ``player=None`` (engine internals
+    don't always populate it). Replace with the state's current player
+    before applying, so make_move's player check passes.
+    """
+    out = []
+    if not pv_steps:
+        return out
+    s = base_state.copy()
+    for move, visits in pv_steps:
+        # Force the move's player to match the state's current player —
+        # MCTS may have stored a generic Move with player=None.
+        from dataclasses import replace as _replace
+        moving_player = s.current_player
+        applied_move = _replace(move, player=moving_player)
+        try:
+            ok = s.make_move(applied_move)
+        except Exception:  # noqa: BLE001
+            break
+        if not ok:
+            break
+        out.append({
+            "move": _serialize_move(applied_move),
+            "visits": int(visits),
+            "player": moving_player.name,
+            "position_after": _serialize_state(s),
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +430,31 @@ def _legal_moves_payload(valid_moves: List[Move]) -> List[Dict[str, Any]]:
     return [_serialize_move(m) for m in valid_moves]
 
 
+def _match_entry_to_move(entry: Dict[str, Any], candidate_moves: List) -> Optional[Any]:
+    """Find the Move object in `candidate_moves` that corresponds to a
+    serialized top-moves entry (matched by type + source + destination + markers).
+    Used both for PV traversal (against root.children) and best_move_value
+    computation (against valid_moves)."""
+    target_type = entry.get("type")
+    target_src = entry.get("source")
+    target_dst = entry.get("destination")
+    target_markers = entry.get("markers")
+    target_marker_set = set(target_markers) if target_markers else None
+    for m in candidate_moves:
+        if m.type.name != target_type:
+            continue
+        if target_src is not None and str(m.source) != target_src:
+            continue
+        if target_dst is not None and (m.destination is None or str(m.destination) != target_dst):
+            continue
+        if target_marker_set is not None:
+            mset = set(str(p) for p in (m.markers or ()))
+            if mset != target_marker_set:
+                continue
+        return m
+    return None
+
+
 def _top_moves(
     probs: np.ndarray,
     valid_moves: List,
@@ -376,6 +503,17 @@ def api_evaluate():  # type: ignore[no-untyped-def]
 
     num_sims = int(payload.get("num_sims", 0))
     top_k = int(payload.get("top_k", 8))
+    # Advanced MCTS knobs — defaults match training so the headline reading
+    # reflects what the trained agent "thinks." Override to stress-test the
+    # position from a different angle.
+    c_puct = float(payload.get("c_puct", 1.0))
+    fpu_reduction = float(payload.get("fpu_reduction", 0.25))
+    evaluation_mode = str(payload.get("evaluation_mode", "pure_neural"))
+    if evaluation_mode not in ("pure_neural", "pure_heuristic", "hybrid"):
+        return jsonify({"ok": False, "errors": [
+            f"evaluation_mode must be pure_neural / pure_heuristic / hybrid, got {evaluation_mode!r}"
+        ]}), 400
+    heuristic_weight = float(payload.get("heuristic_weight", 0.5))
 
     # Build state
     try:
@@ -397,7 +535,20 @@ def api_evaluate():  # type: ignore[no-untyped-def]
 
     # Evaluate
     if num_sims > 0:
-        mcts = get_mcts(model_id, num_sims)
+        mcts = get_mcts(
+            model_id, num_sims,
+            c_puct=c_puct,
+            fpu_reduction=fpu_reduction,
+            evaluation_mode=evaluation_mode,
+            heuristic_weight=heuristic_weight,
+        )
+        # Reset before each call — subtree reuse is enabled so we can read
+        # the tree post-search, but each /api/evaluate is logically a fresh
+        # position; we don't want last search's tree biasing this one.
+        try:
+            mcts.reset_tree()
+        except AttributeError:
+            mcts._cached_root = None  # fallback for older engine versions
         try:
             probs = mcts.search(gs, move_number=1)
         except Exception as e:  # noqa: BLE001
@@ -415,10 +566,66 @@ def api_evaluate():  # type: ignore[no-untyped-def]
             visit_counts[i] = int(round(float(probs[i]) * num_sims))
         top = _top_moves(probs, valid_moves, top_k, include_visits=True, visit_counts=visit_counts)
         mode = "mcts"
-        # Best-move-value: a complementary signal to root.Q
+        # Best-move-value: a complementary signal to root.Q. Compute for
+        # every entry so the UI can flag opposite-sign divergences per-row
+        # (where MCTS picked move N but the network value at the resulting
+        # position disagrees with the search-averaged root.Q).
         wrapper_for_bm = get_wrapper(model_id)
+        for entry in top:
+            matched = _match_entry_to_move(entry, valid_moves)
+            entry["best_move_value"] = (
+                _best_move_value(wrapper_for_bm, gs, matched) if matched is not None else None
+            )
+        # Headline best_move_value = the top-1 move's. Convenient for the
+        # existing single-value display; per-row values are also available.
+        best_value = top[0].get("best_move_value") if top else None
         top_move = max(valid_moves, key=lambda m: float(probs[_encoder.move_to_index(m)]))
-        best_value = _best_move_value(wrapper_for_bm, gs, top_move)
+        # Principal variations — extract from the live MCTS tree before the
+        # next call resets it. Attach each PV to its corresponding top_moves
+        # entry by matching move_to_index.
+        try:
+            root = mcts._cached_root  # noqa: SLF001
+            if root is not None:
+                # Map move_idx → original Move object in root.children (lets us
+                # look up the right Move for each top_moves entry).
+                idx_to_root_move = {}
+                for m in root.children.keys():
+                    try:
+                        idx_to_root_move[_encoder.move_to_index(m)] = m
+                    except Exception:  # noqa: BLE001
+                        continue
+                for entry in top:
+                    # Reconstruct the move's index from the description fields.
+                    # We don't carry idx in entry, so re-derive from the
+                    # serialized move; cheaper to find by move source/dest.
+                    matched_move = None
+                    for m in root.children.keys():
+                        if m.type.name != entry["type"]:
+                            continue
+                        if entry.get("source") and str(m.source) != entry["source"]:
+                            continue
+                        if entry.get("destination") and (m.destination is None or str(m.destination) != entry["destination"]):
+                            continue
+                        if entry.get("markers"):
+                            mset = set(str(p) for p in (m.markers or ()))
+                            if mset != set(entry["markers"]):
+                                continue
+                        matched_move = m
+                        break
+                    if matched_move is None:
+                        entry["principal_variation"] = []
+                        continue
+                    # depth=8, min_visits=4: explore deeper into the tree but
+                    # cut off when search hasn't allocated enough budget to
+                    # trust the "best child" pick. The frontend displays
+                    # visit counts per ply so the user can spot when plies
+                    # are getting tentative (single-digit visits).
+                    pv_steps = _extract_pv_for_move(root, matched_move, depth=8, min_visits=4)
+                    entry["principal_variation"] = _serialize_pv(gs, pv_steps)
+        except Exception as e:  # noqa: BLE001
+            log.warning("PV extraction failed: %s", e)
+            for entry in top:
+                entry.setdefault("principal_variation", [])
     else:
         wrapper = get_wrapper(model_id)
         try:
@@ -439,8 +646,15 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         value = float(value_t.detach().cpu().reshape(-1)[0].item())
         top = _top_moves(probs, valid_moves, top_k, include_visits=False)
         mode = "policy"
+        # Per-entry best_move_value (raw-policy mode also benefits — lets
+        # the user see which low-ranked moves still have positive after-value).
+        for entry in top:
+            matched = _match_entry_to_move(entry, valid_moves)
+            entry["best_move_value"] = (
+                _best_move_value(wrapper, gs, matched) if matched is not None else None
+            )
+        best_value = top[0].get("best_move_value") if top else None
         top_move = max(valid_moves, key=lambda m: float(probs[_encoder.move_to_index(m)]))
-        best_value = _best_move_value(wrapper, gs, top_move)
 
     return jsonify({
         "ok": True,
