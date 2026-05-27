@@ -142,6 +142,18 @@ def measure_one(
         if sims <= 0:
             continue
         mcts = server.get_mcts(model_id, sims)
+        # CRITICAL: server.get_mcts() builds MCTS with enable_subtree_reuse=True
+        # so the tree survives `search()` for downstream PV extraction (used
+        # by the analysis-board UI's step-into-line feature). For the
+        # measurement loop, that means consecutive `mcts.search()` calls on
+        # different positions would inherit the previous position's tree —
+        # producing the previous position's policy distribution mapped onto
+        # the wrong board, and pinning rank_of_final_best to a constant
+        # across sim budgets. Reset before each search to force a fresh root.
+        try:
+            mcts.reset_tree()
+        except AttributeError:
+            mcts._cached_root = None  # fallback for older engine versions
         t0 = time.perf_counter()
         try:
             mcts_probs = mcts.search(gs, move_number=1)
