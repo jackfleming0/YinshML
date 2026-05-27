@@ -110,6 +110,148 @@ This is the right time to land this: we now have *two* concrete
 failure modes documented (iter_4 in invalidated run, iter 2 in
 re-run) that both promoted via the Elo override when the gate
 intended to reject. The patch is justified.
+
+### Post-B1B2B3-rerun-#2 investigation queue — "what would change my mind about the drift story"
+
+Captured 2026-05-27 mid-run, during a discussion about whether iters 3-4's
+declining WR (52.0 → 50.5 → 45.0 vs iter_1) is "degenerating spiral"
+vs "luck of the draw." With 3 data points and SE ~2.5% per measurement,
+the spiral framing was overconfident — the null hypothesis (random walk
+around iter_1's true level) explains the data fine. **But several
+legitimate alternative mechanisms COULD produce real drift, and each is
+testable.** Logging the full investigation list here so it survives the
+end of the active run.
+
+**Working priors** (~13:00 UTC 2026-05-27, my honest read):
+
+- ~50% pure noise / random walk around iter_1's true strength
+- ~30% heuristic-weight annealing exposing iter_1's noisy value head
+- ~15% optimizer state surviving revert and accumulating bad-direction momentum
+- ~5% buffer mode collapse / something I haven't thought of
+
+**Discipline (carry forward):** when observing a "trend" across 2-3
+data points each with ±5% CI, default to noise. Require 5+ data points
+or a mechanism-level argument before claiming structural drift.
+
+#### Mechanism 1 — Heuristic-weight annealing exposes iter_1's noisy value head
+
+The config anneals `heuristic_weight: 0.5 → 0.0` over 5 iters:
+
+| Iter | heuristic_weight | MCTS eval mix |
+|---|---|---|
+| 1 | 0.5 | 50% net + 50% heuristic |
+| 2 | 0.4 | 60% net + 40% heuristic |
+| 3 | 0.3 | 70% net + 30% heuristic |
+| 4 | 0.2 | 80% net + 20% heuristic |
+| 5 | 0.1 | 90% net + 10% heuristic |
+
+If iter_1 has noisy value estimates (plausible — iter 2's +5 WR could
+be a policy-head gain that doesn't transfer to the value head), MCTS
+targets get progressively less reliable as heuristic regularization
+falls away. By iter 4 the search is mostly trusting a possibly-bad
+value head.
+
+**Testable:** re-run with `heuristic_weight_end: 0.3` (vs 0.0). If
+drift disappears or weakens, this mechanism is dominant. Cheap variant
+of the next B1B2B3 run.
+
+**Cost:** Same as B1B2B3 (~12-15h, 1 config knob change).
+
+#### Mechanism 2 — Optimizer state survives revert and accumulates bad momentum
+
+When the gate reverts iter N, the **weights** go back to the prior best.
+But does the Adam optimizer's `m` (first moment) and `v` (second moment)
+state get reset? If not, the optimizer carries momentum from the
+rejected iter's training direction into the next iter's training.
+Rejected candidates would then "prime" the next iter to drift in the
+same (rejected) direction.
+
+**Testable (no GPU needed):** read `yinsh_ml/training/supervisor.py`
+around the revert path. Specifically look for:
+- Where `best_model.pt` is reloaded (search for `_load_best_model` or
+  similar around supervisor.py:1740-1780).
+- Whether the trainer's `optimizer.state_dict()` is reset alongside
+  the weight reload.
+- The path through `TrainingSupervisor.train_iteration` when
+  `decision_kind == 'reverted'` — does optimizer state carry over?
+
+If optimizer state survives revert, that's a **bug-shaped mechanism**.
+Fix: reset optimizer state to zeros (or to a saved-at-promotion
+snapshot) on revert. Add regression test that asserts adam.state is
+empty / matches snapshot after a reverted iter.
+
+**Cost:** 30-60 min to inspect code + write the test if a bug is
+confirmed.
+
+#### Mechanism 3 — Buffer composition / mode collapse
+
+Original "buffer contamination" hand-wave, re-examined: with FIFO
+eviction and `max_buffer_size: 100000`, the buffer transitions from
+"warm-start self-play games" → "iter_1 self-play games" over iters 2-3.
+Whether that's *worse* depends on whether iter_1's games are
+qualitatively different (e.g., more concentrated visit distributions
+→ less exploration; or value targets clustering at extreme ±1.0 →
+shorter or more decisive games).
+
+**Testable (no extra training):** post-run, load the final buffer and
+compare to the iter 1 buffer. Look for:
+- **Visit-distribution sparsity:** per-row nonzero count in
+  `move_probs`. If iter 4's buffer has rows with significantly fewer
+  nonzero moves than iter 1's, that's visit-distribution mode collapse.
+  Concretely: `np.array([(p > 0).sum() for p in buf['move_probs']])`.
+- **Value-target distribution shift:** histogram of `buf['values']`
+  at iter 1 vs iter 4. If iter 4 clusters at the extremes (-1.0, +1.0)
+  more than iter 1, games are getting more decisive — could indicate
+  one side dominating.
+- **Game-length distribution:** infer from `buf['move_numbers']`
+  resets. Shorter games would indicate teacher-side dominance or
+  shorter exploration paths.
+
+If any of these show a clean shift between iter 1 and iter 4 buffers,
+the buffer composition story has legs.
+
+**Cost:** ~30 min of analysis post-run, all data already on disk.
+
+#### Mechanism 4 — Pure noise
+
+Three iters, each with SE ~2.5% on WR. Observing 52.0 → 50.5 → 45.0
+as draws from a stable ~50%-mean distribution is uncommon but not
+crazy (45.0 is ~2σ below mean).
+
+**Testable:** run more iters (relax the 5-iter cap to 10-15) and watch
+the distribution. If WRs continue jumping all over with no consistent
+trend, it's noise. If they keep falling, it's not.
+
+**Cost:** extending B1B2B3 to 10 iters ≈ +30h compute. Probably not
+worth doing as a standalone experiment, but worth noting that ANY
+future B-family run should consider running more iters to get past
+the 3-data-point ambiguity.
+
+#### Cross-mechanism diagnostic — buffer/value-head inspection post-run
+
+Regardless of which mechanism turns out to be dominant, **after this
+run ends** (whether iter 5 promotes, reverts, or the run completes
+normally), do this analysis pass:
+
+1. Download `replay_buffer.pkl.gz` from the run dir.
+2. Run buffer diagnostics (sparsity, value distribution, game length).
+3. Inspect optimizer state code path in supervisor.py.
+4. Write up findings as an addendum to the B1B2B3 RE-RUN #2 Done entry.
+
+The B1B2B3 RE-RUN #2 Done entry should NOT claim "loop is
+non-additive past iter 2" without first ruling out at least
+Mechanism 2 (optimizer state) and Mechanism 3 (buffer composition).
+Both are answerable from data we already have on disk.
+
+#### Discipline for future write-ups
+
+The "spiral / degenerating" framing was over-confident given 3 data
+points. New rule: when the eye sees a "trend" but n < 5 and each
+measurement has ±5% CI, the writeup MUST either (a) state the null
+(noise) and the alternatives explicitly and assign probabilities, or
+(b) be deferred until more data is in. The temptation to narrate a
+single observed trajectory as a mechanism is strong — guard against it.
+
 - **Current frozen anchor:** `models/yngine_volume_15ch_pretrain/best_supervised.pt`
   (the D.2 15-ch pretrained warm-start; re-frozen 2026-05-25 after A1 SPRT
   showed it STRONGER than the prior `best_iter_4` anchor at WR 0.905, CI95
