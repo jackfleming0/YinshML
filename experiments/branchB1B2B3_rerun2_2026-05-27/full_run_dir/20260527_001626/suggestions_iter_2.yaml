@@ -1,0 +1,50 @@
+self_play:
+  annealing_steps: 30
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  enable_subtree_reuse: true
+  epsilon_mix_end: 0.0
+  epsilon_mix_iteration_end: 0.3
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_start: 0.25
+  epsilon_mix_taper_moves: 20
+  evaluation_mode: hybrid
+  final_temp: 0.1
+  fpu_reduction: 0.25
+  games_per_iteration: 200
+  heuristic_weight: 0.3
+  heuristic_weight_anneal_iterations: 5
+  heuristic_weight_end: 0.0
+  heuristic_weight_start: 0.5
+  initial_temp: 1.0
+  late_simulations: 100
+  max_depth: 150
+  mcts_batch_size: 64
+  num_simulations: 200
+  num_workers: 4
+  simulation_switch_ply: 20
+  temp_clamp_fraction: 0.6
+  use_batched_mcts: true
+  use_shared_evaluator: false
+  value_weight: 1.0
+trainer:
+  batch_size: 256
+  batches_per_epoch: auto
+  discrimination_weight: 0.0
+  ema_decay: 0.999
+  enable_autocast: true
+  epochs_per_iteration: 1
+  l2_reg: 0.0
+  lr: 1.0e-05
+  lr_schedule: cosine
+  max_buffer_size: 100000
+  max_oversampling: 4.0
+  search_consistency:
+    enabled: true
+  soft_value_target_sigma: 0.5
+  use_ema_for_eval: true
+  value_head_lr_factor: 5.5
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  warmup_epochs: 1

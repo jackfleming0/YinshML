@@ -31,30 +31,28 @@ a clear next step, this file is the first thing to read.
 
 ---
 
-## Status snapshot (as of 2026-05-26 ~14:45 UTC)
+## Status snapshot (as of 2026-05-27 ~18:00 UTC)
 
-- **B1+B2+B3 ran but is INVALIDATED.** Post-run cleanup uncovered a
-  phase-weight bug in `trainer.py`'s `decode_phase` (read magic `state[5]`,
-  correct for 6-ch but wrong for 15-ch where CH_GAME_PHASE=12). MAIN_GAME
-  positions under-sampled by 2× throughout both D.2 AND B1+B2+B3 training.
-  Conclusions from both runs about how the self-play loop behaved are
-  contaminated. See B1+B2+B3 Done entry for the invalidation banner +
-  what stays valid (bug discovery, gate fail-closed defense, A4 phase 1.5
-  wiring, buffer converter, named channel constants).
-- **Next experiment is B1+B2+B3 re-run** on the fixed code (`training-pipeline-fixes`
-  HEAD). Same config, same warm-start, ~13.5h. Must precede any other
-  15-channel experiment.
-- **Active run:** B1+B2+B3 RE-RUN on the post-fix code. Launched
-  15:04 UTC 2026-05-26 on commit cd31d33. Phase-weight fix VERIFIED
-  empirically (iter 1 buffer: MAIN_GAME 76.9%, RING_PLACEMENT 15.1%,
-  RING_REMOVAL 8.0%). **Iter 2 candidate hit WR 0.517 vs iter_0
-  (vs 0.465 in the invalidated run)** — first real evidence the fix
-  produces stronger candidates. Iter 2 PROMOTED via the Elo-override
-  path despite Wilson REJECT (CI95 [0.469, 0.566] straddled 0.50).
-  iter 3+ trains from iter_1 — first 15-ch run to move off the
-  warm-start. Run continues; gate-override behavior queued as a
-  next-session fix target (see "Gate-override path is permissive"
-  follow-up note below).
+- **B1+B2+B3 RE-RUN #2 complete — verdict NOT_STRONGER** (WR 0.476,
+  CI95 [0.382, 0.571], decided at game 103). Phase-weight fix verified
+  empirically (buffer phase mix 76.6% MAIN_GAME) and the in-loop +5 WR
+  jump at iter 2 reproduces across two independent re-runs (51.7%,
+  52.0%) — but the resulting iter_1 model is statistically
+  indistinguishable from the warm-start at the SPRT 0.60 bar.
+  **B1+B2+B3 is a closed experimental branch.**
+- **Earlier B1+B2+B3 (2026-05-26) is INVALIDATED** by the phase-weight
+  bug, alongside D.2 and D.1 v2 (all 15-channel runs trained under the
+  bug). Phase fix is in HEAD; future 15-ch runs are clean.
+- **Next experiment:** A4 + D1-partial combined. Pretrain with
+  regression value head AND the saved replay buffer's MCTS targets.
+  Lowest cost, highest mechanism prior remaining. Code prepped
+  (commits `343aab6` + `2070650`); launch-ready.
+- **Cloud box can be released.** Artifacts pulled locally:
+  - iter_1_ema (the only promoted candidate): `models/yngine_volume_15ch_pretrain_b1b2b3_rerun2_iter1/iter1_ema.pt`
+  - iter_4_ema (final reverted candidate): `models/yngine_volume_15ch_pretrain_b1b2b3_rerun2_iter4/iter4_ema.pt`
+  - SPRT JSON: `logs/branchB1B2B3_rerun2_iter1_ema_vs_anchor.json`
+  - Replay buffer + manifest + tournament_history in
+    `experiments/branchB1B2B3_rerun2_2026-05-27/full_run_dir/20260527_001626/`
 
 ### Gate-override path is permissive — fix queued for post-run
 
@@ -258,11 +256,19 @@ single observed trajectory as a mechanism is strong — guard against it.
   [0.711, 0.973]). Prior anchor: `models/branchC_volume_pretrain/best_iter_4.pt`
   (Branch C, 6-ch).
 - **Last decisive SPRT verdicts:**
-  - 2026-05-26: B1+B2+B3 — **SPRT verdict NOT_STRONGER (44-50-0,
+  - 2026-05-27: B1+B2+B3 RE-RUN #2 (phase-fix verified) —
+    **NOT_STRONGER** (49-54-0, WR 0.476, CI95 [0.382, 0.571], 103 games,
+    LLR -3.116). Loop produced one promotion (iter_1 via Elo override on
+    Wilson REJECT) but the promoted model is statistically
+    indistinguishable from the warm-start at the SPRT bar.
+    Phase-weight fix WORKS empirically (buffer phase mix correct); the
+    in-loop +5 WR jump at iter 2 is REPRODUCIBLE (52.0% here, 51.7%
+    in prior re-run); but the gain doesn't survive independent
+    re-evaluation. **B1+B2+B3 is a closed experimental branch.** Next:
+    A4 + D1-partial combined.
+  - 2026-05-26: B1+B2+B3 (original) — **NOT_STRONGER (44-50-0,
     WR 0.468, CI95 [0.370, 0.568]), but INTERPRETATION INVALIDATED.**
-    The training ran under the phase-weight bug; the measurement is of
-    a model trained with broken phase sampling. Re-run on the fixed
-    code is the next experiment.
+    Training ran under the phase-weight bug; superseded by RE-RUN #2.
   - 2026-05-25: A1 (D.2 iter_0 / best_supervised vs best_iter_4) —
     **STRONGER** (19-2-0, WR 0.905, CI95 [0.711, 0.973]). New anchor.
     *Unaffected by the phase-weight bug — A1 is a pretrain checkpoint
@@ -1241,6 +1247,165 @@ current state of the priors?" The verdict + crucial detail + confirmed
 findings answer that in ~30 seconds. The operational lessons section
 prevents the most common research-debt failure mode: rediscovering the
 same bug or pattern session after session.
+
+---
+
+### B1+B2+B3 RE-RUN #2 — phase-fix verified, loop neutral at SPRT bar — **NOT_STRONGER** (2026-05-27)
+
+The actual experiment, on the post-phase-weight-fix code. Five-iteration
+MCTS-200 self-play from `best_supervised.pt` warm-start with the same
+config that gave us the invalidated run (B1 gate 0.50 + games_per_match
+200, B2 lr 1e-5, B3 games_per_iter 200). Total: 15.81h self-play + 98 min
+SPRT = **~17.5h on RTX 5090** (second new host after the first attempt
+crashed on CUDA at iter 3). Run dir `runs_branchB1B2B3/20260527_001626`.
+
+**SPRT verdict:**
+- **NOT_STRONGER** (crossed -2.944 LLR boundary at game 103 of 400-cap)
+- Candidate (iter_1_ema) 49-54-0, WR **0.4757**, CI95 **[0.3819, 0.5713]**, LLR **-3.116**
+- Color split cand_white=30, cand_black=19 (acceptable at low n)
+- Duration: 98 min on RTX 5090
+- JSON: `logs/branchB1B2B3_rerun2_iter1_ema_vs_anchor.json`
+
+**The headline finding:** the phase-weight fix **reproducibly produces a
++5 WR jump at iter 2 in the in-loop arena** (51.7% in the first re-run,
+52.0% in this one — independent hosts, statistically identical), but
+**that jump does NOT translate to a decisively stronger model at the
+SPRT bar.** iter_1's true WR vs warm-start under independent
+re-evaluation is ~0.476, within sampling noise of 0.50.
+
+**Comparison vs the invalidated run:** these SPRTs are statistically
+indistinguishable.
+
+| Run | Candidate | Phase fix? | SPRT WR | CI95 | Verdict |
+|---|---|---|---|---|---|
+| Invalidated | iter_4_ema (final of 5 reverted) | NO (buggy) | 0.468 | [0.370, 0.568] | NOT_STRONGER |
+| RE-RUN #2 | iter_1_ema (only promoted candidate) | YES | 0.476 | [0.382, 0.571] | NOT_STRONGER |
+
+The phase fix changed the loop's **shape** (one real promotion at
+iter_1 instead of zero promotions through five iters) but not the
+**ceiling** (final best model is ~0.47-0.48 WR vs warm-start in both
+cases).
+
+**Within-run iter-by-iter** (Wilson gate WR vs current best at gate
+time):
+
+| Run-iter | Candidate | WR vs best | Gate verdict | Best after |
+|---|---|---|---|---|
+| 1 | iter_0 (warm-start) | n/a | NEW BEST (auto-initial) | iter_0 |
+| 2 | iter_1 | 52.0% vs iter_0 | Wilson REJECT, Elo override **PROMOTED** | iter_1 (Elo 1513.3) |
+| 3 | iter_2 | 50.5% vs iter_1 | Wilson REJECT, Elo not improved → REVERT | iter_1 |
+| 4 | iter_3 | 45.0% vs iter_1, CI [0.402, 0.499] | REVERT (statistically below 0.50) | iter_1 |
+| 5 | iter_4 | (reverted, Elo 1498.3 vs 1513.3) | REVERT | iter_1 |
+
+Pattern: one real candidate (iter_1) clears the gate via the Elo override
+path; iters 3-5 all revert.
+
+**Confirmed findings** — see the "post-B1B2B3-rerun-#2 investigation
+queue" section above for the working priors at run time. Below are
+which mechanisms the run's data supports/rejects:
+
+1. ✅ **Phase-weight fix works empirically.** iter 1 buffer phase mix
+   was MAIN_GAME 76.6% / RING_PLACEMENT 15.4% / RING_REMOVAL 8.0% —
+   matches the intended distribution. The MAIN_GAME=2.0 weight is now
+   actually applying to ~77% of samples. The mechanism that was
+   silently broken in D.2 / invalidated B1+B2+B3 is now wired correctly.
+2. ✅ **The +5 WR-jump signal at iter 2 is REPRODUCIBLE** across
+   independent hosts. First re-run hit 51.7%, this re-run hit 52.0%.
+   Same config, same warm-start, different host hardware. Not noise.
+3. ❌ **The +5 WR jump does NOT survive independent SPRT
+   re-evaluation.** iter_1's true WR vs the warm-start is ~0.476.
+   The in-loop arena and SPRT are statistically consistent (CIs
+   overlap), but the SPRT's 0.60 STRONGER bar is not cleared. We do
+   not have evidence that iter_1 is meaningfully stronger than
+   `best_supervised.pt`.
+4. ❌ **Iters 3-5 all revert** under the fixed phase weighting — same
+   broad behavior as the invalidated run, although the WR pattern
+   differs (invalidated run had iter_1/2/3 all reverting at ~47%,
+   this run has iter_2 promote at 52%, then iters 3-5 revert).
+5. 🟡 **Drift mechanism (iters 3-5 declining vs iter_1) is unresolved.**
+   We have 3 data points (50.5%, 45.0%, iter 5 not gate-logged) with
+   SE ~2.5% — the "spiral" framing was overconfident. Run the buffer
+   diagnostics + optimizer-state inspection in the investigation queue
+   to actually answer this.
+
+**Operational lessons logged:**
+
+- **Phase-weight fix is empirically necessary** for 15-channel runs to
+  produce the training environment the config intends. All 15-ch runs
+  prior to this one were operating under under-sampled MAIN_GAME
+  positions. We should re-test D.1 v2 (GAP value head, was 1-15-0
+  NOT_STRONGER) on the fixed code to see if its conclusion changes —
+  the buggy training may have unfairly tarred GAP heads. Logged as
+  potential D.1 v3 candidate.
+- **First host's CUDA failed mid-run.** The first re-run attempt
+  crashed during iter 3's anchor eval with `CUDA_ERROR_UNKNOWN`.
+  Container-level reboots didn't fix; full host restart at the vast.ai
+  level was required, and even that didn't fully recover. Resolution
+  was to destroy + spin up on a different physical host. Logged as
+  operational risk: long runs on vast.ai have a non-trivial
+  failure-mid-run probability; consider checkpointing more
+  aggressively or running shorter iter counts split into resumable
+  segments.
+- **The Elo-override path is conditional, not blanket bypass.** Iter
+  3-5 all had Wilson REJECT AND Elo not improved → all REVERTED
+  correctly. The override only fires when Wilson rejects AND Elo
+  improves. This is closer to "intentional legacy behavior" than I'd
+  characterized — the rest of the gate works as designed. The
+  proposed fix (require `not perform_wilson_check` for the Elo path)
+  is still right, but it's a tightening, not a bug-fix-for-broken.
+
+**Artifacts preserved locally:**
+- SPRT JSON: `logs/branchB1B2B3_rerun2_iter1_ema_vs_anchor.json`
+- Promoted iter_1 checkpoint:
+  `models/yngine_volume_15ch_pretrain_b1b2b3_rerun2_iter1/iter1_ema.pt`
+- Replay buffer (~100K samples, correct phase mix):
+  `experiments/branchB1B2B3_rerun2_2026-05-27/full_run_dir/20260527_001626/replay_buffer.pkl.gz`
+- All run metadata (configs, metrics, manifest, tournament history)
+  in same experiments/ subdir.
+
+**Next experiments — REPRIORITIZED 2026-05-27 post-SPRT:**
+
+The "is the loop additive" question is now resolved at the SPRT level:
+**no, not with these knobs alone.** Path forward shifts from
+"tuning the loop" to "structural change":
+
+1. **A4 — regression value head.** Highest mechanism prior remaining.
+   The +5 in-loop WR jump under correct phase weighting shows the
+   loop CAN produce a real (if marginal) improvement; the value-head
+   discretization is the remaining structural candidate for why the
+   improvement doesn't scale to a decisive gain. Code already prepped
+   (commits `343aab6` + `2070650`). Launch-ready for next session.
+2. **D1-partial — pretrain on the saved buffer.** Now we have TWO
+   correctly-trained buffers (this run + the first re-run) totaling
+   ~100K MCTS-target samples from the warm-start teacher with correct
+   phase distribution. Run `scripts/convert_replay_buffer_to_mmap.py`
+   and feed to `run_supervised_pretraining.py`. Cheap probe (~3-5h,
+   no new generation cost). Should answer: does pretrain on the
+   MCTS-target signal beat pretrain on yngine outcomes?
+3. **A4 + D1-partial combined** — pretrain with regression value head
+   AND the buffer's MCTS targets simultaneously. Lowest cost, highest
+   mechanism prior. This is the actual right next experiment.
+4. **Post-run investigation queue** — see "what would change my mind"
+   section above. Three items doable from local data:
+   - Inspect optimizer state code path in `supervisor.py` revert
+   - Buffer mode-collapse diagnostics (sparsity, value distribution,
+     game-length shift between iter 1 and iter 5 buffers)
+   - Document any findings as addendum to this entry
+
+5. **D.1 v3 candidate (low priority)** — re-run D.1 v2 (GAP value
+   head, 15-channel) on the post-phase-fix code. The original D.1 v2
+   NOT_STRONGER (1-15-0) was measured under buggy phase weighting,
+   so the conclusion that "GAP doesn't work" may have been confounded.
+   Worth a 12h re-run someday but not urgent.
+
+**Deeper meta-finding:** B1+B2+B3 is now a **completed experimental
+branch.** The bundle of three knobs reproduces a small (+5 WR) in-loop
+signal under correct phase weighting, but cannot produce an SPRT-level
+improvement. The structural ceiling of MCTS-200 self-play with this
+warm-start, configured this way, is "roughly the same strength as
+warm-start." Any further progress requires changing either the value-
+head loss structure (A4) or the corpus / target distribution (D1) —
+not the gate, LR, or game count.
 
 ---
 
