@@ -187,6 +187,171 @@ body.line-mode .mode-toggle {
 }
 body.line-mode .controls .actions { opacity: 0.45; pointer-events: none; }
 
+/* ---------- Game mode ---------- */
+
+.game-setup-block {
+  border-top: 1px solid var(--rule);
+}
+.game-setup-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* Numbered-step layout: small chip on the left, field on the right.
+   Makes the sequence (model → strength → spoilers → side → start)
+   visually obvious. */
+.game-setup-step {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 6px 0;
+}
+.game-setup-step .step-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 18px;
+}
+.game-spoilers-field span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.game-spoilers-field small {
+  display: block;
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.game-status-block {
+  border-top: 1px solid var(--rule);
+}
+.game-status-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.game-meta { display: flex; flex-direction: column; gap: 2px; }
+.game-meta-label {
+  font-size: 10px;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.game-meta span:last-child {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.game-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #eff5ff;
+  border: 1px solid #93b8f6;
+  border-radius: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--accent);
+}
+.thinking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinking-pulse {
+  0%, 60%, 100% { opacity: 0.3; transform: scale(0.85); }
+  30% { opacity: 1; transform: scale(1.1); }
+}
+.thinking-text {
+  margin-left: 4px;
+  font-weight: 500;
+}
+
+.game-result {
+  margin-top: 10px;
+  padding: 14px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  text-align: center;
+}
+.game-result-banner {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+.game-result-banner.won { color: var(--positive); }
+.game-result-banner.lost { color: var(--negative); }
+.game-result-banner.draw { color: var(--ink-dim); }
+.game-result-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.game-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+  gap: 10px;
+}
+.game-spoilers-toggle-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  user-select: none;
+}
+.game-controls button { padding: 4px 10px; font-size: 12px; }
+
+/* In Game mode, the main sidebar's setup/analysis controls don't apply —
+   the game is self-contained. Hide them entirely (they reappear when the
+   user switches back to Setup or Play). The game-setup form contains its
+   own model dropdown + sim controls during the setup phase. */
+body.mode-game label.field:has(#model),
+body.mode-game label.field:has(#phase),
+body.mode-game .side-field,
+body.mode-game .derived-stats,
+body.mode-game label.field:has(#num-sims),
+body.mode-game .controls .actions {
+  display: none;
+}
+
+/* Analysis panel hidden when spoilers off — UNLESS we're in a capture
+   phase (ROW_COMPLETION / RING_REMOVAL), where the panel is the human's
+   only way to pick which row/ring to capture. The `force-show-analysis`
+   class is set from JS whenever the current phase is a capture phase. */
+body.mode-game.spoilers-off #result { display: none; }
+body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
+
 /* Step-into-line button on each top-moves row. */
 .top-moves .step-into {
   background: transparent;

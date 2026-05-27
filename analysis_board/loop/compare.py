@@ -1,15 +1,16 @@
-"""Head-to-head comparison of two measurement runs over the SAME positions.
+"""N-way comparison of measurement runs over the same set of positions.
 
-For each position present in both files, compare key metrics and surface:
-- aggregate deltas per sim budget
-- per-phase breakdown of how alignment shifted
-- positions where the two models materially disagree (high-EV inspection)
+Generalizes the previous 2-way compare.py: pass `--input <label> <path>`
+repeatedly for as many models as you want to compare. The report shows
+one overview table per metric (rows = sim budgets, cols = models), a
+per-phase breakdown per metric at the top budget, pairwise position-level
+improvements/regressions for every (A, B) pair, and overlaid charts.
 
 Usage:
     python analysis_board/loop/compare.py \
-        --a analysis_board/loop/runs/<ts>/measurements_anchor.jsonl \
-        --b analysis_board/loop/runs/<ts>/measurements_iter4.jsonl \
-        --label-a anchor --label-b iter4 \
+        --input anchor analysis_board/loop/runs/<ts>/measurements_anchor.jsonl \
+        --input iter1  analysis_board/loop/runs/<ts>/measurements_iter1.jsonl \
+        --input iter4  analysis_board/loop/runs/<ts>/measurements_iter4.jsonl \
         --out-dir analysis_board/loop/runs/<ts>/compare_report/
 """
 from __future__ import annotations
@@ -18,8 +19,9 @@ import argparse
 import json
 import logging
 from collections import defaultdict
+from itertools import combinations
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -30,8 +32,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("compare")
 
 
-def load(path: Path) -> Dict[str, Dict[str, Any]]:
-    by_id: Dict[str, Dict[str, Any]] = {}
+# ---------------------------------------------------------------------------
+# Loading + filtering
+# ---------------------------------------------------------------------------
+
+def load_jsonl(path: Path) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
     with path.open() as f:
         for line in f:
             line = line.strip()
@@ -40,262 +46,428 @@ def load(path: Path) -> Dict[str, Dict[str, Any]]:
             r = json.loads(line)
             if not r.get("ok") or r.get("id") is None:
                 continue
-            by_id[r["id"]] = r
-    return by_id
+            out[r["id"]] = r
+    return out
 
+
+# ---------------------------------------------------------------------------
+# Per-row metric extractors (factored so any metric can be plugged in)
+# ---------------------------------------------------------------------------
+
+def _at_budget(row: Dict[str, Any], sim: int) -> Optional[Dict[str, Any]]:
+    """Get the mcts block at this sim budget, or None if missing/errored."""
+    key = str(sim)
+    cell = row.get("mcts", {}).get(key)
+    if not cell or "error" in cell:
+        return None
+    return cell
+
+
+_METRICS: List[Tuple[str, Callable[[Dict[str, Any]], Optional[float]], str, Optional[str]]] = [
+    # (label, extractor, fmt, direction).
+    # Direction interpretation for highlighting the "best" cell:
+    #   "lower"  → lower value is better (less misalignment, less divergence)
+    #   "higher" → higher value is better (rare here — most metrics measure error)
+    #   None     → no monotonic direction (e.g., value_gain — closer to zero is
+    #              the alignment signal, but both extremes are informative failure
+    #              modes, so we don't bold either side)
+    ("mean rank_of_final_best", lambda c: c.get("rank_of_final_best"), "{:.2f}", "lower"),
+    ("% misaligned (rank≥3)",   lambda c: 1.0 if (c.get("rank_of_final_best") or 0) >= 3 else 0.0,
+                                 "{:.1%}", "lower"),
+    # value_gain: policy-vs-MCTS value delta. Positive = policy missed value
+    # MCTS found; negative = MCTS picks land in positions the value head
+    # rates worse than raw-policy picks (interesting failure mode). Closer
+    # to zero = better policy/value/MCTS alignment. No monotonic "better".
+    ("mean value_gain_over_raw", lambda c: c.get("value_gain_over_raw"), "{:+.3f}", None),
+    # % costly: fraction of positions where the policy head missed ≥0.1 of
+    # value vs what search found. Lower = policy head is more often making
+    # value-equivalent picks to MCTS.
+    ("% costly (gain≥0.1)",     lambda c: 1.0 if (c.get("value_gain_over_raw") or 0) >= 0.1 else 0.0,
+                                 "{:.1%}", "lower"),
+    ("% opposite-sign divergence", lambda c: float(c["opposite_sign_divergence"])
+                                              if c.get("opposite_sign_divergence") is not None else None,
+                                 "{:.1%}", "lower"),
+    ("mean best_move_value",    lambda c: c.get("best_move_value"), "{:+.3f}", None),
+    ("mean root_q",             lambda c: c.get("root_q"), "{:+.3f}", None),
+]
+
+
+def aggregate(rows: List[Dict[str, Any]], sim: int, extractor) -> Optional[float]:
+    vals = []
+    for r in rows:
+        cell = _at_budget(r, sim)
+        if cell is None:
+            continue
+        v = extractor(cell)
+        if v is None:
+            continue
+        vals.append(float(v))
+    return float(np.mean(vals)) if vals else None
+
+
+# ---------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------
+
+def metric_table(
+    rows_by_label: Dict[str, List[Dict[str, Any]]],
+    sims: List[int],
+    label_text: str,
+    extractor,
+    fmt: str,
+    direction: Optional[str],
+) -> str:
+    """One table per metric: rows = sim budgets, cols = labels."""
+    labels = list(rows_by_label.keys())
+    direction_tag = ""
+    if direction == "lower":
+        direction_tag = " _(lower is better)_"
+    elif direction == "higher":
+        direction_tag = " _(higher is better)_"
+
+    header = "| Budget | " + " | ".join(labels) + " |"
+    sep = "|---:|" + "".join(["---:|" for _ in labels])
+    lines = [f"### {label_text}{direction_tag}", "", header, sep]
+
+    # Find the best per row for highlighting (bold the cell)
+    for sim in sims:
+        cells = []
+        raw_vals: List[Optional[float]] = []
+        for label in labels:
+            v = aggregate(rows_by_label[label], sim, extractor)
+            raw_vals.append(v)
+        # Determine the "best" value to bold, if direction is set
+        best_idx = None
+        valid = [(i, v) for i, v in enumerate(raw_vals) if v is not None]
+        if valid and direction in ("lower", "higher"):
+            if direction == "lower":
+                best_idx = min(valid, key=lambda x: x[1])[0]
+            else:
+                best_idx = max(valid, key=lambda x: x[1])[0]
+        for i, v in enumerate(raw_vals):
+            if v is None:
+                cells.append("—")
+            else:
+                txt = fmt.format(v)
+                if i == best_idx:
+                    txt = f"**{txt}**"
+                cells.append(txt)
+        lines.append(f"| {sim} sims | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def per_phase_at_top(
+    rows_by_label: Dict[str, List[Dict[str, Any]]],
+    top_sim: int,
+) -> str:
+    """For each phase, show mean rank_of_final_best per label at the top budget."""
+    labels = list(rows_by_label.keys())
+    # Collect by phase
+    by_phase: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for label, rows in rows_by_label.items():
+        for r in rows:
+            cell = _at_budget(r, top_sim)
+            if cell is None:
+                continue
+            v = cell.get("rank_of_final_best")
+            if v is None:
+                continue
+            by_phase[r["phase"]][label].append(float(v))
+    if not by_phase:
+        return "_(no MCTS data at top budget)_"
+
+    header = "| Phase | N | " + " | ".join(f"mean rank ({l})" for l in labels) + " |"
+    sep = "|---|---:|" + "".join(["---:|" for _ in labels])
+    lines = [header, sep]
+    for phase in sorted(by_phase.keys()):
+        ns = [len(by_phase[phase].get(l, [])) for l in labels]
+        n = min(ns) if ns else 0
+        if n == 0:
+            continue
+        cells = [phase, str(n)]
+        # Best per row
+        means = [float(np.mean(by_phase[phase].get(l, [0]))) if by_phase[phase].get(l) else None
+                 for l in labels]
+        valid = [(i, m) for i, m in enumerate(means) if m is not None]
+        best_idx = min(valid, key=lambda x: x[1])[0] if valid else None
+        for i, m in enumerate(means):
+            if m is None:
+                cells.append("—")
+            else:
+                txt = f"{m:.2f}"
+                if i == best_idx:
+                    txt = f"**{txt}**"
+                cells.append(txt)
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def pairwise_position_deltas(
+    rows_by_label: Dict[str, List[Dict[str, Any]]],
+    top_sim: int,
+    label_a: str,
+    label_b: str,
+    k: int = 10,
+) -> str:
+    """Per-position rank deltas for one (a, b) pair."""
+    by_id_a = {r["id"]: r for r in rows_by_label[label_a]}
+    by_id_b = {r["id"]: r for r in rows_by_label[label_b]}
+    shared = sorted(set(by_id_a) & set(by_id_b))
+    deltas = []
+    key = str(top_sim)
+    for pid in shared:
+        ra = by_id_a[pid]
+        rb = by_id_b[pid]
+        ca = _at_budget(ra, top_sim)
+        cb = _at_budget(rb, top_sim)
+        if not ca or not cb:
+            continue
+        rank_a = ca.get("rank_of_final_best", 0)
+        rank_b = cb.get("rank_of_final_best", 0)
+        deltas.append({
+            "id": pid,
+            "phase": ra["phase"],
+            "rank_a": rank_a,
+            "rank_b": rank_b,
+            "d_rank": rank_b - rank_a,
+            "gain_a": ca.get("value_gain_over_raw"),
+            "gain_b": cb.get("value_gain_over_raw"),
+        })
+
+    # B improves on A: A was misaligned (rank≥3), B's rank dropped by ≥3
+    improvements = sorted(
+        [d for d in deltas if d["rank_a"] >= 3 and d["d_rank"] <= -3],
+        key=lambda d: d["d_rank"],
+    )[:k]
+    # B regresses from A: A was aligned (rank≤1), B's rank jumped by ≥5
+    regressions = sorted(
+        [d for d in deltas if d["rank_a"] <= 1 and d["d_rank"] >= 5],
+        key=lambda d: -d["d_rank"],
+    )[:k]
+
+    def fmt_block(rows, title):
+        out = [f"**{title}**", "",
+               f"| id | phase | rank ({label_a}) | rank ({label_b}) | Δ rank | gain ({label_a}) | gain ({label_b}) |",
+               "|---|---|---:|---:|---:|---:|---:|"]
+        for d in rows:
+            ga = f"{d['gain_a']:+.3f}" if isinstance(d['gain_a'], (int, float)) else "—"
+            gb = f"{d['gain_b']:+.3f}" if isinstance(d['gain_b'], (int, float)) else "—"
+            out.append(f"| `{d['id']}` | {d['phase']} | {d['rank_a']} | {d['rank_b']} | "
+                       f"{d['d_rank']:+d} | {ga} | {gb} |")
+        return "\n".join(out)
+
+    n_imp = sum(1 for d in deltas if d["rank_a"] >= 3 and d["d_rank"] <= -3)
+    n_reg = sum(1 for d in deltas if d["rank_a"] <= 1 and d["d_rank"] >= 5)
+
+    return "\n\n".join([
+        f"#### {label_a} → {label_b}",
+        f"_(N shared = {len(shared)}, improvements = {n_imp}, regressions = {n_reg})_",
+        fmt_block(improvements, f"{label_b} improved on {label_a} (top {min(k, len(improvements))})"),
+        fmt_block(regressions, f"{label_b} regressed from {label_a} (top {min(k, len(regressions))})"),
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Charts
+# ---------------------------------------------------------------------------
+
+_PALETTE = ["#2563eb", "#b91c1c", "#15803d", "#7c3aed", "#b45309", "#0891b2"]
+
+
+def trajectory_chart(
+    rows_by_label: Dict[str, List[Dict[str, Any]]],
+    sims: List[int],
+    extractor,
+    metric_name: str,
+    out_path: Path,
+    direction: Optional[str] = None,
+) -> None:
+    """One line per model showing the metric across sim budgets."""
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    xs = [s for s in sims if s > 0]
+    for i, (label, rows) in enumerate(rows_by_label.items()):
+        ys = [aggregate(rows, s, extractor) for s in xs]
+        ys = [y if y is not None else float("nan") for y in ys]
+        ax.plot(xs, ys, "o-", color=_PALETTE[i % len(_PALETTE)], label=label, linewidth=2)
+    ax.set_xlabel("MCTS sims")
+    ax.set_ylabel(metric_name)
+    ax.set_title(f"{metric_name} vs sim budget")
+    ax.set_xscale("symlog", linthresh=100)
+    ax.legend(loc="best")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def rank_distribution_overlay(
+    rows_by_label: Dict[str, List[Dict[str, Any]]],
+    top_sim: int,
+    out_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    all_ranks: List[int] = []
+    by_label: Dict[str, List[int]] = {}
+    for label, rows in rows_by_label.items():
+        ranks = []
+        for r in rows:
+            cell = _at_budget(r, top_sim)
+            if cell is None:
+                continue
+            v = cell.get("rank_of_final_best")
+            if v is not None:
+                ranks.append(int(v))
+        by_label[label] = ranks
+        all_ranks.extend(ranks)
+    if not all_ranks:
+        return
+    bins = np.arange(0, max(all_ranks) + 2) - 0.5
+    for i, (label, ranks) in enumerate(by_label.items()):
+        ax.hist(ranks, bins=bins, alpha=0.45, color=_PALETTE[i % len(_PALETTE)],
+                label=label, edgecolor="white", linewidth=0.5)
+    ax.axvline(2.5, color="#b45309", linestyle="--", linewidth=1, label="rank≥3 (misaligned)")
+    ax.set_xlabel(f"rank_of_final_best at {top_sim} sims")
+    ax.set_ylabel("# positions")
+    ax.set_title("Alignment distribution comparison")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def gain_distribution_overlay(
+    rows_by_label: Dict[str, List[Dict[str, Any]]],
+    top_sim: int,
+    out_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    by_label: Dict[str, List[float]] = {}
+    all_gains: List[float] = []
+    for label, rows in rows_by_label.items():
+        gains = []
+        for r in rows:
+            cell = _at_budget(r, top_sim)
+            if cell is None:
+                continue
+            v = cell.get("value_gain_over_raw")
+            if v is not None:
+                gains.append(float(v))
+        by_label[label] = gains
+        all_gains.extend(gains)
+    if not all_gains:
+        return
+    bins = np.linspace(min(all_gains) - 0.05, max(all_gains) + 0.05, 30)
+    for i, (label, gains) in enumerate(by_label.items()):
+        ax.hist(gains, bins=bins, alpha=0.45, color=_PALETTE[i % len(_PALETTE)],
+                label=label, edgecolor="white", linewidth=0.5)
+    ax.axvline(0, color="#999", linestyle="-", linewidth=0.7)
+    ax.axvline(0.1, color="#b45309", linestyle="--", linewidth=1, label="costly threshold")
+    ax.set_xlabel(f"value_gain_over_raw at {top_sim} sims")
+    ax.set_ylabel("# positions")
+    ax.set_title("Cost-of-misalignment distribution comparison")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--a", required=True, type=Path)
-    p.add_argument("--b", required=True, type=Path)
-    p.add_argument("--label-a", default="A")
-    p.add_argument("--label-b", default="B")
+    p.add_argument(
+        "--input", action="append", nargs=2, metavar=("LABEL", "PATH"), required=True,
+        help="repeatable: --input <label> <path-to-measurements.jsonl>. Provide 2 or more.",
+    )
     p.add_argument("--out-dir", required=True, type=Path)
     args = p.parse_args()
+
+    if len(args.input) < 2:
+        raise SystemExit("Need at least 2 --input entries to compare.")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     charts_dir = args.out_dir / "charts"
     charts_dir.mkdir(exist_ok=True)
 
-    a = load(args.a)
-    b = load(args.b)
-    shared = sorted(set(a.keys()) & set(b.keys()))
-    log.info("%d positions in A, %d in B, %d shared", len(a), len(b), len(shared))
-    if not shared:
-        log.error("no shared positions")
-        return
+    # Load all
+    raw_by_label: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for label, path in args.input:
+        rows = load_jsonl(Path(path))
+        raw_by_label[label] = rows
+        log.info("loaded %d rows for %s from %s", len(rows), label, path)
 
-    # Recover sim budgets (assume both runs share them).
-    sims = sorted(int(k) for k in a[shared[0]]["mcts"].keys())
-    top_sim = max(sims)
+    # Intersect IDs so every model has the same position set (apples-to-apples)
+    id_sets = [set(d.keys()) for d in raw_by_label.values()]
+    shared_ids = sorted(set.intersection(*id_sets))
+    log.info("shared positions across all inputs: %d", len(shared_ids))
+    if not shared_ids:
+        raise SystemExit("No positions are common across all inputs.")
+
+    rows_by_label: Dict[str, List[Dict[str, Any]]] = {
+        label: [d[i] for i in shared_ids] for label, d in raw_by_label.items()
+    }
+
+    # Recover sim budgets from the first model's first row
+    first_label = next(iter(rows_by_label))
+    sims = sorted(int(k) for k in rows_by_label[first_label][0]["mcts"].keys())
+    top_sim = max(sims) if sims else 0
     log.info("sim budgets: %s  top=%d", sims, top_sim)
 
-    rows_a = [a[i] for i in shared]
-    rows_b = [b[i] for i in shared]
-
-    # --- Aggregate per-budget table ---
-    def stats(rows: List[Dict[str, Any]], sim: int) -> Tuple[float, float, float, float, float]:
-        key = str(sim)
-        ranks = [r["mcts"][key]["rank_of_final_best"] for r in rows
-                 if key in r["mcts"] and "error" not in r["mcts"][key]]
-        gains = [r["mcts"][key].get("value_gain_over_raw") for r in rows
-                 if key in r["mcts"] and "error" not in r["mcts"][key]]
-        gains = [g for g in gains if g is not None]
-        bvs = [r["mcts"][key]["best_move_value"] for r in rows
-               if key in r["mcts"] and "error" not in r["mcts"][key]
-               and r["mcts"][key]["best_move_value"] is not None]
-        misaligned = sum(1 for r in ranks if r >= 3) / len(ranks) if ranks else 0.0
-        costly = sum(1 for g in gains if g >= 0.1) / len(gains) if gains else 0.0
-        mean_rank = float(np.mean(ranks)) if ranks else 0.0
-        mean_gain = float(np.mean(gains)) if gains else 0.0
-        mean_bv = float(np.mean(bvs)) if bvs else 0.0
-        return mean_rank, misaligned, mean_gain, costly, mean_bv
-
-    overview_lines = [
-        f"## Overview (N={len(shared)})",
-        "",
-        f"| Budget | mean rank | %misaligned (≥3) | mean value_gain | %costly (≥0.1) | mean best_value |",
-        f"|---:|---|---|---|---|---|",
-    ]
-    for sim in sims:
-        ra, ma, ga, ca, ba = stats(rows_a, sim)
-        rb, mb, gb, cb, bb = stats(rows_b, sim)
-        d_rank = rb - ra
-        d_mis = mb - ma
-        d_gain = gb - ga
-        d_costly = cb - ca
-        d_bv = bb - ba
-        arrow = lambda x, good_dir="down": (
-            f" {'↓' if (x < 0) == (good_dir == 'down') else '↑'}{abs(x):.2f}" if abs(x) > 1e-6 else ""
-        )
-        overview_lines.append(
-            f"| **{sim}** | "
-            f"{args.label_a} {ra:.2f} → {args.label_b} {rb:.2f}{arrow(d_rank)} | "
-            f"{ma * 100:.1f}% → {mb * 100:.1f}%{arrow(d_mis * 100)} | "
-            f"{ga:+.3f} → {gb:+.3f}{arrow(d_gain, 'down')} | "
-            f"{ca * 100:.1f}% → {cb * 100:.1f}%{arrow(d_costly * 100)} | "
-            f"{ba:+.3f} → {bb:+.3f}{arrow(d_bv, 'up')} |"
-        )
-
-    # --- Per-phase rank-of-final-best at top sim ---
-    by_phase_a: Dict[str, List[int]] = defaultdict(list)
-    by_phase_b: Dict[str, List[int]] = defaultdict(list)
-    for r in rows_a:
-        key = str(top_sim)
-        if key in r["mcts"] and "error" not in r["mcts"][key]:
-            by_phase_a[r["phase"]].append(r["mcts"][key]["rank_of_final_best"])
-    for r in rows_b:
-        key = str(top_sim)
-        if key in r["mcts"] and "error" not in r["mcts"][key]:
-            by_phase_b[r["phase"]].append(r["mcts"][key]["rank_of_final_best"])
-
-    phase_lines = [
-        f"## rank-of-final-best by phase at {top_sim} sims",
-        "",
-        f"| Phase | N | {args.label_a} mean | {args.label_b} mean | Δ | {args.label_a} %top1 | {args.label_b} %top1 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
-    ]
-    for phase in sorted(set(by_phase_a) | set(by_phase_b)):
-        a_ranks = by_phase_a.get(phase, [])
-        b_ranks = by_phase_b.get(phase, [])
-        n = min(len(a_ranks), len(b_ranks))
-        if n == 0:
-            continue
-        ma = float(np.mean(a_ranks))
-        mb = float(np.mean(b_ranks))
-        pa1 = sum(1 for r in a_ranks if r == 0) / len(a_ranks) * 100
-        pb1 = sum(1 for r in b_ranks if r == 0) / len(b_ranks) * 100
-        d = mb - ma
-        d_str = f"{d:+.2f}"
-        phase_lines.append(
-            f"| {phase} | {n} | {ma:.2f} | {mb:.2f} | {d_str} | {pa1:.0f}% | {pb1:.0f}% |"
-        )
-
-    # --- Per-position deltas: which positions did B improve / regress on? ---
-    top_key = str(top_sim)
-    deltas = []
-    for pid in shared:
-        ra = a[pid]
-        rb = b[pid]
-        if top_key not in ra["mcts"] or top_key not in rb["mcts"]:
-            continue
-        if "error" in ra["mcts"][top_key] or "error" in rb["mcts"][top_key]:
-            continue
-        d_rank = rb["mcts"][top_key]["rank_of_final_best"] - ra["mcts"][top_key]["rank_of_final_best"]
-        ga = ra["mcts"][top_key].get("value_gain_over_raw")
-        gb = rb["mcts"][top_key].get("value_gain_over_raw")
-        d_gain = (gb - ga) if (ga is not None and gb is not None) else None
-        deltas.append({
-            "id": pid,
-            "phase": ra["phase"],
-            "move_number": ra.get("meta", {}).get("move_number"),
-            "n_legal": ra["n_legal_moves"],
-            "rank_a": ra["mcts"][top_key]["rank_of_final_best"],
-            "rank_b": rb["mcts"][top_key]["rank_of_final_best"],
-            "d_rank": d_rank,
-            "gain_a": ga,
-            "gain_b": gb,
-            "d_gain": d_gain,
-        })
-
-    # B improved most over A (rank dropped, i.e., d_rank negative AND was misaligned)
-    improvements = [d for d in deltas if d["rank_a"] >= 3 and d["d_rank"] <= -3]
-    regressions = [d for d in deltas if d["rank_a"] <= 1 and d["d_rank"] >= 5]
-
-    improvements.sort(key=lambda d: d["d_rank"])
-    regressions.sort(key=lambda d: -d["d_rank"])
-
-    def render_top(rows, label):
-        out = [
-            f"## {label}",
-            "",
-            f"| id | phase | move # | n_legal | rank ({args.label_a}) | rank ({args.label_b}) | Δ rank | gain ({args.label_a}) | gain ({args.label_b}) |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
-        ]
-        for d in rows[:10]:
-            ga = f"{d['gain_a']:+.3f}" if isinstance(d['gain_a'], (int, float)) else "—"
-            gb = f"{d['gain_b']:+.3f}" if isinstance(d['gain_b'], (int, float)) else "—"
-            out.append(
-                f"| `{d['id']}` | {d['phase']} | {d['move_number'] or '—'} | "
-                f"{d['n_legal']} | {d['rank_a']} | {d['rank_b']} | "
-                f"{d['d_rank']:+d} | {ga} | {gb} |"
-            )
-        return "\n".join(out)
-
     # --- Charts ---
-    # Scatter: rank_a vs rank_b
-    fig, ax = plt.subplots(figsize=(6, 6))
-    xa = [d["rank_a"] for d in deltas]
-    xb = [d["rank_b"] for d in deltas]
-    ax.scatter(xa, xb, alpha=0.5, s=22, color="#2563eb")
-    lim = max(max(xa, default=0), max(xb, default=0)) + 1
-    ax.plot([0, lim], [0, lim], color="#999", linestyle="--", linewidth=1, label="no change")
-    ax.set_xlabel(f"rank_of_final_best — {args.label_a}")
-    ax.set_ylabel(f"rank_of_final_best — {args.label_b}")
-    ax.set_title(f"Per-position alignment shift at {top_sim} sims")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(charts_dir / "rank_scatter.png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
+    for label_text, extractor, fmt, direction in _METRICS:
+        # Trajectory chart per metric
+        slug = label_text.lower().replace(" ", "_").replace("%", "pct").replace("≥", "ge").replace("(", "").replace(")", "")
+        trajectory_chart(rows_by_label, sims, extractor, label_text,
+                         charts_dir / f"trajectory_{slug}.png", direction)
+    rank_distribution_overlay(rows_by_label, top_sim, charts_dir / "rank_distribution.png")
+    gain_distribution_overlay(rows_by_label, top_sim, charts_dir / "gain_distribution.png")
 
-    # Histograms of rank-of-final-best, overlaid
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ranks_a_top = [r["mcts"][top_key]["rank_of_final_best"] for r in rows_a
-                   if top_key in r["mcts"] and "error" not in r["mcts"][top_key]]
-    ranks_b_top = [r["mcts"][top_key]["rank_of_final_best"] for r in rows_b
-                   if top_key in r["mcts"] and "error" not in r["mcts"][top_key]]
-    bins = np.arange(0, max(max(ranks_a_top, default=0), max(ranks_b_top, default=0)) + 2) - 0.5
-    ax.hist(ranks_a_top, bins=bins, alpha=0.6, color="#2563eb", label=args.label_a)
-    ax.hist(ranks_b_top, bins=bins, alpha=0.6, color="#b91c1c", label=args.label_b)
-    ax.axvline(2.5, color="#b45309", linestyle="--", linewidth=1, label="rank≥3 (misaligned)")
-    ax.set_xlabel("rank_of_final_best")
-    ax.set_ylabel("# positions")
-    ax.set_title(f"Alignment distribution at {top_sim} sims")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(charts_dir / "rank_distribution.png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-    # Value gain histograms, overlaid
-    fig, ax = plt.subplots(figsize=(8, 4))
-    gains_a_top = [r["mcts"][top_key]["value_gain_over_raw"] for r in rows_a
-                   if top_key in r["mcts"] and "error" not in r["mcts"][top_key]
-                   and r["mcts"][top_key]["value_gain_over_raw"] is not None]
-    gains_b_top = [r["mcts"][top_key]["value_gain_over_raw"] for r in rows_b
-                   if top_key in r["mcts"] and "error" not in r["mcts"][top_key]
-                   and r["mcts"][top_key]["value_gain_over_raw"] is not None]
-    bins = np.linspace(
-        min(min(gains_a_top), min(gains_b_top)),
-        max(max(gains_a_top), max(gains_b_top)),
-        25,
-    )
-    ax.hist(gains_a_top, bins=bins, alpha=0.6, color="#2563eb", label=args.label_a)
-    ax.hist(gains_b_top, bins=bins, alpha=0.6, color="#b91c1c", label=args.label_b)
-    ax.axvline(0.1, color="#b45309", linestyle="--", linewidth=1, label="costly threshold")
-    ax.axvline(0, color="#999", linestyle="-", linewidth=0.7)
-    ax.set_xlabel("value_gain_over_raw")
-    ax.set_ylabel("# positions")
-    ax.set_title(f"Cost-of-misalignment distribution at {top_sim} sims")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(charts_dir / "gain_distribution.png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-    # --- Compose markdown report ---
+    # --- Markdown report ---
     md = [
-        f"# Comparison: {args.label_a} vs {args.label_b}",
+        "# N-way comparison report",
         "",
-        f"- A: `{args.a}` ({args.label_a})",
-        f"- B: `{args.b}` ({args.label_b})",
-        f"- Shared positions: {len(shared)}",
+        f"- Inputs: {len(args.input)}",
+        f"- Shared positions: {len(shared_ids)}",
         f"- Sim budgets: {sims}",
-        f"- Top budget: {top_sim}",
+        f"- Top budget for headline metrics: {top_sim}",
         "",
-        *overview_lines,
-        "",
-        *phase_lines,
-        "",
-        f"## {args.label_b} improves on {args.label_a} (top 10)",
-        f"",
-        f"Positions where {args.label_a} was misaligned (rank≥3) AND {args.label_b}'s rank dropped by ≥3.",
-        "",
-        render_top(improvements, f"{args.label_b} fixed these"),
-        "",
-        f"## {args.label_b} regresses from {args.label_a} (top 10)",
-        "",
-        f"Positions where {args.label_a} was aligned (rank≤1) AND {args.label_b}'s rank jumped by ≥5.",
-        "",
-        render_top(regressions, f"{args.label_b} broke these"),
-        "",
-        "## Charts",
-        "",
-        "![rank scatter](charts/rank_scatter.png)",
-        "",
-        "![rank distribution](charts/rank_distribution.png)",
-        "",
-        "![gain distribution](charts/gain_distribution.png)",
+        "## Models",
         "",
     ]
+    for label, path in args.input:
+        md.append(f"- **{label}**: `{path}`")
+    md.extend(["", "## Per-metric overview", "",
+               "Each table shows the metric at each sim budget, one column per model. Best value in each row is bolded."])
+    for label_text, extractor, fmt, direction in _METRICS:
+        md.append("")
+        md.append(metric_table(rows_by_label, sims, label_text, extractor, fmt, direction))
+        md.append("")
+
+    md.extend([f"## Per-phase rank_of_final_best at {top_sim} sims", "",
+               per_phase_at_top(rows_by_label, top_sim), ""])
+
+    md.extend(["## Pairwise position-level changes",
+               "",
+               f"Each pair shows positions where the *second* model materially improved or regressed vs the first, at {top_sim} sims. 'Improved' = first was misaligned (rank≥3) and second dropped rank by ≥3. 'Regressed' = first was aligned (rank≤1) and second jumped rank by ≥5.",
+               ""])
+    labels = list(rows_by_label.keys())
+    for a, b in combinations(labels, 2):
+        md.append(pairwise_position_deltas(rows_by_label, top_sim, a, b, k=10))
+        md.append("")
+
+    md.append("## Charts")
+    md.append("")
+    md.append("![Rank distribution](charts/rank_distribution.png)")
+    md.append("")
+    md.append("![Gain distribution](charts/gain_distribution.png)")
+    md.append("")
+    for label_text, _, _, _ in _METRICS:
+        slug = label_text.lower().replace(" ", "_").replace("%", "pct").replace("≥", "ge").replace("(", "").replace(")", "")
+        md.append(f"### Trajectory: {label_text}")
+        md.append(f"![{label_text}](charts/trajectory_{slug}.png)")
+        md.append("")
 
     out_path = args.out_dir / "report.md"
     out_path.write_text("\n".join(md))

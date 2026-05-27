@@ -101,6 +101,19 @@ def pick_encoder(state_tensor: np.ndarray):
     raise ValueError(f"unsupported channel count: {ch}")
 
 
+def _move_bucket(move_no: int) -> str:
+    """Coarse move-number bucket. Matches the boundaries used in report.py
+    (see main_game_breakdown bucket_edges) so sampling and reporting agree
+    on what "early vs mid vs late MAIN_GAME" means."""
+    edges = [11, 20, 30, 45, 60, 80]
+    for i in range(len(edges) - 1):
+        if edges[i] <= move_no < edges[i + 1]:
+            return f"{edges[i]}-{edges[i + 1] - 1}"
+    if move_no >= edges[-1]:
+        return f"{edges[-1]}+"
+    return f"<{edges[0]}"
+
+
 def sample(
     buf: Dict[str, Any],
     n: int,
@@ -108,8 +121,22 @@ def sample(
     phase_filter: Iterable[str] | None = None,
     min_move_number: int = 0,
     seed: int = 0,
+    stratify: str | None = None,
+    per_bucket: int | None = None,
 ) -> List[Dict[str, Any]]:
-    """Randomly sample N positions matching filters."""
+    """Sample N positions matching filters.
+
+    By default does uniform random sampling. When ``stratify`` is set
+    (``"phase"`` or ``"move_number"`` or ``"both"``), positions are grouped
+    by the chosen key(s) and ``per_bucket`` (or N // num_buckets) drawn
+    from each. Buckets with fewer than ``per_bucket`` candidates contribute
+    everything they have — strictly equal bucket sizes are not always
+    achievable, but the result is much more representative than uniform
+    sampling on a skewed buffer.
+
+    Move-number bucketing matches the boundaries used in report.py's
+    main_game_breakdown so sampling and reporting line up.
+    """
     total = len(buf["states"])
     indices = list(range(total))
     if phase_filter:
@@ -122,7 +149,44 @@ def sample(
         return []
 
     rng = random.Random(seed)
-    chosen = rng.sample(indices, min(n, len(indices)))
+
+    if stratify in ("phase", "move_number", "both"):
+        # Decode each candidate's tensor to recover the REAL phase from the
+        # state — the buffer's `phases` field is unreliable (stale label
+        # bug, all show RING_PLACEMENT despite mixed actual distribution).
+        # We only need this once during sampling so the per-index cost is
+        # bounded; encoders share state with the loader anyway.
+        encoder = pick_encoder(buf["states"][indices[0]])
+        from collections import defaultdict
+        buckets: Dict[str, List[int]] = defaultdict(list)
+        for i in indices:
+            try:
+                gs = encoder.decode_state(buf["states"][i])
+            except Exception:
+                continue
+            move_no = int(buf["move_numbers"][i])
+            phase = gs.phase.name
+            if stratify == "phase":
+                key = phase
+            elif stratify == "move_number":
+                key = _move_bucket(move_no)
+            else:  # both
+                key = f"{phase}:{_move_bucket(move_no)}"
+            buckets[key].append(i)
+        log.info("stratify=%s — %d buckets", stratify, len(buckets))
+        for k in sorted(buckets):
+            log.info("  bucket %s: %d candidates", k, len(buckets[k]))
+
+        if per_bucket is None:
+            per_bucket = max(1, n // max(1, len(buckets)))
+        chosen: List[int] = []
+        for k in sorted(buckets):
+            pool = buckets[k]
+            chosen.extend(rng.sample(pool, min(per_bucket, len(pool))))
+        log.info("drew %d positions from %d buckets (target ~%d/bucket)",
+                 len(chosen), len(buckets), per_bucket)
+    else:
+        chosen = rng.sample(indices, min(n, len(indices)))
     chosen.sort()  # deterministic order in the output
 
     encoder = pick_encoder(buf["states"][chosen[0]])
@@ -157,6 +221,12 @@ def main() -> None:
     p.add_argument("--min-move", type=int, default=0,
                    help="skip positions with move_number < this")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--stratify", default=None, choices=[None, "phase", "move_number", "both"],
+                   help="stratified sampling — equal-ish draws per bucket of the chosen key. "
+                        "Reads the REAL phase from the state tensor (the buffer's `phases` "
+                        "field is stale / all-RING_PLACEMENT and unreliable).")
+    p.add_argument("--per-bucket", type=int, default=None,
+                   help="positions per stratified bucket; defaults to n / num_buckets when --stratify is set")
     args = p.parse_args()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +234,7 @@ def main() -> None:
     positions = sample(
         buf, args.n,
         phase_filter=args.phase, min_move_number=args.min_move, seed=args.seed,
+        stratify=args.stratify, per_bucket=args.per_bucket,
     )
     with args.out.open("w") as f:
         for pos in positions:

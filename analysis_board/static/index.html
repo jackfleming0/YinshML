@@ -13,6 +13,7 @@
         <div class="mode-toggle" role="tablist">
           <button class="mode-btn active" data-mode="setup" role="tab" aria-selected="true">Setup</button>
           <button class="mode-btn" data-mode="play" role="tab" aria-selected="false">Play</button>
+          <button class="mode-btn" data-mode="game" role="tab" aria-selected="false">Game</button>
         </div>
         <div class="play-controls" id="play-controls" hidden>
           <div class="turn-badge" id="turn-badge" data-side="WHITE">
@@ -157,6 +158,91 @@
         </div>
       </section>
 
+      <section class="block game-setup-block" id="game-setup-block" hidden>
+        <h2 class="game-setup-title">New game</h2>
+
+        <div class="game-setup-step">
+          <span class="step-num">1</span>
+          <label class="field">
+            <span>Engine model</span>
+            <select id="game-model"></select>
+          </label>
+        </div>
+
+        <div class="game-setup-step">
+          <span class="step-num">2</span>
+          <label class="field">
+            <span>Engine strength</span>
+            <select id="game-sims">
+              <option value="200">Quick — 200 sims (~1s/move)</option>
+              <option value="800" selected>Standard — 800 sims (~5s/move)</option>
+              <option value="1600">Strong — 1600 sims (~10s/move)</option>
+              <option value="3200">Deep — 3200 sims (~25s/move)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="game-setup-step">
+          <span class="step-num">3</span>
+          <label class="field game-spoilers-field">
+            <span>
+              <input type="checkbox" id="game-spoilers" />
+              Show engine analysis during play
+            </span>
+            <small>Off (default) hides the top-moves panel + value bars so the engine's picks don't influence yours. Can be toggled mid-game. Capture choices (which row to remove) stay visible regardless — you need them to play.</small>
+          </label>
+        </div>
+
+        <div class="game-setup-step">
+          <span class="step-num">4</span>
+          <label class="field">
+            <span>Your side</span>
+            <select id="game-human-side">
+              <option value="WHITE" selected>White (first to move)</option>
+              <option value="BLACK">Black</option>
+              <option value="random">Random</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="game-start" class="primary">Start game</button>
+        </div>
+      </section>
+
+      <section class="block game-status-block" id="game-status-block" hidden>
+        <div class="game-status-row" id="game-status-row">
+          <div class="game-meta">
+            <span class="game-meta-label">Engine</span>
+            <span id="game-engine-label">—</span>
+          </div>
+          <div class="game-meta">
+            <span class="game-meta-label">You</span>
+            <span id="game-human-label">—</span>
+          </div>
+        </div>
+        <div class="game-thinking" id="game-thinking" hidden>
+          <span class="thinking-dot"></span>
+          <span class="thinking-dot"></span>
+          <span class="thinking-dot"></span>
+          <span class="thinking-text">Engine thinking…</span>
+        </div>
+        <div class="game-result" id="game-result" hidden>
+          <div class="game-result-banner" id="game-result-label">—</div>
+          <div class="game-result-actions">
+            <button id="game-new" class="primary">New game</button>
+            <button id="game-review" class="secondary">Review</button>
+          </div>
+        </div>
+        <div class="game-controls">
+          <label class="game-spoilers-toggle-inline">
+            <input type="checkbox" id="game-spoilers-inline" />
+            Show engine analysis
+          </label>
+          <button id="game-resign" class="secondary">End game</button>
+        </div>
+      </section>
+
       <section class="block result" id="result">
         <div class="status" id="status">Compose a position and click Evaluate.</div>
 
@@ -171,6 +257,7 @@
           <span class="value-num" id="best-value-num">—</span>
         </div>
         <div class="value-help" id="value-help" hidden>
+          Chess convention: <strong>+ means WHITE winning</strong>, <strong>− means BLACK winning</strong>, regardless of whose turn it is.
           <strong>Search avg</strong>: visit-weighted average across all simulated lines (trends to 0 with more sims).
           <strong>Best move</strong>: network value at the position after the top move — closer to "is this winning."
         </div>

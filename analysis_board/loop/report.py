@@ -46,8 +46,8 @@ def fmt_row(values: Iterable, widths: Iterable[int]) -> str:
 def overview_table(rows: List[Dict[str, Any]], sims: List[int]) -> str:
     """Per-budget summary including value-cost-of-misalignment."""
     lines = [
-        "| Budget | N | mean root_q | mean best_move_value | mean rank_of_final_best | %misaligned (rank≥3) | mean value_gain_over_raw | %costly-misalignment (gain≥0.1) | mean wall (s) |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Budget | N | mean root_q | mean best_move_value | mean rank_of_final_best | %misaligned (rank≥3) | mean value_gain_over_raw | %costly-misalignment (gain≥0.1) | %opposite-sign | mean wall (s) |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     # Raw policy row first
     raw_values = [r["raw_policy"]["value"] for r in rows]
@@ -55,7 +55,7 @@ def overview_table(rows: List[Dict[str, Any]], sims: List[int]) -> str:
                 if r["raw_policy"]["best_move_value"] is not None]
     raw_best_mean = f"{np.mean(raw_best):+.3f}" if raw_best else "—"
     lines.append(
-        f"| raw policy | {len(rows)} | {np.mean(raw_values):+.3f} | {raw_best_mean} | — | — | — | — | — |"
+        f"| raw policy | {len(rows)} | {np.mean(raw_values):+.3f} | {raw_best_mean} | — | — | — | — | — | — |"
     )
     for s in sims:
         if s <= 0:
@@ -77,11 +77,17 @@ def overview_table(rows: List[Dict[str, Any]], sims: List[int]) -> str:
         gain_mean = f"{np.mean(gains):+.3f}" if gains else "—"
         # "costly misalignment": value loss ≥ 0.1 from following raw policy
         costly = sum(1 for g in gains if g >= 0.1) / len(gains) if gains else 0.0
+        # Opposite-sign divergence rate (root_q vs best_move_value disagree
+        # on who's winning) — the value-head-blind-spot signal.
+        osds = [r["mcts"][key].get("opposite_sign_divergence") for r in budget_rows]
+        osds_known = [v for v in osds if v is not None]
+        opp_sign = (sum(1 for v in osds_known if v) / len(osds_known)) if osds_known else 0.0
         lines.append(
             f"| {s} sims | {len(budget_rows)} | "
             f"{np.mean(rqs):+.3f} | {bv_mean} | "
             f"{np.mean(ranks):4.2f} | {misaligned * 100:.1f}% | "
             f"{gain_mean} | {costly * 100:.1f}% | "
+            f"{opp_sign * 100:.1f}% | "
             f"{np.mean(walls):.2f} |"
         )
     return "\n".join(lines)
@@ -157,6 +163,55 @@ def misaligned_examples(rows: List[Dict[str, Any]], top_sim: int, k: int = 10) -
             f"{m['root_q']:+.3f} | {bmv_str} |"
         )
     return "\n".join(lines)
+
+
+def root_q_vs_bmv_chart(rows: List[Dict[str, Any]], top_sim: int, out_path: Path) -> None:
+    """Scatter of root_q vs best_move_value at the top sim budget, color-coded
+    by opposite-sign divergence. The two off-diagonal quadrants (top-left
+    and bottom-right) are the value-head-blind-spot zone — MCTS and the
+    network value head disagree on who's winning."""
+    key = str(top_sim)
+    xs, ys, divergent = [], [], []
+    for r in rows:
+        if key not in r["mcts"] or "error" in r["mcts"][key]:
+            continue
+        rq = r["mcts"][key].get("root_q")
+        bv = r["mcts"][key].get("best_move_value")
+        if rq is None or bv is None:
+            continue
+        xs.append(rq)
+        ys.append(bv)
+        osd = r["mcts"][key].get("opposite_sign_divergence")
+        divergent.append(bool(osd))
+    if not xs:
+        return
+    fig, ax = plt.subplots(figsize=(6.5, 6.5))
+    ax.axhline(0, color="#999", linewidth=0.6)
+    ax.axvline(0, color="#999", linewidth=0.6)
+    # Shade the two divergence quadrants
+    lim = max(max(abs(x) for x in xs), max(abs(y) for y in ys)) + 0.1
+    ax.fill_between([-lim, 0], 0, lim, color="#fef3c7", alpha=0.6, zorder=0)
+    ax.fill_between([0, lim], -lim, 0, color="#fef3c7", alpha=0.6, zorder=0)
+    # Normal points first, divergent on top
+    normal = [(x, y) for x, y, d in zip(xs, ys, divergent) if not d]
+    diverge = [(x, y) for x, y, d in zip(xs, ys, divergent) if d]
+    if normal:
+        nx, ny = zip(*normal)
+        ax.scatter(nx, ny, color="#2563eb", alpha=0.45, s=22, label=f"aligned (n={len(normal)})")
+    if diverge:
+        dx, dy = zip(*diverge)
+        ax.scatter(dx, dy, color="#b91c1c", alpha=0.85, s=32, edgecolor="#7f1d1d", linewidth=0.5,
+                   label=f"opposite-sign (n={len(diverge)})")
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_xlabel(f"root_q (MCTS search-avg, side-to-move POV) @ {top_sim} sims")
+    ax.set_ylabel("best_move_value (network value at post-move position)")
+    ax.set_title("Search-avg vs Best-move value-head agreement\n(yellow quadrants = MCTS and network disagree on who's winning)")
+    ax.legend(loc="lower right")
+    ax.set_aspect("equal")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
 
 
 def value_gain_chart(rows: List[Dict[str, Any]], top_sim: int, out_path: Path) -> None:
@@ -433,6 +488,7 @@ def main() -> None:
         rank_histogram_chart(rows, top_sim, charts_dir / "rank_histogram.png")
         entropy_vs_rank_chart(rows, top_sim, charts_dir / "entropy_vs_rank.png")
         value_gain_chart(rows, top_sim, charts_dir / "value_gain.png")
+        root_q_vs_bmv_chart(rows, top_sim, charts_dir / "rq_vs_bmv.png")
         # MAIN_GAME-only breakdowns separating the "competence over game time"
         # signal from the phase / branching-factor confounds.
         main_game_scatter(rows, top_sim, "move_number", "Move number",
@@ -493,6 +549,8 @@ def main() -> None:
             "![Entropy vs rank](charts/entropy_vs_rank.png)",
             "",
             "![Value cost of misalignment](charts/value_gain.png)",
+            "",
+            "![Search-avg vs best-move scatter](charts/rq_vs_bmv.png)",
             "",
             "![MAIN_GAME alignment vs move number](charts/rank_vs_move_number.png)",
             "",

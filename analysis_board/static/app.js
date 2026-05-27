@@ -112,6 +112,10 @@ const state = {
   lineMode: null,            // null when not walking a line. When active:
                              //   { pvIndex, topMoveDesc, baseSnapshot, steps, currentStep }
                              // Setup/Play interactions are disabled while non-null.
+  game: null,                // null when not in Game mode. When active:
+                             //   { phase: "setup"|"playing"|"ended",
+                             //     humanSide, computerSide, computerSims,
+                             //     spoilersEnabled, thinking, winner }
 };
 
 // ---------- Rendering ----------
@@ -713,6 +717,14 @@ function legalDestinationsFrom(src) {
 
 function handlePlayClick(px, py) {
   if (state.busy) return;
+  // In Game mode: only the human plays via clicks. Engine moves are
+  // auto-applied by computerMakeMove(). Block any click while it's
+  // not the human's turn so the user can't accidentally play for the
+  // engine.
+  if (state.game && state.game.phase === "playing") {
+    const sideToMove = state.lastResult ? state.lastResult.side_to_move : currentSide();
+    if (sideToMove !== state.game.humanSide) return;
+  }
   const near = geom.pixelToNearestPos(px, py);
   if (!near || near.dist > geom.scale * 0.55) {
     // Click on empty area → deselect
@@ -817,14 +829,28 @@ async function applyMove(moveSpec) {
         `Game over — ${state.winner ? state.winner + " wins" : "draw"}.`,
         "success",
       );
-      // Clear stale evaluation UI from the previous turn — top moves and
-      // value bars from the pre-game-over position are misleading once
-      // there are no legal moves left.
       state.legalMoves = [];
       state.lastResult = null;
       renderResult(null);
       if (state.winner) {
         updateTurnBadge(state.winner, "GAME_OVER");
+      }
+      // If we're in Game mode, swap the result banner in instead of just
+      // a status message.
+      if (state.game && state.game.phase === "playing") {
+        handleGameEnd();
+      }
+    } else if (state.game && state.game.phase === "playing") {
+      // Game-mode: don't auto-evaluate after every move, but DO trigger the
+      // engine to play if it's now its turn. The engine's own evaluate
+      // happens inside computerMakeMove with the configured sim budget.
+      const nextSide = data.new_position.side_to_move;
+      if (nextSide === state.game.computerSide) {
+        setTimeout(computerMakeMove, 600);
+      } else if (state.game.spoilersEnabled) {
+        // Human's turn coming up — refresh the analysis so spoiler-on
+        // players see updated recommendations.
+        await evaluate({ skipPositionCheck: true });
       }
     } else if (state.autoEval) {
       await evaluate({ skipPositionCheck: true });
@@ -869,6 +895,11 @@ function applyNewPosition(newPos) {
   state.moveMaker = newPos.move_maker || null;
   updateDerivedStats();
   updateTurnBadge(newPos.side_to_move, newPos.phase);
+  // Force-show the analysis panel during capture sequences in Game mode —
+  // the human's only UI for picking which row/ring to capture is the
+  // top-moves panel, so spoilers-off can't hide it then.
+  const inCapture = (newPos.phase === "ROW_COMPLETION" || newPos.phase === "RING_REMOVAL");
+  document.body.classList.toggle("force-show-analysis", inCapture);
 }
 
 function updateTurnBadge(side, phase) {
@@ -1003,6 +1034,23 @@ const boardHint = $("board-hint");
 const historyBlock = $("history-block");
 const moveHistoryEl = $("move-history");
 const paletteBlock = $("palette-block");
+// Game mode elements
+const gameSetupBlock = $("game-setup-block");
+const gameStatusBlock = $("game-status-block");
+const gameHumanSideEl = $("game-human-side");
+const gameSimsEl = $("game-sims");
+const gameModelEl = $("game-model");
+const gameSpoilersEl = $("game-spoilers");
+const gameSpoilersInlineEl = $("game-spoilers-inline");
+const gameStartBtn = $("game-start");
+const gameNewBtn = $("game-new");
+const gameReviewBtn = $("game-review");
+const gameResignBtn = $("game-resign");
+const gameThinkingEl = $("game-thinking");
+const gameResultEl = $("game-result");
+const gameResultLabelEl = $("game-result-label");
+const gameEngineLabelEl = $("game-engine-label");
+const gameHumanLabelEl = $("game-human-label");
 const turnBadge = $("turn-badge");
 const turnSideEl = $("turn-side");
 const turnPhaseEl = $("turn-phase");
@@ -1047,11 +1095,13 @@ async function loadModels() {
     const list = await res.json();
     state.models = list;
     modelSel.innerHTML = "";
+    if (gameModelEl) gameModelEl.innerHTML = "";
     if (list.length === 0) {
-      const opt = document.createElement("option");
-      opt.textContent = "(no models found in models/)";
-      opt.value = "";
-      modelSel.appendChild(opt);
+      const empty = document.createElement("option");
+      empty.textContent = "(no models found in models/)";
+      empty.value = "";
+      modelSel.appendChild(empty);
+      if (gameModelEl) gameModelEl.appendChild(empty.cloneNode(true));
       return;
     }
     for (const m of list) {
@@ -1059,10 +1109,14 @@ async function loadModels() {
       opt.value = m.id;
       opt.textContent = `${m.label} · ${m.checkpoint}`;
       modelSel.appendChild(opt);
+      if (gameModelEl) gameModelEl.appendChild(opt.cloneNode(true));
     }
     // Prefer yngine_volume_15ch_pretrain if present.
     const preferred = list.find((m) => m.label === "yngine_volume_15ch_pretrain");
-    if (preferred) modelSel.value = preferred.id;
+    if (preferred) {
+      modelSel.value = preferred.id;
+      if (gameModelEl) gameModelEl.value = preferred.id;
+    }
   } catch (e) {
     setStatus("Could not load models: " + e.message, "error");
   }
@@ -1191,6 +1245,10 @@ function renderResult(data) {
     render();
     return;
   }
+  // Universal chess-convention POV: + = WHITE winning, − = BLACK winning,
+  // in every mode regardless of whose turn it is. Server returns
+  // side-to-move POV; we flip when BLACK is to move for display.
+  data = toWhitePov(data);
   // Value bars — pure_neural values ∈ [-1, 1] for side_to_move; hybrid /
   // pure_heuristic produce unbounded heuristic-units scores (the heuristic's
   // 7-feature weighted sum isn't tanh'd), so we display the raw number but
@@ -1201,7 +1259,9 @@ function renderResult(data) {
   const vBar = Math.max(-1, Math.min(1, v));
   valueRow.hidden = false;
   const modeTag = heuristicMode ? " · heuristic units" : "";
-  valueLabel.textContent = `Search avg (${data.side_to_move})${modeTag}`;
+  // Universal WHITE-POV convention — explicit in the label so a new user
+  // doesn't mistake "−0.5 with BLACK to move" for "BLACK losing."
+  valueLabel.textContent = `Search avg (WHITE POV)${modeTag}`;
   valueNum.textContent = heuristicMode ? v.toFixed(2) : v.toFixed(3);
   paintValueBar(valueFill, vBar);
 
@@ -1261,12 +1321,22 @@ function renderResult(data) {
       render();
     });
     li.addEventListener("click", (ev) => {
-      // Don't trigger the row-click action if the user clicked the step-into
-      // button inside it.
       if (ev.target.closest(".step-into")) return;
-      if (state.mode !== "play") return;
       if (state.busy) return;
       if (state.lineMode) return;
+      // Click-to-apply works in Play mode, OR in Game mode during a
+      // capture sequence (REMOVE_MARKERS / REMOVE_RING) where the human
+      // must pick a candidate — even with spoilers off, this panel is
+      // forced visible during captures.
+      const inCapture = data && (data.phase === "ROW_COMPLETION" || data.phase === "RING_REMOVAL");
+      if (state.mode === "play") {
+        // OK
+      } else if (state.mode === "game" && state.game?.phase === "playing" && inCapture) {
+        const sideToMove = data ? data.side_to_move : currentSide();
+        if (sideToMove !== state.game.humanSide) return;
+      } else {
+        return;
+      }
       applyMove({
         type: mv.type,
         source: mv.source,
@@ -1296,6 +1366,30 @@ function renderResult(data) {
     state.hoverArrow = moveToArrow(data.top_moves[0]);
   }
   render();
+}
+
+function toWhitePov(data) {
+  // Chess convention: + means WHITE winning, − means BLACK winning, in EVERY
+  // mode regardless of whose turn it is. The server returns values in
+  // side-to-move POV (matches MCTS internals), so we flip when BLACK is to
+  // move to put everything in WHITE's frame for display. The transformation
+  // is uniform across Setup / Play / Game so users have one mental model.
+  //
+  // Applies to: headline search_avg, best_move_value, and the per-row
+  // best_move_value pills inside top_moves. Move probabilities + visits are
+  // not POV-dependent so they pass through unchanged.
+  if (!data || typeof data.side_to_move !== "string") return data;
+  if (data.side_to_move === "WHITE") return data;
+  const out = { ...data };
+  if (typeof out.value === "number") out.value = -out.value;
+  if (typeof out.best_move_value === "number") out.best_move_value = -out.best_move_value;
+  if (Array.isArray(out.top_moves)) {
+    out.top_moves = out.top_moves.map((m) => ({
+      ...m,
+      best_move_value: (typeof m.best_move_value === "number") ? -m.best_move_value : m.best_move_value,
+    }));
+  }
+  return out;
 }
 
 function paintValueBar(fillEl, v) {
@@ -1348,37 +1442,277 @@ async function setMode(mode) {
     b.classList.toggle("active", b.dataset.mode === mode);
     b.setAttribute("aria-selected", b.dataset.mode === mode ? "true" : "false");
   });
-  paletteBlock.classList.toggle("hidden-in-play", mode === "play");
+  // Body classes drive most of the per-mode CSS hide/show.
+  document.body.classList.toggle("mode-setup", mode === "setup");
+  document.body.classList.toggle("mode-play", mode === "play");
+  document.body.classList.toggle("mode-game", mode === "game");
+
+  paletteBlock.classList.toggle("hidden-in-play", mode !== "setup");
   playControls.hidden = mode !== "play";
-  historyBlock.hidden = mode !== "play";
-  // The side radio in the sidebar is a setup control; in Play mode it's
-  // display-only (the source of truth is whatever side_to_move the server
-  // last returned). Lock it visually so the user doesn't mistake it for
-  // an editable knob.
-  if (sideFieldEl) sideFieldEl.classList.toggle("locked", mode === "play");
+  historyBlock.hidden = mode === "setup";  // history visible in Play AND Game
+  if (sideFieldEl) sideFieldEl.classList.toggle("locked", mode !== "setup");
   state.selectedSource = null;
+
   if (mode === "play") {
     boardHint.textContent = "Click a ring of the side to move, then click a destination. Or click any top-move row to apply.";
     setArmedTool(null);
-    // Need legal moves to play. Only auto-evaluate if a real position exists;
-    // an empty board would just produce a "no legal moves" error which is
-    // confusing on first switch.
     if (!state.lastResult && state.pieces.size > 0) {
       await evaluate({ skipPositionCheck: true });
     } else if (!state.lastResult) {
       setStatus("Place rings/markers in Setup mode, then come back to Play.", null);
     }
-  } else {
+    // Leaving Game mode: tear down game state.
+    if (state.game) endGameSession();
+    gameSetupBlock.hidden = true;
+    gameStatusBlock.hidden = true;
+  } else if (mode === "setup") {
     boardHint.textContent = "Drag a piece from the palette onto a board intersection. Right-click to erase.";
-    // Setup mode invalidates play history (the position can be edited).
     state.history = [];
     state.gameOver = false;
     state.winner = null;
     updateUndoBtn();
     moveHistoryEl.innerHTML = "";
+    if (state.game) endGameSession();
+    gameSetupBlock.hidden = true;
+    gameStatusBlock.hidden = true;
+  } else if (mode === "game") {
+    setArmedTool(null);
+    // Enter the setup screen for a fresh game. If already in a game (e.g.,
+    // the user toggled away and back), preserve in-progress state.
+    if (!state.game) {
+      enterGameSetup();
+    } else {
+      showGameUI();
+    }
   }
   render();
 }
+
+// ---------- Game mode lifecycle ----------
+
+function enterGameSetup() {
+  state.game = { phase: "setup" };
+  gameSetupBlock.hidden = false;
+  gameStatusBlock.hidden = true;
+  gameResultEl.hidden = true;
+  gameThinkingEl.hidden = true;
+  document.body.classList.remove("game-playing", "game-ended", "spoilers-off");
+  document.body.classList.add("game-setup");
+  boardHint.textContent = "Configure your game on the right, then click Start.";
+}
+
+async function startGame() {
+  // Resolve the human side choice.
+  let humanSide = gameHumanSideEl.value;
+  if (humanSide === "random") humanSide = Math.random() < 0.5 ? "WHITE" : "BLACK";
+  const computerSide = humanSide === "WHITE" ? "BLACK" : "WHITE";
+  const computerSims = parseInt(gameSimsEl.value, 10) || 800;
+  const spoilersEnabled = !!gameSpoilersEl.checked;
+  // Sync the main model dropdown to the game-setup choice so all the
+  // existing /api/evaluate plumbing (which reads from modelSel.value) picks
+  // the right one.
+  if (gameModelEl && gameModelEl.value) modelSel.value = gameModelEl.value;
+
+  state.game = {
+    phase: "playing",
+    humanSide,
+    computerSide,
+    computerSims,
+    spoilersEnabled,
+    thinking: false,
+    winner: null,
+  };
+
+  // Start a fresh YINSH game from RING_PLACEMENT. Server is stateless;
+  // we just initialize the local state and let the user (or computer)
+  // play their first move.
+  state.pieces.clear();
+  state.history = [];
+  state.gameOver = false;
+  state.winner = null;
+  state.moveMaker = null;
+  state.lastResult = null;
+  state.legalMoves = [];
+  state.hoverArrow = null;
+  state.selectedSource = null;
+  phaseSel.value = "RING_PLACEMENT";
+  const whiteRadio = document.querySelector('input[name="side"][value="WHITE"]');
+  if (whiteRadio) whiteRadio.checked = true;
+
+  // Sync the inline spoilers toggle with the setup choice.
+  gameSpoilersInlineEl.checked = spoilersEnabled;
+
+  showGameUI();
+  updateDerivedStats();
+  updateTurnBadge("WHITE", "RING_PLACEMENT");
+  moveHistoryEl.innerHTML = "";
+  updateUndoBtn();
+  render();
+
+  // Always fetch the initial evaluation so legal moves are available
+  // for the human's first click (and so the engine has a snapshot if
+  // it moves first).
+  await evaluate({ skipPositionCheck: true });
+
+  // If the engine plays White, kick it off.
+  if (computerSide === "WHITE") {
+    setTimeout(computerMakeMove, 600);
+  }
+}
+
+function showGameUI() {
+  const g = state.game;
+  if (!g) return;
+  gameSetupBlock.hidden = g.phase !== "setup";
+  gameStatusBlock.hidden = g.phase === "setup";
+  document.body.classList.toggle("game-setup", g.phase === "setup");
+  document.body.classList.toggle("game-playing", g.phase === "playing");
+  document.body.classList.toggle("game-ended", g.phase === "ended");
+  document.body.classList.toggle("spoilers-off", g.phase === "playing" && !g.spoilersEnabled);
+  gameResultEl.hidden = g.phase !== "ended";
+  // Engine + human labels
+  const modelName = (modelSel.options[modelSel.selectedIndex]?.text || "engine").split(" ·")[0];
+  gameEngineLabelEl.textContent = g.computerSide
+    ? `${modelName} · ${g.computerSims} sims · plays ${g.computerSide}`
+    : "—";
+  gameHumanLabelEl.textContent = g.humanSide || "—";
+  if (g.phase === "playing") {
+    boardHint.textContent = g.spoilersEnabled
+      ? "Your turn — click a ring then a destination. Engine analysis is visible."
+      : "Your turn — click a ring then a destination. Engine analysis is hidden.";
+  } else if (g.phase === "ended") {
+    boardHint.textContent = "Game complete. New game or review the position.";
+  }
+}
+
+function endGameSession() {
+  state.game = null;
+  document.body.classList.remove("game-setup", "game-playing", "game-ended", "spoilers-off");
+  gameSetupBlock.hidden = true;
+  gameStatusBlock.hidden = true;
+  gameThinkingEl.hidden = true;
+  gameResultEl.hidden = true;
+}
+
+async function computerMakeMove() {
+  if (!state.game || state.game.phase !== "playing") return;
+  if (state.busy) {
+    // Re-check after a short delay; another move is in-flight.
+    setTimeout(computerMakeMove, 250);
+    return;
+  }
+  // Confirm it's actually the computer's turn — defensive against races.
+  const sideToMove = state.lastResult ? state.lastResult.side_to_move : currentSide();
+  if (sideToMove !== state.game.computerSide) return;
+
+  state.game.thinking = true;
+  gameThinkingEl.hidden = false;
+  const thinkingStartedAt = Date.now();
+  const MIN_THINKING_MS = 1500;
+
+  let topMove = null;
+  try {
+    // Force a fresh evaluation with the game's configured sim budget,
+    // independent of whatever num_sims the user has set in the sidebar.
+    const payload = {
+      ...currentPositionPayload(),
+      model_id: modelSel.value,
+      num_sims: state.game.computerSims,
+      top_k: 1,
+    };
+    const res = await fetch("/api/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.top_moves || !data.top_moves.length) {
+      setStatus("Engine couldn't find a move. Game may be stuck.", "error");
+      return;
+    }
+    topMove = data.top_moves[0];
+    // Cache the engine's evaluation so spoiler-on users see it.
+    state.lastResult = data;
+    state.legalMoves = data.legal_moves || [];
+    if (state.game.spoilersEnabled) renderResult(data);
+  } finally {
+    // Wait for minimum thinking time so it doesn't feel jarring.
+    const elapsed = Date.now() - thinkingStartedAt;
+    if (elapsed < MIN_THINKING_MS) {
+      await new Promise((r) => setTimeout(r, MIN_THINKING_MS - elapsed));
+    }
+    state.game.thinking = false;
+    gameThinkingEl.hidden = true;
+  }
+
+  if (!topMove) return;
+  await applyMove({
+    type: topMove.type,
+    source: topMove.source,
+    destination: topMove.destination,
+    markers: topMove.markers,
+  });
+}
+
+function handleGameEnd() {
+  if (!state.game) return;
+  state.game.phase = "ended";
+  // Determine winner from the scores in the current position.
+  const whiteScore = parseInt($("white-score-derived").textContent, 10) || 0;
+  const blackScore = parseInt($("black-score-derived").textContent, 10) || 0;
+  let winner = null;
+  if (whiteScore > blackScore) winner = "WHITE";
+  else if (blackScore > whiteScore) winner = "BLACK";
+  state.game.winner = winner;
+  state.winner = winner;
+
+  let label, kind;
+  if (winner === null) {
+    label = `Draw — ${whiteScore}-${blackScore}`;
+    kind = "draw";
+  } else if (winner === state.game.humanSide) {
+    label = `You win! ${winner} ${whiteScore}-${blackScore}`;
+    kind = "won";
+  } else {
+    label = `Engine wins. ${winner} ${whiteScore}-${blackScore}`;
+    kind = "lost";
+  }
+  gameResultLabelEl.textContent = label;
+  gameResultLabelEl.className = "game-result-banner " + kind;
+  showGameUI();
+}
+
+gameStartBtn.addEventListener("click", startGame);
+gameNewBtn.addEventListener("click", enterGameSetup);
+gameReviewBtn.addEventListener("click", () => {
+  // Review = peek the engine analysis at the final position. Simplest
+  // version: just enable spoilers and let the user look at the analysis.
+  // The history list already shows every move played; clicking a move
+  // in history doesn't navigate yet (deferred to v2).
+  if (!state.game) return;
+  state.game.spoilersEnabled = true;
+  gameSpoilersInlineEl.checked = true;
+  showGameUI();
+  evaluate({ skipPositionCheck: true });
+});
+gameResignBtn.addEventListener("click", () => {
+  if (!state.game || state.game.phase !== "playing") return;
+  if (!confirm("End this game?")) return;
+  state.game.phase = "ended";
+  state.game.winner = null;
+  gameResultLabelEl.textContent = "Game ended (resigned)";
+  gameResultLabelEl.className = "game-result-banner";
+  showGameUI();
+});
+gameSpoilersInlineEl.addEventListener("change", () => {
+  if (!state.game) return;
+  state.game.spoilersEnabled = gameSpoilersInlineEl.checked;
+  document.body.classList.toggle("spoilers-off", !state.game.spoilersEnabled);
+  if (state.game.spoilersEnabled && state.lastResult) {
+    renderResult(state.lastResult);
+  }
+  showGameUI();
+});
 
 undoBtn.addEventListener("click", async () => {
   if (state.history.length === 0 || state.busy) return;

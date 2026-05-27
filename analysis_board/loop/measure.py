@@ -184,10 +184,24 @@ def measure_one(
             if best_val is not None and raw_best_value is not None
             else None
         )
+        # Opposite-sign divergence between root_q (search-averaged value
+        # from side-to-move POV) and best_move_value (network value at the
+        # post-move position, same POV). This is the diagnostic for "MCTS
+        # confident position is good but value head one ply deeper says
+        # no" — exactly the failure pattern that hit the row-10 counter-
+        # capture position 2026-05-26. Skip when either side is near-zero
+        # (sign noise on undecided positions isn't meaningful).
+        NEAR_ZERO = 0.05
+        opposite_sign_divergence = None
+        if best_val is not None and abs(root_q) > NEAR_ZERO and abs(best_val) > NEAR_ZERO:
+            opposite_sign_divergence = bool(
+                (root_q > 0) != (best_val > 0)
+            )
         record["mcts"][str(sims)] = {
             "root_q": root_q,
             "best_move_value": best_val,
             "value_gain_over_raw": value_gain_over_raw,
+            "opposite_sign_divergence": opposite_sign_divergence,
             "entropy": mcts_entropy,
             "top": top_records,
             "rank_of_final_best": rank_of_final_best,
