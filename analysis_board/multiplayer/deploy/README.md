@@ -213,7 +213,25 @@ launchctl kickstart -k gui/$(id -u)/com.jackfleming.yinsh-log-pull
 
 ## Day-to-day operations
 
-### Restart the server (e.g., after pulling new code)
+### Redeploy everything (one command, idempotent)
+
+After any code or plist change you've pushed from your laptop, on the Mac mini run:
+
+```bash
+bash /Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/redeploy.sh
+```
+
+Or set up an alias once (e.g., in `~/.zshrc`) and use that going forward:
+
+```bash
+alias yinsh-redeploy='bash /Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/redeploy.sh'
+```
+
+The script does the whole loop in order: `git pull` → copy plists to `~/Library/LaunchAgents/` → unload services → kill anything squatting on port 5173 → load services → wait 3s → verify the server responds + report the active `YNS_MAX_NUM_SIMS` cap. Safe to run whenever you're unsure of current state.
+
+The sections below are for partial / manual operations when you don't want the full sweep.
+
+### Restart the server only (no pull, no plist update)
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.jackfleming.yinsh-server.plist
@@ -252,14 +270,13 @@ Logs don't rotate automatically. Truncate manually if they grow:
 
 ### Pull and redeploy
 
-```bash
-cd /Users/jackfleming/PycharmProjects/YinshML
-git pull
-launchctl unload ~/Library/LaunchAgents/com.jackfleming.yinsh-server.plist
-launchctl load ~/Library/LaunchAgents/com.jackfleming.yinsh-server.plist
-```
+Use the one-shot `redeploy.sh` at the top of this section. The
+manual-equivalent steps are documented there.
 
-The tunnel doesn't need restart for code changes — it only proxies HTTP.
+Note: the tunnel doesn't need restart for code-only changes — only run
+the full sweep when plists have changed too. `redeploy.sh` cycles both
+unconditionally because it's cheap and removes the "did I forget the
+plist" failure mode.
 
 ### Lock the URL down later (add auth)
 
