@@ -63,6 +63,49 @@ function posToWorld(col, row) {
   return new THREE.Vector3(x - BBOX_CX, 0, -(y - BBOX_CY));
 }
 
+// Physical heights of pieces — used by the flip pivot math. Must stay in
+// sync with the `h` constants inside _buildPiece for each piece kind.
+const MARKER_HEIGHT = 0.07;
+const RING_HEIGHT = 0.10;
+
+// ---------- Easings + tween machinery ----------
+// Small RAF-driven tween system used by animateMove(). Tweens have a delay,
+// a duration, an easing function, and an update(k) callback. The render loop
+// ticks them every frame; completed tweens are spliced out.
+const _easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+const _easeInQuad = (t) => t * t;
+const _easeInOutQuad = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+const _easeOutBack = (t) => {
+  const c = 1.70158;
+  return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2);
+};
+
+const _tweens = [];
+let _setPiecesSuspended = false;
+
+function _addTween(spec) {
+  spec._startedAt = performance.now();
+  _tweens.push(spec);
+}
+
+function _tickTweens(now) {
+  for (let i = _tweens.length - 1; i >= 0; i--) {
+    const t = _tweens[i];
+    const elapsed = now - t._startedAt;
+    const delay = t.delayMs || 0;
+    if (elapsed < delay) continue;
+    const rawK = (elapsed - delay) / t.durationMs;
+    if (rawK >= 1) {
+      try { t.update(t.ease ? t.ease(1) : 1); } catch (e) { console.error("tween update", e); }
+      _tweens.splice(i, 1);
+      if (t.onComplete) { try { t.onComplete(); } catch (e) { console.error("tween onComplete", e); } }
+    } else {
+      const k = t.ease ? t.ease(rawK) : rawK;
+      try { t.update(k); } catch (e) { console.error("tween update", e); }
+    }
+  }
+}
+
 // ---------- Materials & colors ----------
 const PALETTE = {
   page: 0x2b2f33,
@@ -70,7 +113,6 @@ const PALETTE = {
   boardEdge: 0x91a8b8,    // deeper at corners
   boardSide: 0x6b7e8c,    // visible edge of the slab
   grid: 0x1a2128,         // hex lines printed on the board
-  hash: 0x1a2128,         // × hash marks at intersections
   pieceLight: 0xf7f5ee,   // bright cream-white disc face
   pieceLightSpeckle: 0x161a1f,
   pieceDark: 0x161a1f,    // near-black disc face
@@ -139,7 +181,7 @@ const M = {
   raycaster: new THREE.Raycaster(),
   pointer: new THREE.Vector2(),
   boardMesh: null,                 // raycast target
-  boardGroup: null,                // board + grid + hashes
+  boardGroup: null,                // board slab + grid
   piecesGroup: null,               // parented to scene; child of board for tilt-following
   arrowsGroup: null,
   hoverMesh: null,
@@ -250,6 +292,7 @@ export function initBoard3D(container) {
 
   // Render loop
   function loop() {
+    _tickTweens(performance.now());
     M.controls.update();
     M.renderer.render(M.scene, M.camera);
     requestAnimationFrame(loop);
@@ -268,9 +311,15 @@ export function initBoard3D(container) {
 
 export function setPieces(pieceMap) {
   // Reconcile state.pieces (Map<"E5","WHITE_RING">) with the scene graph.
-  // For now: nuke and rebuild — fine at <30 pieces, swap to diffing later
-  // if we see jank.
-  for (const obj of M.pieces.values()) {
+  // No-op while an animation is in flight — animateMove() manages the
+  // scene graph directly during its run, then this gets called again from
+  // the caller's render() afterwards to snap to canonical state.
+  if (_setPiecesSuspended) return;
+  // Nuke and rebuild — fine at <30 pieces. Iterate piecesGroup.children
+  // directly (not M.pieces.values) so transient meshes added during an
+  // animation — dropped markers, fade-in pieces — also get reaped.
+  for (let i = M.piecesGroup.children.length - 1; i >= 0; i--) {
+    const obj = M.piecesGroup.children[i];
     M.piecesGroup.remove(obj);
     _disposeObject(obj);
   }
@@ -282,7 +331,12 @@ export function setPieces(pieceMap) {
     if (!isValidPos(col, row)) continue;
     const mesh = _buildPiece(kind);
     const world = posToWorld(col, row);
-    mesh.position.copy(world);
+    // yOffset lets markers position their group at (mx, MARKER_HEIGHT/2, mz)
+    // while keeping the cylinder bottom flush with the board — needed so
+    // the flip animation can rotate around the group origin without the
+    // marker translating through the board.
+    const yOff = mesh.userData.yOffset || 0;
+    mesh.position.set(world.x, yOff, world.z);
     M.piecesGroup.add(mesh);
     M.pieces.set(key, mesh);
   }
@@ -373,6 +427,37 @@ export function clearArrow() {
     M.arrowsGroup.remove(c);
     _disposeObject(c);
   }
+}
+
+// Animate the transition from prevPieces to newPieces using the move
+// description. Resolves when all tweens complete. While running, setPieces()
+// is suspended (so background renders don't trample the in-progress
+// scene); the caller is expected to invoke render() after this resolves to
+// snap to canonical post-animation state.
+export function animateMove({ move, prevPieces, newPieces }) {
+  if (!move) return Promise.resolve();
+  return new Promise((resolve) => {
+    _setPiecesSuspended = true;
+    const tweens = _buildMoveTweens(move, prevPieces, newPieces);
+    if (tweens.length === 0) {
+      _setPiecesSuspended = false;
+      resolve();
+      return;
+    }
+    let pending = tweens.length;
+    for (const t of tweens) {
+      const orig = t.onComplete;
+      t.onComplete = () => {
+        if (orig) { try { orig(); } catch (e) { console.error(e); } }
+        pending--;
+        if (pending === 0) {
+          _setPiecesSuspended = false;
+          resolve();
+        }
+      };
+      _addTween(t);
+    }
+  });
 }
 
 export function pixelToBoardPos(clientX, clientY) {
@@ -483,20 +568,6 @@ function _buildBoard() {
   const gridMat = new THREE.LineBasicMaterial({ color: PALETTE.grid, transparent: true, opacity: 0.78 });
   const gridLineSegs = new THREE.LineSegments(gridGeom, gridMat);
   M.boardGroup.add(gridLineSegs);
-
-  // × hash marks at every intersection
-  const hashSize = 0.10;
-  const hashLines = [];
-  for (const { col, row } of ALL_POSITIONS) {
-    const a = posToWorld(col, row);
-    hashLines.push(a.x - hashSize, 0.006, a.z - hashSize, a.x + hashSize, 0.006, a.z + hashSize);
-    hashLines.push(a.x - hashSize, 0.006, a.z + hashSize, a.x + hashSize, 0.006, a.z - hashSize);
-  }
-  const hashGeom = new THREE.BufferGeometry();
-  hashGeom.setAttribute("position", new THREE.Float32BufferAttribute(hashLines, 3));
-  const hashMat = new THREE.LineBasicMaterial({ color: PALETTE.hash, transparent: true, opacity: 0.92 });
-  const hashSegs = new THREE.LineSegments(hashGeom, hashMat);
-  M.boardGroup.add(hashSegs);
 
   // A-K column letters + 1-11 row numbers, printed on the board edges
   _buildCoordinateLabels(slabW, slabD);
@@ -681,7 +752,9 @@ function _buildPiece(kind) {
   if (isRing) {
     const outerR = 0.40;
     const innerR = 0.24;
-    const h = 0.10;
+    const h = RING_HEIGHT;
+    // yOffset=0: ring sits with its bottom on the board surface (y=0).
+    group.userData.yOffset = 0;
     // Lathe a square cross-section to make a ring with vertical sides
     const points = [
       new THREE.Vector2(innerR, 0),
@@ -719,9 +792,13 @@ function _buildPiece(kind) {
     innerRim.position.y = h + 0.001;
     group.add(innerRim);
   } else {
-    // Marker — short flat cylinder
+    // Marker — short flat cylinder. Group origin is at the CYLINDER CENTER
+    // (not the board surface), so quaternion rotation around the group's
+    // origin is a coin-flip-in-place — no translation side-effect. setPieces
+    // positions the group at world (mx, MARKER_HEIGHT/2, mz) so the cylinder
+    // bottom is flush with the board.
     const r = 0.26;
-    const h = 0.07;
+    const h = MARKER_HEIGHT;
     const geom = new THREE.CylinderGeometry(r, r, h, 64);
     const mat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
@@ -732,18 +809,26 @@ function _buildPiece(kind) {
     const m = new THREE.Mesh(geom, mat);
     m.castShadow = true;
     m.receiveShadow = true;
-    m.position.y = h / 2;
+    // CylinderGeometry is centered at the mesh origin (y ∈ [-h/2, h/2]) by
+    // default, so position.y=0 keeps it centered at the group origin.
+    m.position.y = 0;
     group.add(m);
-    // Teal rim on top face — same idiom as rings
+    group.userData.bodyMesh = m;
+    // Teal rims on both faces, symmetric about the group origin.
     const rimGeom = new THREE.RingGeometry(r - 0.015, r + 0.020, 64);
     const rimMat = new THREE.MeshBasicMaterial({
       color: PALETTE.pieceRim,
       side: THREE.DoubleSide,
     });
-    const rim = new THREE.Mesh(rimGeom, rimMat);
-    rim.rotation.x = -Math.PI / 2;
-    rim.position.y = h + 0.001;
-    group.add(rim);
+    const topRim = new THREE.Mesh(rimGeom, rimMat);
+    topRim.rotation.x = -Math.PI / 2;
+    topRim.position.y = h / 2 + 0.001;
+    group.add(topRim);
+    const bottomRim = new THREE.Mesh(rimGeom, rimMat);
+    bottomRim.rotation.x = -Math.PI / 2;
+    bottomRim.position.y = -h / 2 - 0.001;
+    group.add(bottomRim);
+    group.userData.yOffset = h / 2;
   }
   return group;
 }
@@ -756,6 +841,237 @@ function _disposeObject(obj) {
       else c.material.dispose();
     }
   });
+}
+
+// ---------- Move animation helpers ----------
+
+// Enumerate the intersections strictly between src and dst along a hex
+// line (3 axes: vertical / horizontal / matching-sign diagonal). For
+// YINSH MOVE_RING this is always one of the 6 hex line directions, so
+// max(|dc|, |dr|) gives the number of steps and the per-step delta is
+// integer-valued.
+function _hexPathBetween(srcCol, srcRow, dstCol, dstRow) {
+  const srcIdx = srcCol.charCodeAt(0) - 65;
+  const dstIdx = dstCol.charCodeAt(0) - 65;
+  const dc = dstIdx - srcIdx;
+  const dr = dstRow - srcRow;
+  const steps = Math.max(Math.abs(dc), Math.abs(dr));
+  if (steps <= 1) return [];
+  const stepDc = dc / steps;
+  const stepDr = dr / steps;
+  const out = [];
+  for (let i = 1; i < steps; i++) {
+    const col = String.fromCharCode(65 + srcIdx + Math.round(stepDc * i));
+    const row = srcRow + Math.round(stepDr * i);
+    out.push({ col, row });
+  }
+  return out;
+}
+
+// Walk every material under `group` and set its opacity. We set transparent
+// = true the first time so the renderer picks up the new blending mode. The
+// per-piece materials are NOT shared across pieces (each _buildPiece call
+// constructs fresh MeshStandardMaterial / MeshBasicMaterial instances; only
+// the speckle TEXTURE is shared), so opacity changes here don't leak to
+// other pieces of the same color.
+function _setPieceOpacity(group, opacity) {
+  group.traverse((c) => {
+    if (!c.material) return;
+    const mats = Array.isArray(c.material) ? c.material : [c.material];
+    for (const m of mats) {
+      m.transparent = true;
+      m.opacity = opacity;
+    }
+  });
+}
+
+function _buildMoveTweens(move, prevPieces, newPieces) {
+  switch (move && move.type) {
+    case "MOVE_RING":      return _moveRingTweens(move, prevPieces, newPieces);
+    case "PLACE_RING":     return _placeRingTweens(move, prevPieces, newPieces);
+    case "REMOVE_MARKERS": return _removeMarkersTweens(move, prevPieces, newPieces);
+    case "REMOVE_RING":    return _removeRingTweens(move, prevPieces, newPieces);
+    default:               return [];
+  }
+}
+
+// Drop animation: piece starts visible at `canonicalY + dropHeight`, falls
+// under quadratic acceleration to `canonicalY`. No scale/opacity tween —
+// the piece is solid and present throughout. Reads as "a marker / ring
+// being placed from above" rather than "appearing into existence."
+const DROP_HEIGHT_RING = 0.7;
+const DROP_HEIGHT_MARKER = 0.35;
+
+// MOVE_RING — three concurrent threads:
+//   1. Ring slides flat from src → dst (no vertical arc — physical rings
+//      slide across the board, not over it).
+//   2. A marker of the ring's color drops from above at src (the marker
+//      left behind by the moving ring).
+//   3. Markers between src and dst (exclusive) flip 180° around the X axis,
+//      tipping away from the viewer. Same axis for every flip — visually
+//      unified, recognizable as "a marker flipped." Texture-swap happens
+//      mid-rotation (edge-on, invisible to the eye). Staggered along the
+//      line so the cascade reads.
+function _moveRingTweens(move, prevPieces, newPieces) {
+  const tweens = [];
+  const srcKey = move.source;
+  const dstKey = move.destination;
+  if (!srcKey || !dstKey) return [];
+  const ringMesh = M.pieces.get(srcKey);
+  if (!ringMesh) return [];
+
+  const srcCol = srcKey[0], srcRow = parseInt(srcKey.slice(1), 10);
+  const dstCol = dstKey[0], dstRow = parseInt(dstKey.slice(1), 10);
+  const srcW = posToWorld(srcCol, srcRow);
+  const dstW = posToWorld(dstCol, dstRow);
+
+  // (1) ring slide — flat, ease-in-out, slower than v1.
+  tweens.push({
+    durationMs: 480,
+    delayMs: 0,
+    ease: _easeInOutQuad,
+    update: (k) => {
+      ringMesh.position.lerpVectors(srcW, dstW, k);
+      // Stay at canonical y=0 (ring bottom on board) the whole slide. No
+      // arc lift — physical rings don't levitate over the markers.
+      ringMesh.position.y = 0;
+    },
+  });
+
+  // (2) dropped marker at src — falls from above.
+  const ringKind = prevPieces.get(srcKey);
+  if (ringKind && ringKind.endsWith("RING")) {
+    const markerKind = ringKind.replace("RING", "MARKER");
+    const droppedMarker = _buildPiece(markerKind);
+    const canonicalY = droppedMarker.userData.yOffset || 0;
+    droppedMarker.position.set(srcW.x, canonicalY + DROP_HEIGHT_MARKER, srcW.z);
+    M.piecesGroup.add(droppedMarker);
+    tweens.push({
+      durationMs: 320,
+      // Delay slightly so the marker drops after the ring has lifted off —
+      // it should feel like the marker was underneath, revealed by the move.
+      delayMs: 80,
+      update: (k) => {
+        // Quadratic fall: y = canonicalY + dropHeight * (1 - k²). Starts
+        // slow at the top, accelerates downward, lands at canonicalY at k=1.
+        droppedMarker.position.y = canonicalY + DROP_HEIGHT_MARKER * (1 - k * k);
+      },
+    });
+  }
+
+  // (3) passed marker flips — fixed X-axis, tip away from viewer (-Z).
+  const pathPositions = _hexPathBetween(srcCol, srcRow, dstCol, dstRow);
+  if (pathPositions.length > 0) {
+    // X-axis flip, signed so the rotation tips the marker's top face
+    // toward -Z (away from camera, which sits at +Z+Y). Three.js
+    // setFromAxisAngle is right-handed, so axis (-1,0,0) rotated by +π
+    // takes +Y → -Z over the first half of the flip.
+    const flipAxis = new THREE.Vector3(-1, 0, 0);
+
+    let staggerIdx = 0;
+    for (let i = 0; i < pathPositions.length; i++) {
+      const pos = pathPositions[i];
+      const key = `${pos.col}${pos.row}`;
+      const prev = prevPieces.get(key);
+      const next = newPieces.get(key);
+      if (!prev || !next) continue;
+      if (!prev.endsWith("MARKER") || !next.endsWith("MARKER")) continue;
+      if (prev === next) continue;
+      const markerMesh = M.pieces.get(key);
+      if (!markerMesh) continue;
+
+      const initialQuat = markerMesh.quaternion.clone();
+      const newKind = next;
+      const newFaceTex = newKind.startsWith("WHITE") ? M.textures.lightFace : M.textures.darkFace;
+      let swapped = false;
+
+      tweens.push({
+        durationMs: 360,
+        delayMs: 120 + staggerIdx * 60,
+        ease: _easeInOutQuad,
+        update: (k) => {
+          const angle = k * Math.PI;
+          const q = new THREE.Quaternion().setFromAxisAngle(flipAxis, angle);
+          markerMesh.quaternion.copy(q).multiply(initialQuat);
+          if (!swapped && k >= 0.5) {
+            swapped = true;
+            const body = markerMesh.userData.bodyMesh;
+            if (body && body.material) {
+              body.material.map = newFaceTex;
+              body.material.needsUpdate = true;
+            }
+          }
+        },
+      });
+      staggerIdx++;
+    }
+  }
+
+  return tweens;
+}
+
+function _placeRingTweens(move, prevPieces, newPieces) {
+  // PLACE_RING uses .source as the placement position.
+  const key = move.source;
+  if (!key) return [];
+  const ringKind = newPieces.get(key);
+  if (!ringKind) return [];
+  const col = key[0], row = parseInt(key.slice(1), 10);
+  const w = posToWorld(col, row);
+  const ring = _buildPiece(ringKind);
+  const canonicalY = ring.userData.yOffset || 0;
+  // Start visible, in the air, and fall. No scale-up or opacity fade —
+  // a YINSH ring being placed comes DOWN from the player's hand, it
+  // doesn't materialize.
+  ring.position.set(w.x, canonicalY + DROP_HEIGHT_RING, w.z);
+  M.piecesGroup.add(ring);
+  return [{
+    durationMs: 360,
+    delayMs: 0,
+    update: (k) => {
+      ring.position.y = canonicalY + DROP_HEIGHT_RING * (1 - k * k);
+    },
+  }];
+}
+
+function _removeMarkersTweens(move, prevPieces, newPieces) {
+  const markers = move.markers || [];
+  const tweens = [];
+  for (let i = 0; i < markers.length; i++) {
+    const key = markers[i];
+    const markerMesh = M.pieces.get(key);
+    if (!markerMesh) continue;
+    const initialY = markerMesh.position.y;
+    tweens.push({
+      durationMs: 400,
+      delayMs: i * 50,
+      update: (k) => {
+        // Accelerating lift — the marker is lifted off the board. No scale.
+        markerMesh.position.y = initialY + k * k * 1.2;
+        // Stay opaque for the first half (visible "lift"), fade in the second.
+        const opacity = k < 0.5 ? 1 : 1 - (k - 0.5) * 2;
+        _setPieceOpacity(markerMesh, opacity);
+      },
+    });
+  }
+  return tweens;
+}
+
+function _removeRingTweens(move, prevPieces, newPieces) {
+  const key = move.source;
+  if (!key) return [];
+  const ringMesh = M.pieces.get(key);
+  if (!ringMesh) return [];
+  const initialY = ringMesh.position.y;
+  return [{
+    durationMs: 440,
+    delayMs: 0,
+    update: (k) => {
+      ringMesh.position.y = initialY + k * k * 1.4;
+      const opacity = k < 0.5 ? 1 : 1 - (k - 0.5) * 2;
+      _setPieceOpacity(ringMesh, opacity);
+    },
+  }];
 }
 
 // Mirror of the position-set so app.js can still call isValidPos via this

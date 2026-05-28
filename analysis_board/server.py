@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +45,20 @@ MODELS_DIR = ROOT / "models"
 # Preferred filenames in priority order. The first match in a model_dir wins.
 _PT_CANDIDATES = ("best_supervised.pt", "best.pt", "final.pt", "supervised_final.pt")
 DEVICE = os.environ.get("YNS_DEVICE")  # None = auto-detect
+
+# Hard cap on MCTS sims per request — protects a shared/public deployment
+# from a single client queuing a 25+ second eval. Default 0 = no cap (local
+# dev). On the deployed Mac mini we set YNS_MAX_NUM_SIMS=1600 via launchd
+# so a friend on the public URL can't accidentally queue 3200-sim runs.
+MAX_NUM_SIMS = int(os.environ.get("YNS_MAX_NUM_SIMS", "0"))
+
+# Serialize MCTS searches across concurrent requests. The MCTS instances in
+# _mcts_cache are shared by all callers hitting the same (model_id, num_sims,
+# ...) tuple, so two concurrent users would race on reset_tree() / search() /
+# _cached_root. Enforce single-MCTS-at-a-time: queue requests behind whoever
+# is currently searching. Acceptable at the ~5-user scale (worst case 5 *
+# 1600-sim eval ≈ 1 minute for the last user).
+_mcts_lock = threading.Lock()
 
 
 def _pick_checkpoint(model_dir: Path) -> Optional[Path]:
@@ -507,6 +522,11 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         return jsonify({"ok": False, "errors": ["model_id is required"]}), 400
 
     num_sims = int(payload.get("num_sims", 0))
+    capped_from = None
+    if MAX_NUM_SIMS > 0 and num_sims > MAX_NUM_SIMS:
+        capped_from = num_sims
+        num_sims = MAX_NUM_SIMS
+        log.info("capping num_sims %d → %d (YNS_MAX_NUM_SIMS)", capped_from, num_sims)
     top_k = int(payload.get("top_k", 8))
     # Advanced MCTS knobs — defaults match training so the headline reading
     # reflects what the trained agent "thinks." Override to stress-test the
@@ -547,6 +567,12 @@ def api_evaluate():  # type: ignore[no-untyped-def]
             evaluation_mode=evaluation_mode,
             heuristic_weight=heuristic_weight,
         )
+        # Hold the lock from reset_tree through PV extraction — the cached
+        # MCTS instance + its _cached_root are shared across users, so a
+        # concurrent search would race with this one's tree state. Acquired
+        # here, released either on the MCTS-failure early-return path below
+        # or in the PV extraction's `finally` at the end of this branch.
+        _mcts_lock.acquire()
         # Reset before each call — subtree reuse is enabled so we can read
         # the tree post-search, but each /api/evaluate is logically a fresh
         # position; we don't want last search's tree biasing this one.
@@ -554,10 +580,15 @@ def api_evaluate():  # type: ignore[no-untyped-def]
             mcts.reset_tree()
         except AttributeError:
             mcts._cached_root = None  # fallback for older engine versions
+        except Exception as e:  # noqa: BLE001
+            log.exception("MCTS reset_tree raised")
+            _mcts_lock.release()
+            return jsonify({"ok": False, "errors": [f"MCTS reset failed: {e}"]}), 500
         try:
             probs = mcts.search(gs, move_number=1)
         except Exception as e:  # noqa: BLE001
             log.exception("MCTS search failed")
+            _mcts_lock.release()
             return jsonify({"ok": False, "errors": [f"MCTS failed: {e}"]}), 500
         value = float(getattr(mcts, "last_root_value", 0.0))
         # MCTS with enable_subtree_reuse=False clears root.children after
@@ -631,6 +662,10 @@ def api_evaluate():  # type: ignore[no-untyped-def]
             log.warning("PV extraction failed: %s", e)
             for entry in top:
                 entry.setdefault("principal_variation", [])
+        finally:
+            # Release the MCTS lock after PV extraction — the next queued
+            # request can now reset_tree() and run its own search.
+            _mcts_lock.release()
     else:
         wrapper = get_wrapper(model_id)
         try:

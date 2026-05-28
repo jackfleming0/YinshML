@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jackfleming.yinsh-server</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jackfleming/PycharmProjects/YinshML</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jackfleming/PycharmProjects/YinshML/venv/bin/python</string>
+        <string>/Users/jackfleming/PycharmProjects/YinshML/analysis_board/server.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Bind to localhost only — cloudflared talks to us over loopback. -->
+        <key>YNS_HOST</key>
+        <string>127.0.0.1</string>
+        <key>YNS_PORT</key>
+        <string>5173</string>
+        <!-- Public-access sim cap. 1600 ≈ 11s worst-case eval on Apple Silicon. -->
+        <key>YNS_MAX_NUM_SIMS</key>
+        <string>1600</string>
+        <!-- MPS = Apple Silicon GPU. Fall back to "cpu" if MPS misbehaves. -->
+        <key>YNS_DEVICE</key>
+        <string>mps</string>
+    </dict>
+
+    <!-- Restart automatically on crash / exit. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Logs land alongside this plist in deploy/. Truncate manually if they
+         grow too large; no rotation built in. -->
+    <key>StandardOutPath</key>
+    <string>/Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/yinsh-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/yinsh-server.err.log</string>
+</dict>
+</plist>

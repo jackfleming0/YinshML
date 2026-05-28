@@ -1,0 +1,17 @@
+# Cloudflare Tunnel ingress config for the YINSH analysis board.
+#
+# Tunnel UUID below was returned by `cloudflared tunnel create yinsh`.
+# Credentials file is auto-generated at the path below during tunnel
+# creation; if your $HOME differs, update the path accordingly.
+
+tunnel: 5b9bce1d-d8ef-4ae1-b10f-e6f2cc3a38ed
+credentials-file: /Users/jackfleming/.cloudflared/5b9bce1d-d8ef-4ae1-b10f-e6f2cc3a38ed.json
+
+ingress:
+  # YINSH analysis board — public access. Abuse is bounded by the server's
+  # YNS_MAX_NUM_SIMS cap + single-MCTS-at-a-time semaphore.
+  - hostname: yinsh.jackflemingux.com
+    service: http://localhost:5173
+
+  # Catch-all 404 for anything else that hits this tunnel.
+  - service: http_status:404

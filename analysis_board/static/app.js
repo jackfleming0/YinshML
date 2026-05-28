@@ -17,6 +17,7 @@ import {
   clearArrow,
   pixelToBoardPos,
   resetView,
+  animateMove,
 } from "./board3d.js";
 
 // ---------- Constants ----------
@@ -376,6 +377,9 @@ function currentSide() {
 async function applyMove(moveSpec) {
   state.busy = true;
   state.hoverArrow = null;
+  // Snapshot the pre-move pieces for the animation diff. Must be a copy —
+  // applyNewPosition mutates state.pieces in place.
+  const prevPiecesSnapshot = new Map(state.pieces);
   try {
     const res = await fetch("/api/move", {
       method: "POST",
@@ -387,18 +391,32 @@ async function applyMove(moveSpec) {
       setStatus((data.errors || ["move failed"]).join(" · "), "error");
       return;
     }
-    // Push history before mutating.
+    // Push history (pre-move position) before mutating.
     state.history.push({
       position: currentPositionPayload(),
       move: data.applied_move,
     });
     updateUndoBtn();
     appendHistoryEntry(data.applied_move);
-    // Apply new position to local state.
+    // Build the new-pieces map without mutating state.pieces yet — we want
+    // sidebar state (side/phase/badge) to stay aligned with the board
+    // during the animation, so applyNewPosition runs AFTER animateMove.
+    const newPiecesMap = new Map();
+    for (const p of data.new_position.pieces) newPiecesMap.set(p.pos, p.piece);
+    await animateMove({
+      move: data.applied_move,
+      prevPieces: prevPiecesSnapshot,
+      newPieces: newPiecesMap,
+    });
+    // Commit pieces + sidebar all at once (in sync with the canonical scene).
     applyNewPosition(data.new_position);
     state.legalMoves = data.legal_moves || [];
     state.gameOver = data.game_over;
     state.winner = data.winner;
+    // Snap the scene to canonical state before any downstream await
+    // (engine reply / autoEval fetch) so transient animation meshes don't
+    // linger across that fetch.
+    render();
     if (state.gameOver) {
       setStatus(
         `Game over — ${state.winner ? state.winner + " wins" : "draw"}.`,

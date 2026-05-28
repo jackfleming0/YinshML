@@ -1,0 +1,3 @@
+# launchd log output — produced at runtime, not source.
+*.log
+*.err.log
