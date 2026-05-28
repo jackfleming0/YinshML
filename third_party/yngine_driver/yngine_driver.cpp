@@ -267,9 +267,13 @@ int main(int /*argc*/, char** /*argv*/) {
     std::cout.rdbuf(nullptr);
     std::cout.setstate(std::ios::badbit);
 
-    // 512 MB MCTS pool — generous; an MCTS-10K search peaks ~50 MB on the
-    // 192-core cloud run, so any single-threaded local budget fits easily.
-    constexpr std::size_t MEM_LIMIT = 512ull * 1024ull * 1024ull;
+    // 128 MB MCTS pool. yngine's ArenaAllocator mmaps the full pool up
+    // front, so the original 512 MB default pinned ~5 GB across 10 sequential
+    // eval games (a fresh process per game) and triggered the macOS OOM
+    // killer mid-search. 128 MB still fits an MCTS-10K search (the cloud
+    // V2a fingerprint run peaked ~50 MB at MCTS-10K) and is well under the
+    // per-process pressure threshold on a 16 GB box.
+    constexpr std::size_t MEM_LIMIT = 128ull * 1024ull * 1024ull;
     auto make_mcts = [&]() {
         auto m = std::make_unique<MCTS>(MEM_LIMIT);
         // Workaround for an upstream yngine bug: ~MCTS unconditionally calls

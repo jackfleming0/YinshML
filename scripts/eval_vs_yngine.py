@@ -189,6 +189,102 @@ def play_one_game(
     }
 
 
+def run_sprt(
+    *,
+    net: NetworkWrapper,
+    mcts: BatchedMCTS,
+    yngine_sims: int,
+    yngine_threads: int,
+    yngine_binary: Optional[Path],
+    p0: float, p1: float, alpha: float, beta: float, max_games: int,
+    base_seed: int,
+    opening_plies: int, opening_temp: float, max_moves: int,
+) -> Tuple[List[dict], dict]:
+    """Bernoulli SPRT on model WR. H0: WR=p0; H1: WR=p1, p1>p0.
+
+    Same structure as eval_vs_frozen_anchor.py's run_sprt: alternate colors,
+    update LLR after each decisive game (draws excluded), stop on boundary
+    crossing or at max_games. Returns (per_game_records, sprt_summary).
+    """
+    import math
+    upper = math.log((1.0 - beta) / alpha)      # accept H1 (STRONGER)
+    lower = math.log(beta / (1.0 - alpha))       # accept H0 (NOT_STRONGER)
+    win_inc = math.log(p1 / p0)
+    loss_inc = math.log((1.0 - p1) / (1.0 - p0))
+
+    per_game: List[dict] = []
+    model_wins = yngine_wins = draws = 0
+    model_white_wins = model_black_wins = 0
+    llr = 0.0
+    decision = "INCONCLUSIVE"
+    for g in range(max_games):
+        model_is_white = (g % 2 == 0)
+        rec = play_one_game(
+            net=net, mcts=mcts,
+            yngine_sims=yngine_sims,
+            yngine_threads=yngine_threads,
+            model_is_white=model_is_white,
+            seed=base_seed + g,
+            opening_plies=opening_plies,
+            opening_temp=opening_temp,
+            max_moves=max_moves,
+            yngine_binary=yngine_binary,
+        )
+        rec["game_idx"] = g
+        per_game.append(rec)
+
+        if rec["model_won"]:
+            model_wins += 1
+            model_white_wins += int(model_is_white)
+            model_black_wins += int(not model_is_white)
+            llr += win_inc
+        elif rec["winner"] == "draw":
+            draws += 1   # excluded from LLR
+        else:
+            yngine_wins += 1
+            llr += loss_inc
+
+        winner = rec["winner"]
+        mw = "✓" if rec["model_won"] else ("=" if winner == "draw" else "✗")
+        side = "W" if model_is_white else "B"
+        suffix = f" [err: {rec['error']}]" if rec["error"] else ""
+        logger.info(
+            f"  game {g+1:>3}  model={side}  winner={winner}  {mw}  "
+            f"moves={rec['moves']:>3}  {rec['seconds']:.1f}s  "
+            f"score={model_wins}-{yngine_wins}-{draws}  "
+            f"LLR={llr:+.2f} (L={lower:.2f}, U={upper:+.2f}){suffix}"
+        )
+
+        if llr >= upper:
+            decision = "STRONGER"
+            break
+        if llr <= lower:
+            decision = "NOT_STRONGER"
+            break
+
+    decisive = model_wins + yngine_wins
+    wr_decisive = model_wins / decisive if decisive else 0.0
+    ci_lo, ci_hi = wilson_ci_95(wr_decisive, decisive)
+    summary = {
+        "decision": decision,
+        "games": len(per_game),
+        "model_wins": model_wins,
+        "yngine_wins": yngine_wins,
+        "draws": draws,
+        "model_white_wins": model_white_wins,
+        "model_black_wins": model_black_wins,
+        "llr": llr,
+        "llr_upper": upper,
+        "llr_lower": lower,
+        "wr_decisive": wr_decisive,
+        "ci95_lo": ci_lo,
+        "ci95_hi": ci_hi,
+        "p0": p0, "p1": p1, "alpha": alpha, "beta": beta,
+        "max_games": max_games,
+    }
+    return per_game, summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Eval a checkpoint vs the external yngine MCTS engine.")
@@ -227,6 +323,24 @@ def main() -> None:
                         help="JSON results path. Created if needed.")
     parser.add_argument("--quiet-mcts", action="store_true", default=True,
                         help="Suppress verbose MCTS construction logging.")
+    # --- SPRT (sequential probability ratio test) ---
+    # Mirrors eval_vs_frozen_anchor.py. Stops as soon as the model's WR is
+    # clearly above p1 or below p0. Big payoff against yngine because if the
+    # model is sweeping (which the early MCTS-200 run revealed: 26-0), SPRT
+    # terminates ≈10× faster than a fixed-n match — same conclusion, way
+    # less compute.
+    parser.add_argument("--sprt", action="store_true",
+                        help="Use SPRT instead of a fixed-n match. Stops "
+                             "as soon as the result is decisive.")
+    parser.add_argument("--sprt-p0", type=float, default=0.50,
+                        help="H0 win prob (model not stronger than yngine).")
+    parser.add_argument("--sprt-p1", type=float, default=0.60,
+                        help="H1 win prob (the smallest edge worth declaring "
+                             "stronger). Wider (p1-p0) → faster, coarser.")
+    parser.add_argument("--sprt-alpha", type=float, default=0.05,
+                        help="Type-I error (false STRONGER).")
+    parser.add_argument("--sprt-beta", type=float, default=0.05,
+                        help="Type-II error (false NOT_STRONGER).")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -259,50 +373,76 @@ def main() -> None:
     )
     logger.info(f"yngine binary: {binary}")
 
-    per_game: List[dict] = []
     t0 = time.time()
-    for g in range(args.num_games):
-        if args.alternate_colors:
-            model_is_white = (g % 2 == 0)
-        else:
-            model_is_white = True
-        rec = play_one_game(
+
+    if args.sprt:
+        per_game, sprt_summary = run_sprt(
             net=net, mcts=mcts,
             yngine_sims=args.yngine_sims,
             yngine_threads=args.yngine_threads,
-            model_is_white=model_is_white,
-            seed=args.seed + g,
+            yngine_binary=binary,
+            p0=args.sprt_p0, p1=args.sprt_p1,
+            alpha=args.sprt_alpha, beta=args.sprt_beta,
+            max_games=args.num_games,
+            base_seed=args.seed,
             opening_plies=args.opening_sample_plies,
             opening_temp=args.opening_temperature,
             max_moves=args.max_moves,
-            yngine_binary=binary,
         )
-        rec["game_idx"] = g
-        per_game.append(rec)
-        winner = rec["winner"]
-        mw = "✓" if rec["model_won"] else ("=" if winner == "draw" else "✗")
-        side = "W" if model_is_white else "B"
-        suffix = f" [err: {rec['error']}]" if rec["error"] else ""
-        logger.info(
-            f"  game {g+1:>3}/{args.num_games}  model={side}  winner={winner}  "
-            f"{mw}  moves={rec['moves']:>3}  {rec['seconds']:.1f}s{suffix}"
+        model_wins = sprt_summary["model_wins"]
+        yngine_wins = sprt_summary["yngine_wins"]
+        draws = sprt_summary["draws"]
+        model_white_wins = sprt_summary["model_white_wins"]
+        model_black_wins = sprt_summary["model_black_wins"]
+        wr = sprt_summary["wr_decisive"]
+        ci_lo = sprt_summary["ci95_lo"]
+        ci_hi = sprt_summary["ci95_hi"]
+        result_verdict = sprt_summary["decision"]
+    else:
+        per_game = []
+        for g in range(args.num_games):
+            if args.alternate_colors:
+                model_is_white = (g % 2 == 0)
+            else:
+                model_is_white = True
+            rec = play_one_game(
+                net=net, mcts=mcts,
+                yngine_sims=args.yngine_sims,
+                yngine_threads=args.yngine_threads,
+                model_is_white=model_is_white,
+                seed=args.seed + g,
+                opening_plies=args.opening_sample_plies,
+                opening_temp=args.opening_temperature,
+                max_moves=args.max_moves,
+                yngine_binary=binary,
+            )
+            rec["game_idx"] = g
+            per_game.append(rec)
+            winner = rec["winner"]
+            mw = "✓" if rec["model_won"] else ("=" if winner == "draw" else "✗")
+            side = "W" if model_is_white else "B"
+            suffix = f" [err: {rec['error']}]" if rec["error"] else ""
+            logger.info(
+                f"  game {g+1:>3}/{args.num_games}  model={side}  winner={winner}  "
+                f"{mw}  moves={rec['moves']:>3}  {rec['seconds']:.1f}s{suffix}"
+            )
+        sprt_summary = None
+        model_wins = sum(1 for r in per_game if r["model_won"])
+        draws = sum(1 for r in per_game if r["winner"] == "draw")
+        yngine_wins = len(per_game) - model_wins - draws
+        total = len(per_game)
+        wr = model_wins / total if total else 0.0
+        ci_lo, ci_hi = wilson_ci_95(wr, total)
+        model_white_wins = sum(
+            1 for r in per_game if r["model_won"] and r["model_color"] == "white"
         )
+        model_black_wins = sum(
+            1 for r in per_game if r["model_won"] and r["model_color"] == "black"
+        )
+        result_verdict = verdict(ci_lo, ci_hi)
 
     elapsed = time.time() - t0
-
-    # Aggregate.
-    model_wins = sum(1 for r in per_game if r["model_won"])
-    draws = sum(1 for r in per_game if r["winner"] == "draw")
-    yngine_wins = len(per_game) - model_wins - draws
     total = len(per_game)
-    wr = model_wins / total if total else 0.0
-    ci_lo, ci_hi = wilson_ci_95(wr, total)
-    model_white_wins = sum(
-        1 for r in per_game if r["model_won"] and r["model_color"] == "white"
-    )
-    model_black_wins = sum(
-        1 for r in per_game if r["model_won"] and r["model_color"] == "black"
-    )
 
     result = {
         "model_label": model_label,
@@ -315,19 +455,24 @@ def main() -> None:
         "model_black_wins": model_black_wins,
         "ci95_lo": ci_lo,
         "ci95_hi": ci_hi,
-        "verdict": verdict(ci_lo, ci_hi),
+        "verdict": result_verdict,
+        "sprt": sprt_summary,
         "per_game": per_game,
         "elapsed_seconds": elapsed,
     }
 
     print("\n" + "=" * 92)
+    mode = ("SPRT" if args.sprt else f"fixed-n {args.num_games}")
     print(f"{model_label} vs yngine (MCTS-{args.yngine_sims})  "
-          f"@ our sims={args.num_sims}  —  {elapsed:.0f}s")
+          f"@ our sims={args.num_sims}  [{mode}]  —  {elapsed:.0f}s")
     print("=" * 92)
     print(f"games: {total}   WR (model): {wr:.3f}   "
-          f"CI95=[{ci_lo:.3f}, {ci_hi:.3f}]   verdict: {result['verdict']}")
+          f"CI95=[{ci_lo:.3f}, {ci_hi:.3f}]   verdict: {result_verdict}")
     print(f"  model wins: {model_wins}  (W: {model_white_wins}, B: {model_black_wins})")
     print(f"  yngine wins: {yngine_wins}    draws: {draws}")
+    if args.sprt and sprt_summary is not None:
+        print(f"  SPRT LLR: {sprt_summary['llr']:+.2f}  "
+              f"(L={sprt_summary['llr_lower']:.2f}, U={sprt_summary['llr_upper']:+.2f})")
 
     if args.output:
         out = {
@@ -346,6 +491,13 @@ def main() -> None:
                 "device": resolved_device,
                 "seed": args.seed,
                 "engine": "self_play.MCTS.search_batch",
+                "mode": "sprt" if args.sprt else "fixed_n",
+                "sprt_params": (
+                    {"p0": args.sprt_p0, "p1": args.sprt_p1,
+                     "alpha": args.sprt_alpha, "beta": args.sprt_beta,
+                     "max_games": args.num_games}
+                    if args.sprt else None
+                ),
             },
             "results": [result],
             "elapsed_seconds": elapsed,

@@ -1,0 +1,218 @@
+{
+  "config": {
+    "model_path": "models/iter1_ema_2026-05-27/iter1_ema.pt",
+    "model_label": "iter1_ema_2026-05-27/iter1_ema",
+    "num_sims": 800,
+    "num_games": 200,
+    "yngine_sims": 1000,
+    "yngine_threads": 1,
+    "yngine_binary": "/Users/jackfleming/PycharmProjects/YinshML/third_party/yngine_driver/build-release/yngine_driver",
+    "alternate_colors": true,
+    "opening_sample_plies": 20,
+    "opening_temperature": 1.0,
+    "max_moves": 300,
+    "device": "mps",
+    "seed": 42,
+    "engine": "self_play.MCTS.search_batch",
+    "mode": "sprt",
+    "sprt_params": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.05,
+      "beta": 0.05,
+      "max_games": 200
+    }
+  },
+  "results": [
+    {
+      "model_label": "iter1_ema_2026-05-27/iter1_ema",
+      "model_path": "models/iter1_ema_2026-05-27/iter1_ema.pt",
+      "model_wr": 1.0,
+      "model_wins": 17,
+      "yngine_wins": 0,
+      "draws": 0,
+      "model_white_wins": 9,
+      "model_black_wins": 8,
+      "ci95_lo": 0.8156763396284354,
+      "ci95_hi": 1.0,
+      "verdict": "STRONGER",
+      "sprt": {
+        "decision": "STRONGER",
+        "games": 17,
+        "model_wins": 17,
+        "yngine_wins": 0,
+        "draws": 0,
+        "model_white_wins": 9,
+        "model_black_wins": 8,
+        "llr": 3.0994664654972275,
+        "llr_upper": 2.9444389791664403,
+        "llr_lower": -2.9444389791664403,
+        "wr_decisive": 1.0,
+        "ci95_lo": 0.8156763396284354,
+        "ci95_hi": 1.0,
+        "p0": 0.5,
+        "p1": 0.6,
+        "alpha": 0.05,
+        "beta": 0.05,
+        "max_games": 200
+      },
+      "per_game": [
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 43,
+          "seconds": 245.0705816745758,
+          "error": null,
+          "game_idx": 0
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 44,
+          "seconds": 244.61017990112305,
+          "error": null,
+          "game_idx": 1
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 49,
+          "seconds": 277.6625699996948,
+          "error": null,
+          "game_idx": 2
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 58,
+          "seconds": 303.909991979599,
+          "error": null,
+          "game_idx": 3
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 55,
+          "seconds": 289.46144700050354,
+          "error": null,
+          "game_idx": 4
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 48,
+          "seconds": 271.0534908771515,
+          "error": null,
+          "game_idx": 5
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 55,
+          "seconds": 283.1241252422333,
+          "error": null,
+          "game_idx": 6
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 46,
+          "seconds": 270.6551389694214,
+          "error": null,
+          "game_idx": 7
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 47,
+          "seconds": 271.2753028869629,
+          "error": null,
+          "game_idx": 8
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 76,
+          "seconds": 351.6979320049286,
+          "error": null,
+          "game_idx": 9
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 51,
+          "seconds": 285.46242117881775,
+          "error": null,
+          "game_idx": 10
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 58,
+          "seconds": 278.0908737182617,
+          "error": null,
+          "game_idx": 11
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 81,
+          "seconds": 372.68893694877625,
+          "error": null,
+          "game_idx": 12
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 50,
+          "seconds": 255.86228919029236,
+          "error": null,
+          "game_idx": 13
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 79,
+          "seconds": 372.911936044693,
+          "error": null,
+          "game_idx": 14
+        },
+        {
+          "model_color": "black",
+          "winner": "black",
+          "model_won": true,
+          "moves": 48,
+          "seconds": 251.61678791046143,
+          "error": null,
+          "game_idx": 15
+        },
+        {
+          "model_color": "white",
+          "winner": "white",
+          "model_won": true,
+          "moves": 51,
+          "seconds": 271.54813170433044,
+          "error": null,
+          "game_idx": 16
+        }
+      ],
+      "elapsed_seconds": 4896.72433590889
+    }
+  ],
+  "elapsed_seconds": 4896.72433590889
+}
