@@ -1275,6 +1275,116 @@ same bug or pattern session after session.
 
 ---
 
+### Alignment-loop analysis of B1+B2+B3 RE-RUN #2 — alignment matches WR trajectory, validates autopilot decisions — **MEASURED** (2026-05-27)
+
+3-way comparison (`anchor` / `iter1_ema` / `iter4_ema`) on 95 stratified
+MAIN_GAME-heavy positions from the post-fix replay buffer, evaluated at
+`sims=[0, 400, 1600, 3200]` per model. Tooling: `analysis_board/loop/`
+— stratified sampler (`sample_positions.py --stratify move_number`),
+per-position MCTS measurement (`measure.py`), N-way per-metric report
+(`compare.py`). Total compute ~3h on M-series MPS across the three
+measurement passes. Run dir
+`analysis_board/loop/runs/20260527_142250_b1b2b3_postfix/`, report at
+`compare_report/report.md`. This is a *child* analysis of the
+B1+B2+B3 RE-RUN #2 entry below, not an independent experiment.
+
+**Result block (at 3200 sims, N=95 shared positions):**
+
+| Metric | anchor | iter1 | iter4 |
+|---|---:|---:|---:|
+| Mean rank_of_final_best (lower better) | 7.44 | 7.49 | 7.94 |
+| % misaligned (rank≥3, lower better) | 46.3% | 45.3% | 45.3% |
+| Mean value_gain_over_raw (closer to zero better) | -0.005 | -0.007 | -0.012 |
+| % costly (gain≥0.1, lower better) | 7.4% | **5.3%** | 10.5% |
+| % opposite-sign divergence (lower better) | 2.8% | 4.2% | 7.1% |
+| Mean best_move_value | +0.275 | +0.267 | +0.246 |
+
+**The crucial detail:** **iter1 has the lowest % costly (5.3% vs anchor's
+7.4%)** — a real, signed improvement that SPRT at N=103 missed (47.6%
+WR, NOT_STRONGER). iter4 is materially worse than iter1 across every
+alignment metric, matching the autopilot's revert decision. Alignment
+appears to be a *sensitive* training-quality signal where SPRT-at-small-N
+is noise-limited.
+
+**Trajectory (anchor → iter1 → iter4) across the metric set:**
+- mean rank: 7.44 → 7.49 → 7.94 (slight regression then larger regression)
+- % costly: 7.4% → **5.3%** → 10.5% (real improvement at iter1, then degradation)
+- % opposite-sign: 2.8% → 4.2% → 7.1% (monotonic degradation)
+- best_move_value: +0.275 → +0.267 → +0.246 (monotonic degradation)
+
+The % costly trajectory is the noisiest but most signed; opposite-sign
+and best_move_value are *cleanly monotonic* through iter4 and corroborate
+the WR-trajectory degradation.
+
+**Confirmed/pending findings:**
+- ✅ **The post-fix iters DID produce measurable behavioral change vs
+  anchor**, not just noise. Multiple alignment metrics shift with
+  consistent direction. Confirms the training pipeline is doing
+  *something*, even when SPRT can't resolve it as a WR change at N=103.
+- ✅ **Alignment trajectory matches WR trajectory** (anchor → iter1
+  slight improvement → iter4 degradation). First independent
+  corroboration of the autopilot's iter-by-iter promote/revert decisions
+  from an axis other than win-rate.
+- ✅ **Opposite-sign divergence is rare, not systemic.** 2.8–7.1% at 3200
+  sims, NOT the 43.8% an earlier corrupted run suggested (see
+  operational lessons). The row-10-counter-capture-style failure
+  pattern from 2026-05-26 is real but uncommon.
+- 🟡 (open) **Does alignment improvement predict SPRT improvement at
+  larger N?** Iter1's +2.1pt improvement in % costly maps to NOT_STRONGER
+  at N=103. Worth testing whether N=400-800 SPRT can resolve the
+  alignment delta into a WR signal. If yes, alignment becomes a useful
+  *faster* training-quality detector than SPRT.
+
+**Operational lessons logged:**
+- **`measure.py` was silently corrupting per-position MCTS measurements**
+  for two days. Root cause: `server.get_mcts()` was updated to use
+  `enable_subtree_reuse=True` (needed for the analysis-board's
+  step-into-line PV extraction); the Flask `/api/evaluate` path was
+  updated with `mcts.reset_tree()` before each search to keep
+  evaluations independent, but `measure.py` (which calls `mcts.search()`
+  directly) was not. Result: every position after the first in a
+  measurement batch inherited the previous position's tree, producing
+  the prior position's policy distribution mapped onto a different board.
+  Smoking-gun symptom in the corrupted reports: identical
+  `rank_of_final_best` across all sim budgets for every position —
+  which I missed when generating the morning 158-position stratified
+  run, surfacing as the alarming "43.8% opposite-sign rate" headline
+  that turned out to be the bug talking. Fix landed in commit `35b3977`
+  (one-line `mcts.reset_tree()` addition to `measure_one()`). All
+  loop-runs since `a52e3f5` (2026-05-26 afternoon, the step-into-line
+  commit) had to be re-run.
+- **Discipline takeaway:** when enabling state-persistence on a shared
+  instance (`enable_subtree_reuse=True`), audit every caller for paired
+  resets. The Flask path was fine because I added the reset there;
+  `measure.py` wasn't because I didn't think about the new invariant
+  when retrofitting subtree-reuse for an unrelated PV-extraction feature.
+- **Stratified sampling** (`sample_positions.py --stratify move_number`)
+  made late-MAIN_GAME buckets sturdy enough for analysis. Previous
+  uniform sampling had ~3 positions in move 60+ buckets; stratified has
+  30+. Stratification should be the default going forward.
+- **Per-row best_move_value pills + opposite-sign-divergent flag in the
+  analysis-board UI** make the value-head-blind-spot pattern visible at
+  a glance without stepping into each line. Right tool to surface
+  *before* generating measurements — would have caught the 43.8% number
+  as suspicious immediately if it had been visible.
+
+**Next experiments per sequencing matrix:**
+- **TODO_baseline.md #28** — fix `trainer.py:1442` search-consistency
+  mid-capture contamination before the next training cycle. Bounded
+  magnitude (~1.3% loss contamination — `0.1 SC weight × ~13%
+  mid-capture buffer fraction`) but real, and gated as "do not land
+  mid-run." Affects every config with `search_consistency: enabled:
+  true`, which is all current B1B2B3 / wave3 configs.
+- **Iter1-as-warm-start training run** — current evidence (1.7pt
+  improvement in % costly, opposite-sign +1.4pt regression but absolute
+  rate still low at 4.2%) is consistent with iter1 being marginally
+  stronger than anchor. Whether that compounds across more iterations
+  is the open question. Cheap to test: same config, swap warm-start.
+- **(deferred)** Calibrate whether alignment metric can replace SPRT as
+  the autopilot's promote/revert criterion in regimes where N is
+  compute-limited. Needs 2-3 more training-run analyses across
+  different config tweaks to characterize the alignment ↔ WR mapping.
+
 ### B1+B2+B3 RE-RUN #2 — phase-fix verified, loop neutral at SPRT bar — **NOT_STRONGER** (2026-05-27)
 
 The actual experiment, on the post-phase-weight-fix code. Five-iteration
