@@ -22,9 +22,12 @@
         <string>127.0.0.1</string>
         <key>YNS_PORT</key>
         <string>5173</string>
-        <!-- Public-access sim cap. 1600 ≈ 11s worst-case eval on Apple Silicon. -->
+        <!-- Public-access sim cap. 3200 ≈ 22s worst-case eval on Apple Silicon.
+             Bumped from 1600 after a strong-player tester reported no perceptible
+             difference between Standard/Strong — wanted to expose the full
+             "Deep" option to test whether the dial is real or placebo. -->
         <key>YNS_MAX_NUM_SIMS</key>
-        <string>1600</string>
+        <string>3200</string>
         <!-- MPS = Apple Silicon GPU. Fall back to "cpu" if MPS misbehaves. -->
         <key>YNS_DEVICE</key>
         <string>mps</string>

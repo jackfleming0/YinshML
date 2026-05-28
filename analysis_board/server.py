@@ -12,10 +12,12 @@ Run with::
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -59,6 +61,48 @@ MAX_NUM_SIMS = int(os.environ.get("YNS_MAX_NUM_SIMS", "0"))
 # is currently searching. Acceptable at the ~5-user scale (worst case 5 *
 # 1600-sim eval ≈ 1 minute for the last user).
 _mcts_lock = threading.Lock()
+
+# Append-only per-day JSONL log of every successful /api/move event. Used
+# to reconstruct friend-played games offline for qualitative analysis:
+# where did the engine win / lose, what openings show up, what positions
+# trip the model up. Path is relative to the repo root (ROOT). Logging is
+# best-effort — a write failure must NOT break the response to the user.
+GAME_LOG_DIR = ROOT / "analysis_board" / "multiplayer" / "deploy" / "games"
+
+
+def _log_move_event(
+    payload: Dict[str, Any], move_spec: Optional[Dict[str, Any]], response: Dict[str, Any],
+) -> None:
+    """Append one /api/move event to today's JSONL file. Captures both the
+    pre- and post-move position so a single line is self-contained — no need
+    to chain events to reconstruct state. Groups into games via the
+    client-supplied ``play_session_id`` (regenerated on Clear / startGame /
+    setup→play transitions).
+    """
+    try:
+        GAME_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        path = GAME_LOG_DIR / f"{now.strftime('%Y-%m-%d')}.jsonl"
+        event = {
+            "ts": now.isoformat(),
+            "play_session_id": payload.get("play_session_id"),
+            "pre_position": {
+                "pieces": payload.get("pieces"),
+                "phase": payload.get("phase"),
+                "side_to_move": payload.get("side_to_move"),
+                "scores": payload.get("scores"),
+                "move_maker": payload.get("move_maker"),
+            },
+            "requested_move": move_spec,
+            "applied_move": response.get("applied_move"),
+            "new_position": response.get("new_position"),
+            "game_over": response.get("game_over"),
+            "winner": response.get("winner"),
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(event, separators=(",", ":")) + "\n")
+    except Exception as e:  # noqa: BLE001
+        log.warning("game-log append failed: %s", e)
 
 
 def _pick_checkpoint(model_dir: Path) -> Optional[Path]:
@@ -768,14 +812,17 @@ def api_move():  # type: ignore[no-untyped-def]
     else:
         new_valid = gs.get_valid_moves()
 
-    return jsonify({
+    result = {
         "ok": True,
         "new_position": new_payload,
         "applied_move": _serialize_move(move),
         "legal_moves": _legal_moves_payload(new_valid),
         "game_over": game_over,
         "winner": winner,
-    })
+    }
+    # Best-effort: append to the per-day game log. Failures don't bubble up.
+    _log_move_event(payload, move_spec, result)
+    return jsonify(result)
 
 
 def main() -> None:

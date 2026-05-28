@@ -50,6 +50,17 @@ function isValidPos(col, row) {
   return rows ? rows.includes(row) : false;
 }
 
+// Generate a UUID. Browsers ≥2022 have crypto.randomUUID natively; the
+// fallback covers older runtimes. Used to tag every /api/move with a
+// `play_session_id` so the server log can be grouped into games offline.
+function _uuid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
 // Geometry is owned by board3d.js — see posToWorld / pixelToBoardPos there.
 
 // ---------- State ----------
@@ -79,6 +90,9 @@ const state = {
                              //   { phase: "setup"|"playing"|"ended",
                              //     humanSide, computerSide, computerSims,
                              //     spoilersEnabled, thinking, winner }
+  playSessionId: _uuid(),    // sent with every /api/move so server-side logs
+                             // can be reconstructed into discrete games offline.
+                             // Regenerated on Clear / startGame / setup→play.
 };
 
 
@@ -533,6 +547,7 @@ function currentPositionPayload() {
     side_to_move: currentSide(),
     scores: derivedScores(),
     move_maker: state.moveMaker,
+    play_session_id: state.playSessionId,
   };
 }
 
@@ -665,6 +680,8 @@ clearBtn.addEventListener("click", () => {
   state.pieces.clear();
   state.hoverArrow = null;
   state.lastResult = null;
+  // Fresh play session — moves played after a Clear belong to a new game.
+  state.playSessionId = _uuid();
   updateDerivedStats();
   renderResult(null);
   render();
@@ -1108,6 +1125,10 @@ async function setMode(mode) {
   if (mode === "play") {
     boardHint.textContent = "Click a ring of the side to move, then click a destination. Or click any top-move row to apply.";
     setArmedTool(null);
+    // Entering Play from Setup = starting a new game from the composed
+    // position. Fresh play session so the logs cleanly separate "composed
+    // and played" from prior activity on the page.
+    state.playSessionId = _uuid();
     if (!state.lastResult && state.pieces.size > 0) {
       await evaluate({ skipPositionCheck: true });
     } else if (!state.lastResult) {
@@ -1190,6 +1211,8 @@ async function startGame() {
     thinking: false,
     winner: null,
   };
+  // Fresh play session — the next /api/move belongs to this new game.
+  state.playSessionId = _uuid();
 
   // Start a fresh YINSH game from RING_PLACEMENT. Server is stateless;
   // we just initialize the local state and let the user (or computer)
