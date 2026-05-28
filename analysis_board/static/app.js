@@ -18,6 +18,8 @@ import {
   pixelToBoardPos,
   resetView,
   animateMove,
+  setCapturedRings,
+  setSelectableRings,
 } from "./board3d.js";
 
 // ---------- Constants ----------
@@ -71,8 +73,8 @@ const state = {
   hoverArrow: null,          // {from:{col,row}, to:{col,row}} | null — for top-move hover
   lastResult: null,          // last /api/evaluate response
   models: [],
-  mode: "setup",             // "setup" | "play"
-  opponent: "self",          // "self" | "engine" — meaningful only when mode === "play"
+  mode: "play",              // "setup" | "play" — Play is the default landing
+  opponent: "engine",        // "self" | "engine" — Engine is the default opponent
   legalMoves: [],            // list of move dicts (from /api/evaluate or /api/move response)
   selectedSource: null,      // {col,row} of the ring picked in Play mode, awaiting destination
   history: [],               // stack of {position, move_description}
@@ -125,6 +127,17 @@ function render() {
     setArrow(fromStr, toStr);
   } else {
     clearArrow();
+  }
+  // RING_REMOVAL phase: highlight every removable ring of the side-to-move
+  // with a red overlay so the player picks by sight, not by reading the
+  // coordinate label in the analysis panel.
+  if (phaseSel.value === "RING_REMOVAL" && state.legalMoves.length > 0) {
+    const removable = state.legalMoves
+      .filter((m) => m.type === "REMOVE_RING" && m.source)
+      .map((m) => m.source);
+    setSelectableRings(removable);
+  } else {
+    setSelectableRings([]);
   }
 }
 
@@ -770,6 +783,9 @@ function updateDerivedStats() {
   blackRingsCountEl.textContent = b;
   whiteScoreEl.textContent = scores.WHITE;
   blackScoreEl.textContent = scores.BLACK;
+  // Mirror the score into the corner reserve slots — captured rings appear
+  // as 3D rings in white/black corners so the score reads at a glance.
+  setCapturedRings(scores.WHITE, scores.BLACK);
   // Grey out ring tools when the cap is hit.
   for (const btn of palette.querySelectorAll(".tool")) {
     const tool = btn.dataset.tool;
@@ -1605,3 +1621,9 @@ applyOpponentStyling(state.opponent);
 loadModels();
 updateDerivedStats();
 render();
+// Default landing = Play + vs Engine → land users straight in the New Game
+// stepper instead of an empty board with no obvious next action. Users who
+// want to compose a position click "Set up position" to escape into Setup.
+if (state.mode === "play" && state.opponent === "engine" && !state.game) {
+  enterGameSetup();
+}

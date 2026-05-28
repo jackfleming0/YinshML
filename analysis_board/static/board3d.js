@@ -122,6 +122,9 @@ const PALETTE = {
   selection: 0xffb347,
   arrowSrc: 0xd97706,
   arrowDst: 0x2aa7c0,
+  // RING_REMOVAL phase: highlight every removable ring of the side-to-move
+  // so the player can pick by sight, not by reading the coordinate label.
+  removable: 0xef4444,
 };
 
 // Build a CanvasTexture with terrazzo-style speckle for piece faces. One
@@ -184,10 +187,14 @@ const M = {
   boardGroup: null,                // board slab + grid
   piecesGroup: null,               // parented to scene; child of board for tilt-following
   arrowsGroup: null,
+  capturedRingsGroup: null,        // filled rings dropped into corner reserve slots
+  selectableHighlightsGroup: null, // RING_REMOVAL highlights (red overlays)
   hoverMesh: null,
   selectionMesh: null,
   pieces: new Map(),               // key "E5" → Object3D
   textures: {},                    // speckle textures, lazy-built
+  whiteReserveSlots: [],           // [{x,z}, ...] populated by _buildRingReserves
+  blackReserveSlots: [],
   container: null,
   size: { w: 760, h: 760 },
   raycastReady: false,
@@ -277,18 +284,23 @@ export function initBoard3D(container) {
   M.boardGroup = new THREE.Group();
   M.piecesGroup = new THREE.Group();
   M.arrowsGroup = new THREE.Group();
+  M.capturedRingsGroup = new THREE.Group();
+  M.selectableHighlightsGroup = new THREE.Group();
   M.scene.add(M.boardGroup);
   M.scene.add(M.piecesGroup);
   M.scene.add(M.arrowsGroup);
+  M.scene.add(M.capturedRingsGroup);
+  M.scene.add(M.selectableHighlightsGroup);
+
+  // Speckle textures need to exist before _buildBoard's reserve slots
+  // refer to them (setCapturedRings calls _buildPiece which needs textures).
+  M.textures.lightFace = buildSpeckleTexture(PALETTE.pieceLight, PALETTE.pieceLightSpeckle);
+  M.textures.darkFace = buildSpeckleTexture(PALETTE.pieceDark, PALETTE.pieceDarkSpeckle);
 
   // Build static board geometry
   _buildBoard();
   _buildHoverMesh();
   _buildSelectionMesh();
-
-  // Speckle textures (built once, reused)
-  M.textures.lightFace = buildSpeckleTexture(PALETTE.pieceLight, PALETTE.pieceLightSpeckle);
-  M.textures.darkFace = buildSpeckleTexture(PALETTE.pieceDark, PALETTE.pieceDarkSpeckle);
 
   // Render loop
   function loop() {
@@ -426,6 +438,70 @@ export function clearArrow() {
     const c = M.arrowsGroup.children[i];
     M.arrowsGroup.remove(c);
     _disposeObject(c);
+  }
+}
+
+// Fill the corner reserve slots with real rings of each color based on the
+// current capture counts. Called from updateDerivedStats() on every render
+// cycle so the score is always in sync. Counts are clamped to [0, 3]
+// (3 captured rows = win).
+export function setCapturedRings(whiteCount, blackCount) {
+  // Clear existing
+  for (let i = M.capturedRingsGroup.children.length - 1; i >= 0; i--) {
+    const c = M.capturedRingsGroup.children[i];
+    M.capturedRingsGroup.remove(c);
+    _disposeObject(c);
+  }
+  const w = Math.max(0, Math.min(3, whiteCount | 0));
+  const b = Math.max(0, Math.min(3, blackCount | 0));
+  for (let i = 0; i < w; i++) {
+    const pos = M.whiteReserveSlots[i];
+    if (!pos) continue;
+    const ring = _buildPiece("WHITE_RING");
+    // Slightly smaller than on-board rings so the corners read as
+    // "scoreboard" not "another playable area."
+    ring.position.set(pos.x, 0, pos.z);
+    ring.scale.set(0.85, 0.85, 0.85);
+    M.capturedRingsGroup.add(ring);
+  }
+  for (let i = 0; i < b; i++) {
+    const pos = M.blackReserveSlots[i];
+    if (!pos) continue;
+    const ring = _buildPiece("BLACK_RING");
+    ring.position.set(pos.x, 0, pos.z);
+    ring.scale.set(0.85, 0.85, 0.85);
+    M.capturedRingsGroup.add(ring);
+  }
+}
+
+// Highlight a set of removable rings (during RING_REMOVAL phase) with a
+// red overlay so the player can pick by sight, not by reading coordinates.
+// Pass [] to clear.
+export function setSelectableRings(posKeys) {
+  for (let i = M.selectableHighlightsGroup.children.length - 1; i >= 0; i--) {
+    const c = M.selectableHighlightsGroup.children[i];
+    M.selectableHighlightsGroup.remove(c);
+    _disposeObject(c);
+  }
+  if (!posKeys || posKeys.length === 0) return;
+  for (const key of posKeys) {
+    const col = key[0];
+    const row = parseInt(key.slice(1), 10);
+    if (!isValidPos(col, row)) continue;
+    const w = posToWorld(col, row);
+    const geom = new THREE.RingGeometry(0.42, 0.50, 40);
+    const mat = new THREE.MeshBasicMaterial({
+      color: PALETTE.removable,
+      transparent: true,
+      opacity: 0.70,
+      side: THREE.DoubleSide,
+    });
+    const m = new THREE.Mesh(geom, mat);
+    m.rotation.x = -Math.PI / 2;
+    // Sit just above the ring's top face so the highlight reads as an
+    // emphasis ring around the piece, not as a piece itself.
+    m.position.set(w.x, 0.022, w.z);
+    M.selectableHighlightsGroup.add(m);
   }
 }
 
@@ -686,15 +762,21 @@ function _applyBoardVignetteColors(geom, w, d) {
 }
 
 function _buildRingReserves(slabW, slabD) {
-  // Ghost outline rings in two opposite corners showing un-placed rings.
-  // Visual flavor only — not state-tracked yet.
+  // Three ghost slots per side, one per capturable row. As captures happen
+  // setCapturedRings() fills slots with real speckled rings of the matching
+  // color — the score becomes visible at a glance without reading numbers.
+  // Back-left corner = WHITE's reserve, front-right = BLACK's.
   const ringR = 0.40, innerR = 0.22;
   const corners = [
-    { x: -slabW / 2 + 1.0, z: -slabD / 2 + 1.0, dx: 1.0 },
-    { x: slabW / 2 - 1.0, z: slabD / 2 - 1.0, dx: -1.0 },
+    { side: "WHITE", x: -slabW / 2 + 1.0, z: -slabD / 2 + 1.0, dx: 1.0 },
+    { side: "BLACK", x: slabW / 2 - 1.0, z: slabD / 2 - 1.0, dx: -1.0 },
   ];
+  M.whiteReserveSlots = [];
+  M.blackReserveSlots = [];
   for (const c of corners) {
     for (let i = 0; i < 3; i++) {
+      const slotX = c.x + i * c.dx * 0.9;
+      const slotZ = c.z;
       const geom = new THREE.RingGeometry(innerR, ringR, 40);
       const mat = new THREE.MeshBasicMaterial({
         color: PALETTE.boardEdge,
@@ -704,8 +786,10 @@ function _buildRingReserves(slabW, slabD) {
       });
       const m = new THREE.Mesh(geom, mat);
       m.rotation.x = -Math.PI / 2;
-      m.position.set(c.x + i * c.dx * 0.9, 0.004, c.z);
+      m.position.set(slotX, 0.004, slotZ);
       M.boardGroup.add(m);
+      if (c.side === "WHITE") M.whiteReserveSlots.push({ x: slotX, z: slotZ });
+      else M.blackReserveSlots.push({ x: slotX, z: slotZ });
     }
   }
 }
