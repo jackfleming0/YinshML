@@ -1,0 +1,8 @@
+# launchd log output — produced at runtime, not source.
+*.log
+*.err.log
+
+# Per-day JSONL game logs from /api/move. Private (could contain friend
+# play patterns); rsync them off the Mac mini for analysis but don't
+# commit them.
+games/

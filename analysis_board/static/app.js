@@ -17,6 +17,7 @@ import {
   clearArrow,
   pixelToBoardPos,
   resetView,
+  animateMove,
 } from "./board3d.js";
 
 // ---------- Constants ----------
@@ -49,6 +50,17 @@ function isValidPos(col, row) {
   return rows ? rows.includes(row) : false;
 }
 
+// Generate a UUID. Browsers ≥2022 have crypto.randomUUID natively; the
+// fallback covers older runtimes. Used to tag every /api/move with a
+// `play_session_id` so the server log can be grouped into games offline.
+function _uuid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
 // Geometry is owned by board3d.js — see posToWorld / pixelToBoardPos there.
 
 // ---------- State ----------
@@ -78,6 +90,9 @@ const state = {
                              //   { phase: "setup"|"playing"|"ended",
                              //     humanSide, computerSide, computerSims,
                              //     spoilersEnabled, thinking, winner }
+  playSessionId: _uuid(),    // sent with every /api/move so server-side logs
+                             // can be reconstructed into discrete games offline.
+                             // Regenerated on Clear / startGame / setup→play.
 };
 
 
@@ -376,6 +391,9 @@ function currentSide() {
 async function applyMove(moveSpec) {
   state.busy = true;
   state.hoverArrow = null;
+  // Snapshot the pre-move pieces for the animation diff. Must be a copy —
+  // applyNewPosition mutates state.pieces in place.
+  const prevPiecesSnapshot = new Map(state.pieces);
   try {
     const res = await fetch("/api/move", {
       method: "POST",
@@ -387,18 +405,32 @@ async function applyMove(moveSpec) {
       setStatus((data.errors || ["move failed"]).join(" · "), "error");
       return;
     }
-    // Push history before mutating.
+    // Push history (pre-move position) before mutating.
     state.history.push({
       position: currentPositionPayload(),
       move: data.applied_move,
     });
     updateUndoBtn();
     appendHistoryEntry(data.applied_move);
-    // Apply new position to local state.
+    // Build the new-pieces map without mutating state.pieces yet — we want
+    // sidebar state (side/phase/badge) to stay aligned with the board
+    // during the animation, so applyNewPosition runs AFTER animateMove.
+    const newPiecesMap = new Map();
+    for (const p of data.new_position.pieces) newPiecesMap.set(p.pos, p.piece);
+    await animateMove({
+      move: data.applied_move,
+      prevPieces: prevPiecesSnapshot,
+      newPieces: newPiecesMap,
+    });
+    // Commit pieces + sidebar all at once (in sync with the canonical scene).
     applyNewPosition(data.new_position);
     state.legalMoves = data.legal_moves || [];
     state.gameOver = data.game_over;
     state.winner = data.winner;
+    // Snap the scene to canonical state before any downstream await
+    // (engine reply / autoEval fetch) so transient animation meshes don't
+    // linger across that fetch.
+    render();
     if (state.gameOver) {
       setStatus(
         `Game over — ${state.winner ? state.winner + " wins" : "draw"}.`,
@@ -515,6 +547,7 @@ function currentPositionPayload() {
     side_to_move: currentSide(),
     scores: derivedScores(),
     move_maker: state.moveMaker,
+    play_session_id: state.playSessionId,
   };
 }
 
@@ -647,6 +680,8 @@ clearBtn.addEventListener("click", () => {
   state.pieces.clear();
   state.hoverArrow = null;
   state.lastResult = null;
+  // Fresh play session — moves played after a Clear belong to a new game.
+  state.playSessionId = _uuid();
   updateDerivedStats();
   renderResult(null);
   render();
@@ -1090,6 +1125,10 @@ async function setMode(mode) {
   if (mode === "play") {
     boardHint.textContent = "Click a ring of the side to move, then click a destination. Or click any top-move row to apply.";
     setArmedTool(null);
+    // Entering Play from Setup = starting a new game from the composed
+    // position. Fresh play session so the logs cleanly separate "composed
+    // and played" from prior activity on the page.
+    state.playSessionId = _uuid();
     if (!state.lastResult && state.pieces.size > 0) {
       await evaluate({ skipPositionCheck: true });
     } else if (!state.lastResult) {
@@ -1172,6 +1211,8 @@ async function startGame() {
     thinking: false,
     winner: null,
   };
+  // Fresh play session — the next /api/move belongs to this new game.
+  state.playSessionId = _uuid();
 
   // Start a fresh YINSH game from RING_PLACEMENT. Server is stateless;
   // we just initialize the local state and let the user (or computer)
