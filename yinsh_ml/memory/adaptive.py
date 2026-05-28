@@ -103,30 +103,30 @@ class TensorCompatibilityChecker:
     @staticmethod
     def is_compatible(source_tensor: torch.Tensor, target_shape: Tuple[int, ...]) -> bool:
         """
-        Determines if a tensor can be reshaped to the target shape without reallocation.
-        
-        Args:
-            source_tensor: The source tensor to potentially reshape
-            target_shape: The desired shape
-            
-        Returns:
-            True if reshaping is possible and efficient
+        Determines if a tensor can be reused as the target shape via `view()`
+        without reallocation.
+
+        The consumer (`TensorPool.get`) reuses by calling
+        `source_tensor.view(target_shape)`, which requires *exact* numel
+        equality — `view` reinterprets storage, it does not slice. Earlier
+        revisions of this check accepted `target_elements <= source_elements`
+        (i.e. a too-large tensor was "compatible"), which caused every
+        batch-size-mismatched lookup in the threaded shared-evaluator path
+        to emit a `Failed to reshape tensor: shape '...' is invalid for
+        input of size ...` warning before falling through to fresh
+        allocation. The reshape path was effectively dead code for batch-size
+        variation. See `test_tensor_pool.py::TestReshapeCompatibility`.
         """
-        # Check 1: Element count - target must have fewer or equal elements
+        # Numel must match exactly — `view()` requires it.
         source_elements = source_tensor.numel()
         target_elements = torch.prod(torch.tensor(target_shape)).item()
-        if target_elements > source_elements:
+        if source_elements != target_elements:
             return False
-            
-        # Check 2: Contiguity - reshaping requires contiguous memory
+
+        # Contiguity — `view()` requires contiguous storage.
         if not source_tensor.is_contiguous():
             return False
-            
-        # Check 3: Reasonable waste factor - don't reuse if too inefficient
-        waste_factor = (source_elements - target_elements) / target_elements
-        if waste_factor > 2.0:  # Don't waste more than 2x the needed memory
-            return False
-            
+
         return True
     
     @staticmethod

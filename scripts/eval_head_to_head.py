@@ -187,9 +187,9 @@ def main():
         if not ckpt.exists():
             logger.error(f"Checkpoint not found: {ckpt}")
             sys.exit(1)
-        net = NetworkWrapper(device=device)
-        # Use the wrapper's load_model so size mismatch hard-fails with a clear error.
-        net.load_model(str(ckpt))
+        # Constructor path auto-detects encoding + capacity from the checkpoint
+        # AND hard-fails on size mismatch with a clear error.
+        net = NetworkWrapper(model_path=str(ckpt), device=device)
         nets[it] = net
         logger.info(f"Loaded iter_{it} from {ckpt.name}")
 

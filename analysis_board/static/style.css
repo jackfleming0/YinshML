@@ -1,0 +1,1122 @@
+/* YINSH analysis board — light, BGA-inspired. */
+
+:root {
+  /* BGA / Rio Grande aesthetic — light icy-blue board floats on a dark
+     charcoal page. Cool palette throughout, teal accent that echoes the
+     piece rim. Type and chrome read white-on-dark to keep the focus on
+     the rendered board surface. */
+  --bg: #2b2f33;
+  --bg-soft: #353a3f;
+  --board-tile: #c7d9e3;       /* board surface light center */
+  --board-tile-2: #91a8b8;     /* board surface deeper corners */
+  --board-grid: #1a2128;
+  --board-dot: #1a2128;
+  --ink: #f0f3f6;              /* primary text, on dark */
+  --ink-dim: #aab3bc;
+  --ink-faint: #6f7882;
+  --rule: rgba(255, 255, 255, 0.10);
+  --surface: #353a3f;          /* sidebar cards */
+  --surface-2: #40464c;        /* nested controls */
+  --accent: #2aa7c0;            /* teal — echoes the piece rim */
+  --accent-dim: #5fc1d4;
+  --positive: #4caf6a;
+  --negative: #d9534f;
+  --warn: #e0a83b;
+  /* Doubled shadows — sit pieces / cards above the dark background */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 18px rgba(0, 0, 0, 0.20);
+  --shadow-lift: 0 1px 3px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.25);
+  --radius: 8px;
+}
+
+* { box-sizing: border-box; }
+
+/* HTML's `hidden` attribute is semantic — respect it globally so class-level
+   `display: flex/grid/block` rules don't accidentally win the specificity
+   battle and reveal elements that JS explicitly hid. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background:
+    radial-gradient(circle at 30% 0%, var(--bg-soft) 0%, var(--bg) 55%);
+  color: var(--ink);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  min-height: 100vh;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: minmax(720px, 1fr) 360px;
+  gap: 24px;
+  padding: 24px;
+  max-width: 1440px;
+  margin: 0 auto;
+  min-height: 100vh;
+}
+
+/* ---------- Board area ---------- */
+
+.board-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  max-width: 760px;
+}
+.mode-toggle {
+  display: inline-flex;
+  background: var(--surface);
+  border-radius: 5px;
+  padding: 3px;
+  box-shadow: var(--shadow);
+}
+.mode-btn {
+  background: transparent;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.mode-btn.active {
+  background: var(--accent);
+  color: white;
+  font-weight: 500;
+}
+.mode-btn:not(.active):hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.play-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.play-controls .secondary {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Line-mode navigation bar — sits above the board when walking a PV. */
+.line-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: rgba(42, 167, 192, 0.10);
+  border: 1px solid rgba(42, 167, 192, 0.40);
+  border-radius: 8px;
+  padding: 10px 14px;
+  width: 100%;
+  max-width: 760px;
+  box-shadow: var(--shadow);
+}
+.line-nav-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--ink);
+  flex-wrap: wrap;
+}
+.line-nav-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  font-weight: 600;
+}
+.line-nav-move {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ink);
+  font-weight: 600;
+}
+.line-nav-step {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.line-nav-just-played {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ink-dim);
+  padding-left: 4px;
+  border-left: 1px solid var(--rule);
+}
+.line-nav-just-played:empty { display: none; }
+.line-nav-just-played.tentative {
+  color: var(--warn);
+  font-style: italic;
+}
+.line-nav-just-played.tentative::after {
+  content: " · tentative";
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: 4px;
+  opacity: 0.7;
+}
+.line-nav-controls {
+  display: flex;
+  gap: 6px;
+}
+.line-nav-controls button {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.line-nav-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* When in line mode, dim out the setup/play controls so they don't look
+   like they'll do anything. */
+body.line-mode .palette,
+body.line-mode .field input,
+body.line-mode .field select,
+body.line-mode #evaluate,
+body.line-mode #clear,
+body.line-mode .mode-toggle {
+  opacity: 0.45;
+  pointer-events: none;
+}
+body.line-mode .controls .actions { opacity: 0.45; pointer-events: none; }
+
+/* ---------- Game mode ---------- */
+
+.game-setup-block {
+  border-top: 1px solid var(--rule);
+}
+.game-setup-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* Numbered-step layout: small chip on the left, field on the right.
+   Makes the sequence (model → strength → spoilers → side → start)
+   visually obvious. */
+.game-setup-step {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 6px 0;
+}
+.game-setup-step .step-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 18px;
+}
+.game-spoilers-field span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.game-spoilers-field small {
+  display: block;
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.game-status-block {
+  border-top: 1px solid var(--rule);
+}
+.game-status-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.game-meta { display: flex; flex-direction: column; gap: 2px; }
+.game-meta-label {
+  font-size: 10px;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.game-meta span:last-child {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.game-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(42, 167, 192, 0.10);
+  border: 1px solid rgba(42, 167, 192, 0.40);
+  border-radius: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--accent);
+}
+.thinking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinking-pulse {
+  0%, 60%, 100% { opacity: 0.3; transform: scale(0.85); }
+  30% { opacity: 1; transform: scale(1.1); }
+}
+.thinking-text {
+  margin-left: 4px;
+  font-weight: 500;
+}
+
+.game-result {
+  margin-top: 10px;
+  padding: 14px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  text-align: center;
+}
+.game-result-banner {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+.game-result-banner.won { color: var(--positive); }
+.game-result-banner.lost { color: var(--negative); }
+.game-result-banner.draw { color: var(--ink-dim); }
+.game-result-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.game-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+  gap: 10px;
+}
+.game-spoilers-toggle-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  user-select: none;
+}
+.game-controls button { padding: 4px 10px; font-size: 12px; }
+
+/* ---------- Opponent sub-control (Play-mode pill) ---------- */
+
+/* The Opponent block is rendered in DOM but invisible outside Play mode. */
+body:not(.mode-play) .opponent-block { display: none; }
+
+.opponent-block { padding-top: 4px; padding-bottom: 4px; }
+.opponent-toggle {
+  display: flex;
+  background: var(--surface-2);
+  border-radius: 6px;
+  padding: 3px;
+  width: 100%;
+  gap: 2px;
+}
+.opp-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  padding: 7px 10px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.opp-btn.active {
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+}
+.opp-btn:not(.active):hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+/* When playing against the engine inside Play mode, hide the self-mode
+   status + settings — engine config supersedes them. */
+body.mode-play.opponent-engine .status-block,
+body.mode-play.opponent-engine .settings-block,
+body.mode-play.opponent-engine .auto-eval-toggle {
+  display: none;
+}
+
+/* Set-up-mode-only blocks */
+body:not(.mode-setup) .setup-actions-block,
+body:not(.mode-setup) .palette-block {
+  display: none;
+}
+
+/* game-setup-block / game-status-block only render in Play+Engine. JS still
+   toggles their `hidden` attribute by game phase, but outside vs-Engine we
+   force them gone so they don't leak. */
+body:not(.opponent-engine) .game-setup-block,
+body:not(.opponent-engine) .game-status-block {
+  display: none;
+}
+
+/* Spoilers-off analysis panel hide — UNLESS we're in a capture phase, where
+   the analysis panel is the human's only way to pick which row/ring to
+   capture. force-show-analysis is set from JS during capture phases. */
+body.opponent-engine.spoilers-off #result { display: none; }
+body.opponent-engine.spoilers-off.force-show-analysis #result { display: block; }
+
+/* During the force-show-analysis capture state, the panel is visible but
+   we still want to respect the spoiler intent: the human should pick a
+   row/ring without seeing the engine's preference signal. Hide the
+   percentage, visit count, best-move-value chip, value bars, and the
+   chess-convention helper — leave only the clickable move descriptions. */
+body.opponent-engine.spoilers-off.force-show-analysis .value-row,
+body.opponent-engine.spoilers-off.force-show-analysis .value-help,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .rank,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .prob-cell,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .visits,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .bmv,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .step-into,
+body.opponent-engine.spoilers-off.force-show-analysis #status {
+  display: none;
+}
+/* And the "top" highlight on the first item — in blind mode it's just the
+   alphabetically-first option, no longer the engine's pick. */
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves li.top {
+  background: transparent;
+}
+
+/* Step-into-line button on each top-moves row. */
+.top-moves .step-into {
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+.top-moves .step-into:hover {
+  background: rgba(42, 167, 192, 0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.top-moves .step-into:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Big, unambiguous side-to-move + phase badge */
+.turn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.turn-disc {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  flex-shrink: 0;
+}
+.turn-badge[data-side="WHITE"] .turn-disc { background: #e5edf0; border-color: var(--accent); }
+.turn-badge[data-side="BLACK"] .turn-disc { background: #161a1f; border-color: var(--accent); }
+.turn-badge .turn-text strong { font-weight: 600; }
+.turn-phase {
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.turn-phase:empty { display: none; }
+.turn-phase.alert {
+  background: rgba(224, 168, 59, 0.15);
+  color: var(--warn);
+  border: 1px solid rgba(224, 168, 59, 0.45);
+}
+
+/* In Play mode, the side radio in the sidebar becomes display-only —
+   don't pretend it's an editable control. */
+.side-field.locked {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.auto-eval-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  user-select: none;
+  cursor: help;
+}
+.auto-eval-toggle input { margin: 0; cursor: pointer; }
+
+/* History panel */
+.history-block { padding-top: 10px; }
+.history-title {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.move-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.move-history li {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 6px;
+  padding: 3px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ink-dim);
+  line-height: 1.4;
+}
+.move-history li:nth-child(even) { background: var(--surface-2); }
+.move-history .ply { color: var(--ink-faint); font-variant-numeric: tabular-nums; text-align: right; }
+
+/* Palette hides entirely in Play mode (instead of just greying out — saves vertical space). */
+.palette-block.hidden-in-play { display: none; }
+
+.board-wrap {
+  background: var(--bg-soft);
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: var(--shadow-lift);
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+/* Floating board-overlay button (e.g. "Reset view") — small icon button
+   parked at the top-right corner of the board area. Subtle in idle, more
+   pronounced on hover so it doesn't compete with the lattice. */
+.board-overlay-btn {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 24, 30, 0.55);
+  color: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  z-index: 5;
+}
+.board-overlay-btn:hover {
+  background: rgba(20, 24, 30, 0.85);
+  color: #fff;
+  border-color: var(--accent);
+}
+.board-overlay-btn:active { transform: translateY(1px); }
+
+/* Dwell-tooltip floating near the cursor when the mouse stays on an
+   intersection for ~350ms. Reads as a small label on the page, not part
+   of the 3D scene. */
+.board-tooltip {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  background: rgba(18, 22, 28, 0.94);
+  color: #eef2f6;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font: 600 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.05em;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  transform: translate(12px, -140%);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.board-tooltip[data-visible="true"] { opacity: 1; }
+
+#board-3d {
+  display: block;
+  width: 760px;
+  height: 760px;
+  background: transparent;
+  border-radius: 10px;
+  cursor: crosshair;
+  user-select: none;
+  touch-action: none;
+  position: relative;
+}
+#board-3d canvas {
+  display: block;
+  border-radius: 10px;
+}
+
+/* Legacy 2D canvas selector — kept harmless for the transition */
+#board {
+  display: none;
+}
+
+.hint {
+  position: absolute;
+  bottom: -28px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+/* ---------- Section headers ---------- */
+
+/* General section header — appears at the top of each .block to give it
+   visual identity. Subtle uppercase label so the section is clearly named
+   without competing with the content underneath. */
+.block-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+/* ---------- Status block (compact phase + side + score) ---------- */
+
+.status-block { padding-top: 4px; padding-bottom: 4px; }
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.status-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+.status-field .status-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.status-field select {
+  padding: 5px 7px;
+  font-size: 12px;
+}
+.status-field .radio-row {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+}
+.status-field .radio-row label {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---------- Engine settings disclosure ---------- */
+
+.settings-block { padding: 0; }
+.settings-block > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 12px 14px;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0;
+}
+.settings-block > summary::-webkit-details-marker { display: none; }
+.settings-block > summary::after {
+  content: "▸";
+  font-size: 10px;
+  color: var(--ink-faint);
+  transition: transform 120ms ease;
+}
+.settings-block[open] > summary::after { transform: rotate(90deg); }
+.settings-block[open] > summary { border-bottom: 1px solid var(--rule); }
+.settings-block .settings-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- Setup-mode primary actions ---------- */
+
+.setup-actions-block { padding-top: 10px; padding-bottom: 10px; }
+
+/* ---------- Palette (inside sidebar) ---------- */
+
+.palette-block .block-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.palette-block .block-hint {
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--ink-faint);
+}
+
+.palette {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+
+.tool {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 6px 4px 4px;
+  cursor: grab;
+  font: inherit;
+  color: var(--ink);
+  transition: border-color 100ms ease, background 100ms ease, transform 60ms ease;
+}
+.tool:hover { border-color: var(--ink-dim); background: var(--surface-2); }
+.tool:active { cursor: grabbing; transform: translateY(1px); }
+.tool.armed { border-color: var(--accent); background: rgba(42, 167, 192, 0.12); }
+
+.swatch {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.swatch svg { width: 100%; height: 100%; }
+.swatch.eraser {
+  font-size: 20px;
+  color: var(--ink-dim);
+}
+.tool .label {
+  font-size: 10px;
+  color: var(--ink-dim);
+  pointer-events: none;
+  letter-spacing: 0.01em;
+}
+
+/* Ghost piece dragged from palette */
+.ghost {
+  position: fixed;
+  pointer-events: none;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  z-index: 9999;
+  opacity: 0.92;
+  filter: drop-shadow(0 4px 6px rgba(0,0,0,0.18));
+}
+.ghost svg { width: 100%; height: 100%; }
+
+/* ---------- Controls ---------- */
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  align-self: start;
+}
+
+.controls header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.controls header .subtitle {
+  margin: 4px 0 0;
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.block:first-of-type { border-top: none; padding-top: 0; }
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field > span {
+  font-size: 12px;
+  color: var(--ink-dim);
+  font-weight: 500;
+}
+.field em { color: var(--ink-faint); font-style: normal; font-weight: 400; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.derived-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.derived-stats .stat { display: flex; flex-direction: column; gap: 2px; }
+.derived-stats .stat-label {
+  font-size: 11px;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.derived-stats .stat-line { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.derived-stats strong { color: var(--ink); font-weight: 600; }
+
+.tool.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.side-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+.side-field > span {
+  font-size: 12px;
+  color: var(--ink-dim);
+  font-weight: 500;
+}
+.radio-row { display: flex; gap: 16px; }
+.radio-row label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+
+select, input[type="number"] {
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font: inherit;
+  color: var(--ink);
+  outline: none;
+}
+select:focus, input[type="number"]:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.actions { display: flex; gap: 8px; margin-top: 4px; }
+
+/* Set-up mode's actions row — primary "Analyze position", secondary
+   "Play from here →", subtle link "Clear board" so the eye lands on the
+   two real choices and Clear is a quiet escape hatch. */
+.setup-actions { flex-wrap: wrap; align-items: center; }
+.setup-actions .primary, .setup-actions .secondary { flex: 1 1 auto; }
+.setup-actions .link-button { margin-left: 0; }
+
+/* Advanced MCTS — collapsible to stay out of the way for default users. */
+.advanced-mcts {
+  margin-top: 2px;
+}
+.advanced-mcts summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 0;
+  user-select: none;
+  outline: none;
+}
+.advanced-mcts summary:hover { color: var(--ink); }
+.advanced-mcts summary::-webkit-details-marker { color: var(--ink-faint); }
+.advanced-mcts[open] summary { margin-bottom: 8px; }
+.advanced-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: 6px;
+}
+.advanced-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 8px;
+  padding: 0 4px;
+}
+.field input:disabled, .field select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.link-button:hover { color: var(--accent); }
+
+button.primary, button.secondary {
+  border-radius: 6px;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+button.primary {
+  background: var(--accent);
+  color: white;
+  border: 1px solid var(--accent);
+  flex: 1;
+}
+button.primary:hover { background: #1d8aa0; }
+button.primary:disabled { background: var(--ink-faint); border-color: var(--ink-faint); cursor: not-allowed; }
+button.secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+}
+button.secondary:hover { background: var(--surface-2); }
+
+/* ---------- Result ---------- */
+
+.result .status {
+  font-size: 13px;
+  color: var(--ink-dim);
+}
+.result .status.error {
+  color: var(--negative);
+  background: rgba(217, 83, 79, 0.15);
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(217, 83, 79, 0.45);
+}
+.result .status.success { color: var(--positive); }
+.result .status.thinking { color: var(--accent); font-style: italic; }
+
+.value-row {
+  display: grid;
+  grid-template-columns: 78px 1fr 56px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+.value-label { font-size: 12px; color: var(--ink-dim); }
+.value-help {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+.value-help strong { color: var(--ink); font-weight: 600; }
+.value-num { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px; }
+.value-bar {
+  position: relative;
+  height: 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.value-fill {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: var(--positive);
+  border-radius: 4px;
+  transition: left 200ms ease, width 200ms ease, background 200ms ease;
+}
+.value-fill.negative { background: var(--negative); }
+.value-zero {
+  position: absolute;
+  left: 50%;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--ink-faint);
+  opacity: 0.5;
+}
+
+.top-moves {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.top-moves li {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 80ms ease;
+}
+.top-moves li:hover, .top-moves li.hover {
+  background: var(--surface-2);
+}
+.top-moves li.top { background: rgba(42, 167, 192, 0.12); }
+.top-moves .rank {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+  font-size: 12px;
+  width: 1.6em;
+  text-align: right;
+}
+.top-moves .move-desc {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ink);
+}
+.top-moves .prob-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 90px;
+  justify-content: flex-end;
+}
+.top-moves .prob-bar {
+  width: 50px;
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.top-moves .prob-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+}
+.top-moves .prob-num {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--ink-dim);
+  min-width: 32px;
+  text-align: right;
+}
+.top-moves .visits {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+/* Per-row best_move_value — sign-colored so opposite-sign divergences
+   pop visually. "after" = value of the resulting position after this
+   move, in side-to-move's POV. */
+.top-moves .bmv {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  min-width: 42px;
+  text-align: center;
+}
+.top-moves .bmv.positive { color: var(--positive); background: rgba(76, 175, 106, 0.18); }
+.top-moves .bmv.negative { color: var(--negative); background: rgba(217, 83, 79, 0.18); }
+.top-moves .bmv.neutral { color: var(--ink-faint); }
+.top-moves .bmv.unknown { color: var(--ink-faint); }
+/* Visually flag rows where the after-value sign disagrees with the
+   headline search_avg sign — that's the "MCTS-confidently-wrong-at-root,
+   accurate-one-ply-deeper" pattern worth surfacing. */
+.top-moves li.divergent { border-left: 3px solid var(--warn); padding-left: 5px; }

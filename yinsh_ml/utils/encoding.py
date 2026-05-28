@@ -93,6 +93,21 @@ class StateEncoder:
     Handles encoding and decoding of YINSH game states and moves for the neural network.
     """
 
+    # Channel layout for the basic 6-channel encoding. Named so that
+    # downstream code (e.g., trainer's phase-aware sampling) can refer to
+    # the phase channel by name instead of a magic index. Mirrors the
+    # 15-channel encoder's `CH_GAME_PHASE = 12` convention; the two are
+    # *not* the same number, which is exactly why magic-indexing breaks
+    # silently on encoding swap (cf. trainer.py decode_phase bug,
+    # 2026-05-26).
+    NUM_CHANNELS = 6
+    CH_CURRENT_RINGS = 0
+    CH_OPPONENT_RINGS = 1
+    CH_CURRENT_MARKERS = 2
+    CH_OPPONENT_MARKERS = 3
+    CH_VALID_MOVES = 4
+    CH_GAME_PHASE = 5
+
     def __init__(self):
         # Initialize position mappings
         self.position_to_index = {}
@@ -628,3 +643,57 @@ class StateEncoder:
 
         pass
         return game_state
+
+# ---------------------------------------------------------------------------
+# Cross-encoder phase decoding
+# ---------------------------------------------------------------------------
+
+def phase_channel_index(num_channels: int) -> int:
+    """Return the channel index that carries the GAME_PHASE signal for a
+    given encoder. Single source of truth — keeps callers from baking
+    magic numbers into their lookups (cf. the 2026-05-26 trainer bug where
+    `state[5]` was read regardless of encoder, silently classifying every
+    15-channel sample as RING_PLACEMENT).
+
+    Supported: 6-channel basic encoder (CH_GAME_PHASE = 5), 15-channel
+    enhanced encoder (CH_GAME_PHASE = 12). Adding a new encoder requires
+    a new branch here AND in the encoder class itself.
+    """
+    if num_channels == StateEncoder.NUM_CHANNELS:
+        return StateEncoder.CH_GAME_PHASE
+    if num_channels == 15:
+        # Lazy import — enhanced_encoding imports encoding at module load
+        # time; the reverse import would be circular.
+        from .enhanced_encoding import EnhancedStateEncoder
+        return EnhancedStateEncoder.CH_GAME_PHASE
+    raise ValueError(
+        f"unknown encoder: {num_channels} channels (expected 6 or 15). "
+        "If you added a new encoder, also update phase_channel_index() "
+        "in yinsh_ml/utils/encoding.py."
+    )
+
+
+def decode_phase_from_state(state) -> str:
+    """Decode the GAME_PHASE label from a state tensor.
+
+    Works for both the 6-channel basic encoder and the 15-channel enhanced
+    encoder by routing via `phase_channel_index`. Returns one of
+    'RING_PLACEMENT', 'MAIN_GAME', 'RING_REMOVAL'.
+
+    The phase channel encodes a uniform broadcast value in [0, 1]:
+        0.0  → RING_PLACEMENT
+        0.5  → MAIN_GAME
+        1.0  → RING_REMOVAL
+    (See encode_state / encode_state_for_phase logic in both encoders.)
+    The classification thresholds here mirror the historical trainer
+    implementation so loss-weight semantics stay compatible.
+    """
+    import numpy as np
+    ch = phase_channel_index(state.shape[0])
+    phase_channel = state[ch]
+    avg = float(np.mean(np.abs(phase_channel)))
+    if avg < 0.2:
+        return "RING_PLACEMENT"
+    if avg < 0.6:
+        return "MAIN_GAME"
+    return "RING_REMOVAL"

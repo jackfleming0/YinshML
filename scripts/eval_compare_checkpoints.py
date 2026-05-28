@@ -141,8 +141,7 @@ def main():
     nets: Dict[str, NetworkWrapper] = {}
     for label, path in entries:
         logger.info(f"Loading {label} from {path}")
-        n = NetworkWrapper(device=device)
-        n.load_model(str(path))
+        n = NetworkWrapper(model_path=str(path), device=device)
         nets[label] = n
 
     half = args.num_games // 2

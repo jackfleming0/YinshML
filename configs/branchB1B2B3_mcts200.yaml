@@ -1,0 +1,120 @@
+# branchB1B2B3_mcts200.yaml — Stop-the-leak: tighten gate (B1) + lower LR (B2)
+#                                + more games/iter (B3).
+#
+# Triggered by the 2026-05-25 A1 finding: the D.2 pretrain (`best_supervised.pt`)
+# is STRONGER than the prior champion (CI95 [0.711, 0.973]) and the 5-iter
+# MCTS-200 self-play loop on top of it produced an iter_4 that is NOT_STRONGER
+# (WR 0.526). The loop destroyed ~250-300 Elo of value on a strong warm-start.
+#
+# This config keeps every other variable identical to branchD2_enhanced_mcts200.yaml
+# and changes only the three knobs implicated in the dilution mechanism:
+#
+#   B1  arena.promotion_threshold:   0.20 → 0.50   (no more "non-catastrophe" promotions)
+#       arena.games_per_match:        100 → 200   (tighter CI around the 0.50 bar)
+#   B2  trainer.lr:                 1e-4 → 1e-5   (10× drop; matches pretrain end-LR;
+#                                                  closes the LR step at warm-start handoff)
+#   B3  self_play.games_per_iteration: 100 → 200  (more training data per iter, less noise)
+#
+# Warm-start init: models/yngine_volume_15ch_pretrain/best_supervised.pt
+# (the new frozen anchor — see EXPERIMENT_BACKLOG.md A1 entry).
+#
+# Hypothesis: the warm-start regime needs (a) a gate that can actually reject
+# regressions, (b) gentler gradient updates, and (c) less noisy training
+# signal per iter. If iter_4 lands non-worse-than-iter_0 here, the self-play
+# loop is salvageable for the fine-tuning regime. If it still drifts down,
+# the failure isn't in these three knobs and we move to A4 / D1.
+#
+# Expected cost: ~14-18h self-play (5 iters at 2× games + 2× arena games)
+# plus 1-4h SPRT. Budget: 17h.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_branchB1B2B3
+
+encoding:
+  type: enhanced   # match D.2 — same 15-ch encoder as warm-start
+
+network:
+  value_head_type: spatial   # same as D.2 (best_supervised.pt was trained with spatial)
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 200
+  late_simulations: 100
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 4
+  use_shared_evaluator: false
+  games_per_iteration: 200      # B3: was 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.00001                   # B2: was 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 200          # B1: was 100 (tighter CI around 0.50)
+  promotion_threshold: 0.50     # B1: was 0.20
+  tournament_sliding_window: 3
+  eval_seed: 20260518
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1

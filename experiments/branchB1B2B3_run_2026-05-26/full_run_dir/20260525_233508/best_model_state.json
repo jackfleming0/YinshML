@@ -1,0 +1,8 @@
+{
+    "best_model_elo": 1507.3386002515713,
+    "best_model_iteration": 4,
+    "best_model_path": "iteration_4/checkpoint_iteration_4.pt",
+    "_iteration_counter": 4,
+    "best_model_path_mtime": 1779793493.3222435,
+    "best_model_save_path_mtime": 1779796724.676694
+}

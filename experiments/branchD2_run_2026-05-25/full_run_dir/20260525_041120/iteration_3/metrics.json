@@ -1,0 +1,214 @@
+{
+    "avg_game_length": 64.52,
+    "avg_ring_mobility": 0.0,
+    "win_rate": 1.0,
+    "draw_rate": 0.0,
+    "policy_loss": 0.9065031592662518,
+    "value_loss": 2.689838194235777,
+    "tournament_rating": 1467.2585527237593,
+    "tournament_win_rate": 0.4275,
+    "anchor_win_rate": 1.0,
+    "anchor_eval": {
+        "checkpoint_iteration_3": {
+            "games_played": 40,
+            "candidate_wins": 40,
+            "anchor_wins": 0,
+            "draws": 0,
+            "win_rate": 1.0,
+            "depth": 1,
+            "seed": 1337,
+            "avg_game_length": 59.125,
+            "mode": "raw_policy",
+            "mcts_simulations": 0,
+            "per_side": {
+                "white": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 57.75,
+                    "game_length_min": 45,
+                    "game_length_max": 79,
+                    "game_length_range": 34
+                },
+                "black": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 60.5,
+                    "game_length_min": 46,
+                    "game_length_max": 78,
+                    "game_length_range": 32
+                }
+            },
+            "deterministic_sides": []
+        },
+        "checkpoint_iteration_2": {
+            "games_played": 40,
+            "candidate_wins": 39,
+            "anchor_wins": 1,
+            "draws": 0,
+            "win_rate": 0.975,
+            "depth": 1,
+            "seed": 1337,
+            "avg_game_length": 59.725,
+            "mode": "raw_policy",
+            "mcts_simulations": 0,
+            "per_side": {
+                "white": {
+                    "games": 20,
+                    "cand_wins": 19,
+                    "cand_win_rate": 0.95,
+                    "avg_game_length": 58.85,
+                    "game_length_min": 47,
+                    "game_length_max": 76,
+                    "game_length_range": 29
+                },
+                "black": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 60.6,
+                    "game_length_min": 50,
+                    "game_length_max": 84,
+                    "game_length_range": 34
+                }
+            },
+            "deterministic_sides": []
+        },
+        "checkpoint_iteration_1": {
+            "games_played": 40,
+            "candidate_wins": 40,
+            "anchor_wins": 0,
+            "draws": 0,
+            "win_rate": 1.0,
+            "depth": 1,
+            "seed": 1337,
+            "avg_game_length": 60.5,
+            "mode": "raw_policy",
+            "mcts_simulations": 0,
+            "per_side": {
+                "white": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 60.4,
+                    "game_length_min": 43,
+                    "game_length_max": 77,
+                    "game_length_range": 34
+                },
+                "black": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 60.6,
+                    "game_length_min": 48,
+                    "game_length_max": 74,
+                    "game_length_range": 26
+                }
+            },
+            "deterministic_sides": []
+        }
+    },
+    "anchor_eval_mcts": {
+        "checkpoint_iteration_3": {
+            "games_played": 40,
+            "candidate_wins": 40,
+            "anchor_wins": 0,
+            "draws": 0,
+            "win_rate": 1.0,
+            "depth": 1,
+            "seed": 1337,
+            "avg_game_length": 51.8,
+            "mode": "mcts",
+            "mcts_simulations": 64,
+            "per_side": {
+                "white": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 52.0,
+                    "game_length_min": 43,
+                    "game_length_max": 61,
+                    "game_length_range": 18
+                },
+                "black": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 51.6,
+                    "game_length_min": 44,
+                    "game_length_max": 64,
+                    "game_length_range": 20
+                }
+            },
+            "deterministic_sides": []
+        },
+        "checkpoint_iteration_2": {
+            "games_played": 40,
+            "candidate_wins": 40,
+            "anchor_wins": 0,
+            "draws": 0,
+            "win_rate": 1.0,
+            "depth": 1,
+            "seed": 1337,
+            "avg_game_length": 51.4,
+            "mode": "mcts",
+            "mcts_simulations": 64,
+            "per_side": {
+                "white": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 51.2,
+                    "game_length_min": 43,
+                    "game_length_max": 61,
+                    "game_length_range": 18
+                },
+                "black": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 51.6,
+                    "game_length_min": 44,
+                    "game_length_max": 60,
+                    "game_length_range": 16
+                }
+            },
+            "deterministic_sides": []
+        },
+        "checkpoint_iteration_1": {
+            "games_played": 40,
+            "candidate_wins": 40,
+            "anchor_wins": 0,
+            "draws": 0,
+            "win_rate": 1.0,
+            "depth": 1,
+            "seed": 1337,
+            "avg_game_length": 51.325,
+            "mode": "mcts",
+            "mcts_simulations": 64,
+            "per_side": {
+                "white": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 49.3,
+                    "game_length_min": 41,
+                    "game_length_max": 61,
+                    "game_length_range": 20
+                },
+                "black": {
+                    "games": 20,
+                    "cand_wins": 20,
+                    "cand_win_rate": 1.0,
+                    "avg_game_length": 53.35,
+                    "game_length_min": 46,
+                    "game_length_max": 69,
+                    "game_length_range": 23
+                }
+            },
+            "deterministic_sides": []
+        }
+    },
+    "timestamp": 1779707254.9089332
+}

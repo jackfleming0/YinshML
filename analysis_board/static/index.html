@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>YINSH analysis</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="app">
+    <main class="board-area">
+      <div class="mode-row">
+        <div class="mode-toggle" role="tablist">
+          <button class="mode-btn active" data-mode="setup" role="tab" aria-selected="true">Set up position</button>
+          <button class="mode-btn" data-mode="play" role="tab" aria-selected="false">Play</button>
+        </div>
+        <div class="play-controls" id="play-controls" hidden>
+          <div class="turn-badge" id="turn-badge" data-side="WHITE">
+            <span class="turn-disc" aria-hidden="true"></span>
+            <span class="turn-text">
+              <strong id="turn-side">WHITE</strong> to move
+              <span class="turn-phase" id="turn-phase"></span>
+            </span>
+          </div>
+          <button id="undo" class="secondary" disabled title="Undo last move">↶ Undo</button>
+          <label class="auto-eval-toggle" title="When on, every move triggers /api/evaluate with the current sim budget. Sub-second at num_sims=0 (raw policy); multi-second at high MCTS budgets. Turn off if you want to play several moves quickly without waiting on inference.">
+            <input type="checkbox" id="auto-eval" checked /> auto-evaluate
+          </label>
+        </div>
+      </div>
+      <div class="line-nav" id="line-nav" hidden>
+        <div class="line-nav-info">
+          <span class="line-nav-label">Walking line</span>
+          <span class="line-nav-move" id="line-move-desc">—</span>
+          <span class="line-nav-step" id="line-step-counter">step 0/0</span>
+          <span class="line-nav-just-played" id="line-just-played"></span>
+        </div>
+        <div class="line-nav-controls">
+          <button id="line-prev" class="secondary" disabled>← prev</button>
+          <button id="line-next" class="secondary" disabled>next →</button>
+          <button id="line-return" class="primary">↩ Return</button>
+        </div>
+      </div>
+      <div class="board-wrap">
+        <div id="board-3d" class="board-3d" aria-label="YINSH board" role="img"></div>
+        <button id="reset-view-btn" class="board-overlay-btn" title="Reset view" aria-label="Reset view">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="1 4 1 10 7 10"></polyline>
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+          </svg>
+        </button>
+        <div class="hint" id="board-hint">Drag a piece from the palette onto a board intersection. Right-click to erase.</div>
+      </div>
+    </main>
+
+    <aside class="controls">
+      <header>
+        <h1>YINSH analysis</h1>
+        <p class="subtitle" id="sidebar-subtitle">Compose a position, ask the network.</p>
+      </header>
+
+      <section class="block opponent-block" id="opponent-block">
+        <div class="block-title">Opponent</div>
+        <div class="opponent-toggle" role="tablist" aria-label="Opponent">
+          <button class="opp-btn active" data-opponent="self" role="tab" aria-selected="true">Play both sides</button>
+          <button class="opp-btn" data-opponent="engine" role="tab" aria-selected="false">vs Engine</button>
+        </div>
+      </section>
+
+      <section class="block status-block" id="status-block">
+        <div class="block-title">Status</div>
+
+        <div class="status-grid">
+          <label class="field status-field">
+            <span class="status-label">Phase</span>
+            <select id="phase">
+              <option value="RING_PLACEMENT">Ring placement</option>
+              <option value="MAIN_GAME" selected>Main game</option>
+              <option value="ROW_COMPLETION">Row completion</option>
+              <option value="RING_REMOVAL">Ring removal</option>
+            </select>
+          </label>
+
+          <fieldset class="field status-field side-field">
+            <span class="status-label">To move</span>
+            <div class="radio-row">
+              <label><input type="radio" name="side" value="WHITE" checked /> W</label>
+              <label><input type="radio" name="side" value="BLACK" /> B</label>
+            </div>
+          </fieldset>
+        </div>
+
+        <div class="derived-stats" id="derived-stats">
+          <div class="stat">
+            <span class="stat-label">White</span>
+            <span class="stat-line"><span id="white-rings-count">0</span> rings · score <strong id="white-score-derived">0</strong></span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Black</span>
+            <span class="stat-line"><span id="black-rings-count">0</span> rings · score <strong id="black-score-derived">0</strong></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="block palette-block" id="palette-block">
+        <div class="block-title">Pieces <span class="block-hint">drag onto the board</span></div>
+        <div class="palette" id="palette">
+          <button class="tool" data-tool="WHITE_RING" title="White ring">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="9" fill="#e6ecef" stroke="#2aa7c0" stroke-width="1.8"/><circle r="5.2" fill="#a8b9c3" stroke="#2aa7c0" stroke-width="1.2"/></svg></span>
+            <span class="label">W ring</span>
+          </button>
+          <button class="tool" data-tool="BLACK_RING" title="Black ring">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="9" fill="#1a1f24" stroke="#2aa7c0" stroke-width="1.8"/><circle r="5.2" fill="#a8b9c3" stroke="#2aa7c0" stroke-width="1.2"/></svg></span>
+            <span class="label">B ring</span>
+          </button>
+          <button class="tool" data-tool="WHITE_MARKER" title="White marker">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="7" fill="#e6ecef" stroke="#2aa7c0" stroke-width="1.6"/></svg></span>
+            <span class="label">W mark</span>
+          </button>
+          <button class="tool" data-tool="BLACK_MARKER" title="Black marker">
+            <span class="swatch"><svg viewBox="-12 -12 24 24"><circle r="7" fill="#1a1f24" stroke="#2aa7c0" stroke-width="1.6"/></svg></span>
+            <span class="label">B mark</span>
+          </button>
+          <button class="tool" data-tool="ERASE" title="Eraser (or right-click pieces)">
+            <span class="swatch eraser">⌫</span>
+            <span class="label">Erase</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="block setup-actions-block" id="setup-actions-block">
+        <div class="actions setup-actions">
+          <button id="evaluate" class="primary">Analyze position</button>
+          <button id="play-from-here" class="secondary">Play from here →</button>
+          <button id="clear" class="link-button">Clear board</button>
+        </div>
+      </section>
+
+      <details class="block settings-block" id="settings-block">
+        <summary class="block-title">Engine settings</summary>
+        <div class="settings-body">
+          <label class="field">
+            <span>Model</span>
+            <select id="model"></select>
+          </label>
+
+          <label class="field">
+            <span>MCTS sims <em>(0 = raw policy)</em></span>
+            <input id="num-sims" type="number" value="0" min="0" max="2000" step="50" />
+          </label>
+
+          <details class="advanced-mcts" id="advanced-mcts">
+            <summary>Advanced MCTS</summary>
+            <div class="advanced-grid">
+              <label class="field">
+                <span>Evaluation mode <em>(leaf value source)</em></span>
+                <select id="eval-mode">
+                  <option value="pure_neural" selected>Pure neural (default)</option>
+                  <option value="hybrid">Hybrid (neural + heuristic blend)</option>
+                  <option value="pure_heuristic">Pure heuristic</option>
+                </select>
+              </label>
+              <label class="field" id="heuristic-weight-field">
+                <span>Heuristic weight <em>(blend coefficient)</em></span>
+                <input id="heuristic-weight" type="number" value="0.5" min="0" max="1" step="0.05" />
+              </label>
+              <label class="field">
+                <span>c_puct <em>(exploration; 1.0 default, ~2.0 KataGo)</em></span>
+                <input id="c-puct" type="number" value="1.0" min="0" max="5" step="0.1" />
+              </label>
+              <label class="field">
+                <span>fpu_reduction <em>(unvisited-child penalty)</em></span>
+                <input id="fpu-reduction" type="number" value="0.25" min="0" max="1" step="0.05" />
+              </label>
+            </div>
+            <div class="advanced-hint">
+              Defaults match training. Changes apply on next Analyze.
+              <button id="reset-advanced" type="button" class="link-button">reset</button>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <section class="block game-setup-block" id="game-setup-block" hidden>
+        <h2 class="game-setup-title">New game</h2>
+
+        <div class="game-setup-step">
+          <span class="step-num">1</span>
+          <label class="field">
+            <span>Engine model</span>
+            <select id="game-model"></select>
+          </label>
+        </div>
+
+        <div class="game-setup-step">
+          <span class="step-num">2</span>
+          <label class="field">
+            <span>Engine strength</span>
+            <select id="game-sims">
+              <option value="200">Quick — 200 sims (~1s/move)</option>
+              <option value="800" selected>Standard — 800 sims (~5s/move)</option>
+              <option value="1600">Strong — 1600 sims (~10s/move)</option>
+              <option value="3200">Deep — 3200 sims (~25s/move)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="game-setup-step">
+          <span class="step-num">3</span>
+          <label class="field game-spoilers-field">
+            <span>
+              <input type="checkbox" id="game-spoilers" />
+              Show engine analysis during play
+            </span>
+            <small>Off (default) hides the top-moves panel + value bars so the engine's picks don't influence yours. Can be toggled mid-game. Capture choices (which row to remove) stay visible regardless — you need them to play.</small>
+          </label>
+        </div>
+
+        <div class="game-setup-step">
+          <span class="step-num">4</span>
+          <label class="field">
+            <span>Your side</span>
+            <select id="game-human-side">
+              <option value="WHITE" selected>White (first to move)</option>
+              <option value="BLACK">Black</option>
+              <option value="random">Random</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="game-start" class="primary">Start game</button>
+        </div>
+      </section>
+
+      <section class="block game-status-block" id="game-status-block" hidden>
+        <div class="game-status-row" id="game-status-row">
+          <div class="game-meta">
+            <span class="game-meta-label">Engine</span>
+            <span id="game-engine-label">—</span>
+          </div>
+          <div class="game-meta">
+            <span class="game-meta-label">You</span>
+            <span id="game-human-label">—</span>
+          </div>
+        </div>
+        <div class="game-thinking" id="game-thinking" hidden>
+          <span class="thinking-dot"></span>
+          <span class="thinking-dot"></span>
+          <span class="thinking-dot"></span>
+          <span class="thinking-text">Engine thinking…</span>
+        </div>
+        <div class="game-result" id="game-result" hidden>
+          <div class="game-result-banner" id="game-result-label">—</div>
+          <div class="game-result-actions">
+            <button id="game-new" class="primary">New game</button>
+            <button id="game-review" class="secondary">Review</button>
+          </div>
+        </div>
+        <div class="game-controls">
+          <label class="game-spoilers-toggle-inline">
+            <input type="checkbox" id="game-spoilers-inline" />
+            Show engine analysis
+          </label>
+          <button id="game-resign" class="secondary">End game</button>
+        </div>
+      </section>
+
+      <section class="block result" id="result">
+        <div class="block-title">Network analysis</div>
+        <div class="status" id="status">Compose a position and click Analyze.</div>
+
+        <div class="value-row" id="value-row" hidden>
+          <span class="value-label" id="value-label">Search avg</span>
+          <div class="value-bar"><div class="value-fill" id="value-fill"></div><div class="value-zero"></div></div>
+          <span class="value-num" id="value-num">—</span>
+        </div>
+        <div class="value-row" id="best-value-row" hidden>
+          <span class="value-label">Best move</span>
+          <div class="value-bar"><div class="value-fill" id="best-value-fill"></div><div class="value-zero"></div></div>
+          <span class="value-num" id="best-value-num">—</span>
+        </div>
+        <div class="value-help" id="value-help" hidden>
+          Chess convention: <strong>+ means WHITE winning</strong>, <strong>− means BLACK winning</strong>, regardless of whose turn it is.
+          <strong>Search avg</strong>: visit-weighted average across all simulated lines (trends to 0 with more sims).
+          <strong>Best move</strong>: network value at the position after the top move — closer to "is this winning."
+        </div>
+
+        <ol class="top-moves" id="top-moves"></ol>
+      </section>
+
+      <section class="block history-block" id="history-block" hidden>
+        <div class="block-title">Move history</div>
+        <ol class="move-history" id="move-history"></ol>
+      </section>
+    </aside>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

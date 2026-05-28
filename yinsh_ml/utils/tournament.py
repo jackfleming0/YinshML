@@ -241,7 +241,9 @@ class ModelTournament:
                  temperature: float = 0.1,
                  sliding_window_size: int = 5,
                  use_ema_for_eval: bool = True,
-                 eval_seed: Optional[int] = None):
+                 eval_seed: Optional[int] = None,
+                 use_enhanced_encoding: bool = False,
+                 value_head_type: Optional[str] = None):
         """
         Initialize tournament manager.
 
@@ -274,6 +276,11 @@ class ModelTournament:
         self.temperature = temperature
         self.use_ema_for_eval = use_ema_for_eval
         self.eval_seed = eval_seed
+        # Encoder + head config used when constructing NetworkWrapper instances
+        # for tournament / anchor evaluation. Must match the training network's
+        # architecture or load_model hard-fails on channel / head mismatch.
+        self.use_enhanced_encoding = use_enhanced_encoding
+        self.value_head_type = value_head_type
         self.latest_summary_stats: Dict[str, Dict] = {}   # NEW
         self._pair_results: Dict[Tuple[str, str], Dict[str, int]] = {}
 
@@ -326,7 +333,11 @@ class ModelTournament:
             if ema_path.exists():
                 actual_path = ema_path
                 self.logger.debug(f"Loading EMA weights for {checkpoint_path.name}: {ema_path}")
-        model = NetworkWrapper(device=self.device)
+        wrapper_kwargs = {'device': self.device,
+                          'use_enhanced_encoding': self.use_enhanced_encoding}
+        if self.value_head_type is not None:
+            wrapper_kwargs['value_head_type'] = self.value_head_type
+        model = NetworkWrapper(**wrapper_kwargs)
         model.load_model(str(actual_path))
         return model
 

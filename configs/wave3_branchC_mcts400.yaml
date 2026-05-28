@@ -1,0 +1,128 @@
+# wave3_branchC_mcts400.yaml — Step 2 ceiling experiment: stronger teacher.
+#
+# CONTROLLED LEVER TEST. This is a byte-for-byte copy of
+# wave3_branchC_mcts200.yaml with EXACTLY ONE knob changed: MCTS search depth
+# (200->400 early, 100->200 late). Everything else — init checkpoint, games/iter,
+# epochs, LR, promotion gate, anchor — is held fixed so any strength delta is
+# attributable to search depth alone.
+#
+# Hypothesis (from VOLUME_PRETRAIN_RESULTS.md §"epistemic caveat"): MCTS-200
+# self-play from the already-strong pretrained init produced targets ≈ the net's
+# own policy (you can't learn from a teacher who plays like you), so internal Elo
+# was flat. A stronger teacher (MCTS-400) has to *outrun* the current policy,
+# which is what more sims buy. If this is the lever, the resulting candidate
+# beats the frozen MCTS-200 output (best_iter_4) on the non-saturated yardstick.
+#
+# LAUNCH (warm-start from the SAME init Branch C used — the controlled part):
+#   python scripts/run_training.py \
+#       --config configs/wave3_branchC_mcts400.yaml \
+#       --init-checkpoint models/yngine_volume_pretrain/best_supervised.pt
+#
+# SCREEN each candidate afterward (the anchor is the MCTS-200 output):
+#   python scripts/eval_vs_frozen_anchor.py --sprt --sprt-p1 0.60 \
+#       --anchor models/branchC_volume_pretrain/best_iter_4.pt \
+#       --candidate runs_wave3_branchC_mcts400/<ts>/checkpoint_iteration_*_ema.pt \
+#       --output-json logs/mcts400_vs_frozen.json
+#
+# Wall time: MCTS-200 ran ~3.2h/iter on a 4090 (16.1h/5). Doubling early+late
+# sims ≈ 2x per-game search cost; self-play dominates the iter, so budget
+# ~6h/iter -> ~30-32h for 5 iters + train/anchor overhead. See STEP2_MCTS400_RUNBOOK.md.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_wave3_branchC_mcts400   # <-- distinct from the MCTS-200 run dir
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 400       # <-- THE LEVER: was 200
+  late_simulations: 200      # <-- THE LEVER: was 100 (keeps the 2:1 early:late ratio)
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 4            # throughput-only: ProcessPoolExecutor runs the SAME
+                            # per-game play_game_worker as serial, just 4 at once.
+                            # 4 is the measured 4090 sweet spot (GPU_SCALING_RESULTS:
+                            # 1.85x vs serial; 8w=52%, 16w=40% — command-queue
+                            # contention). Not learning-relevant, so the controlled
+                            # sims-only comparison vs Branch C is preserved.
+  use_shared_evaluator: false   # Tier-2 lever (coalesced inference) deferred — needs
+                                # the serial-vs-shared parity check first (see §1b).
+  games_per_iteration: 100   # held fixed (controlled test) — NOT compensating for the 2x cost
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  # Held fixed vs MCTS-200. The promotion gate stays at Wilson 0.20 (loose) ON
+  # PURPOSE: the doc flags it as "too loose for a real run," but tightening it
+  # here would add a second changed variable and break the controlled comparison.
+  # Tighten it only in a follow-up run once the sims lever is isolated.
+  games_per_match: 100
+  promotion_threshold: 0.20
+  tournament_sliding_window: 3
+  eval_seed: 20260518
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  # HA d=1 collapse tripwire (runs in-loop, MCTS-64, independent of self_play
+  # sims). Saturated at 100% so it can't show *gains*, but it cheaply catches a
+  # collapse — the failure mode the original Branch C hit (82.5% -> 60%).
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1

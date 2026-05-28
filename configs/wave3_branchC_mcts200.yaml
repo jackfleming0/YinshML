@@ -79,7 +79,11 @@ augmentation:
   max_augmentations: 4
 
 arena:
-  games_per_match: 20
+  # Internal-Elo tournament is raw-policy (1 fwd pass/move, temperature-sampled)
+  # so games/match is cheap. 20 produced a ±150 Elo noise band (see
+  # VOLUME_PRETRAIN_RESULTS.md) that swamped the per-iter trend; 100 shrinks it
+  # ~2.2x (noise ~1/sqrt(n)) so a real climb is readable. Code default is 200.
+  games_per_match: 100
   promotion_threshold: 0.20
   tournament_sliding_window: 3
   eval_seed: 20260518

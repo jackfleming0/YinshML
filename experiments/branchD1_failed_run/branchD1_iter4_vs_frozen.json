@@ -1,0 +1,63 @@
+{
+  "config": {
+    "anchor": "models/branchC_volume_pretrain/best_iter_4.pt",
+    "anchor_label": "best_iter_4",
+    "candidates": [
+      "runs_branchD1/20260523_143129/iteration_4/checkpoint_iteration_4_ema.pt"
+    ],
+    "mode": "sprt",
+    "num_games": 40,
+    "num_simulations": 64,
+    "opening_sample_plies": 20,
+    "opening_temperature": 1.0,
+    "sprt": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.05,
+      "beta": 0.05,
+      "max_games": 400
+    },
+    "seed": 42,
+    "device": "cuda",
+    "engine": "self_play.MCTS.search_batch"
+  },
+  "results": [
+    {
+      "candidate_path": "runs_branchD1/20260523_143129/iteration_4/checkpoint_iteration_4_ema.pt",
+      "candidate_label": "iteration_4/checkpoint_iteration_4_ema",
+      "anchor_path": "models/branchC_volume_pretrain/best_iter_4.pt",
+      "candidate_wr": 0.0625,
+      "candidate_wins": 1,
+      "anchor_wins": 15,
+      "draws": 0,
+      "cand_white_wins": 1,
+      "cand_black_wins": 0,
+      "ci95_lo": 0.01111905730833121,
+      "ci95_hi": 0.2832926836802987,
+      "verdict": "NOT_STRONGER",
+      "sprt": {
+        "label": "iteration_4/checkpoint_iteration_4_ema",
+        "decision": "NOT_STRONGER",
+        "games": 16,
+        "cand_wins": 1,
+        "anchor_wins": 15,
+        "draws": 0,
+        "cand_white_wins": 1,
+        "cand_black_wins": 0,
+        "llr": -3.164831712919191,
+        "llr_lower": -2.9444389791664403,
+        "llr_upper": 2.9444389791664403,
+        "wr_decisive": 0.0625,
+        "ci95_lo": 0.01111905730833121,
+        "ci95_hi": 0.2832926836802987,
+        "p0": 0.5,
+        "p1": 0.6,
+        "alpha": 0.05,
+        "beta": 0.05,
+        "max_games": 400
+      },
+      "seconds": 554.9215018749237
+    }
+  ],
+  "elapsed_seconds": 556.3249015808105
+}

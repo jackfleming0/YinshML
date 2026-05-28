@@ -171,19 +171,46 @@ def create_model(args) -> tuple:
     )
 
     input_channels = 15 if args.use_enhanced_encoding else 6
-    model = YinshNetwork(
+    model_kwargs = dict(
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
         input_channels=input_channels,
-    ).to(device)
+        value_head_type=args.value_head_type,
+        value_mode=args.value_mode,
+    )
+    if args.value_mode == 'classification' and args.num_value_classes is not None:
+        model_kwargs['num_value_classes'] = args.num_value_classes
+    model = YinshNetwork(**model_kwargs).to(device)
 
-    if args.checkpoint:
-        logger.info(f"Loading checkpoint: {args.checkpoint}")
+    # Mutual-exclusion: --resume and --checkpoint do different things.
+    if args.resume and args.checkpoint:
+        raise ValueError(
+            "--resume and --checkpoint are mutually exclusive. "
+            "--checkpoint warm-starts model weights only (optimizer + epoch reset); "
+            "--resume continues a prior run (restores model + optimizer + epoch from "
+            "<output_dir>/last_resume_state.pt)."
+        )
+
+    resume_bundle = None
+    if args.resume:
+        resume_path = Path(args.output_dir) / 'last_resume_state.pt'
+        if not resume_path.exists():
+            raise FileNotFoundError(
+                f"--resume specified but no state file at {resume_path}. "
+                "Remove --resume to start fresh, or check --output-dir."
+            )
+        logger.info(f"Resuming from rich bundle: {resume_path}")
+        resume_bundle = torch.load(resume_path, map_location=device,
+                                   weights_only=False)
+        model.load_state_dict(resume_bundle['model'])
+
+    elif args.checkpoint:
+        logger.info(f"Warm-starting from checkpoint: {args.checkpoint}")
         state_dict = torch.load(args.checkpoint, map_location=device,
                                 weights_only=True)
         model.load_state_dict(state_dict)
 
-    return model, device
+    return model, device, resume_bundle
 
 
 def _value_targets_to_classes(values: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -197,23 +224,56 @@ def _value_targets_to_classes(values: torch.Tensor, num_classes: int) -> torch.T
     return torch.round(normalized).long().clamp(0, num_classes - 1)
 
 
-def train(model, device, train_loader, val_loader, args):
-    """Run supervised training loop."""
+def train(model, device, train_loader, val_loader, args, resume_bundle=None):
+    """Run supervised training loop.
+
+    If resume_bundle is provided (from --resume), restores optimizer state and
+    continues from saved_epoch + 1. The cosine scheduler is recreated fresh with
+    T_max=args.epochs, then advanced saved_epoch steps — this lets a resume
+    pass --epochs N+M to extend the original N-epoch run by M epochs cleanly.
+    """
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
 
-    # LR schedule: cosine annealing
+    # LR schedule: cosine annealing. Built against the CURRENT args.epochs so an
+    # extension call (--resume --epochs N+M) recomputes the curve over the new
+    # total budget. We then advance the scheduler saved_epoch steps to land on
+    # the LR appropriate for the new schedule at that point.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=args.lr / 100
     )
 
+    start_epoch = 1
     best_val_loss = float('inf')
+
+    if resume_bundle is not None:
+        if 'optimizer' in resume_bundle:
+            optimizer.load_state_dict(resume_bundle['optimizer'])
+        saved_epoch = resume_bundle.get('epoch', 0)
+        start_epoch = saved_epoch + 1
+        best_val_loss = resume_bundle.get('best_val_loss', float('inf'))
+        for _ in range(saved_epoch):
+            scheduler.step()
+        logger.info(
+            f"Resumed at epoch {start_epoch}/{args.epochs} | "
+            f"best_val_loss carry-over = {best_val_loss:.4f} | "
+            f"LR = {scheduler.get_last_lr()[0]:.6f}"
+        )
+        if start_epoch > args.epochs:
+            logger.warning(
+                f"Resume state already past --epochs (saved_epoch={saved_epoch} "
+                f">= args.epochs={args.epochs}). Nothing to do. Increase --epochs "
+                f"to extend the run."
+            )
+            return Path(args.output_dir) / 'best_supervised.pt'
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     num_value_classes = model.num_value_classes
+    is_regression = (model.value_mode == 'regression')
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         # --- Training ---
         model.train()
         train_policy_loss = 0.0
@@ -231,8 +291,7 @@ def train(model, device, train_loader, val_loader, args):
 
             optimizer.zero_grad()
 
-            pred_logits, _ = model(states)
-            value_logits = model._value_logits  # populated in forward()
+            pred_logits, value_pred = model(states)
 
             # Policy loss: cross-entropy against expert moves.
             # Branch on target schema: 1-D int targets → integer-target CE;
@@ -245,11 +304,18 @@ def train(model, device, train_loader, val_loader, args):
                 policy_loss = -(policies * log_probs).sum(dim=1).mean()
                 expert_moves = policies.argmax(dim=1)
 
-            # Value loss: cross-entropy on discretized outcome classes.
-            # Mirrors yinsh_ml/training/trainer.py — same loss surface as
-            # self-play so the warm-start checkpoint isn't washed out on iter 1.
-            target_class = _value_targets_to_classes(values, num_value_classes)
-            value_loss = F.cross_entropy(value_logits, target_class)
+            # Value loss: branch on value_mode.
+            if is_regression:
+                # Scalar tanh head against raw value target. value_pred is
+                # already (B,) from YinshNetwork.forward in regression mode.
+                value_loss = F.mse_loss(value_pred, values.float())
+            else:
+                # Cross-entropy on discretized outcome classes. Mirrors
+                # yinsh_ml/training/trainer.py — same loss surface as self-play
+                # so the warm-start checkpoint isn't washed out on iter 1.
+                value_logits = model._value_logits  # populated in forward()
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                value_loss = F.cross_entropy(value_logits, target_class)
 
             # Combined loss
             loss = policy_loss + args.value_weight * value_loss
@@ -266,8 +332,19 @@ def train(model, device, train_loader, val_loader, args):
             pred_moves = pred_logits.argmax(dim=1)
             train_correct += (pred_moves == expert_moves).sum().item()
 
-            pred_class = value_logits.argmax(dim=1)
-            train_value_correct += (pred_class == target_class).sum().item()
+            # Value accuracy: in classification mode = argmax class match;
+            # in regression mode = sign accuracy (proxy — does the model
+            # at least predict the right side of zero?). Classification's
+            # argmax accuracy is the metric flagged as "argmax-VAcc plateau"
+            # in the A4 hypothesis; sign accuracy is the regression analog.
+            if is_regression:
+                train_value_correct += (
+                    torch.sign(value_pred) == torch.sign(values.float())
+                ).sum().item()
+            else:
+                pred_class = model._value_logits.argmax(dim=1)
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                train_value_correct += (pred_class == target_class).sum().item()
             train_total += len(states)
 
             batch_count += 1
@@ -316,6 +393,22 @@ def train(model, device, train_loader, val_loader, args):
             save_path = output_dir / f'supervised_epoch_{epoch}.pt'
             torch.save(model.state_dict(), save_path)
 
+        # Rich resume bundle — overwritten every epoch. Includes optimizer state
+        # and epoch counter so `--resume` continues without reset. Existing
+        # state_dict-only checkpoints above stay untouched for downstream
+        # compatibility (self-play loads them as plain state_dicts).
+        resume_path = output_dir / 'last_resume_state.pt'
+        torch.save({
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'epoch': epoch,
+            'best_val_loss': best_val_loss,
+            'args': {
+                k: v for k, v in vars(args).items()
+                if isinstance(v, (str, int, float, bool, type(None)))
+            },
+        }, resume_path)
+
     # Save final model
     save_path = output_dir / 'supervised_final.pt'
     torch.save(model.state_dict(), save_path)
@@ -327,8 +420,11 @@ def train(model, device, train_loader, val_loader, args):
 def evaluate(model, device, data_loader, num_value_classes) -> tuple:
     """Evaluate model on a dataset.
 
-    Returns (policy_loss, value_ce_loss, policy_top1_accuracy, value_class_accuracy).
+    Returns (policy_loss, value_loss, policy_top1_accuracy, value_accuracy).
+    In classification mode, value_loss is CE and value_accuracy is class argmax match.
+    In regression mode, value_loss is MSE and value_accuracy is sign accuracy.
     """
+    is_regression = (model.value_mode == 'regression')
     model.eval()
     total_policy = 0.0
     total_value = 0.0
@@ -342,8 +438,7 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
             policies = policies.to(device)
             values = values.to(device)
 
-            pred_logits, _ = model(states)
-            value_logits = model._value_logits
+            pred_logits, value_pred = model(states)
 
             if policies.dim() == 1:
                 expert_moves = policies.long()
@@ -353,8 +448,12 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
                 policy_loss = -(policies * log_probs).sum(dim=1).mean()
                 expert_moves = policies.argmax(dim=1)
 
-            target_class = _value_targets_to_classes(values, num_value_classes)
-            value_loss = F.cross_entropy(value_logits, target_class)
+            if is_regression:
+                value_loss = F.mse_loss(value_pred, values.float())
+            else:
+                value_logits = model._value_logits
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                value_loss = F.cross_entropy(value_logits, target_class)
 
             total_policy += policy_loss.item() * len(states)
             total_value += value_loss.item() * len(states)
@@ -362,8 +461,14 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
             pred_moves = pred_logits.argmax(dim=1)
             correct += (pred_moves == expert_moves).sum().item()
 
-            pred_class = value_logits.argmax(dim=1)
-            value_correct += (pred_class == target_class).sum().item()
+            if is_regression:
+                value_correct += (
+                    torch.sign(value_pred) == torch.sign(values.float())
+                ).sum().item()
+            else:
+                pred_class = model._value_logits.argmax(dim=1)
+                target_class = _value_targets_to_classes(values, num_value_classes)
+                value_correct += (pred_class == target_class).sum().item()
             total += len(states)
 
     n = len(data_loader.dataset)
@@ -409,7 +514,17 @@ def main():
 
     # Model options
     parser.add_argument('--checkpoint', type=str, default=None,
-                       help='Path to checkpoint to resume from')
+                       help='Path to a state_dict to warm-start from (model '
+                            'weights only; optimizer/epoch reset to fresh). '
+                            'For mid-training resume of a prior --output-dir, '
+                            'use --resume instead. Mutually exclusive with --resume.')
+    parser.add_argument('--resume', action='store_true',
+                       help='Resume from <output_dir>/last_resume_state.pt — '
+                            'restores model + optimizer state and continues from '
+                            'saved_epoch + 1. Extends cleanly: pass --epochs '
+                            'higher than the prior run to add more epochs '
+                            '(cosine schedule recomputes over the new total). '
+                            'Mutually exclusive with --checkpoint.')
     parser.add_argument('--device', type=str, default=None,
                        help='Device (cuda/mps/cpu)')
     parser.add_argument('--use-enhanced-encoding', action='store_true',
@@ -419,6 +534,36 @@ def main():
                        help='ResNet channel width (default: 256)')
     parser.add_argument('--num-blocks', type=int, default=12,
                        help='Number of residual/attention blocks (default: 12)')
+    parser.add_argument('--value-mode', type=str, default='classification',
+                       choices=['classification', 'regression'],
+                       help="Value-head loss structure. 'classification' "
+                            "(default) discretizes the outcome into "
+                            "num_value_classes bins and trains with "
+                            "F.cross_entropy — matches the self-play "
+                            "trainer so the warm-start isn't washed out. "
+                            "'regression' trains a scalar tanh head with "
+                            "F.mse_loss against the raw value target — "
+                            "Branch A4 hypothesis: the 3-class CE plateau "
+                            "is target-discretization, not capacity. "
+                            "Self-play trainer must match if you intend "
+                            "to chain pretrain -> self-play.")
+    parser.add_argument('--num-value-classes', type=int, default=None,
+                       help='Override num_value_classes for classification mode '
+                            '(default: model default of 7). Ignored in regression mode.')
+    parser.add_argument('--value-head-type', type=str, default='spatial',
+                       choices=['spatial', 'gap', 'gap_v2'],
+                       help="Value head architecture: 'spatial' (legacy ~4M "
+                            "params, Flatten(64*11*11)->512->256->out), 'gap' "
+                            "(~17K params, 1x1 conv->GAP->Linear(64, out) — "
+                            "direct projection, lost to spatial head in SPRT), "
+                            "or 'gap_v2' (~22K params, adds hidden layer: 1x1 "
+                            "conv->GAP->Linear(64,80)->ReLU->Linear(80,out), "
+                            "KataGo-canonical). Defaults to 'spatial' for "
+                            "back-compat. Use 'gap_v2' to train a GAP-native "
+                            "supervised init from scratch — the parallel-track "
+                            "alternative to warm-starting a spatial-head "
+                            "checkpoint into a fresh head via run_training.py's "
+                            "--init-checkpoint.")
 
     # Output options
     parser.add_argument('--output-dir', type=str, default='models/supervised',
@@ -453,13 +598,14 @@ def main():
                             persistent_workers=True)
 
     # Create model
-    model, device = create_model(args)
+    model, device, resume_bundle = create_model(args)
     logger.info(f"Model on {device}, "
                 f"{sum(p.numel() for p in model.parameters()):,} parameters")
 
     # Train
     t0 = time.time()
-    best_path = train(model, device, train_loader, val_loader, args)
+    best_path = train(model, device, train_loader, val_loader, args,
+                      resume_bundle=resume_bundle)
     elapsed = time.time() - t0
 
     logger.info(f"Training complete in {elapsed:.0f}s. "

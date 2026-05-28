@@ -263,15 +263,24 @@ def main() -> None:
     # Encoding and augmentation settings (architectural improvements)
     encoding_cfg = cfg.get('encoding', {})
     augmentation_cfg = cfg.get('augmentation', {})
+    network_cfg = cfg.get('network', {})
 
     use_enhanced_encoding = encoding_cfg.get('type', 'basic') == 'enhanced'
     enable_augmentation = augmentation_cfg.get('enabled', False) or trainer_cfg.get('enable_augmentation', False)
     max_augmentations = augmentation_cfg.get('max_augmentations', trainer_cfg.get('max_augmentations', 12))
+    # Branch D.1: value_head_type='gap' swaps the ~4M-param spatial-flatten
+    # value head for a ~17K-param GAP head. None = auto-detect from
+    # --init-checkpoint, else fall back to wrapper default ('spatial').
+    value_head_type = network_cfg.get('value_head_type', None)
+    if value_head_type is not None and value_head_type not in ('spatial', 'gap', 'gap_v2'):
+        parser.error(f"network.value_head_type must be 'spatial', 'gap', or 'gap_v2', got {value_head_type!r}")
 
     if use_enhanced_encoding:
         logger.info(f"Using ENHANCED encoding (15 channels)")
     else:
         logger.info(f"Using BASIC encoding (6 channels)")
+    if value_head_type is not None:
+        logger.info(f"Using value head: {value_head_type}")
 
     if enable_augmentation:
         logger.info(f"Augmentation ENABLED (max {max_augmentations}x expansion)")
@@ -444,6 +453,7 @@ def main() -> None:
         model_path=str(init_path_for_construct) if init_path_for_construct else None,
         device=device,
         use_enhanced_encoding=use_enhanced_encoding,
+        value_head_type=value_head_type,
     )
     # Attach difficulty presets for export metadata
     network.difficulty_presets = cfg.get('difficulty_presets', {})

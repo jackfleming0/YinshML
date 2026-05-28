@@ -9,9 +9,28 @@
 !configs/
 !configs/*.yaml
 configs/local/
+!experiments/
+!experiments/**
+# Exclude ALL training-artifact binaries inside experiments/ — checkpoints,
+# replay buffers, optimizer state, exported models. GitHub rejects >100MB
+# files; these are recoverable from logs/metrics and shouldn't be in the
+# repo. Configs (yaml), metrics (json), and tournament logs stay tracked.
+experiments/**/*.pt
+experiments/**/*.pkl
+experiments/**/*.pkl.gz
+experiments/**/*.mlpackage
+experiments/**/*.mlmodel
+experiments/**/*.npy
+experiments/**/*.npz
 !pyproject.toml
 !requirements.txt
 !setup.py
+# Analysis board (position composer + alignment loop scripts). Source is
+# allowlisted; generated run outputs (positions, measurements, reports,
+# charts) live under loop/runs/<timestamp>/ and stay ignored.
+!analysis_board/
+!analysis_board/**
+analysis_board/loop/runs/
 
 # Allowed root-level documentation
 !CLAUDE.md
@@ -51,6 +70,13 @@ configs/local/
 !WAVE3_EXPERIMENT_LOG.md
 !WAVE3_BRANCH_C_DECISION.md
 !ERIC_JANG_AUTOGO_AUDIT.md
+!VOLUME_PRETRAIN_RESULTS.md
+!TECH_DEBT.md
+!D2_PREP.md
+!EXPERIMENT_BACKLOG.md
+!docs/
+!docs/**
+!SESSION_2026-05-21_RECAP.md
 
 !results/
 !logs/
@@ -140,3 +166,4 @@ tasks/ .env*
 # Task files
 # tasks.json
 # tasks/ 
+.cloud_session/

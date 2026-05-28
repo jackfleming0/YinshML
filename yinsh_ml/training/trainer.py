@@ -16,6 +16,7 @@ import random
 
 from ..utils.metrics_logger import MetricsLogger, EpochMetrics
 from ..utils.enhanced_metrics import EnhancedMetricsCollector
+from ..utils.encoding import decode_phase_from_state
 from ..network.wrapper import NetworkWrapper
 from .ema import EMAShadow
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
@@ -171,17 +172,16 @@ class GameExperience:
 
                     pass
 
-        # Helper to decode phases from channel 5
-        def decode_phase(state: np.ndarray) -> str:
-            phase_channel = state[5]  # 5th channel for 'GAME_PHASE'
-            avg = np.mean(np.abs(phase_channel))
-            if avg < 0.2:
-                phase = "RING_PLACEMENT"
-            elif avg < 0.6:
-                phase = "MAIN_GAME"
-            else:
-                phase = "RING_REMOVAL"
-            return phase
+        # Decode phase via the encoder-aware utility. Previously this
+        # was a local helper that read `state[5]` unconditionally — fine
+        # for the 6-channel basic encoder (CH_GAME_PHASE=5) but silently
+        # wrong for the 15-channel enhanced encoder (CH_GAME_PHASE=12;
+        # channel 5 is a row-threat channel). The bug caused every 15-ch
+        # buffer sample to be labelled RING_PLACEMENT and silently
+        # disabled the configured `phase_weights` MAIN_GAME=2.0 boost in
+        # `sample_batch`. See EXPERIMENT_BACKLOG B1+B2+B3 Done entry for
+        # the full diagnosis (2026-05-26).
+        decode_phase = decode_phase_from_state
 
         # Fix #1: No longer compute normalized_margin - values are already position-specific from MCTS
         # Keep score computation for logging only

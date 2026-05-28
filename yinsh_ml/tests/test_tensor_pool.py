@@ -1,5 +1,7 @@
 """Tests for TensorPool implementation."""
 
+import logging
+
 import pytest
 import torch
 import threading
@@ -16,6 +18,79 @@ from yinsh_ml.memory.tensor_pool import (
     validate_tensor_reset,
     create_tensor_pool
 )
+from yinsh_ml.memory.adaptive import TensorCompatibilityChecker
+
+
+class TestReshapeCompatibility:
+    """Pin the contract between `TensorCompatibilityChecker.is_compatible`
+    and the consumer at `TensorPool.get`, which calls `tensor.view(shape)`.
+
+    `view(shape)` requires `numel(tensor) == prod(shape)` exactly — it
+    reinterprets storage, it does not slice. So `is_compatible` must only
+    accept tensors whose numel matches the target's, otherwise the pool
+    emits "Failed to reshape tensor: shape '...' is invalid for input
+    of size ..." warnings on every batch-size-mismatch lookup (observed
+    in the threaded shared-evaluator path where batch sizes vary per
+    coalesced call — see logs/tier_a_parity.json).
+    """
+
+    def test_is_compatible_rejects_size_mismatch(self):
+        """A (2, 6, 11, 11) source can NOT be view()'d into (1, 6, 11, 11) —
+        numel mismatch (1452 != 726). `is_compatible` must reflect that.
+        """
+        source = torch.zeros(2, 6, 11, 11)
+        assert TensorCompatibilityChecker.is_compatible(source, (1, 6, 11, 11)) is False
+
+    def test_is_compatible_accepts_same_numel_different_shape(self):
+        """Same numel, different shape — view() succeeds. Keep this case
+        as a real reuse opportunity."""
+        source = torch.zeros(2, 7433)
+        assert TensorCompatibilityChecker.is_compatible(source, (14866,)) is True
+        assert TensorCompatibilityChecker.is_compatible(source, (7433, 2)) is True
+
+    def test_is_compatible_exact_match(self):
+        """Same shape is also compatible (degenerate same-numel case)."""
+        source = torch.zeros(1, 6, 11, 11)
+        assert TensorCompatibilityChecker.is_compatible(source, (1, 6, 11, 11)) is True
+
+    def test_pool_no_warning_on_batch_size_mismatch(self, caplog):
+        """End-to-end: seed pool with a (2, 6, 11, 11) tensor, then request
+        (1, 6, 11, 11). The pool should NOT emit a "Failed to reshape"
+        warning — it should silently fall through to fresh allocation.
+
+        Pre-fix this fired every batch-size-mismatched lookup in the
+        threaded BatchedEvaluator path.
+        """
+        pool = TensorPool(TensorPoolConfig(enable_tensor_reshaping=True,
+                                           enable_adaptive_sizing=False))
+        # Force CPU — on MPS the pool's default device is `torch.device('mps')`
+        # but stored tensors record as `torch.device('mps:0')`, so the
+        # `device_str` filter in `_find_compatible_tensor` rejects the
+        # candidate before the reshape path ever runs (separate bug, tracked
+        # elsewhere). CPU avoids that confound. The production warning came
+        # from the threaded worker path, which passes the device explicitly.
+        cpu = torch.device("cpu")
+        # Seed the pool with a batch-2 input tensor.
+        t_big = pool.get(shape=(2, 6, 11, 11), device=cpu)
+        pool.release(t_big)
+
+        # Now request a batch-1 tensor — no exact match, reshape path tries
+        # to repurpose the (2,6,11,11) entry. Pre-fix: warning. Post-fix:
+        # silent fresh allocation.
+        with caplog.at_level(logging.WARNING, logger="yinsh_ml.memory.tensor_pool"):
+            t_small = pool.get(shape=(1, 6, 11, 11), device=cpu)
+
+        reshape_warnings = [r for r in caplog.records
+                            if "Failed to reshape" in r.getMessage()]
+        assert not reshape_warnings, (
+            f"Pool emitted {len(reshape_warnings)} reshape warning(s) on "
+            f"batch-size mismatch — `is_compatible` is accepting tensors "
+            f"that `view()` cannot handle. Messages: "
+            f"{[r.getMessage() for r in reshape_warnings]}"
+        )
+        # And the returned tensor must still be correct.
+        assert tuple(t_small.shape) == (1, 6, 11, 11)
+        assert t_small.dtype == torch.float32
 
 
 class TestTensorKey:

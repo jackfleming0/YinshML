@@ -44,13 +44,14 @@ class MatchResult:
 
 
 def load_model(checkpoint_path: str, device: str) -> NetworkWrapper:
-    """Load a model from checkpoint."""
-    network = NetworkWrapper(device=device)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    if 'model_state_dict' in checkpoint:
-        network.network.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        network.network.load_state_dict(checkpoint)
+    """Load a model from checkpoint.
+
+    Uses the NetworkWrapper constructor's auto-detect path so encoding
+    (6-ch vs 15-ch) and architecture (channels / blocks / value head) are
+    inferred from the checkpoint state_dict — required for cross-era
+    tournaments that span pre- and post-encoding-fix checkpoints.
+    """
+    network = NetworkWrapper(model_path=checkpoint_path, device=device)
     network.network.eval()
     return network
 

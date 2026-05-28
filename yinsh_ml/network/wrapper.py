@@ -28,7 +28,8 @@ class NetworkWrapper:
                  value_mode: str = 'classification', num_value_classes: int = 7,
                  use_enhanced_encoding: bool = False,
                  num_channels: Optional[int] = None,
-                 num_blocks: Optional[int] = None):
+                 num_blocks: Optional[int] = None,
+                 value_head_type: Optional[str] = None):
         """
         Initialize the network wrapper.
 
@@ -41,6 +42,13 @@ class NetworkWrapper:
             use_enhanced_encoding: If True, use 15-channel enhanced encoding. If False, use basic 6-channel.
             num_channels: ResNet channel count. If None and model_path given, auto-detect from state_dict.
             num_blocks: Number of residual/attention blocks. If None and model_path given, auto-detect.
+            value_head_type: 'spatial' (legacy ~4M params) or 'gap' (Branch D.1 ~17K params).
+                If None and model_path given, auto-detect by inspecting `value_head.0.weight`'s
+                kernel size (3 → spatial, 1 → gap). If None and no model_path, defaults to
+                'spatial'. To DELIBERATELY swap heads during warm-start (e.g. load a spatial
+                checkpoint into a gap wrapper for Branch D.1), pass 'gap' explicitly — the
+                shape filter in `load_model` will load the trunk + policy and silently drop
+                the spatial-head keys, leaving the GAP head freshly initialized.
         """
         if device:
             self.device = torch.device(device)
@@ -89,17 +97,74 @@ class NetworkWrapper:
                             continue
                 if block_ids:
                     num_blocks = len(block_ids)
+            # Auto-detect value head type. Spatial head's first layer is
+            # Conv2d(c, 64, kernel=3) → weight shape (64, c, 3, 3). Both GAP
+            # variants use Conv2d(c, 64, kernel=1) → weight shape (64, c, 1, 1).
+            # To discriminate GAP v1 vs v2, count Linear modules in the head:
+            #   spatial: 3 Linears (7744→512, 512→256, 256→out)
+            #   gap (v1): 1 Linear (64→out)
+            #   gap_v2:   2 Linears (64→hidden=80, hidden→out)
+            # Detection by counting `value_head.N.weight` keys with shape == 2
+            # (which marks a Linear's weight tensor).
+            # Only override if the caller didn't specify a type — explicit
+            # 'gap' / 'gap_v2' on a spatial checkpoint is the warm-start path.
+            if value_head_type is None:
+                vh0 = sd.get('value_head.0.weight')
+                if vh0 is not None and vh0.dim() == 4:
+                    if vh0.shape[-1] == 3:
+                        value_head_type = 'spatial'
+                    else:
+                        # kernel=1 → GAP variant. Count Linears to distinguish.
+                        n_linears = sum(
+                            1 for k, v in sd.items()
+                            if k.startswith('value_head.') and k.endswith('.weight')
+                            and v.dim() == 2
+                        )
+                        value_head_type = 'gap_v2' if n_linears >= 2 else 'gap'
+            # Auto-detect value_mode + num_value_classes from the LAST Linear
+            # weight in the value head:
+            #   classification → out_features == num_value_classes (e.g. 7)
+            #   regression     → out_features == 1
+            # Only override if the caller didn't specify the mode explicitly
+            # — explicit kwarg wins (parallel to value_head_type's policy).
+            # The default value_mode kwarg is 'classification', so we detect
+            # 'regression' from the checkpoint OR keep the default. To
+            # distinguish "caller passed classification" from "caller didn't
+            # care", we check the LAST linear's shape and switch only when
+            # it clearly indicates regression. (Symmetric to value_head_type's
+            # `is None` check, but value_mode has a non-None default so we
+            # use the checkpoint as the ground truth when it disagrees.)
+            value_head_linear_weights = [
+                (int(k.split('.')[1]), v) for k, v in sd.items()
+                if k.startswith('value_head.') and k.endswith('.weight') and v.dim() == 2
+            ]
+            if value_head_linear_weights:
+                value_head_linear_weights.sort(key=lambda kv: kv[0])
+                last_linear_weight = value_head_linear_weights[-1][1]
+                ckpt_out_dim = int(last_linear_weight.shape[0])
+                if ckpt_out_dim == 1:
+                    # Regression checkpoint. Override the caller's
+                    # classification default if it wasn't deliberately set.
+                    if value_mode == 'classification':
+                        value_mode = 'regression'
+                elif ckpt_out_dim > 1:
+                    # Classification checkpoint with N=ckpt_out_dim classes.
+                    if value_mode == 'classification':
+                        num_value_classes = ckpt_out_dim
         if num_channels is None:
             num_channels = 256
         if num_blocks is None:
             num_blocks = 12
+        if value_head_type is None:
+            value_head_type = 'spatial'
 
         self.network = YinshNetwork(
             num_channels=num_channels,
             num_blocks=num_blocks,
             value_mode=value_mode,
             num_value_classes=num_value_classes,
-            input_channels=input_channels
+            input_channels=input_channels,
+            value_head_type=value_head_type,
         ).to(self.device)
 
         # Setup logging
@@ -139,6 +204,13 @@ class NetworkWrapper:
         else:
             self.state_encoder = StateEncoder()
             self.logger.info("Using basic 6-channel encoding")
+
+        # Mirror value_head_type onto self so callers (e.g. supervisor's
+        # network-recreation path) can preserve it without poking into
+        # `self.network.value_head_type`.
+        self.value_head_type = self.network.value_head_type
+        vh_params = sum(p.numel() for p in self.network.value_head.parameters())
+        self.logger.info(f"Using {self.value_head_type} value head ({vh_params:,d} params)")
 
         # Difficulty presets can be attached by runner for CoreML metadata
         self.difficulty_presets = None

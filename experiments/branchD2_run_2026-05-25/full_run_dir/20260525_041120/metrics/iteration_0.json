@@ -1,0 +1,319 @@
+{
+  "iteration": 0,
+  "timestamp": "2026-05-25T05:17:55.608778",
+  "metrics": {
+    "games": [],
+    "training": [
+      {
+        "policy_loss": 1.1078661165985406,
+        "value_loss": 9.138632063772164,
+        "value_accuracy": 0.08103553921568628,
+        "move_accuracies": {
+          "top_1_accuracy": 0.08892463235294118,
+          "top_3_accuracy": 0.16321997549019607,
+          "top_5_accuracy": 0.19990808823529413
+        },
+        "learning_rates": {
+          "policy": 1e-05,
+          "value": 5e-05
+        },
+        "gradient_norm": 1.1180336784302647,
+        "loss_improvement": 0.0
+      }
+    ],
+    "tournament": null,
+    "scalars": {
+      "train/policy_target_entropy_mean": [
+        {
+          "step": 1,
+          "value": 0.1407785713672638
+        },
+        {
+          "step": 2,
+          "value": 0.12794101238250732
+        },
+        {
+          "step": 3,
+          "value": 0.1304435133934021
+        },
+        {
+          "step": 4,
+          "value": 0.12718559801578522
+        },
+        {
+          "step": 5,
+          "value": 0.12432410567998886
+        },
+        {
+          "step": 6,
+          "value": 0.11838668584823608
+        },
+        {
+          "step": 7,
+          "value": 0.11805590987205505
+        },
+        {
+          "step": 8,
+          "value": 0.13508185744285583
+        },
+        {
+          "step": 9,
+          "value": 0.1301708221435547
+        },
+        {
+          "step": 10,
+          "value": 0.1123356968164444
+        },
+        {
+          "step": 11,
+          "value": 0.10442156344652176
+        },
+        {
+          "step": 12,
+          "value": 0.1211869865655899
+        },
+        {
+          "step": 13,
+          "value": 0.10985234379768372
+        },
+        {
+          "step": 14,
+          "value": 0.15690696239471436
+        },
+        {
+          "step": 15,
+          "value": 0.13367685675621033
+        },
+        {
+          "step": 16,
+          "value": 0.12455759942531586
+        },
+        {
+          "step": 17,
+          "value": 0.12528613209724426
+        },
+        {
+          "step": 18,
+          "value": 0.13714757561683655
+        },
+        {
+          "step": 19,
+          "value": 0.12711390852928162
+        },
+        {
+          "step": 20,
+          "value": 0.11782723665237427
+        },
+        {
+          "step": 21,
+          "value": 0.1515170782804489
+        },
+        {
+          "step": 22,
+          "value": 0.14029400050640106
+        },
+        {
+          "step": 23,
+          "value": 0.10963916778564453
+        },
+        {
+          "step": 24,
+          "value": 0.13355274498462677
+        },
+        {
+          "step": 25,
+          "value": 0.13578109443187714
+        },
+        {
+          "step": 26,
+          "value": 0.10355114191770554
+        },
+        {
+          "step": 27,
+          "value": 0.1447930783033371
+        },
+        {
+          "step": 28,
+          "value": 0.1290282905101776
+        },
+        {
+          "step": 29,
+          "value": 0.12300950288772583
+        },
+        {
+          "step": 30,
+          "value": 0.10121938586235046
+        },
+        {
+          "step": 31,
+          "value": 0.1386789232492447
+        },
+        {
+          "step": 32,
+          "value": 0.17895416915416718
+        },
+        {
+          "step": 33,
+          "value": 0.1741010844707489
+        },
+        {
+          "step": 34,
+          "value": 0.10195586085319519
+        },
+        {
+          "step": 35,
+          "value": 0.11584044247865677
+        },
+        {
+          "step": 36,
+          "value": 0.1294235736131668
+        },
+        {
+          "step": 37,
+          "value": 0.1068091094493866
+        },
+        {
+          "step": 38,
+          "value": 0.10691618919372559
+        },
+        {
+          "step": 39,
+          "value": 0.16525286436080933
+        },
+        {
+          "step": 40,
+          "value": 0.12490765750408173
+        },
+        {
+          "step": 41,
+          "value": 0.13961371779441833
+        },
+        {
+          "step": 42,
+          "value": 0.1465604305267334
+        },
+        {
+          "step": 43,
+          "value": 0.1572006344795227
+        },
+        {
+          "step": 44,
+          "value": 0.09948685020208359
+        },
+        {
+          "step": 45,
+          "value": 0.1334778368473053
+        },
+        {
+          "step": 46,
+          "value": 0.1206929162144661
+        },
+        {
+          "step": 47,
+          "value": 0.1367003321647644
+        },
+        {
+          "step": 48,
+          "value": 0.14809656143188477
+        },
+        {
+          "step": 49,
+          "value": 0.12227949500083923
+        },
+        {
+          "step": 50,
+          "value": 0.18012383580207825
+        },
+        {
+          "step": 51,
+          "value": 0.1683117151260376
+        }
+      ],
+      "train/effective_batch_size": [
+        {
+          "step": 52,
+          "value": 256.0
+        }
+      ]
+    },
+    "events": [],
+    "summary_stats": {
+      "game_lengths": {
+        "mean": NaN,
+        "std": NaN,
+        "distribution": [
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0.0,
+            0.1,
+            0.2,
+            0.30000000000000004,
+            0.4,
+            0.5,
+            0.6000000000000001,
+            0.7000000000000001,
+            0.8,
+            0.9,
+            1.0
+          ]
+        ]
+      },
+      "value_head": {
+        "accuracy_by_phase": {},
+        "confidence_trend": [],
+        "correlation_with_outcome": 0.0
+      },
+      "learning_dynamics": {
+        "policy_loss_trend": 0.0,
+        "value_loss_trend": 0.0,
+        "gradient_norms": [
+          1.1180336784302647
+        ],
+        "plateau_detected": false
+      }
+    }
+  },
+  "enhanced_metrics": {
+    "summary": {
+      "phases": {}
+    },
+    "phase_metrics": {
+      "placement": {
+        "value_predictions": [],
+        "actual_outcomes": [],
+        "move_times": [],
+        "decision_confidence": []
+      },
+      "main_game": {
+        "value_predictions": [],
+        "actual_outcomes": [],
+        "move_times": [],
+        "decision_confidence": []
+      },
+      "ring_removal": {
+        "value_predictions": [],
+        "actual_outcomes": [],
+        "move_times": [],
+        "decision_confidence": []
+      },
+      "game_over": {
+        "value_predictions": [],
+        "actual_outcomes": [],
+        "move_times": [],
+        "decision_confidence": []
+      }
+    },
+    "critical_positions": {}
+  }
+}

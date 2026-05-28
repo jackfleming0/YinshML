@@ -581,6 +581,13 @@ class TrainingSupervisor:
         # vs full round-robin at iter 50: 1225 pairs × 400 = 490,000 games (infeasible)
         tournament_window = self.mode_settings.get('tournament_sliding_window', 5)
 
+        # Mirror the network's encoder / head config into the tournament so
+        # NetworkWrapper instances it constructs for round-robin + anchor eval
+        # match the training architecture (otherwise load_model hard-fails on
+        # 15-ch checkpoints loaded into a 6-ch default wrapper, etc.).
+        tm_use_enhanced_encoding = getattr(self.network, 'use_enhanced_encoding', False)
+        tm_value_head_type = getattr(self.network, 'value_head_type', None)
+
         self.tournament_manager = ModelTournament(
             training_dir=self.save_dir, # Tournaments evaluate models within this run's directory
             device=self.device,
@@ -588,6 +595,8 @@ class TrainingSupervisor:
             sliding_window_size=tournament_window,
             use_ema_for_eval=self._use_ema_for_eval,
             eval_seed=self._eval_seed,
+            use_enhanced_encoding=tm_use_enhanced_encoding,
+            value_head_type=tm_value_head_type,
         )
         ema_state = (
             f"ema_decay={ema_decay}, use_ema_for_eval={self._use_ema_for_eval}"
@@ -1654,6 +1663,16 @@ class TrainingSupervisor:
 
         wins, total = 0, 0
         perform_wilson_check = False
+        # When Wilson SHOULD have run (best exists, candidate is different) but
+        # the tournament's round-robin didn't produce any H2H games against
+        # best (typically because best is older than `tournament_sliding_window`
+        # and got dropped from the window), record that explicitly. The
+        # downstream promotion logic must NOT fall through to the Elo gap
+        # path in this case — a 7-Elo gap on a Glicko rating with RD ~250 is
+        # within noise, and we observed it false-promote a candidate in the
+        # B1+B2+B3 run (iter_4, 2026-05-26). Fail closed when Wilson was
+        # supposed to run but couldn't.
+        wilson_attempted_no_data = False
 
         # --- Check if comparison is needed and possible ---
         if self.best_model_iteration >= 0 and self.best_model_iteration != candidate_iteration and self.best_model_path:
@@ -1665,10 +1684,15 @@ class TrainingSupervisor:
                     perform_wilson_check = True
                     self.logger.info(f"Head-to-head results found: Candidate Wins={wins}, Total Games={total}")
                 else:
+                    wilson_attempted_no_data = True
                     self.logger.warning(
-                        f"No head-to-head games recorded between {candidate_id_canon} and {best_id_canon}. Cannot run Wilson gate.")
+                        f"No head-to-head games recorded between {candidate_id_canon} and {best_id_canon}. "
+                        f"Cannot run Wilson gate. Fail-closed: Elo fallback disabled — current best is "
+                        f"likely outside the tournament's sliding window. Consider raising "
+                        f"`tournament_sliding_window` or pinning best_model in the round-robin.")
             except Exception as e:
                 self.logger.error(f"Error getting head-to-head results: {e}", exc_info=True)
+                wilson_attempted_no_data = True
 
         elif self.best_model_iteration < 0:
             self.logger.info("No previous best model recorded. Wilson gate skipped.")
@@ -1719,6 +1743,19 @@ class TrainingSupervisor:
             # candidate and wipe the prior Elo baseline.
             promote = True
             self.logger.info(f"✅ PROMOTED: Iter {candidate_iteration} ({candidate_id_canon}) is the first model.")
+        elif wilson_attempted_no_data:
+            # Fail-closed: Wilson was supposed to gate this promotion but the
+            # tournament didn't produce H2H games against best. Falling through
+            # to the Elo gap path is unsafe (small-population Glicko RD is
+            # large; a few-point gap is noise). See iter_4 / B1+B2+B3 false
+            # promotion (2026-05-26). Hold the candidate as kept; don't
+            # promote and don't revert (we have no signal either way).
+            self.logger.warning(
+                f"➡️ KEPT: Iter {candidate_iteration} ({candidate_id_canon}) — Wilson gate "
+                f"could not run (no H2H data) and Elo fallback is too noisy "
+                f"on Glicko ratings with small populations. Conservative no-op "
+                f"(no promote, no revert)."
+            )
         elif candidate_elo > self.best_model_elo:
             promote = True
             reason = f"Elo improved ({candidate_elo:.1f} > {self.best_model_elo:.1f})"
@@ -2307,14 +2344,18 @@ class TrainingSupervisor:
                 # Save current network state
                 self.network.save_model(temp_path)
 
-                # Get device and encoding information
+                # Get device and architecture information
                 device = getattr(self.network, 'device', torch.device('cpu'))
                 use_enhanced_encoding = getattr(self.network, 'use_enhanced_encoding', False)
+                value_head_type = getattr(self.network, 'value_head_type', None)
 
-                # Recreate network with tensor pool (preserving encoding type)
+                # Recreate network with tensor pool (preserving encoding type
+                # AND value-head architecture — without the latter, a GAP-head
+                # run silently reverts to a spatial head on recreation).
                 from yinsh_ml.network.wrapper import NetworkWrapper
                 new_network = NetworkWrapper(device=device, tensor_pool=self.tensor_pool,
-                                            use_enhanced_encoding=use_enhanced_encoding)
+                                            use_enhanced_encoding=use_enhanced_encoding,
+                                            value_head_type=value_head_type)
                 new_network.load_model(temp_path)
 
                 # Replace old network

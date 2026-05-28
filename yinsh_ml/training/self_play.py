@@ -1573,6 +1573,11 @@ class SelfPlay:
             'use_batched_mcts': use_batched_mcts,  # Add batched MCTS flag
             'mcts_batch_size': mcts_batch_size,  # Add batch size
             'use_enhanced_encoding': getattr(self.network, 'use_enhanced_encoding', False),  # Enhanced encoding flag
+            # Branch D.1: 'spatial' (legacy) or 'gap' (GAP value head). Workers
+            # construct NetworkWrapper without model_path, so the wrapper's
+            # auto-detect doesn't fire — we must propagate the head type
+            # explicitly, same pattern as use_enhanced_encoding.
+            'value_head_type': getattr(self.network, 'value_head_type', None),
             'enable_subtree_reuse': enable_subtree_reuse,  # Carry MCTS tree across moves within a game
             'fpu_reduction': fpu_reduction,  # First-Play Urgency coefficient (KataGo-style PUCT)
             'epsilon_mix_start': epsilon_mix_start,  # Root Dirichlet mixing fraction at move 0
@@ -1600,7 +1605,7 @@ class SelfPlay:
         # that don't belong in MCTS.__init__()
         mcts_init_config = {k: v for k, v in self.mcts_config.items()
                            if k not in ['use_batched_mcts', 'mcts_batch_size',
-                                        'use_enhanced_encoding', 'use_cpp_engine']}
+                                        'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type']}
 
         self.mcts = MCTS(
             network=self.network,
@@ -2138,10 +2143,15 @@ def play_game_worker(
         )
         local_tensor_pool = TensorPool(tensor_pool_config)
 
-        # Create network with tensor pool (use enhanced encoding if specified)
+        # Create network with tensor pool (use enhanced encoding + value
+        # head type if specified). value_head_type comes from the parent's
+        # SelfPlay.mcts_config; if None (older configs / not set), the
+        # wrapper defaults to 'spatial'.
         use_enhanced_encoding = mcts_config.get('use_enhanced_encoding', False)
+        value_head_type = mcts_config.get('value_head_type', None)
         network = NetworkWrapper(device=device, tensor_pool=local_tensor_pool,
-                                 use_enhanced_encoding=use_enhanced_encoding)
+                                 use_enhanced_encoding=use_enhanced_encoding,
+                                 value_head_type=value_head_type)
         network.load_model(model_path)
         network.network.eval()
 
@@ -2176,7 +2186,7 @@ def play_game_worker(
         # Remove these from mcts_config before passing to MCTS __init__
         mcts_init_config = {k: v for k, v in mcts_config.items()
                            if k not in ['use_batched_mcts', 'mcts_batch_size',
-                                        'use_enhanced_encoding', 'use_cpp_engine']}
+                                        'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type']}
 
         # W2 B1: only the in-process (sequential) caller can pass a logger
         # safely; process-pool callers pass None to avoid a pickling error.
@@ -2281,7 +2291,7 @@ def play_game_thread(
 
         mcts_init_config = {k: v for k, v in mcts_config.items()
                             if k not in ['use_batched_mcts', 'mcts_batch_size',
-                                         'use_enhanced_encoding', 'use_cpp_engine']}
+                                         'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type']}
 
         # The shared evaluator routes inference; MCTS still needs the
         # network reference for its state_encoder.

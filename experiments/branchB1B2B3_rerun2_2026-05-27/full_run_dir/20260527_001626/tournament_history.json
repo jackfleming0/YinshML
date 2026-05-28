@@ -1,0 +1,634 @@
+{
+  "full_round_robin_1_20260527_052221": {
+    "iteration": 1,
+    "timestamp": "2026-05-27T05:26:08.604991",
+    "round_robin_results": [
+      {
+        "white_model": "checkpoint_iteration_0",
+        "black_model": "checkpoint_iteration_1",
+        "white_wins": 93,
+        "black_wins": 107,
+        "draws": 0,
+        "timestamp": "2026-05-27T05:24:14.511479",
+        "avg_game_length": 62.305
+      },
+      {
+        "white_model": "checkpoint_iteration_1",
+        "black_model": "checkpoint_iteration_0",
+        "white_wins": 101,
+        "black_wins": 99,
+        "draws": 0,
+        "timestamp": "2026-05-27T05:26:07.030411",
+        "avg_game_length": 63.12
+      }
+    ],
+    "stats": {
+      "checkpoint_iteration_0": {
+        "wins": 192,
+        "losses": 208,
+        "draws": 0,
+        "white_wins": 93,
+        "white_losses": 107,
+        "white_draws": 0,
+        "black_wins": 99,
+        "black_losses": 101,
+        "black_draws": 0,
+        "games": 400,
+        "white_games": 200,
+        "black_games": 200,
+        "win_rate": 0.48,
+        "white_win_rate": 0.465,
+        "black_win_rate": 0.495,
+        "elo": 1486.6681493449883,
+        "glicko_rating": 1486.6681493449883,
+        "rd": 253.3457704125118
+      },
+      "checkpoint_iteration_1": {
+        "wins": 208,
+        "losses": 192,
+        "draws": 0,
+        "white_wins": 101,
+        "white_losses": 99,
+        "white_draws": 0,
+        "black_wins": 107,
+        "black_losses": 93,
+        "black_draws": 0,
+        "games": 400,
+        "white_games": 200,
+        "black_games": 200,
+        "win_rate": 0.52,
+        "white_win_rate": 0.505,
+        "black_win_rate": 0.535,
+        "elo": 1513.3318506550117,
+        "glicko_rating": 1513.3318506550117,
+        "rd": 253.3457704125118
+      }
+    },
+    "pair_cis": [
+      {
+        "model_a": "checkpoint_iteration_0",
+        "model_b": "checkpoint_iteration_1",
+        "wins_a": 192,
+        "wins_b": 208,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.48,
+        "ci_lower": 0.4314625267229099,
+        "ci_upper": 0.5289179789010773,
+        "se": 0.024979991993593593
+      }
+    ]
+  },
+  "full_round_robin_2_20260527_081928": {
+    "iteration": 2,
+    "timestamp": "2026-05-27T08:30:52.039780",
+    "round_robin_results": [
+      {
+        "white_model": "checkpoint_iteration_0",
+        "black_model": "checkpoint_iteration_1",
+        "white_wins": 93,
+        "black_wins": 107,
+        "draws": 0,
+        "timestamp": "2026-05-27T08:21:22.265976",
+        "avg_game_length": 62.305
+      },
+      {
+        "white_model": "checkpoint_iteration_1",
+        "black_model": "checkpoint_iteration_0",
+        "white_wins": 101,
+        "black_wins": 99,
+        "draws": 0,
+        "timestamp": "2026-05-27T08:23:15.520940",
+        "avg_game_length": 63.12
+      },
+      {
+        "white_model": "checkpoint_iteration_0",
+        "black_model": "checkpoint_iteration_2",
+        "white_wins": 93,
+        "black_wins": 107,
+        "draws": 0,
+        "timestamp": "2026-05-27T08:25:10.468786",
+        "avg_game_length": 62.65
+      },
+      {
+        "white_model": "checkpoint_iteration_2",
+        "black_model": "checkpoint_iteration_0",
+        "white_wins": 104,
+        "black_wins": 96,
+        "draws": 0,
+        "timestamp": "2026-05-27T08:27:02.890157",
+        "avg_game_length": 63.285
+      },
+      {
+        "white_model": "checkpoint_iteration_1",
+        "black_model": "checkpoint_iteration_2",
+        "white_wins": 96,
+        "black_wins": 104,
+        "draws": 0,
+        "timestamp": "2026-05-27T08:28:58.511261",
+        "avg_game_length": 62.72
+      },
+      {
+        "white_model": "checkpoint_iteration_2",
+        "black_model": "checkpoint_iteration_1",
+        "white_wins": 98,
+        "black_wins": 102,
+        "draws": 0,
+        "timestamp": "2026-05-27T08:30:50.296737",
+        "avg_game_length": 62.62
+      }
+    ],
+    "stats": {
+      "checkpoint_iteration_0": {
+        "wins": 381,
+        "losses": 419,
+        "draws": 0,
+        "white_wins": 186,
+        "white_losses": 214,
+        "white_draws": 0,
+        "black_wins": 195,
+        "black_losses": 205,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.47625,
+        "white_win_rate": 0.465,
+        "black_win_rate": 0.4875,
+        "elo": 1489.274353478473,
+        "glicko_rating": 1489.274353478473,
+        "rd": 208.52751560195418
+      },
+      "checkpoint_iteration_1": {
+        "wins": 406,
+        "losses": 394,
+        "draws": 0,
+        "white_wins": 197,
+        "white_losses": 203,
+        "white_draws": 0,
+        "black_wins": 209,
+        "black_losses": 191,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.5075,
+        "white_win_rate": 0.4925,
+        "black_win_rate": 0.5225,
+        "elo": 1503.387046269956,
+        "glicko_rating": 1503.387046269956,
+        "rd": 208.52751560195418
+      },
+      "checkpoint_iteration_2": {
+        "wins": 413,
+        "losses": 387,
+        "draws": 0,
+        "white_wins": 202,
+        "white_losses": 198,
+        "white_draws": 0,
+        "black_wins": 211,
+        "black_losses": 189,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.51625,
+        "white_win_rate": 0.505,
+        "black_win_rate": 0.5275,
+        "elo": 1507.3386002515713,
+        "glicko_rating": 1507.3386002515713,
+        "rd": 208.52751560195418
+      }
+    },
+    "pair_cis": [
+      {
+        "model_a": "checkpoint_iteration_0",
+        "model_b": "checkpoint_iteration_1",
+        "wins_a": 384,
+        "wins_b": 416,
+        "draws": 0,
+        "total": 800,
+        "win_rate_a": 0.48,
+        "ci_lower": 0.4455577718159626,
+        "ci_upper": 0.5146333902239218,
+        "se": 0.017663521732655695
+      },
+      {
+        "model_a": "checkpoint_iteration_0",
+        "model_b": "checkpoint_iteration_2",
+        "wins_a": 189,
+        "wins_b": 211,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.4725,
+        "ci_lower": 0.4240683265333157,
+        "ci_upper": 0.5214548686996666,
+        "se": 0.02496215886096393
+      },
+      {
+        "model_a": "checkpoint_iteration_1",
+        "model_b": "checkpoint_iteration_2",
+        "wins_a": 198,
+        "wins_b": 202,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.495,
+        "ci_lower": 0.44628359498707637,
+        "ci_upper": 0.5438115314189205,
+        "se": 0.02499874996874844
+      }
+    ]
+  },
+  "full_round_robin_3_20260527_113647": {
+    "iteration": 3,
+    "timestamp": "2026-05-27T11:48:21.741299",
+    "round_robin_results": [
+      {
+        "white_model": "checkpoint_iteration_1",
+        "black_model": "checkpoint_iteration_2",
+        "white_wins": 96,
+        "black_wins": 104,
+        "draws": 0,
+        "timestamp": "2026-05-27T11:38:43.118219",
+        "avg_game_length": 62.72
+      },
+      {
+        "white_model": "checkpoint_iteration_2",
+        "black_model": "checkpoint_iteration_1",
+        "white_wins": 98,
+        "black_wins": 102,
+        "draws": 0,
+        "timestamp": "2026-05-27T11:40:36.517351",
+        "avg_game_length": 62.62
+      },
+      {
+        "white_model": "checkpoint_iteration_1",
+        "black_model": "checkpoint_iteration_3",
+        "white_wins": 113,
+        "black_wins": 87,
+        "draws": 0,
+        "timestamp": "2026-05-27T11:42:33.228180",
+        "avg_game_length": 62.12
+      },
+      {
+        "white_model": "checkpoint_iteration_3",
+        "black_model": "checkpoint_iteration_1",
+        "white_wins": 93,
+        "black_wins": 107,
+        "draws": 0,
+        "timestamp": "2026-05-27T11:44:28.788069",
+        "avg_game_length": 63.92
+      },
+      {
+        "white_model": "checkpoint_iteration_2",
+        "black_model": "checkpoint_iteration_3",
+        "white_wins": 97,
+        "black_wins": 103,
+        "draws": 0,
+        "timestamp": "2026-05-27T11:46:27.075729",
+        "avg_game_length": 62.545
+      },
+      {
+        "white_model": "checkpoint_iteration_3",
+        "black_model": "checkpoint_iteration_2",
+        "white_wins": 102,
+        "black_wins": 98,
+        "draws": 0,
+        "timestamp": "2026-05-27T11:48:18.879867",
+        "avg_game_length": 61.91
+      }
+    ],
+    "stats": {
+      "checkpoint_iteration_1": {
+        "wins": 418,
+        "losses": 382,
+        "draws": 0,
+        "white_wins": 209,
+        "white_losses": 191,
+        "white_draws": 0,
+        "black_wins": 209,
+        "black_losses": 191,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.5225,
+        "white_win_rate": 0.5225,
+        "black_win_rate": 0.5225,
+        "elo": 1510.1611388098677,
+        "glicko_rating": 1510.1611388098677,
+        "rd": 208.52751560195418
+      },
+      "checkpoint_iteration_2": {
+        "wins": 397,
+        "losses": 403,
+        "draws": 0,
+        "white_wins": 195,
+        "white_losses": 205,
+        "white_draws": 0,
+        "black_wins": 202,
+        "black_losses": 198,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.49625,
+        "white_win_rate": 0.4875,
+        "black_win_rate": 0.505,
+        "elo": 1498.306476865022,
+        "glicko_rating": 1498.306476865022,
+        "rd": 208.52751560195418
+      },
+      "checkpoint_iteration_3": {
+        "wins": 385,
+        "losses": 415,
+        "draws": 0,
+        "white_wins": 195,
+        "white_losses": 205,
+        "white_draws": 0,
+        "black_wins": 190,
+        "black_losses": 210,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.48125,
+        "white_win_rate": 0.4875,
+        "black_win_rate": 0.475,
+        "elo": 1491.5323843251101,
+        "glicko_rating": 1491.5323843251101,
+        "rd": 208.52751560195418
+      }
+    },
+    "pair_cis": [
+      {
+        "model_a": "checkpoint_iteration_0",
+        "model_b": "checkpoint_iteration_1",
+        "wins_a": 384,
+        "wins_b": 416,
+        "draws": 0,
+        "total": 800,
+        "win_rate_a": 0.48,
+        "ci_lower": 0.4455577718159626,
+        "ci_upper": 0.5146333902239218,
+        "se": 0.017663521732655695
+      },
+      {
+        "model_a": "checkpoint_iteration_0",
+        "model_b": "checkpoint_iteration_2",
+        "wins_a": 189,
+        "wins_b": 211,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.4725,
+        "ci_lower": 0.4240683265333157,
+        "ci_upper": 0.5214548686996666,
+        "se": 0.02496215886096393
+      },
+      {
+        "model_a": "checkpoint_iteration_1",
+        "model_b": "checkpoint_iteration_2",
+        "wins_a": 396,
+        "wins_b": 404,
+        "draws": 0,
+        "total": 800,
+        "win_rate_a": 0.495,
+        "ci_lower": 0.4604602750165578,
+        "ci_upper": 0.5295875154934133,
+        "se": 0.017676785624089014
+      },
+      {
+        "model_a": "checkpoint_iteration_1",
+        "model_b": "checkpoint_iteration_3",
+        "wins_a": 220,
+        "wins_b": 180,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.55,
+        "ci_lower": 0.5010000980193108,
+        "ci_upper": 0.5980486379207213,
+        "se": 0.024874685927665497
+      },
+      {
+        "model_a": "checkpoint_iteration_2",
+        "model_b": "checkpoint_iteration_3",
+        "wins_a": 195,
+        "wins_b": 205,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.4875,
+        "ci_lower": 0.4388676214712341,
+        "ci_upper": 0.536370194543758,
+        "se": 0.024992186278915255
+      }
+    ]
+  },
+  "full_round_robin_4_20260527_150217": {
+    "iteration": 4,
+    "timestamp": "2026-05-27T15:13:51.208423",
+    "round_robin_results": [
+      {
+        "white_model": "checkpoint_iteration_2",
+        "black_model": "checkpoint_iteration_3",
+        "white_wins": 97,
+        "black_wins": 103,
+        "draws": 0,
+        "timestamp": "2026-05-27T15:04:13.439642",
+        "avg_game_length": 62.545
+      },
+      {
+        "white_model": "checkpoint_iteration_3",
+        "black_model": "checkpoint_iteration_2",
+        "white_wins": 102,
+        "black_wins": 98,
+        "draws": 0,
+        "timestamp": "2026-05-27T15:06:06.510238",
+        "avg_game_length": 61.91
+      },
+      {
+        "white_model": "checkpoint_iteration_2",
+        "black_model": "checkpoint_iteration_4",
+        "white_wins": 111,
+        "black_wins": 89,
+        "draws": 0,
+        "timestamp": "2026-05-27T15:08:05.295827",
+        "avg_game_length": 61.955
+      },
+      {
+        "white_model": "checkpoint_iteration_4",
+        "black_model": "checkpoint_iteration_2",
+        "white_wins": 105,
+        "black_wins": 95,
+        "draws": 0,
+        "timestamp": "2026-05-27T15:09:59.176936",
+        "avg_game_length": 62.33
+      },
+      {
+        "white_model": "checkpoint_iteration_3",
+        "black_model": "checkpoint_iteration_4",
+        "white_wins": 102,
+        "black_wins": 98,
+        "draws": 0,
+        "timestamp": "2026-05-27T15:11:56.238860",
+        "avg_game_length": 61.28
+      },
+      {
+        "white_model": "checkpoint_iteration_4",
+        "black_model": "checkpoint_iteration_3",
+        "white_wins": 105,
+        "black_wins": 95,
+        "draws": 0,
+        "timestamp": "2026-05-27T15:13:49.063443",
+        "avg_game_length": 61.545
+      }
+    ],
+    "stats": {
+      "checkpoint_iteration_2": {
+        "wins": 401,
+        "losses": 399,
+        "draws": 0,
+        "white_wins": 208,
+        "white_losses": 192,
+        "white_draws": 0,
+        "black_wins": 193,
+        "black_losses": 207,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.50125,
+        "white_win_rate": 0.52,
+        "black_win_rate": 0.4825,
+        "elo": 1500.5645077116594,
+        "glicko_rating": 1500.5645077116594,
+        "rd": 208.52751560195418
+      },
+      "checkpoint_iteration_3": {
+        "wins": 402,
+        "losses": 398,
+        "draws": 0,
+        "white_wins": 204,
+        "white_losses": 196,
+        "white_draws": 0,
+        "black_wins": 198,
+        "black_losses": 202,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.5025,
+        "white_win_rate": 0.51,
+        "black_win_rate": 0.495,
+        "elo": 1501.1290154233186,
+        "glicko_rating": 1501.1290154233186,
+        "rd": 208.52751560195418
+      },
+      "checkpoint_iteration_4": {
+        "wins": 397,
+        "losses": 403,
+        "draws": 0,
+        "white_wins": 210,
+        "white_losses": 190,
+        "white_draws": 0,
+        "black_wins": 187,
+        "black_losses": 213,
+        "black_draws": 0,
+        "games": 800,
+        "white_games": 400,
+        "black_games": 400,
+        "win_rate": 0.49625,
+        "white_win_rate": 0.525,
+        "black_win_rate": 0.4675,
+        "elo": 1498.306476865022,
+        "glicko_rating": 1498.306476865022,
+        "rd": 208.52751560195418
+      }
+    },
+    "pair_cis": [
+      {
+        "model_a": "checkpoint_iteration_0",
+        "model_b": "checkpoint_iteration_1",
+        "wins_a": 384,
+        "wins_b": 416,
+        "draws": 0,
+        "total": 800,
+        "win_rate_a": 0.48,
+        "ci_lower": 0.4455577718159626,
+        "ci_upper": 0.5146333902239218,
+        "se": 0.017663521732655695
+      },
+      {
+        "model_a": "checkpoint_iteration_0",
+        "model_b": "checkpoint_iteration_2",
+        "wins_a": 189,
+        "wins_b": 211,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.4725,
+        "ci_lower": 0.4240683265333157,
+        "ci_upper": 0.5214548686996666,
+        "se": 0.02496215886096393
+      },
+      {
+        "model_a": "checkpoint_iteration_1",
+        "model_b": "checkpoint_iteration_2",
+        "wins_a": 396,
+        "wins_b": 404,
+        "draws": 0,
+        "total": 800,
+        "win_rate_a": 0.495,
+        "ci_lower": 0.4604602750165578,
+        "ci_upper": 0.5295875154934133,
+        "se": 0.017676785624089014
+      },
+      {
+        "model_a": "checkpoint_iteration_1",
+        "model_b": "checkpoint_iteration_3",
+        "wins_a": 220,
+        "wins_b": 180,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.55,
+        "ci_lower": 0.5010000980193108,
+        "ci_upper": 0.5980486379207213,
+        "se": 0.024874685927665497
+      },
+      {
+        "model_a": "checkpoint_iteration_2",
+        "model_b": "checkpoint_iteration_3",
+        "wins_a": 390,
+        "wins_b": 410,
+        "draws": 0,
+        "total": 800,
+        "win_rate_a": 0.4875,
+        "ci_lower": 0.45300514956800275,
+        "ci_upper": 0.522114326706925,
+        "se": 0.017672144394498365
+      },
+      {
+        "model_a": "checkpoint_iteration_2",
+        "model_b": "checkpoint_iteration_4",
+        "wins_a": 206,
+        "wins_b": 194,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.515,
+        "ci_lower": 0.4661126679560689,
+        "ci_upper": 0.5636019528259406,
+        "se": 0.024988747467610296
+      },
+      {
+        "model_a": "checkpoint_iteration_3",
+        "model_b": "checkpoint_iteration_4",
+        "wins_a": 197,
+        "wins_b": 203,
+        "draws": 0,
+        "total": 400,
+        "win_rate_a": 0.4925,
+        "ci_lower": 0.4438103957369542,
+        "ci_upper": 0.541332293872041,
+        "se": 0.024997187341779078
+      }
+    ]
+  }
+}

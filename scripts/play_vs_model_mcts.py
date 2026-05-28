@@ -319,8 +319,7 @@ def play(args) -> None:
         print(f"ERROR: checkpoint not found at {args.checkpoint}")
         sys.exit(1)
     print(f"Loading model: {args.checkpoint}")
-    network = NetworkWrapper(device=device)
-    network.load_model(str(args.checkpoint))
+    network = NetworkWrapper(model_path=str(args.checkpoint), device=device)
 
     human_color = Player.WHITE if args.color.lower() == "white" else Player.BLACK
     ai_color = Player.BLACK if human_color == Player.WHITE else Player.WHITE
