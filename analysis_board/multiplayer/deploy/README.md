@@ -96,7 +96,9 @@ launchctl load ~/Library/LaunchAgents/com.jackfleming.yinsh-server.plist
 launchctl load ~/Library/LaunchAgents/com.jackfleming.yinsh-tunnel.plist
 ```
 
-Both processes start immediately and survive logout / reboot / crash.
+Both processes start immediately and restart automatically on crash
+(`KeepAlive=true` in each plist). For them to also come back after a Mac
+mini reboot — see [Reboot survival](#reboot-survival) below.
 
 ### 8. Verify end-to-end
 
@@ -111,6 +113,57 @@ recently — check the `.err.log` next to the plist.
 
 Then: load `https://yinsh.jackflemingux.com` from a phone again. Should
 respond just like the foreground test.
+
+## Reboot survival
+
+LaunchAgents load when a **user logs in**, not when the Mac boots. So
+without these two settings, a power outage or OS-update reboot leaves
+the Mac mini sitting at the login screen with the site offline until
+someone physically logs in.
+
+### Auto-login
+
+System Settings → Users & Groups → click the **(i)** next to your user
+→ enable **Automatically log in as**. Enter your password to confirm.
+
+After any reboot the mini logs you in automatically, the LaunchAgents
+fire, and the site comes back in ~90 seconds.
+
+Caveat: if FileVault is enabled, this option is grayed out (FileVault
+needs the disk-unlock password before any user can log in). For a
+headless server, the usual tradeoff is FileVault off. If you want
+FileVault, the only "hands-off" path is to give up on auto-login and
+plan for manual recovery after every reboot.
+
+### Disable idle sleep
+
+```bash
+sudo pmset -a sleep 0
+```
+
+Sets the idle-system-sleep timer to 0 (never). Display sleep is
+independent — your screen can still go dark, the OS keeps running.
+
+Verify with:
+
+```bash
+pmset -g | grep -E "^ *(sleep|displaysleep)"
+```
+
+`sleep` should report `0`. `displaysleep` can be whatever.
+
+### What this covers
+
+- Power outage → mini boots → auto-login → LaunchAgents load → site
+  is back. ~90s downtime.
+- macOS auto-update reboot → same path.
+- Idle desktop → no sleep, site stays reachable indefinitely.
+
+### What still requires you
+
+- Pulling new code: see "Pull and redeploy" below.
+- Replacing model checkpoints: drop new `.pt` into `models/<name>/`
+  and reload the server LaunchAgent.
 
 ## Day-to-day operations
 
