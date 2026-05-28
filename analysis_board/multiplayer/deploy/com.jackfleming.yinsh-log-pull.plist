@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jackfleming.yinsh-log-pull</string>
+
+    <!-- LAPTOP-ONLY LaunchAgent. Pulls game logs from the Mac mini nightly.
+         Do NOT install on the Mac mini itself. -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/laptop_pull_logs.sh</string>
+    </array>
+
+    <!-- Fires daily at 02:00 local time. If the laptop is asleep / off at
+         that hour, macOS runs it on next wake. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Also fire once when the LaunchAgent is loaded — gives an immediate
+         sanity check that SSH and the path work. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/log-pull.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/log-pull.err.log</string>
+</dict>
+</plist>

@@ -165,6 +165,52 @@ pmset -g | grep -E "^ *(sleep|displaysleep)"
 - Replacing model checkpoints: drop new `.pt` into `models/<name>/`
   and reload the server LaunchAgent.
 
+## Laptop-side log pull (separate from Mac mini setup)
+
+The Mac mini server writes one JSONL file per UTC day to `games/`
+(gitignored — private). To pull them to your laptop for offline analysis
+without thinking about it, install the third LaunchAgent on your
+**laptop** (NOT the Mac mini):
+
+```bash
+# On the laptop — first verify SSH key auth to the Mac mini works
+ssh jackfleming@mac-mini.local true   # should return silently, no password
+
+# If the above prompts for a password, set up key auth first:
+ssh-keygen -t ed25519   # if you don't have a key yet
+ssh-copy-id jackfleming@mac-mini.local
+
+# Install the pull agent
+cp /Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/com.jackfleming.yinsh-log-pull.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.jackfleming.yinsh-log-pull.plist
+
+# Verify (fires immediately on load via RunAtLoad=true)
+launchctl list | grep yinsh-log-pull
+tail /Users/jackfleming/PycharmProjects/YinshML/analysis_board/multiplayer/deploy/log-pull.log
+```
+
+The script (`laptop_pull_logs.sh`) `rsync`s `games/` from the mini into
+`~/PycharmProjects/YinshML/game_logs/` (gitignored at the repo root) every
+night at 02:00 local time. If the laptop is off-network when the timer
+fires, the script exits silently — no launchd error spam, just "tomorrow
+will catch it." If the laptop was asleep at 02:00, macOS fires the
+LaunchAgent on next wake.
+
+Overrides via environment if your setup differs:
+
+| Variable | Default | What |
+|---|---|---|
+| `YNS_MAC_MINI_HOST` | `mac-mini.local` | mDNS / hostname / IP of the mini |
+| `YNS_MAC_MINI_USER` | `jackfleming` | SSH login on the mini |
+| `YNS_MAC_MINI_LOGS_DIR` | `…/deploy/games/` | Where logs live on the mini |
+| `YNS_LOCAL_LOG_DIR` | `~/PycharmProjects/YinshML/game_logs/` | Local destination |
+
+To trigger a pull manually (without waiting for the timer):
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.jackfleming.yinsh-log-pull
+```
+
 ## Day-to-day operations
 
 ### Restart the server (e.g., after pulling new code)
