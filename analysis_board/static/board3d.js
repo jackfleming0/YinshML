@@ -474,22 +474,31 @@ export function setCapturedRings(whiteCount, blackCount) {
   }
 }
 
-// Highlight a set of removable rings (during RING_REMOVAL phase) with a
-// red overlay so the player can pick by sight, not by reading coordinates.
+// Highlight a set of selectable pieces with a red overlay so the player can
+// pick by sight, not by reading coordinate labels. Two phases use this:
+//   - RING_REMOVAL: pass kind="ring" + each removable ring's position.
+//   - ROW_COMPLETION: pass kind="marker" + the union of marker positions
+//     across all candidate rows.
 // Pass [] to clear.
-export function setSelectableRings(posKeys) {
+export function setSelectableHighlights(posKeys, kind = "ring") {
   for (let i = M.selectableHighlightsGroup.children.length - 1; i >= 0; i--) {
     const c = M.selectableHighlightsGroup.children[i];
     M.selectableHighlightsGroup.remove(c);
     _disposeObject(c);
   }
   if (!posKeys || posKeys.length === 0) return;
+  // Ring overlay sits just outside the ring's outer radius (0.40); marker
+  // overlay sits just outside the marker's cylinder radius (0.26). Same
+  // visual idiom (red halo), scaled to the piece it's annotating.
+  const dims = kind === "marker"
+    ? { inner: 0.28, outer: 0.34 }
+    : { inner: 0.42, outer: 0.50 };
   for (const key of posKeys) {
     const col = key[0];
     const row = parseInt(key.slice(1), 10);
     if (!isValidPos(col, row)) continue;
     const w = posToWorld(col, row);
-    const geom = new THREE.RingGeometry(0.42, 0.50, 40);
+    const geom = new THREE.RingGeometry(dims.inner, dims.outer, 40);
     const mat = new THREE.MeshBasicMaterial({
       color: PALETTE.removable,
       transparent: true,
@@ -498,7 +507,7 @@ export function setSelectableRings(posKeys) {
     });
     const m = new THREE.Mesh(geom, mat);
     m.rotation.x = -Math.PI / 2;
-    // Sit just above the ring's top face so the highlight reads as an
+    // Sit just above the piece's top face so the highlight reads as an
     // emphasis ring around the piece, not as a piece itself.
     m.position.set(w.x, 0.022, w.z);
     M.selectableHighlightsGroup.add(m);

@@ -19,7 +19,7 @@ import {
   resetView,
   animateMove,
   setCapturedRings,
-  setSelectableRings,
+  setSelectableHighlights,
 } from "./board3d.js";
 
 // ---------- Constants ----------
@@ -128,16 +128,30 @@ function render() {
   } else {
     clearArrow();
   }
-  // RING_REMOVAL phase: highlight every removable ring of the side-to-move
-  // with a red overlay so the player picks by sight, not by reading the
+  // Capture-phase highlights — player picks by sight, not by reading the
   // coordinate label in the analysis panel.
+  //   - RING_REMOVAL: each removable ring of the side-to-move gets a red halo.
+  //   - ROW_COMPLETION: every marker that's part of ANY candidate row gets a
+  //     red halo. The analysis panel's hover-arrow still disambiguates which
+  //     specific row is selected when multiple candidates exist.
   if (phaseSel.value === "RING_REMOVAL" && state.legalMoves.length > 0) {
     const removable = state.legalMoves
       .filter((m) => m.type === "REMOVE_RING" && m.source)
       .map((m) => m.source);
-    setSelectableRings(removable);
+    setSelectableHighlights(removable, "ring");
+  } else if (phaseSel.value === "ROW_COMPLETION" && state.legalMoves.length > 0) {
+    // Union of marker positions across all candidate rows. Set dedupes
+    // overlap between candidates (markers shared by multiple rows show
+    // up once, not N times).
+    const markerSet = new Set();
+    for (const mv of state.legalMoves) {
+      if (mv.type === "REMOVE_MARKERS" && Array.isArray(mv.markers)) {
+        for (const p of mv.markers) markerSet.add(p);
+      }
+    }
+    setSelectableHighlights(Array.from(markerSet), "marker");
   } else {
-    setSelectableRings([]);
+    setSelectableHighlights([], "ring");
   }
 }
 
