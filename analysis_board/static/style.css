@@ -1,33 +1,39 @@
 /* YINSH analysis board — light, BGA-inspired. */
 
 :root {
-  /* Background slightly warmer + a touch more atmospheric so the polished
-     board reads as the focal element rather than a stark cutout. Deeper
-     ink range, restrained saturation per visual-style preference. */
-  --bg: #ecead0;
-  --bg-soft: #f3f1da;
-  --board-tile: #b4c8d4;
-  --board-tile-2: #94aab9;
+  /* BGA / Rio Grande aesthetic — light icy-blue board floats on a dark
+     charcoal page. Cool palette throughout, teal accent that echoes the
+     piece rim. Type and chrome read white-on-dark to keep the focus on
+     the rendered board surface. */
+  --bg: #2b2f33;
+  --bg-soft: #353a3f;
+  --board-tile: #c7d9e3;       /* board surface light center */
+  --board-tile-2: #91a8b8;     /* board surface deeper corners */
   --board-grid: #1a2128;
-  --board-dot: #384654;
-  --ink: #15191e;
-  --ink-dim: #4a5563;
-  --ink-faint: #8b95a3;
-  --rule: #d6d2bf;
-  --surface: #ffffff;
-  --surface-2: #f2efe1;
-  --accent: #2563eb;
-  --accent-dim: #93b8f6;
-  --positive: #15803d;
-  --negative: #b91c1c;
-  --warn: #b45309;
-  /* Doubled shadows — direct (tight) + indirect (atmospheric) at low opacity */
-  --shadow: 0 1px 2px rgba(20, 22, 27, 0.06), 0 6px 18px rgba(20, 22, 27, 0.07);
-  --shadow-lift: 0 1px 3px rgba(20, 22, 27, 0.08), 0 10px 28px rgba(20, 22, 27, 0.10);
+  --board-dot: #1a2128;
+  --ink: #f0f3f6;              /* primary text, on dark */
+  --ink-dim: #aab3bc;
+  --ink-faint: #6f7882;
+  --rule: rgba(255, 255, 255, 0.10);
+  --surface: #353a3f;          /* sidebar cards */
+  --surface-2: #40464c;        /* nested controls */
+  --accent: #2aa7c0;            /* teal — echoes the piece rim */
+  --accent-dim: #5fc1d4;
+  --positive: #4caf6a;
+  --negative: #d9534f;
+  --warn: #e0a83b;
+  /* Doubled shadows — sit pieces / cards above the dark background */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 18px rgba(0, 0, 0, 0.20);
+  --shadow-lift: 0 1px 3px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.25);
   --radius: 8px;
 }
 
 * { box-sizing: border-box; }
+
+/* HTML's `hidden` attribute is semantic — respect it globally so class-level
+   `display: flex/grid/block` rules don't accidentally win the specificity
+   battle and reveal elements that JS explicitly hid. */
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;
@@ -110,8 +116,8 @@ html, body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  background: #eff5ff;
-  border: 1px solid #93b8f6;
+  background: rgba(42, 167, 192, 0.10);
+  border: 1px solid rgba(42, 167, 192, 0.40);
   border-radius: 8px;
   padding: 10px 14px;
   width: 100%;
@@ -149,7 +155,7 @@ html, body {
   font-size: 11px;
   color: var(--ink-dim);
   padding-left: 4px;
-  border-left: 1px solid #c5d8ff;
+  border-left: 1px solid var(--rule);
 }
 .line-nav-just-played:empty { display: none; }
 .line-nav-just-played.tentative {
@@ -265,8 +271,8 @@ body.line-mode .controls .actions { opacity: 0.45; pointer-events: none; }
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  background: #eff5ff;
-  border: 1px solid #93b8f6;
+  background: rgba(42, 167, 192, 0.10);
+  border: 1px solid rgba(42, 167, 192, 0.40);
   border-radius: 6px;
   margin-top: 10px;
   font-size: 12px;
@@ -332,25 +338,91 @@ body.line-mode .controls .actions { opacity: 0.45; pointer-events: none; }
 }
 .game-controls button { padding: 4px 10px; font-size: 12px; }
 
-/* In Game mode, the main sidebar's setup/analysis controls don't apply —
-   the game is self-contained. Hide them entirely (they reappear when the
-   user switches back to Setup or Play). The game-setup form contains its
-   own model dropdown + sim controls during the setup phase. */
-body.mode-game label.field:has(#model),
-body.mode-game label.field:has(#phase),
-body.mode-game .side-field,
-body.mode-game .derived-stats,
-body.mode-game label.field:has(#num-sims),
-body.mode-game .controls .actions {
+/* ---------- Opponent sub-control (Play-mode pill) ---------- */
+
+/* The Opponent block is rendered in DOM but invisible outside Play mode. */
+body:not(.mode-play) .opponent-block { display: none; }
+
+.opponent-block { padding-top: 4px; padding-bottom: 4px; }
+.opponent-toggle {
+  display: flex;
+  background: var(--surface-2);
+  border-radius: 6px;
+  padding: 3px;
+  width: 100%;
+  gap: 2px;
+}
+.opp-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  padding: 7px 10px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.opp-btn.active {
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+}
+.opp-btn:not(.active):hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+/* When playing against the engine inside Play mode, hide the self-mode
+   status + settings — engine config supersedes them. */
+body.mode-play.opponent-engine .status-block,
+body.mode-play.opponent-engine .settings-block,
+body.mode-play.opponent-engine .auto-eval-toggle {
   display: none;
 }
 
-/* Analysis panel hidden when spoilers off — UNLESS we're in a capture
-   phase (ROW_COMPLETION / RING_REMOVAL), where the panel is the human's
-   only way to pick which row/ring to capture. The `force-show-analysis`
-   class is set from JS whenever the current phase is a capture phase. */
-body.mode-game.spoilers-off #result { display: none; }
-body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
+/* Set-up-mode-only blocks */
+body:not(.mode-setup) .setup-actions-block,
+body:not(.mode-setup) .palette-block {
+  display: none;
+}
+
+/* game-setup-block / game-status-block only render in Play+Engine. JS still
+   toggles their `hidden` attribute by game phase, but outside vs-Engine we
+   force them gone so they don't leak. */
+body:not(.opponent-engine) .game-setup-block,
+body:not(.opponent-engine) .game-status-block {
+  display: none;
+}
+
+/* Spoilers-off analysis panel hide — UNLESS we're in a capture phase, where
+   the analysis panel is the human's only way to pick which row/ring to
+   capture. force-show-analysis is set from JS during capture phases. */
+body.opponent-engine.spoilers-off #result { display: none; }
+body.opponent-engine.spoilers-off.force-show-analysis #result { display: block; }
+
+/* During the force-show-analysis capture state, the panel is visible but
+   we still want to respect the spoiler intent: the human should pick a
+   row/ring without seeing the engine's preference signal. Hide the
+   percentage, visit count, best-move-value chip, value bars, and the
+   chess-convention helper — leave only the clickable move descriptions. */
+body.opponent-engine.spoilers-off.force-show-analysis .value-row,
+body.opponent-engine.spoilers-off.force-show-analysis .value-help,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .rank,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .prob-cell,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .visits,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .bmv,
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves .step-into,
+body.opponent-engine.spoilers-off.force-show-analysis #status {
+  display: none;
+}
+/* And the "top" highlight on the first item — in blind mode it's just the
+   alphabetically-first option, no longer the engine's pick. */
+body.opponent-engine.spoilers-off.force-show-analysis .top-moves li.top {
+  background: transparent;
+}
 
 /* Step-into-line button on each top-moves row. */
 .top-moves .step-into {
@@ -364,7 +436,7 @@ body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
   transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
 }
 .top-moves .step-into:hover {
-  background: #eff5ff;
+  background: rgba(42, 167, 192, 0.12);
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -390,11 +462,11 @@ body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  border: 1px solid #1a1a1a;
+  border: 1px solid var(--rule);
   flex-shrink: 0;
 }
-.turn-badge[data-side="WHITE"] .turn-disc { background: #fafafa; }
-.turn-badge[data-side="BLACK"] .turn-disc { background: #1f1f1f; }
+.turn-badge[data-side="WHITE"] .turn-disc { background: #e5edf0; border-color: var(--accent); }
+.turn-badge[data-side="BLACK"] .turn-disc { background: #161a1f; border-color: var(--accent); }
 .turn-badge .turn-text strong { font-weight: 600; }
 .turn-phase {
   margin-left: 6px;
@@ -409,9 +481,9 @@ body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
 }
 .turn-phase:empty { display: none; }
 .turn-phase.alert {
-  background: #fef3c7;
+  background: rgba(224, 168, 59, 0.15);
   color: var(--warn);
-  border: 1px solid #fde68a;
+  border: 1px solid rgba(224, 168, 59, 0.45);
 }
 
 /* In Play mode, the side radio in the sidebar becomes display-only —
@@ -467,21 +539,81 @@ body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
 .palette-block.hidden-in-play { display: none; }
 
 .board-wrap {
-  background: var(--surface);
+  background: var(--bg-soft);
   border-radius: 12px;
   padding: 14px;
   box-shadow: var(--shadow-lift);
   position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.04);
 }
 
-#board {
+/* Floating board-overlay button (e.g. "Reset view") — small icon button
+   parked at the top-right corner of the board area. Subtle in idle, more
+   pronounced on hover so it doesn't compete with the lattice. */
+.board-overlay-btn {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 24, 30, 0.55);
+  color: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  z-index: 5;
+}
+.board-overlay-btn:hover {
+  background: rgba(20, 24, 30, 0.85);
+  color: #fff;
+  border-color: var(--accent);
+}
+.board-overlay-btn:active { transform: translateY(1px); }
+
+/* Dwell-tooltip floating near the cursor when the mouse stays on an
+   intersection for ~350ms. Reads as a small label on the page, not part
+   of the 3D scene. */
+.board-tooltip {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  background: rgba(18, 22, 28, 0.94);
+  color: #eef2f6;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font: 600 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.05em;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  transform: translate(12px, -140%);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.board-tooltip[data-visible="true"] { opacity: 1; }
+
+#board-3d {
   display: block;
+  width: 760px;
+  height: 760px;
   background: transparent;
   border-radius: 10px;
   cursor: crosshair;
   user-select: none;
   touch-action: none;
+  position: relative;
+}
+#board-3d canvas {
+  display: block;
+  border-radius: 10px;
+}
+
+/* Legacy 2D canvas selector — kept harmless for the transition */
+#board {
+  display: none;
 }
 
 .hint {
@@ -494,15 +626,97 @@ body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
   font-size: 12px;
 }
 
-/* ---------- Palette (inside sidebar) ---------- */
+/* ---------- Section headers ---------- */
 
-.palette-block .block-title {
-  font-size: 12px;
+/* General section header — appears at the top of each .block to give it
+   visual identity. Subtle uppercase label so the section is clearly named
+   without competing with the content underneath. */
+.block-title {
+  font-size: 11px;
   font-weight: 600;
   color: var(--ink-dim);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   margin-bottom: 8px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+/* ---------- Status block (compact phase + side + score) ---------- */
+
+.status-block { padding-top: 4px; padding-bottom: 4px; }
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.status-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+.status-field .status-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.status-field select {
+  padding: 5px 7px;
+  font-size: 12px;
+}
+.status-field .radio-row {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+}
+.status-field .radio-row label {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---------- Engine settings disclosure ---------- */
+
+.settings-block { padding: 0; }
+.settings-block > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 12px 14px;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0;
+}
+.settings-block > summary::-webkit-details-marker { display: none; }
+.settings-block > summary::after {
+  content: "▸";
+  font-size: 10px;
+  color: var(--ink-faint);
+  transition: transform 120ms ease;
+}
+.settings-block[open] > summary::after { transform: rotate(90deg); }
+.settings-block[open] > summary { border-bottom: 1px solid var(--rule); }
+.settings-block .settings-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- Setup-mode primary actions ---------- */
+
+.setup-actions-block { padding-top: 10px; padding-bottom: 10px; }
+
+/* ---------- Palette (inside sidebar) ---------- */
+
+.palette-block .block-title {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -537,7 +751,7 @@ body.mode-game.spoilers-off.force-show-analysis #result { display: block; }
 }
 .tool:hover { border-color: var(--ink-dim); background: var(--surface-2); }
 .tool:active { cursor: grabbing; transform: translateY(1px); }
-.tool.armed { border-color: var(--accent); background: #eff5ff; }
+.tool.armed { border-color: var(--accent); background: rgba(42, 167, 192, 0.12); }
 
 .swatch {
   width: 28px;
@@ -678,6 +892,13 @@ select:focus, input[type="number"]:focus {
 
 .actions { display: flex; gap: 8px; margin-top: 4px; }
 
+/* Set-up mode's actions row — primary "Analyze position", secondary
+   "Play from here →", subtle link "Clear board" so the eye lands on the
+   two real choices and Clear is a quiet escape hatch. */
+.setup-actions { flex-wrap: wrap; align-items: center; }
+.setup-actions .primary, .setup-actions .secondary { flex: 1 1 auto; }
+.setup-actions .link-button { margin-left: 0; }
+
 /* Advanced MCTS — collapsible to stay out of the way for default users. */
 .advanced-mcts {
   margin-top: 2px;
@@ -727,7 +948,7 @@ select:focus, input[type="number"]:focus {
   padding: 0;
   text-decoration: underline;
 }
-.link-button:hover { color: #1d4ed8; }
+.link-button:hover { color: var(--accent); }
 
 button.primary, button.secondary {
   border-radius: 6px;
@@ -743,7 +964,7 @@ button.primary {
   border: 1px solid var(--accent);
   flex: 1;
 }
-button.primary:hover { background: #1d4ed8; }
+button.primary:hover { background: #1d8aa0; }
 button.primary:disabled { background: var(--ink-faint); border-color: var(--ink-faint); cursor: not-allowed; }
 button.secondary {
   background: var(--surface);
@@ -760,10 +981,10 @@ button.secondary:hover { background: var(--surface-2); }
 }
 .result .status.error {
   color: var(--negative);
-  background: #fee2e2;
+  background: rgba(217, 83, 79, 0.15);
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid #fecaca;
+  border: 1px solid rgba(217, 83, 79, 0.45);
 }
 .result .status.success { color: var(--positive); }
 .result .status.thinking { color: var(--accent); font-style: italic; }
@@ -833,7 +1054,7 @@ button.secondary:hover { background: var(--surface-2); }
 .top-moves li:hover, .top-moves li.hover {
   background: var(--surface-2);
 }
-.top-moves li.top { background: #eff5ff; }
+.top-moves li.top { background: rgba(42, 167, 192, 0.12); }
 .top-moves .rank {
   font-variant-numeric: tabular-nums;
   color: var(--ink-faint);
@@ -891,8 +1112,8 @@ button.secondary:hover { background: var(--surface-2); }
   min-width: 42px;
   text-align: center;
 }
-.top-moves .bmv.positive { color: var(--positive); background: #d6f0dc; }
-.top-moves .bmv.negative { color: var(--negative); background: #fde2e2; }
+.top-moves .bmv.positive { color: var(--positive); background: rgba(76, 175, 106, 0.18); }
+.top-moves .bmv.negative { color: var(--negative); background: rgba(217, 83, 79, 0.18); }
 .top-moves .bmv.neutral { color: var(--ink-faint); }
 .top-moves .bmv.unknown { color: var(--ink-faint); }
 /* Visually flag rows where the after-value sign disagrees with the

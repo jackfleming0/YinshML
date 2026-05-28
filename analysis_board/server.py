@@ -92,6 +92,11 @@ def discover_models() -> List[Dict[str, Any]]:
     for model_dir in sorted(MODELS_DIR.iterdir()):
         if not model_dir.is_dir():
             continue
+        # Skip archived / hidden directories. Use models/_archive/<name>/
+        # to park older checkpoints you don't want surfaced in the dropdown
+        # without deleting them.
+        if model_dir.name.startswith(("_", ".")):
+            continue
         pt = _pick_checkpoint(model_dir)
         if pt is None:
             continue

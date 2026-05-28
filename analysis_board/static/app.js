@@ -1,10 +1,23 @@
 // YINSH analysis board — drag-drop position composer + network evaluation.
 //
+// Rendering is delegated to ./board3d.js (three.js). app.js owns logical
+// state, API calls, and DOM glue; board3d.js owns the 3D scene and the
+// pixel↔board-position conversion via raycasting.
+//
 // Hex geometry is ported from yinsh_ml/viz/board_render.py:
 //   screen_x = col_idx * sqrt(3)/2
 //   screen_y = (row - 1) - col_idx * 0.5
-// Canvas Y is inverted relative to that (down is +y on screen), so we flip
-// when going to pixels.
+
+import {
+  initBoard3D,
+  setPieces,
+  setHover,
+  setSelection,
+  setArrow,
+  clearArrow,
+  pixelToBoardPos,
+  resetView,
+} from "./board3d.js";
 
 // ---------- Constants ----------
 const COLUMNS = "ABCDEFGHIJK".split("");
@@ -36,59 +49,7 @@ function isValidPos(col, row) {
   return rows ? rows.includes(row) : false;
 }
 
-// ---------- Geometry ----------
-function mathXY(col, row) {
-  const colIdx = col.charCodeAt(0) - 65;
-  return { x: colIdx * SQRT3_2, y: (row - 1) - colIdx * 0.5 };
-}
-
-const BBOX = (() => {
-  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-  for (const { col, row } of ALL_POSITIONS) {
-    const { x, y } = mathXY(col, row);
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  }
-  return { xMin, xMax, yMin, yMax };
-})();
-
-class BoardGeom {
-  constructor(canvas) {
-    const W = canvas.width, H = canvas.height;
-    this.padLeft = 56;
-    this.padRight = 24;
-    this.padTop = 24;
-    this.padBottom = 44;
-    const innerW = W - this.padLeft - this.padRight;
-    const innerH = H - this.padTop - this.padBottom;
-    const xRange = BBOX.xMax - BBOX.xMin;
-    const yRange = BBOX.yMax - BBOX.yMin;
-    this.scale = Math.min(innerW / xRange, innerH / yRange);
-    // center inside the inner rect
-    const usedW = xRange * this.scale;
-    const usedH = yRange * this.scale;
-    this.originX = this.padLeft + (innerW - usedW) / 2;
-    this.originY = this.padTop + (innerH - usedH) / 2;
-  }
-  posToPixel(col, row) {
-    const { x, y } = mathXY(col, row);
-    return {
-      px: this.originX + (x - BBOX.xMin) * this.scale,
-      py: this.originY + (BBOX.yMax - y) * this.scale,  // flip Y for canvas
-    };
-  }
-  pixelToNearestPos(px, py) {
-    let best = null, bestDist = Infinity;
-    for (const { col, row } of ALL_POSITIONS) {
-      const { px: x, py: y } = this.posToPixel(col, row);
-      const d = (x - px) ** 2 + (y - py) ** 2;
-      if (d < bestDist) { bestDist = d; best = { col, row, dist: Math.sqrt(d) }; }
-    }
-    return best;
-  }
-}
+// Geometry is owned by board3d.js — see posToWorld / pixelToBoardPos there.
 
 // ---------- State ----------
 const state = {
@@ -99,6 +60,7 @@ const state = {
   lastResult: null,          // last /api/evaluate response
   models: [],
   mode: "setup",             // "setup" | "play"
+  opponent: "self",          // "self" | "engine" — meaningful only when mode === "play"
   legalMoves: [],            // list of move dicts (from /api/evaluate or /api/move response)
   selectedSource: null,      // {col,row} of the ring picked in Play mode, awaiting destination
   history: [],               // stack of {position, move_description}
@@ -112,479 +74,44 @@ const state = {
   lineMode: null,            // null when not walking a line. When active:
                              //   { pvIndex, topMoveDesc, baseSnapshot, steps, currentStep }
                              // Setup/Play interactions are disabled while non-null.
-  game: null,                // null when not in Game mode. When active:
+  game: null,                // null unless opponent === "engine". When active:
                              //   { phase: "setup"|"playing"|"ended",
                              //     humanSide, computerSide, computerSims,
                              //     spoilersEnabled, thinking, winner }
 };
 
-// ---------- Rendering ----------
-// Palette tuned for the "serious analysis tool" aesthetic — deeper saturated
-// blue-gray tile, restrained piece colors with subtle specular highlights,
-// doubled drop shadows for piece weight. Matches the visual-style preference
-// for deep saturated darks + low-opacity borders + gentle corners.
-const COLORS = {
-  bg: "#eeece6",
-  tile1: "#b4c8d4",          // top of board gradient
-  tile2: "#94aab9",          // bottom of board gradient
-  tileEdgeOuter: "#6a7e8c",
-  tileEdgeInner: "rgba(255, 255, 255, 0.35)",
-  grid: "#1a2128",
-  gridDot: "#384654",
-  label: "#4a5563",
-  labelMuted: "#7a8694",
-  // Pieces — multi-stop gradients keyed off these. Pure-black/pure-white
-  // looks fake; warm-white and cool-charcoal feel like physical objects.
-  whiteRingCore: "#f9f6ee",
-  whiteRingEdge: "#bfb7a6",
-  whiteRingStroke: "#1f1d18",
-  blackRingCore: "#34373d",
-  blackRingEdge: "#0d0f12",
-  blackRingStroke: "#040506",
-  ringInnerHole: "#aabccb",   // sits over the board, just slightly darker
-  whiteMarkerCore: "#f7f5ed",
-  whiteMarkerEdge: "#c3bcab",
-  blackMarkerCore: "#2a2d33",
-  blackMarkerEdge: "#080a0d",
-  markerStroke: "#1a1817",
-  specularHighlight: "rgba(255, 255, 255, 0.55)",
-  pieceShadowNear: "rgba(15, 20, 28, 0.30)",
-  pieceShadowFar: "rgba(15, 20, 28, 0.12)",
-  hoverFill: "rgba(37, 99, 235, 0.18)",
-  hoverStroke: "#2563eb",
-  selectStroke: "#1d4ed8",
-  selectGlow: "rgba(37, 99, 235, 0.45)",
-  arrowSrc: "#d97706",        // deeper amber than #f59e0b
-  arrowDst: "#1d4ed8",        // deeper indigo for crispness on the tile
-};
 
-// Off-screen cache for the static board background (tile gradient, noise,
-// grid lines, dots, labels). Drawn once at init; composited each frame so
-// the noise + labels + grid don't get re-rasterized on every piece move.
-let _boardBgCache = null;
+// ---------- 3D rendering glue ----------
+const boardContainer = document.getElementById("board-3d");
+const { domElement: boardEl } = initBoard3D(boardContainer);
 
-function buildBoardBackground(geom, W, H) {
-  const off = document.createElement("canvas");
-  off.width = W;
-  off.height = H;
-  const bctx = off.getContext("2d");
-
-  const tilePad = 22;
-  const tileX = geom.padLeft - tilePad;
-  const tileY = geom.padTop - tilePad;
-  const tileW = W - geom.padLeft - geom.padRight + 2 * tilePad;
-  const tileH = H - geom.padTop - geom.padBottom + 2 * tilePad;
-
-  // 1. Tile drop shadow (subtle, gives the board lift off the page)
-  bctx.save();
-  bctx.shadowColor = "rgba(15, 20, 28, 0.18)";
-  bctx.shadowBlur = 20;
-  bctx.shadowOffsetX = 0;
-  bctx.shadowOffsetY = 6;
-  bctx.fillStyle = COLORS.tile1;
-  roundRect(bctx, tileX, tileY, tileW, tileH, 14);
-  bctx.fill();
-  bctx.restore();
-
-  // 2. Tile gradient fill
-  const grad = bctx.createLinearGradient(0, tileY, 0, tileY + tileH);
-  grad.addColorStop(0, COLORS.tile1);
-  grad.addColorStop(1, COLORS.tile2);
-  bctx.fillStyle = grad;
-  roundRect(bctx, tileX, tileY, tileW, tileH, 14);
-  bctx.fill();
-
-  // 3. Subtle noise overlay — paper-grain effect. ~5% intensity so it reads
-  // as texture rather than dirt. Generated once into ImageData and clipped
-  // to the tile rect.
-  bctx.save();
-  bctx.beginPath();
-  roundRect(bctx, tileX + 1, tileY + 1, tileW - 2, tileH - 2, 13);
-  bctx.clip();
-  const noiseImg = bctx.createImageData(Math.ceil(tileW), Math.ceil(tileH));
-  const nd = noiseImg.data;
-  for (let i = 0; i < nd.length; i += 4) {
-    const v = (Math.random() * 14) | 0;   // 0-13
-    nd[i] = nd[i + 1] = nd[i + 2] = v < 7 ? 0 : 255;
-    nd[i + 3] = 7;                         // ~3% alpha — barely visible
-  }
-  bctx.putImageData(noiseImg, tileX, tileY);
-  bctx.restore();
-
-  // 4. Inner highlight border + outer edge — doubled border per visual-style
-  bctx.strokeStyle = COLORS.tileEdgeInner;
-  bctx.lineWidth = 1;
-  roundRect(bctx, tileX + 1.5, tileY + 1.5, tileW - 3, tileH - 3, 13);
-  bctx.stroke();
-  bctx.strokeStyle = COLORS.tileEdgeOuter;
-  bctx.lineWidth = 1;
-  roundRect(bctx, tileX, tileY, tileW, tileH, 14);
-  bctx.stroke();
-
-  // 5. Grid lines — three forward hex axes, restrained opacity
-  bctx.strokeStyle = COLORS.grid;
-  bctx.lineWidth = 0.85;
-  bctx.globalAlpha = 0.42;
-  bctx.lineCap = "round";
-  const FWD = [[0, 1], [1, 0], [1, 1]];
-  for (const { col, row } of ALL_POSITIONS) {
-    const a = geom.posToPixel(col, row);
-    for (const [dc, dr] of FWD) {
-      const nc = String.fromCharCode(col.charCodeAt(0) + dc);
-      const nr = row + dr;
-      if (!isValidPos(nc, nr)) continue;
-      const b = geom.posToPixel(nc, nr);
-      bctx.beginPath();
-      bctx.moveTo(a.px, a.py);
-      bctx.lineTo(b.px, b.py);
-      bctx.stroke();
-    }
-  }
-  bctx.globalAlpha = 1;
-
-  // 6. Position dots — small gradient for depth
-  for (const { col, row } of ALL_POSITIONS) {
-    const { px, py } = geom.posToPixel(col, row);
-    const dotGrad = bctx.createRadialGradient(px - 0.6, py - 0.6, 0, px, py, 2.6);
-    dotGrad.addColorStop(0, COLORS.gridDot);
-    dotGrad.addColorStop(1, "rgba(20, 28, 40, 0.6)");
-    bctx.fillStyle = dotGrad;
-    bctx.beginPath();
-    bctx.arc(px, py, 2.4, 0, Math.PI * 2);
-    bctx.fill();
-  }
-
-  // 7. Axis labels — serif, two-tone (column letters muted, rows muted)
-  bctx.font = "600 13px 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif";
-  bctx.fillStyle = COLORS.label;
-  bctx.textAlign = "center";
-  bctx.textBaseline = "middle";
-  for (const col of COLUMNS) {
-    const rows = VALID_POSITIONS[col];
-    const bottomRow = rows[0];
-    const { px, py } = geom.posToPixel(col, bottomRow);
-    bctx.fillText(col, px, py + 24);
-  }
-  bctx.textAlign = "right";
-  for (let row = 1; row <= 11; row++) {
-    let leftCol = null;
-    for (const col of COLUMNS) {
-      if (isValidPos(col, row)) { leftCol = col; break; }
-    }
-    if (!leftCol) continue;
-    const { px, py } = geom.posToPixel(leftCol, row);
-    bctx.fillText(String(row), px - 20, py);
-  }
-
-  return off;
-}
-
-function drawBoard(ctx, geom) {
-  const W = ctx.canvas.width, H = ctx.canvas.height;
-  ctx.clearRect(0, 0, W, H);
-  if (!_boardBgCache) _boardBgCache = buildBoardBackground(geom, W, H);
-  ctx.drawImage(_boardBgCache, 0, 0);
-}
-
-function drawPieces(ctx, geom) {
-  const cellSize = geom.scale; // approximate spacing of one hex unit
-  const ringOuter = cellSize * 0.40;
-  const ringInner = cellSize * 0.22;
-  const markerR = cellSize * 0.20;
-
-  for (const [key, piece] of state.pieces) {
-    const col = key[0];
-    const row = parseInt(key.slice(1), 10);
-    const { px, py } = geom.posToPixel(col, row);
-    if (piece === "WHITE_RING") drawRing(ctx, px, py, ringOuter, ringInner, "white");
-    else if (piece === "BLACK_RING") drawRing(ctx, px, py, ringOuter, ringInner, "black");
-    else if (piece === "WHITE_MARKER") drawMarker(ctx, px, py, markerR, "white");
-    else if (piece === "BLACK_MARKER") drawMarker(ctx, px, py, markerR, "black");
-  }
-}
-
-function drawRing(ctx, x, y, outerR, innerR, color) {
-  const isWhite = color === "white";
-
-  // -- 1. Doubled drop shadow: near (tight, denser) + far (soft, atmospheric)
-  ctx.save();
-  ctx.shadowColor = COLORS.pieceShadowFar;
-  ctx.shadowBlur = outerR * 0.9;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = outerR * 0.20;
-  // Render an invisible disk to project the shadow without drawing the body
-  ctx.fillStyle = "rgba(0,0,0,0.001)";
-  ctx.beginPath(); ctx.arc(x, y, outerR, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  ctx.shadowColor = COLORS.pieceShadowNear;
-  ctx.shadowBlur = outerR * 0.32;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = outerR * 0.10;
-
-  // -- 2. Outer body — multi-stop radial gradient with specular highlight
-  const coreColor = isWhite ? COLORS.whiteRingCore : COLORS.blackRingCore;
-  const edgeColor = isWhite ? COLORS.whiteRingEdge : COLORS.blackRingEdge;
-  const grad = ctx.createRadialGradient(
-    x - outerR * 0.32, y - outerR * 0.34, outerR * 0.08,
-    x, y, outerR * 1.02,
-  );
-  if (isWhite) {
-    grad.addColorStop(0, "#ffffff");
-    grad.addColorStop(0.25, coreColor);
-    grad.addColorStop(0.85, "#d8d2c1");
-    grad.addColorStop(1, edgeColor);
-  } else {
-    grad.addColorStop(0, "#52555c");
-    grad.addColorStop(0.30, coreColor);
-    grad.addColorStop(0.85, "#1c1f24");
-    grad.addColorStop(1, edgeColor);
-  }
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(x, y, outerR, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  // -- 3. Outer edge stroke (thin, off-black for both colors so the rings
-  //       feel like they share a material category — chess.com-like discipline)
-  ctx.strokeStyle = isWhite ? COLORS.whiteRingStroke : COLORS.blackRingStroke;
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  ctx.arc(x, y, outerR, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // -- 4. Inner hole — punched-through effect: gradient from a slightly
-  //       darker board-tile shade at center to the ring's body color at the
-  //       inner edge. Looks like a real hole, not a painted disc.
-  const holeGrad = ctx.createRadialGradient(
-    x - innerR * 0.2, y - innerR * 0.2, 0,
-    x, y, innerR,
-  );
-  holeGrad.addColorStop(0, "#9aacba");
-  holeGrad.addColorStop(0.7, COLORS.ringInnerHole);
-  holeGrad.addColorStop(1, isWhite ? "#a8b8c5" : "#7e8c98");
-  ctx.fillStyle = holeGrad;
-  ctx.beginPath();
-  ctx.arc(x, y, innerR, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = isWhite ? COLORS.whiteRingStroke : COLORS.blackRingStroke;
-  ctx.lineWidth = 0.9;
-  ctx.beginPath();
-  ctx.arc(x, y, innerR, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // -- 5. Specular highlight — small crescent at upper-left for both colors,
-  //       restrained alpha so it reads as material polish, not glare
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(x, y, outerR - 1, 0, Math.PI * 2);
-  ctx.arc(x, y, innerR + 1, 0, Math.PI * 2, true);
-  ctx.clip("evenodd");
-  const specGrad = ctx.createRadialGradient(
-    x - outerR * 0.40, y - outerR * 0.45, 0,
-    x - outerR * 0.40, y - outerR * 0.45, outerR * 0.55,
-  );
-  specGrad.addColorStop(0, isWhite ? "rgba(255,255,255,0.75)" : "rgba(255,255,255,0.32)");
-  specGrad.addColorStop(0.7, "rgba(255,255,255,0.04)");
-  specGrad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = specGrad;
-  ctx.fillRect(x - outerR, y - outerR, outerR * 2, outerR * 2);
-  ctx.restore();
-}
-
-function drawMarker(ctx, x, y, r, color) {
-  const isWhite = color === "white";
-
-  // Soft drop shadow (single — markers sit lower than rings)
-  ctx.save();
-  ctx.shadowColor = COLORS.pieceShadowNear;
-  ctx.shadowBlur = r * 0.55;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = r * 0.18;
-
-  const coreColor = isWhite ? COLORS.whiteMarkerCore : COLORS.blackMarkerCore;
-  const edgeColor = isWhite ? COLORS.whiteMarkerEdge : COLORS.blackMarkerEdge;
-  const grad = ctx.createRadialGradient(
-    x - r * 0.30, y - r * 0.32, r * 0.05,
-    x, y, r * 1.02,
-  );
-  if (isWhite) {
-    grad.addColorStop(0, "#ffffff");
-    grad.addColorStop(0.4, coreColor);
-    grad.addColorStop(1, edgeColor);
-  } else {
-    grad.addColorStop(0, "#484c54");
-    grad.addColorStop(0.4, coreColor);
-    grad.addColorStop(1, edgeColor);
-  }
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  ctx.strokeStyle = COLORS.markerStroke;
-  ctx.lineWidth = 0.9;
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Small specular for markers too (subtler than rings)
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(x, y, r - 0.5, 0, Math.PI * 2);
-  ctx.clip();
-  const specGrad = ctx.createRadialGradient(
-    x - r * 0.35, y - r * 0.40, 0,
-    x - r * 0.35, y - r * 0.40, r * 0.5,
-  );
-  specGrad.addColorStop(0, isWhite ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.22)");
-  specGrad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = specGrad;
-  ctx.fillRect(x - r, y - r, r * 2, r * 2);
-  ctx.restore();
-}
-
-function drawHover(ctx, geom) {
-  // Setup mode shows hover on every armed tool drop target.
-  if (state.mode === "setup" && state.hoverPos && state.armedTool) {
-    const { col, row } = state.hoverPos;
-    const { px, py } = geom.posToPixel(col, row);
-    ctx.fillStyle = COLORS.hoverFill;
-    ctx.strokeStyle = COLORS.hoverStroke;
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.arc(px, py, geom.scale * 0.38, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-  }
-}
-
-function drawSelection(ctx, geom) {
-  if (state.mode !== "play" || !state.selectedSource) return;
-  const { col, row } = state.selectedSource;
-  const { px, py } = geom.posToPixel(col, row);
-
-  // Soft outer glow for the selected piece
-  ctx.save();
-  ctx.shadowColor = COLORS.selectGlow;
-  ctx.shadowBlur = geom.scale * 0.45;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.strokeStyle = COLORS.selectStroke;
-  ctx.lineWidth = 2.6;
-  ctx.beginPath();
-  ctx.arc(px, py, geom.scale * 0.48, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-
-  // Legal destinations — small filled dots with subtle gradient
-  const dests = legalDestinationsFrom(state.selectedSource);
-  for (const d of dests) {
-    const pt = geom.posToPixel(d.col, d.row);
-    const r = geom.scale * 0.12;
-    const grad = ctx.createRadialGradient(pt.px - r * 0.3, pt.py - r * 0.3, 0, pt.px, pt.py, r);
-    grad.addColorStop(0, "#60a5fa");
-    grad.addColorStop(1, COLORS.selectStroke);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(pt.px, pt.py, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
-function drawArrow(ctx, geom) {
-  if (!state.hoverArrow) return;
-  const { from, to } = state.hoverArrow;
-  if (!from) return;
-  const a = geom.posToPixel(from.col, from.row);
-
-  // Soft drop shadow on all annotation strokes — makes them sit cleanly
-  // on top of pieces without competing visually.
-  ctx.save();
-  ctx.shadowColor = "rgba(15, 20, 28, 0.25)";
-  ctx.shadowBlur = 6;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 1;
-
-  if (!to) {
-    // Single-position move (placement / removal): ring of accent
-    ctx.strokeStyle = COLORS.arrowDst;
-    ctx.lineWidth = 2.6;
-    ctx.beginPath();
-    ctx.arc(a.px, a.py, geom.scale * 0.46, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-    return;
-  }
-
-  const b = geom.posToPixel(to.col, to.row);
-  // From circle (origin marker — amber)
-  ctx.strokeStyle = COLORS.arrowSrc;
-  ctx.lineWidth = 2.4;
-  ctx.beginPath();
-  ctx.arc(a.px, a.py, geom.scale * 0.46, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Shaft
-  const dx = b.px - a.px, dy = b.py - a.py;
-  const len = Math.hypot(dx, dy);
-  const ux = dx / len, uy = dy / len;
-  const startOffset = geom.scale * 0.46;
-  const endOffset = geom.scale * 0.46;
-  const sx = a.px + ux * startOffset, sy = a.py + uy * startOffset;
-  const ex = b.px - ux * endOffset, ey = b.py - uy * endOffset;
-  ctx.strokeStyle = COLORS.arrowDst;
-  ctx.lineWidth = 3.0;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(sx, sy);
-  ctx.lineTo(ex, ey);
-  ctx.stroke();
-
-  // Arrowhead (filled triangle)
-  const ah = 11, aw = 7.5;
-  ctx.fillStyle = COLORS.arrowDst;
-  ctx.beginPath();
-  ctx.moveTo(ex, ey);
-  ctx.lineTo(ex - ux * ah - uy * aw, ey - uy * ah + ux * aw);
-  ctx.lineTo(ex - ux * ah + uy * aw, ey - uy * ah - ux * aw);
-  ctx.closePath();
-  ctx.fill();
-
-  // Destination circle
-  ctx.strokeStyle = COLORS.arrowDst;
-  ctx.lineWidth = 2.4;
-  ctx.beginPath();
-  ctx.arc(b.px, b.py, geom.scale * 0.46, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
+const resetViewBtn = document.getElementById("reset-view-btn");
+if (resetViewBtn) resetViewBtn.addEventListener("click", () => resetView());
 
 function render() {
-  drawBoard(ctx, geom);
-  drawPieces(ctx, geom);
-  drawHover(ctx, geom);
-  drawSelection(ctx, geom);
-  drawArrow(ctx, geom);
+  setPieces(state.pieces);
+  if (state.hoverPos) {
+    setHover(state.hoverPos.col, state.hoverPos.row);
+  } else {
+    setHover(null, null);
+  }
+  if (state.selectedSource) {
+    setSelection(state.selectedSource.col, state.selectedSource.row);
+  } else {
+    setSelection(null, null);
+  }
+  if (state.hoverArrow) {
+    // moveToArrow yields {from: {col,row}, to: {col,row}|null}; setArrow
+    // takes "A1"-style position strings. Convert here so board3d stays
+    // protocol-agnostic.
+    const { from, to } = state.hoverArrow;
+    const fromStr = from ? `${from.col}${from.row}` : null;
+    const toStr = to ? `${to.col}${to.row}` : null;
+    setArrow(fromStr, toStr);
+  } else {
+    clearArrow();
+  }
 }
-
-// ---------- Canvas + geom ----------
-const canvas = document.getElementById("board");
-const ctx = canvas.getContext("2d");
-const geom = new BoardGeom(canvas);
 
 // ---------- Drag-drop ----------
 let drag = null;   // { tool, ghostEl } | null
@@ -646,56 +173,92 @@ document.addEventListener("mousemove", (ev) => {
 
 document.addEventListener("mouseup", (ev) => {
   if (!drag) return;
-  // Was the drop over the canvas?
-  const rect = canvas.getBoundingClientRect();
+  // Was the drop over the board element?
+  const rect = boardEl.getBoundingClientRect();
   if (ev.clientX >= rect.left && ev.clientX <= rect.right &&
       ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
-    handlePlace(ev.clientX - rect.left, ev.clientY - rect.top, drag.tool);
+    handlePlace(ev.clientX, ev.clientY, drag.tool);
   }
   endDrag();
 });
 
-// Canvas mouse: hover preview (setup) / select-and-move (play).
-canvas.addEventListener("mousemove", (ev) => {
-  const rect = canvas.getBoundingClientRect();
-  const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
-  const near = geom.pixelToNearestPos(x, y);
-  if (state.mode === "setup") {
-    if (state.armedTool && near && near.dist < geom.scale * 0.6) {
-      state.hoverPos = { col: near.col, row: near.row };
-    } else {
-      state.hoverPos = null;
+// Dwell tooltip — shows the position name (e.g. "H5") after the mouse
+// stays over the same intersection for ~350ms. Visual confirmation of the
+// hovered cell without tracing the grid lines.
+const boardTooltip = document.createElement("div");
+boardTooltip.className = "board-tooltip";
+boardTooltip.setAttribute("data-visible", "false");
+document.body.appendChild(boardTooltip);
+let _tooltipPos = null;       // "E5" string of currently-tracked position
+let _tooltipTimer = null;
+let _tooltipLastEv = null;    // last mousemove event, for positioning at fire time
+const TOOLTIP_DWELL_MS = 350;
+
+function _hideTooltip() {
+  if (_tooltipTimer) { clearTimeout(_tooltipTimer); _tooltipTimer = null; }
+  boardTooltip.setAttribute("data-visible", "false");
+  _tooltipPos = null;
+}
+
+function _scheduleTooltip(ev, posStr) {
+  if (_tooltipPos === posStr) {
+    // Same intersection — keep current timer or visible state, just track cursor
+    _tooltipLastEv = ev;
+    if (boardTooltip.getAttribute("data-visible") === "true") {
+      boardTooltip.style.left = `${ev.clientX}px`;
+      boardTooltip.style.top = `${ev.clientY}px`;
     }
+    return;
+  }
+  // New intersection — reset
+  if (_tooltipTimer) clearTimeout(_tooltipTimer);
+  boardTooltip.setAttribute("data-visible", "false");
+  _tooltipPos = posStr;
+  _tooltipLastEv = ev;
+  _tooltipTimer = setTimeout(() => {
+    if (_tooltipPos !== posStr || !_tooltipLastEv) return;
+    boardTooltip.textContent = posStr;
+    boardTooltip.style.left = `${_tooltipLastEv.clientX}px`;
+    boardTooltip.style.top = `${_tooltipLastEv.clientY}px`;
+    boardTooltip.setAttribute("data-visible", "true");
+  }, TOOLTIP_DWELL_MS);
+}
+
+// Board pointer: hover preview (setup) / select-and-move (play) + dwell tooltip.
+boardEl.addEventListener("mousemove", (ev) => {
+  const near = pixelToBoardPos(ev.clientX, ev.clientY);
+  if (state.mode === "setup") {
+    state.hoverPos = (state.armedTool && near) ? { col: near.col, row: near.row } : null;
   } else {
     state.hoverPos = null;  // Play mode: no drop-cursor preview
   }
+  if (near) _scheduleTooltip(ev, `${near.col}${near.row}`);
+  else _hideTooltip();
   render();
 });
 
-canvas.addEventListener("mouseleave", () => {
+boardEl.addEventListener("mouseleave", () => {
   state.hoverPos = null;
+  _hideTooltip();
   render();
 });
 
-canvas.addEventListener("click", (ev) => {
+boardEl.addEventListener("click", (ev) => {
   // While walking a PV the board is display-only — clicks are ignored.
   if (state.lineMode) return;
-  const rect = canvas.getBoundingClientRect();
-  const cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
   if (state.mode === "setup") {
     if (!state.armedTool) return;
-    handlePlace(cx, cy, state.armedTool);
+    handlePlace(ev.clientX, ev.clientY, state.armedTool);
     return;
   }
-  handlePlayClick(cx, cy);
+  handlePlayClick(ev.clientX, ev.clientY);
 });
 
-canvas.addEventListener("contextmenu", (ev) => {
+boardEl.addEventListener("contextmenu", (ev) => {
   ev.preventDefault();
   if (state.mode !== "setup") return;   // no erase in play mode
-  const rect = canvas.getBoundingClientRect();
-  const near = geom.pixelToNearestPos(ev.clientX - rect.left, ev.clientY - rect.top);
-  if (near && near.dist < geom.scale * 0.5) {
+  const near = pixelToBoardPos(ev.clientX, ev.clientY);
+  if (near) {
     state.pieces.delete(posKey(near.col, near.row));
     state.hoverArrow = null;
     state.lastResult = null;
@@ -717,16 +280,24 @@ function legalDestinationsFrom(src) {
 
 function handlePlayClick(px, py) {
   if (state.busy) return;
-  // In Game mode: only the human plays via clicks. Engine moves are
-  // auto-applied by computerMakeMove(). Block any click while it's
-  // not the human's turn so the user can't accidentally play for the
-  // engine.
-  if (state.game && state.game.phase === "playing") {
-    const sideToMove = state.lastResult ? state.lastResult.side_to_move : currentSide();
-    if (sideToMove !== state.game.humanSide) return;
+  // Play+Engine: only the human plays via clicks. Engine moves are
+  // auto-applied by computerMakeMove(). Block any click while it's not
+  // the human's turn so the user can't accidentally play for the engine.
+  // Also block clicks entirely if Opponent=Engine but no game is active —
+  // the user is sitting in the NEW GAME stepper and shouldn't be able to
+  // play moves on the board until they hit Start game.
+  if (state.opponent === "engine") {
+    if (!state.game || state.game.phase !== "playing") {
+      setStatus("Click 'Start game' on the right to begin a vs-Engine game.", null);
+      return;
+    }
+    // currentSide() reads the radio (kept in sync by applyNewPosition);
+    // state.lastResult.side_to_move goes stale between turns when spoilers
+    // are off, so prefer the radio.
+    if (currentSide() !== state.game.humanSide) return;
   }
-  const near = geom.pixelToNearestPos(px, py);
-  if (!near || near.dist > geom.scale * 0.55) {
+  const near = pixelToBoardPos(px, py);
+  if (!near) {
     // Click on empty area → deselect
     state.selectedSource = null;
     render();
@@ -735,8 +306,12 @@ function handlePlayClick(px, py) {
   const { col, row } = near;
   const posStr = `${col}${row}`;
   const pieceHere = state.pieces.get(posKey(col, row));
-  const side = state.lastResult ? state.lastResult.side_to_move : currentSide();
+  // Always read side/phase from the post-move-fresh sources (radio +
+  // phaseSel), not state.lastResult — the latter goes stale between turns
+  // in Play+Engine when spoilers are off (no auto-evaluate runs).
+  const side = currentSide();
   const sideRing = side === "WHITE" ? "WHITE_RING" : "BLACK_RING";
+  const currentPhase = phaseSel.value;
 
   // If there's a selected source and this position is a legal MOVE_RING dest → apply
   if (state.selectedSource) {
@@ -767,7 +342,7 @@ function handlePlayClick(px, py) {
   }
 
   // RING_PLACEMENT: clicking on an empty position places a ring of side-to-move
-  if (state.lastResult && state.lastResult.phase === "RING_PLACEMENT" && !pieceHere) {
+  if (currentPhase === "RING_PLACEMENT" && !pieceHere) {
     const placeMove = state.legalMoves.find(
       (m) => m.type === "PLACE_RING" && m.source === posStr,
     );
@@ -778,7 +353,7 @@ function handlePlayClick(px, py) {
   }
 
   // RING_REMOVAL: clicking own ring removes it
-  if (state.lastResult && state.lastResult.phase === "RING_REMOVAL" && pieceHere === sideRing) {
+  if (currentPhase === "RING_REMOVAL" && pieceHere === sideRing) {
     const removeMove = state.legalMoves.find(
       (m) => m.type === "REMOVE_RING" && m.source === posStr,
     );
@@ -845,11 +420,15 @@ async function applyMove(moveSpec) {
       // engine to play if it's now its turn. The engine's own evaluate
       // happens inside computerMakeMove with the configured sim budget.
       const nextSide = data.new_position.side_to_move;
+      const nextPhase = data.new_position.phase;
+      const inCapture = nextPhase === "ROW_COMPLETION" || nextPhase === "RING_REMOVAL";
       if (nextSide === state.game.computerSide) {
         setTimeout(computerMakeMove, 600);
-      } else if (state.game.spoilersEnabled) {
-        // Human's turn coming up — refresh the analysis so spoiler-on
-        // players see updated recommendations.
+      } else if (state.game.spoilersEnabled || inCapture) {
+        // Refresh the analysis. Spoilers-on: user wants the panel updated.
+        // Capture phase: the analysis panel is the human's ONLY UI to pick
+        // which row/ring to remove, so it needs fresh top_moves regardless
+        // of the spoilers setting. force-show-analysis CSS will reveal it.
         await evaluate({ skipPositionCheck: true });
       }
     } else if (state.autoEval) {
@@ -940,8 +519,8 @@ function currentPositionPayload() {
 }
 
 function handlePlace(px, py, tool) {
-  const near = geom.pixelToNearestPos(px, py);
-  if (!near || near.dist > geom.scale * 0.6) return;
+  const near = pixelToBoardPos(px, py);
+  if (!near) return;
   const key = posKey(near.col, near.row);
   const existing = state.pieces.get(key);
   if (tool === "ERASE") {
@@ -1017,6 +596,7 @@ resetAdvancedBtn.addEventListener("click", () => {
 syncHeuristicWeightEnabled();
 const evalBtn = $("evaluate");
 const clearBtn = $("clear");
+const playFromHereBtn = $("play-from-here");
 const statusEl = $("status");
 const valueRow = $("value-row");
 const valueFill = $("value-fill");
@@ -1076,6 +656,14 @@ clearBtn.addEventListener("click", () => {
 phaseSel.addEventListener("change", updateDerivedStats);
 
 evalBtn.addEventListener("click", evaluate);
+
+if (playFromHereBtn) {
+  playFromHereBtn.addEventListener("click", () => {
+    // Carries the composed state.pieces / phase / side into Play mode.
+    // setMode("play") auto-evaluates if there's a position.
+    setMode("play");
+  });
+}
 
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && document.activeElement?.tagName !== "INPUT" &&
@@ -1281,7 +869,23 @@ function renderResult(data) {
   // disagrees. For heuristic modes, the headline is in heuristic units so
   // sign is still comparable to the network's [-1, 1] best_move_value.
   const headlineSign = Math.sign(data.value || 0);
-  data.top_moves.forEach((mv, i) => {
+  // In Play+Engine with spoilers off + capture phase, resort the list by
+  // canonical board position so the user picks blindly — the engine's
+  // preferred row is no longer at position 1. The percentages / visits /
+  // value bars are hidden via CSS in this mode.
+  const inCaptureBlind = (
+    state.game?.phase === "playing" &&
+    !state.game.spoilersEnabled &&
+    (data.phase === "ROW_COMPLETION" || data.phase === "RING_REMOVAL")
+  );
+  const moveCanonKey = (mv) => {
+    if (mv.type === "REMOVE_MARKERS" && mv.markers && mv.markers.length) return mv.markers[0];
+    return mv.source || "";
+  };
+  const moves = inCaptureBlind
+    ? [...data.top_moves].sort((a, b) => moveCanonKey(a).localeCompare(moveCanonKey(b)))
+    : data.top_moves;
+  moves.forEach((mv, i) => {
     const li = document.createElement("li");
     if (i === 0) li.classList.add("top");
     li.dataset.idx = i;
@@ -1324,18 +928,18 @@ function renderResult(data) {
       if (ev.target.closest(".step-into")) return;
       if (state.busy) return;
       if (state.lineMode) return;
-      // Click-to-apply works in Play mode, OR in Game mode during a
-      // capture sequence (REMOVE_MARKERS / REMOVE_RING) where the human
-      // must pick a candidate — even with spoilers off, this panel is
-      // forced visible during captures.
+      // Click-to-apply works in Play mode (self-play). In Play+Engine, it
+      // also works during a capture sequence (REMOVE_MARKERS / REMOVE_RING)
+      // since the human must pick a candidate — the analysis panel is
+      // forced visible there even with spoilers off.
+      if (state.mode !== "play") return;
       const inCapture = data && (data.phase === "ROW_COMPLETION" || data.phase === "RING_REMOVAL");
-      if (state.mode === "play") {
-        // OK
-      } else if (state.mode === "game" && state.game?.phase === "playing" && inCapture) {
-        const sideToMove = data ? data.side_to_move : currentSide();
-        if (sideToMove !== state.game.humanSide) return;
-      } else {
-        return;
+      if (state.opponent === "engine") {
+        if (!(state.game?.phase === "playing" && inCapture)) return;
+        // currentSide() reflects the post-move radio state, kept in sync by
+        // applyNewPosition. data.side_to_move can be stale between turns
+        // when spoilers are off.
+        if (currentSide() !== state.game.humanSide) return;
       }
       applyMove({
         type: mv.type,
@@ -1361,9 +965,15 @@ function renderResult(data) {
     topMovesEl.appendChild(li);
   });
 
-  // Auto-show the top move arrow on result.
+  // Auto-show the top move arrow on result — UNLESS we're playing vs the
+  // engine with spoilers off. The on-board arrow is rendered by three.js
+  // and bypasses the CSS hide of the result panel. In capture phases the
+  // panel is force-shown so the human can pick, but we still suppress the
+  // arrow there: the arrow highlights the engine's preferred source/row,
+  // which is a spoiler.
   if (data.top_moves.length > 0) {
-    state.hoverArrow = moveToArrow(data.top_moves[0]);
+    const spoilersHide = state.game?.phase === "playing" && !state.game.spoilersEnabled;
+    state.hoverArrow = spoilersHide ? null : moveToArrow(data.top_moves[0]);
   }
   render();
 }
@@ -1428,29 +1038,53 @@ function moveToArrow(mv) {
 }
 
 // Right-click erases — keep stats in sync after erase.
-canvas.addEventListener("contextmenu", () => updateDerivedStats());
+boardEl.addEventListener("contextmenu", () => updateDerivedStats());
 
-// ---------- Mode toggle ----------
+// ---------- Mode + Opponent toggles ----------
 document.querySelectorAll(".mode-btn").forEach((btn) => {
   btn.addEventListener("click", () => setMode(btn.dataset.mode));
 });
+document.querySelectorAll(".opp-btn").forEach((btn) => {
+  btn.addEventListener("click", () => setOpponent(btn.dataset.opponent));
+});
 
-async function setMode(mode) {
-  if (state.mode === mode) return;
-  state.mode = mode;
+function applyModeStyling(mode) {
   document.querySelectorAll(".mode-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.mode === mode);
     b.setAttribute("aria-selected", b.dataset.mode === mode ? "true" : "false");
   });
-  // Body classes drive most of the per-mode CSS hide/show.
+  // Body classes drive most of the per-mode CSS hide/show. These need to be
+  // set on initial page load too, not just on user toggle — otherwise the
+  // body has no mode class and per-mode CSS never fires.
   document.body.classList.toggle("mode-setup", mode === "setup");
   document.body.classList.toggle("mode-play", mode === "play");
-  document.body.classList.toggle("mode-game", mode === "game");
 
   paletteBlock.classList.toggle("hidden-in-play", mode !== "setup");
   playControls.hidden = mode !== "play";
-  historyBlock.hidden = mode === "setup";  // history visible in Play AND Game
+  historyBlock.hidden = mode === "setup";
   if (sideFieldEl) sideFieldEl.classList.toggle("locked", mode !== "setup");
+
+  const sub = document.getElementById("sidebar-subtitle");
+  if (sub) {
+    sub.textContent = mode === "setup"
+      ? "Compose a position, ask the network."
+      : "Play YINSH — vs yourself or the engine.";
+  }
+}
+
+function applyOpponentStyling(opp) {
+  document.querySelectorAll(".opp-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.opponent === opp);
+    b.setAttribute("aria-selected", b.dataset.opponent === opp ? "true" : "false");
+  });
+  document.body.classList.toggle("opponent-self", opp === "self");
+  document.body.classList.toggle("opponent-engine", opp === "engine");
+}
+
+async function setMode(mode) {
+  if (state.mode === mode) return;
+  state.mode = mode;
+  applyModeStyling(mode);
   state.selectedSource = null;
 
   if (mode === "play") {
@@ -1459,12 +1093,19 @@ async function setMode(mode) {
     if (!state.lastResult && state.pieces.size > 0) {
       await evaluate({ skipPositionCheck: true });
     } else if (!state.lastResult) {
-      setStatus("Place rings/markers in Setup mode, then come back to Play.", null);
+      setStatus("Place rings/markers in Set up mode, then come back to Play.", null);
     }
-    // Leaving Game mode: tear down game state.
-    if (state.game) endGameSession();
-    gameSetupBlock.hidden = true;
-    gameStatusBlock.hidden = true;
+    // Honor the current Opponent setting. If Engine, route into the
+    // engine-session lifecycle; otherwise self-play behavior (no game state).
+    applyOpponentStyling(state.opponent);
+    if (state.opponent === "engine") {
+      if (!state.game) enterGameSetup();
+      else showGameUI();
+    } else {
+      if (state.game) endGameSession();
+      gameSetupBlock.hidden = true;
+      gameStatusBlock.hidden = true;
+    }
   } else if (mode === "setup") {
     boardHint.textContent = "Drag a piece from the palette onto a board intersection. Right-click to erase.";
     state.history = [];
@@ -1475,15 +1116,24 @@ async function setMode(mode) {
     if (state.game) endGameSession();
     gameSetupBlock.hidden = true;
     gameStatusBlock.hidden = true;
-  } else if (mode === "game") {
-    setArmedTool(null);
-    // Enter the setup screen for a fresh game. If already in a game (e.g.,
-    // the user toggled away and back), preserve in-progress state.
-    if (!state.game) {
-      enterGameSetup();
-    } else {
-      showGameUI();
-    }
+  }
+  render();
+}
+
+async function setOpponent(opp) {
+  if (state.opponent === opp) return;
+  state.opponent = opp;
+  applyOpponentStyling(opp);
+  // Opponent only takes effect inside Play mode; if the user toggles it
+  // while in Set up, we record the preference for when they switch to Play.
+  if (state.mode !== "play") return;
+  if (opp === "engine") {
+    if (!state.game) enterGameSetup();
+    else showGameUI();
+  } else if (opp === "self") {
+    if (state.game) endGameSession();
+    gameSetupBlock.hidden = true;
+    gameStatusBlock.hidden = true;
   }
   render();
 }
@@ -1602,7 +1252,10 @@ async function computerMakeMove() {
     return;
   }
   // Confirm it's actually the computer's turn — defensive against races.
-  const sideToMove = state.lastResult ? state.lastResult.side_to_move : currentSide();
+  // Source of truth is the side radio (kept in sync by applyNewPosition);
+  // state.lastResult.side_to_move is stale when spoilers are off because
+  // no auto-evaluate runs after /api/move in that mode.
+  const sideToMove = currentSide();
   if (sideToMove !== state.game.computerSide) return;
 
   state.game.thinking = true;
@@ -1704,12 +1357,16 @@ gameResignBtn.addEventListener("click", () => {
   gameResultLabelEl.className = "game-result-banner";
   showGameUI();
 });
-gameSpoilersInlineEl.addEventListener("change", () => {
+gameSpoilersInlineEl.addEventListener("change", async () => {
   if (!state.game) return;
   state.game.spoilersEnabled = gameSpoilersInlineEl.checked;
   document.body.classList.toggle("spoilers-off", !state.game.spoilersEnabled);
-  if (state.game.spoilersEnabled && state.lastResult) {
-    renderResult(state.lastResult);
+  if (state.game.spoilersEnabled) {
+    // Flipping spoilers ON mid-game: state.lastResult is likely a stale
+    // snapshot from before / between turns (no evaluates ran while
+    // spoilers were off). Refresh so the panel shows current analysis,
+    // not pre-game options.
+    await evaluate({ skipPositionCheck: true });
   }
   showGameUI();
 });
@@ -1902,6 +1559,8 @@ document.addEventListener("keydown", (ev) => {
 });
 
 // ---------- Boot ----------
+applyModeStyling(state.mode);
+applyOpponentStyling(state.opponent);
 loadModels();
 updateDerivedStats();
 render();
