@@ -31,6 +31,20 @@ experiments/**/*.npz
 !analysis_board/
 !analysis_board/**
 analysis_board/loop/runs/
+# yngine eval harness — vendored C++ driver source + the temhelk/yngine submodule
+# pointer (the submodule directory itself is populated on `git submodule update`
+# and never directly committed beyond the gitlink, so allowlisting the parent is
+# enough).
+!third_party/
+!third_party/yngine_driver/
+!third_party/yngine_driver/**
+!third_party/yngine
+third_party/yngine/**
+# Build artifacts from `bash third_party/yngine_driver/build.sh` — never
+# committed; the build script is idempotent and rebuilds in minutes.
+third_party/yngine_driver/build-release/
+third_party/yngine_driver/build*/
+!.gitmodules
 # Opening-theory diagnostic outputs: self-play + heuristic-baseline parquet
 # dumps. Reproducible by re-running scripts/measure_model_openings.py and
 # the heuristic-baseline generator; would otherwise accumulate.
