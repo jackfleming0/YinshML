@@ -71,11 +71,10 @@ echo
 echo "==> [5/6] [$(ts)] Loading LaunchAgents..."
 launchctl load "$LAUNCH_DIR/$SERVER_PLIST"
 launchctl load "$LAUNCH_DIR/$TUNNEL_PLIST"
-echo "    both loaded; waiting 3s for bind..."
-sleep 3
+echo "    both loaded"
 echo
 
-echo "==> [6/6] [$(ts)] Verifying..."
+echo "==> [6/6] [$(ts)] Verifying (polling HTTP up to 25s for model load + bind)..."
 SERVER_LINE="$(launchctl list | grep yinsh-server || echo 'MISSING')"
 TUNNEL_LINE="$(launchctl list | grep yinsh-tunnel || echo 'MISSING')"
 
@@ -84,10 +83,18 @@ CAP="$(grep -A 1 YNS_MAX_NUM_SIMS "$LAUNCH_DIR/$SERVER_PLIST" 2>/dev/null | grep
 echo "    server agent: $SERVER_LINE"
 echo "    tunnel agent: $TUNNEL_LINE"
 
+# Poll for up to ~25s — PyTorch model load into MPS routinely takes 5-15s
+# from cold, longer if multiple checkpoints need scanning. A flat sleep
+# was too brittle.
 HTTP_OK=0
-if curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$PORT/api/models"; then
-  HTTP_OK=1
-fi
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13; do
+  if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/api/models"; then
+    HTTP_OK=1
+    echo "    HTTP OK after ~${i}*2s"
+    break
+  fi
+  sleep 2
+done
 
 echo
 echo "============================================"
