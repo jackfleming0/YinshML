@@ -31,6 +31,13 @@ experiments/**/*.npz
 !analysis_board/
 !analysis_board/**
 analysis_board/loop/runs/
+# Opening-theory diagnostic outputs: self-play + heuristic-baseline parquet
+# dumps. Reproducible by re-running scripts/measure_model_openings.py and
+# the heuristic-baseline generator; would otherwise accumulate.
+analysis_board/multiplayer/data_runs/
+# Per-day JSONL game logs from /api/move — private (friend play patterns),
+# accumulating, never push to the public repo.
+analysis_board/multiplayer/deploy/games/
 
 # Allowed root-level documentation
 !CLAUDE.md
