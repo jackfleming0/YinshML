@@ -424,6 +424,53 @@ prompt cache hits — ~10× cheaper than the first one).
   `errors[]`; the client can retry.
 - Empty key → 503 with a pointer to this section.
 
+### Owner bypass for the sims cap
+
+`YNS_MAX_NUM_SIMS` (3200 in the plist) protects public visitors from one
+client queuing a multi-minute, lock-serialized search that blocks
+everyone else. But the owner sometimes wants to go far deeper (256000
+sims on a quiet position). `YNS_OWNER_TOKEN` grants exactly that: a
+request carrying the matching token skips the cap; everyone else stays
+capped.
+
+#### 1. Generate a secret and drop it into the plist
+
+```bash
+openssl rand -hex 24   # copy the output
+```
+
+Edit `com.jackfleming.yinsh-server.plist`, paste it between the
+`YNS_OWNER_TOKEN` tags (replace the empty `<string></string>`), then
+reload:
+
+```xml
+<key>YNS_OWNER_TOKEN</key>
+<string>your-long-random-secret</string>
+```
+
+```bash
+yinsh-redeploy
+```
+
+**Do not commit the real value** — keep it only in the installed copy
+under `~/Library/LaunchAgents/`. Empty (the committed default) = bypass
+disabled, so nobody gets extra budget.
+
+#### 2. Paste the same token into the board, once
+
+On your own machine: Engine settings → Advanced MCTS → **Owner token**,
+paste the secret. It's stored in your browser's `localStorage`
+(`yns_owner_token`) and sent with every eval, so you only do this once
+per browser. Public visitors leave it blank.
+
+#### 3. Verify
+
+Set MCTS sims to something above the cap (e.g. 5000) and Analyze. With a
+valid token the status banner shows the full count and no "capped"
+warning; clear the token and the same request reports
+`⚠ capped to 3200 of 5000 requested`. Server-side, an over-cap request
+*without* the token logs `capping num_sims …`; *with* it, no such line.
+
 ### Lock the URL down later (add auth)
 
 If public access becomes a problem, add a Cloudflare Access policy:

@@ -630,7 +630,22 @@ const heuristicWeightEl = $("heuristic-weight");
 const heuristicWeightField = $("heuristic-weight-field");
 const cPuctEl = $("c-puct");
 const fpuReductionEl = $("fpu-reduction");
+const ownerTokenEl = $("owner-token");
 const resetAdvancedBtn = $("reset-advanced");
+
+// Owner token: persisted to localStorage so it survives reloads (the owner
+// pastes it once). Empty for every normal/public visitor. Sent with eval
+// requests to bypass the public YNS_MAX_NUM_SIMS cap server-side.
+const OWNER_TOKEN_KEY = "yns_owner_token";
+if (ownerTokenEl) {
+  ownerTokenEl.value = localStorage.getItem(OWNER_TOKEN_KEY) || "";
+  ownerTokenEl.addEventListener("change", () => {
+    const v = ownerTokenEl.value.trim();
+    if (v) localStorage.setItem(OWNER_TOKEN_KEY, v);
+    else localStorage.removeItem(OWNER_TOKEN_KEY);
+  });
+}
+const ownerToken = () => (ownerTokenEl ? ownerTokenEl.value.trim() : "");
 
 // Advanced-MCTS defaults — kept here as the single source of truth for
 // the reset button and the server-side defaults (they must agree).
@@ -840,6 +855,7 @@ function currentPayload() {
     side_to_move: sideEl ? sideEl.value : "WHITE",
     scores: derivedScores(),
     num_sims: Math.max(0, parseInt(numSims.value, 10) || 0),
+    owner_token: ownerToken(),
     top_k: 8,
     move_maker: state.moveMaker,
     // Advanced MCTS knobs — server falls back to training defaults if absent,
@@ -888,10 +904,15 @@ async function evaluate(opts = {}) {
         captureNote = " · capture: remove a ring";
       }
     }
+    // If the public cap clamped the search, say so out loud instead of
+    // silently running fewer sims than requested.
+    const capNote = data.capped_from
+      ? ` · ⚠ capped to ${data.num_sims} of ${data.capped_from} requested (public limit)`
+      : "";
     setStatus(
       `${data.mode === "mcts" ? "MCTS" : "Network policy"} · ` +
-      `${data.side_to_move} to move${captureNote} · ${data.num_valid_moves} legal moves`,
-      "success",
+      `${data.side_to_move} to move${captureNote} · ${data.num_valid_moves} legal moves${capNote}`,
+      data.capped_from ? "warning" : "success",
     );
     renderResult(data);
   } catch (e) {
@@ -2118,6 +2139,7 @@ async function evaluateReviewPosition() {
     ...step.position,
     model_id: modelSel.value,
     num_sims: Math.max(0, parseInt(numSims.value, 10) || 0),
+    owner_token: ownerToken(),
     top_k: 8,
     evaluation_mode: evalModeEl.value,
     heuristic_weight: parseFloat(heuristicWeightEl.value) || MCTS_DEFAULTS.heuristic_weight,

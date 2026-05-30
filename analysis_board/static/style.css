@@ -1193,6 +1193,13 @@ button.secondary:hover { background: var(--surface-2); }
   border: 1px solid rgba(217, 83, 79, 0.45);
 }
 .result .status.success { color: var(--positive); }
+.result .status.warning {
+  color: #e8b339;
+  background: rgba(232, 179, 57, 0.12);
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(232, 179, 57, 0.4);
+}
 .result .status.thinking { color: var(--accent); font-style: italic; }
 
 .value-row {
