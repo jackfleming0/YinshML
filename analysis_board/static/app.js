@@ -1677,6 +1677,222 @@ document.addEventListener("keydown", (ev) => {
   else if (ev.key === "Escape") { ev.preventDefault(); exitLineMode(); }
 });
 
+// ---------- Screenshot import (Set up mode) ----------
+//
+// Drop-zone + paste + file-picker → POST /api/import_screenshot →
+// applyNewPosition. The endpoint itself is server-side (Anthropic API
+// key never reaches the browser); we only handle the upload UX.
+const importDropzone = $("import-dropzone");
+const importFileInput = $("import-file-input");
+const importStatusEl = $("import-status");
+const importAutoAnalyzeEl = $("import-auto-analyze");
+
+const IMPORT_ALLOWED_TYPES = new Set([
+  "image/png", "image/jpeg", "image/webp", "image/gif",
+]);
+const IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+
+let importBusy = false;
+
+function setImportStatus(text, level) {
+  if (!importStatusEl) return;
+  importStatusEl.classList.remove("is-error", "is-success", "is-thinking");
+  if (!text) {
+    importStatusEl.hidden = true;
+    importStatusEl.innerHTML = "";
+    return;
+  }
+  if (level === "error") importStatusEl.classList.add("is-error");
+  else if (level === "success") importStatusEl.classList.add("is-success");
+  else if (level === "thinking") importStatusEl.classList.add("is-thinking");
+  importStatusEl.innerHTML = text;
+  importStatusEl.hidden = false;
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // Result is `data:<mime>;base64,<b64>` — strip the prefix so the
+      // server gets bare base64 (it also accepts the data: form, but
+      // bare is cleaner on the wire).
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("FileReader returned non-string result"));
+        return;
+      }
+      const comma = result.indexOf(",");
+      resolve(comma === -1 ? result : result.slice(comma + 1));
+    };
+    reader.onerror = () => reject(reader.error || new Error("FileReader failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+async function importScreenshotFromFile(file) {
+  if (importBusy) return;
+  if (!file) return;
+  if (!IMPORT_ALLOWED_TYPES.has(file.type)) {
+    setImportStatus(
+      `Can't import ${escapeHtml(file.type || "this file")} — try PNG, JPEG, WEBP, or GIF.`,
+      "error",
+    );
+    return;
+  }
+  if (file.size > IMPORT_MAX_BYTES) {
+    const mb = (file.size / (1024 * 1024)).toFixed(1);
+    setImportStatus(
+      `Image is ${mb}MB — max 5MB. Resize or screenshot the board area only.`,
+      "error",
+    );
+    return;
+  }
+
+  // Confirm before clobbering an in-progress composed position.
+  if (state.pieces.size > 0) {
+    const ok = window.confirm(
+      "Importing will replace the current composed position. Continue?",
+    );
+    if (!ok) return;
+  }
+
+  importBusy = true;
+  importDropzone.classList.add("is-busy");
+  setImportStatus(
+    "Parsing image with Claude vision (typically 3–8s)…",
+    "thinking",
+  );
+
+  let b64;
+  try {
+    b64 = await fileToBase64(file);
+  } catch (e) {
+    importBusy = false;
+    importDropzone.classList.remove("is-busy");
+    setImportStatus(`Couldn't read file: ${escapeHtml(e.message)}`, "error");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/import_screenshot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image_base64: b64,
+        mime_type: file.type,
+      }),
+    });
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      setImportStatus(
+        `Server returned non-JSON (HTTP ${res.status}). Check the server log.`,
+        "error",
+      );
+      return;
+    }
+    if (!data.ok) {
+      const errs = (data.errors || ["import failed"]).join(" · ");
+      setImportStatus(escapeHtml(errs), "error");
+      return;
+    }
+
+    // Reuse applyNewPosition (same path /api/move uses). It mutates
+    // state.pieces, sets phase + side, refreshes derived stats.
+    applyNewPosition(data.position);
+    state.lastResult = null;
+    renderResult(null);
+    render();
+
+    const pieceCount = data.position?.pieces?.length || 0;
+    let msg = `Imported ${pieceCount} piece${pieceCount === 1 ? "" : "s"} · `
+      + `confidence: <strong>${escapeHtml(data.confidence || "medium")}</strong> · `
+      + `phase: ${escapeHtml(data.position?.phase || "?")} · `
+      + `${escapeHtml(data.position?.side_to_move || "?")} to move`;
+    if (data.notes) {
+      msg += `<span class="import-status-notes">${escapeHtml(data.notes)}</span>`;
+    }
+    setImportStatus(msg, "success");
+
+    if (importAutoAnalyzeEl?.checked) {
+      // skipPositionCheck because the imported state may be a real
+      // RING_PLACEMENT position with 0 pieces and we don't want the
+      // auto-analyze to error on that.
+      await evaluate({ skipPositionCheck: true });
+    }
+  } catch (e) {
+    setImportStatus(`Request failed: ${escapeHtml(e.message)}`, "error");
+  } finally {
+    importBusy = false;
+    importDropzone.classList.remove("is-busy");
+  }
+}
+
+if (importDropzone && importFileInput) {
+  importDropzone.addEventListener("click", () => {
+    if (importBusy) return;
+    importFileInput.value = "";  // allow re-picking the same file
+    importFileInput.click();
+  });
+  importDropzone.addEventListener("keydown", (ev) => {
+    if (importBusy) return;
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      importFileInput.value = "";
+      importFileInput.click();
+    }
+  });
+
+  importFileInput.addEventListener("change", () => {
+    const file = importFileInput.files?.[0];
+    if (file) importScreenshotFromFile(file);
+  });
+
+  importDropzone.addEventListener("dragover", (ev) => {
+    ev.preventDefault();
+    importDropzone.classList.add("is-dragover");
+  });
+  importDropzone.addEventListener("dragleave", () => {
+    importDropzone.classList.remove("is-dragover");
+  });
+  importDropzone.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    importDropzone.classList.remove("is-dragover");
+    const file = ev.dataTransfer?.files?.[0];
+    if (file) importScreenshotFromFile(file);
+  });
+
+  // Global paste — works anywhere on the page while in Setup mode. Skip
+  // when the user is pasting text into an input (model name, sim count,
+  // etc.) so we don't intercept their non-image clipboard.
+  document.addEventListener("paste", (ev) => {
+    if (state.mode !== "setup") return;
+    if (importBusy) return;
+    const target = ev.target;
+    const tag = target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    const items = ev.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        ev.preventDefault();
+        const file = item.getAsFile();
+        if (file) importScreenshotFromFile(file);
+        return;
+      }
+    }
+  });
+}
 // ---------- Review mode (BGA game import + step-through) ----------
 //
 // Lives alongside but does NOT share state with line-mode (PV walking). Two

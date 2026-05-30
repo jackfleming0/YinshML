@@ -137,6 +137,25 @@
         </div>
       </section>
 
+      <section class="block import-block" id="import-block">
+        <div class="block-title">Import from image <span class="block-hint">paste, drop, or pick</span></div>
+        <div class="import-dropzone" id="import-dropzone" tabindex="0"
+             role="button" aria-label="Import board screenshot">
+          <div class="import-dropzone-prompt">
+            <span class="import-dropzone-icon" aria-hidden="true">▣</span>
+            <div class="import-dropzone-text">
+              <strong>Drop a screenshot, paste with ⌘V, or click to pick.</strong>
+              <small>BGA, Yucata, Boardspace, phone photo — any clear board.</small>
+            </div>
+          </div>
+          <input type="file" id="import-file-input" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+        </div>
+        <div class="import-status" id="import-status" hidden></div>
+        <label class="import-auto-analyze" title="Run /api/evaluate immediately after a successful import.">
+          <input type="checkbox" id="import-auto-analyze" /> Analyze immediately after import
+        </label>
+      </section>
+
       <section class="block setup-actions-block" id="setup-actions-block">
         <div class="actions setup-actions">
           <button id="evaluate" class="primary">Analyze position</button>

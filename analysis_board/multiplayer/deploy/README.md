@@ -350,6 +350,80 @@ the full sweep when plists have changed too. `redeploy.sh` cycles both
 unconditionally because it's cheap and removes the "did I forget the
 plist" failure mode.
 
+### Anthropic API key for screenshot import
+
+The Set up → "Import from image" feature calls the Anthropic API
+server-side (Claude Sonnet 4.6 vision) to OCR YINSH boards from
+screenshots or photos. The key is consumed by `ANTHROPIC_API_KEY` and is
+read at server startup. Without it, the rest of the server keeps
+working — only the import endpoint returns 503 with a clear message.
+
+#### 1. Get the key
+
+[console.anthropic.com](https://console.anthropic.com) → API Keys →
+Create Key. Copy the `sk-ant-...` value once (the console only shows it
+on creation; rotate if lost). The screenshot-import workload is small:
+~$0.01–0.03 per parse with prompt caching active. Budget alerts at
+$5/month are plenty of headroom for personal use.
+
+#### 2. Install the SDK in the deploy venv
+
+```bash
+ssh jackfleming@mac-mini.local
+cd /Users/jackfleming/PycharmProjects/YinshML
+source venv/bin/activate
+pip install anthropic
+```
+
+The server lazy-imports `anthropic` only when the import endpoint is
+called, so this can happen at any time — no other deploy step affects
+it.
+
+#### 3. Drop the key into the launchd plist
+
+Edit `com.jackfleming.yinsh-server.plist` and replace the empty
+`<string></string>` after `<key>ANTHROPIC_API_KEY</key>` with the actual
+key:
+
+```xml
+<key>ANTHROPIC_API_KEY</key>
+<string>sk-ant-...</string>
+```
+
+Then reload the LaunchAgent so the env var is picked up:
+
+```bash
+yinsh-redeploy
+```
+
+(or the equivalent `launchctl unload` + `load` pair under "Restart the
+server only").
+
+#### 4. Verify
+
+From your laptop, load `https://yinsh.jackflemingux.com`, switch to
+**Set up position**, paste a YINSH screenshot (`⌘+Shift+5` an area then
+`⌘V` into the page), and watch the composer populate within ~8 seconds.
+
+Spot-check the server log:
+
+```bash
+tail yinsh-server.log | grep "screenshot import"
+```
+
+You should see one line per successful parse, including
+`cache_read_input_tokens=<N>` on the second-and-later calls (system
+prompt cache hits — ~10× cheaper than the first one).
+
+#### Rate limit & failure modes
+
+- 10 imports/hour per IP (IP via `CF-Connecting-IP` so it's the real
+  user, not the tunnel loopback). 11th call returns 429.
+- 5MB raw-image cap.
+- Anthropic API outage / timeout → 502 with the upstream error in
+  `errors[]`; the client can retry.
+- Empty key → 503 with a pointer to this section.
+
 ### Lock the URL down later (add auth)
 
 If public access becomes a problem, add a Cloudflare Access policy:

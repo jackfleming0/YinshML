@@ -385,9 +385,120 @@ body.mode-play.opponent-engine .auto-eval-toggle {
 
 /* Set-up-mode-only blocks */
 body:not(.mode-setup) .setup-actions-block,
-body:not(.mode-setup) .palette-block {
+body:not(.mode-setup) .palette-block,
+body:not(.mode-setup) .import-block {
   display: none;
 }
+
+/* ---------- Import-from-image block ---------- */
+
+.import-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.import-dropzone {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  padding: 14px 16px;
+  border: 1.5px dashed rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--ink-dim);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.import-dropzone:hover,
+.import-dropzone:focus-visible {
+  border-color: var(--accent);
+  background: rgba(42, 167, 192, 0.06);
+  color: var(--ink);
+  outline: none;
+}
+
+.import-dropzone.is-dragover {
+  border-color: var(--accent);
+  background: rgba(42, 167, 192, 0.12);
+  color: var(--ink);
+}
+
+.import-dropzone.is-busy {
+  cursor: progress;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.import-dropzone-prompt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.import-dropzone-icon {
+  font-size: 22px;
+  line-height: 1;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.import-dropzone-text strong {
+  display: block;
+  color: var(--ink);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.import-dropzone-text small {
+  color: var(--ink-faint);
+}
+
+.import-status {
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  border-left: 3px solid var(--accent);
+}
+
+.import-status.is-error {
+  border-left-color: var(--negative);
+  color: var(--negative);
+}
+
+.import-status.is-success {
+  border-left-color: var(--positive);
+  color: var(--ink);
+}
+
+.import-status.is-thinking {
+  border-left-color: var(--warn);
+  color: var(--ink-dim);
+}
+
+.import-status-notes {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+.import-auto-analyze {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.import-auto-analyze input { margin: 0; }
 
 /* game-setup-block / game-status-block only render in Play+Engine. JS still
    toggles their `hidden` attribute by game phase, but outside vs-Engine we

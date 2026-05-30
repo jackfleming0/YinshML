@@ -49,6 +49,22 @@ from yinsh_ml.game.types import GamePhase, Move, MoveType  # noqa: E402
 from yinsh_ml.network.wrapper import NetworkWrapper  # noqa: E402
 from yinsh_ml.utils.encoding import StateEncoder  # noqa: E402
 
+# Aliased on import — both bga_import and screenshot_import export
+# `check_rate_limit` / `record_rate_limit` against their own per-IP
+# trackers (separate quotas, separate buckets). Without the rename
+# the second import would shadow the BGA functions and the BGA
+# handler would charge against the screenshot bucket.
+from analysis_board.screenshot_import import (  # noqa: E402
+    ScreenshotImportError,
+    call_claude_vision,
+    decode_and_validate_image,
+    validate_claude_response,
+)
+from analysis_board.screenshot_import import (  # noqa: E402
+    check_rate_limit as screenshot_check_rate_limit,
+    record_rate_limit as screenshot_record_rate_limit,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("analysis_board")
 
@@ -848,6 +864,23 @@ def api_move():  # type: ignore[no-untyped-def]
     return jsonify(result)
 
 
+def _client_ip() -> str:
+    """Pick the most-trustworthy client IP available.
+
+    Cloudflare adds ``CF-Connecting-IP`` for tunneled traffic; behind
+    cloudflared the remote_addr is always 127.0.0.1, so we'd be
+    rate-limiting "the tunnel" instead of "the user" without this.
+    Falls back to ``X-Forwarded-For`` (first hop) and finally remote_addr.
+    """
+    cf = request.headers.get("CF-Connecting-IP")
+    if cf:
+        return cf.strip()
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
 def _build_bga_scraper():
     """Construct a BGAScraper with cookies loaded. Returns None on auth
     failure. Pulled out so tests can monkey-patch the constructor without
@@ -898,7 +931,9 @@ def api_import_bga():  # type: ignore[no-untyped-def]
     # Novel import — check rate limit BEFORE doing any work. Cookies / scrape
     # / replay failures shouldn't burn the user's allowance, so the actual
     # record_rate_limit call happens after a successful import below.
-    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    # Use the shared `_client_ip()` so we honor `CF-Connecting-IP` first
+    # (deployed behind cloudflared, `remote_addr` is always 127.0.0.1).
+    client_ip = _client_ip()
     if not check_rate_limit(client_ip):
         return jsonify({
             "ok": False,
@@ -958,6 +993,99 @@ def api_import_bga():  # type: ignore[no-untyped-def]
     record_rate_limit(client_ip)
     log.info("BGA import succeeded for table %s (%d steps)", table_id, len(playback["steps"]))
     return jsonify({"ok": True, "table_id": table_id, "cached": False, **playback})
+
+
+@app.route("/api/import_screenshot", methods=["POST"])
+def api_import_screenshot():  # type: ignore[no-untyped-def]
+    """Parse a YINSH board image into a position payload via Claude vision.
+
+    Request body::
+
+        {"image_base64": "<base64>", "mime_type": "image/png"}
+
+    Response (success)::
+
+        {
+          "ok": True,
+          "position": {
+            "pieces": [{"pos": "E5", "piece": "WHITE_RING"}, ...],
+            "phase": "MAIN_GAME",
+            "side_to_move": "WHITE",
+            "scores": {"WHITE": 0, "BLACK": 0},
+          },
+          "confidence": "high" | "medium" | "low",
+          "notes": "free-text caveats",
+        }
+
+    Failure modes — all body-shaped with an ``errors`` array (the
+    frontend has a single parse path for these); HTTP status reflects
+    severity (400 / 429 / 502 / 503).
+    """
+    payload = request.get_json(force=True, silent=False) or {}
+
+    # Validate image inputs BEFORE checking rate limit — caller gets a
+    # crisp 400 on malformed input instead of burning quota on a parse
+    # we'd reject anyway.
+    try:
+        image_b64, mime_type = decode_and_validate_image(
+            payload.get("image_base64"),
+            payload.get("mime_type"),
+        )
+    except ScreenshotImportError as e:
+        return jsonify({"ok": False, "errors": [e.user_message]}), e.status
+
+    client_ip = _client_ip()
+    # Aliased to keep a separate per-IP bucket from the BGA limiter
+    # (different quotas, different services).
+    if not screenshot_check_rate_limit(client_ip):
+        return jsonify({
+            "ok": False,
+            "errors": [
+                f"Rate limit hit ({client_ip}). Max 10 imports/hour per IP "
+                "to keep public-deployment Claude API costs predictable. "
+                "Try again in an hour."
+            ],
+        }), 429
+
+    try:
+        raw_parsed = call_claude_vision(image_b64, mime_type)
+        usage = raw_parsed.pop("_usage", None)
+        validated = validate_claude_response(raw_parsed)
+    except ScreenshotImportError as e:
+        # Failures don't count against the rate limit. Tells the user
+        # to retry without sweating the quota.
+        return jsonify({"ok": False, "errors": [e.user_message]}), e.status
+    except Exception as e:  # noqa: BLE001
+        log.exception("screenshot import unexpected failure")
+        return jsonify({
+            "ok": False,
+            "errors": [f"Screenshot import failed: {e}"],
+        }), 500
+
+    # Success — burn one rate-limit slot.
+    screenshot_record_rate_limit(client_ip)
+
+    if usage is not None:
+        log.info(
+            "screenshot import: ip=%s confidence=%s pieces=%d "
+            "tokens(in=%d/out=%d cache_create=%d cache_read=%d)",
+            client_ip,
+            validated["confidence"],
+            len(validated["position"]["pieces"]),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+        )
+    else:
+        log.info(
+            "screenshot import: ip=%s confidence=%s pieces=%d",
+            client_ip,
+            validated["confidence"],
+            len(validated["position"]["pieces"]),
+        )
+
+    return jsonify({"ok": True, **validated})
 
 
 def main() -> None:

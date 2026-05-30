@@ -31,6 +31,13 @@
         <!-- MPS = Apple Silicon GPU. Fall back to "cpu" if MPS misbehaves. -->
         <key>YNS_DEVICE</key>
         <string>mps</string>
+        <!-- Anthropic API key for /api/import_screenshot (Set up → Import
+             from image). Paste the sk-ant-... key here in-place; if left
+             empty, the import endpoint returns 503 with a clear error
+             and the rest of the server keeps working. See
+             "Anthropic API key for screenshot import" in deploy/README.md. -->
+        <key>ANTHROPIC_API_KEY</key>
+        <string></string>
     </dict>
 
     <!-- Restart automatically on crash / exit. -->
