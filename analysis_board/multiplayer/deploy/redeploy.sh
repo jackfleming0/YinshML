@@ -35,6 +35,40 @@ echo "==> [2/6] [$(ts)] Installing plists into $LAUNCH_DIR/..."
 cp "$SCRIPT_DIR/$SERVER_PLIST" "$LAUNCH_DIR/"
 cp "$SCRIPT_DIR/$TUNNEL_PLIST" "$LAUNCH_DIR/"
 echo "    server + tunnel plists copied"
+
+# Overlay secrets from ~/.yinsh.env into the installed server plist. The
+# repo plist has empty <string></string> placeholders for any secret env
+# vars; this step writes the real values after the copy, so secrets never
+# live in git. ~/.yinsh.env format: one `export KEY=value` per line, file
+# permissions tight (chmod 600). Add new secret names to the SECRET_VARS
+# list below when /api/* endpoints need them.
+ENV_FILE="$HOME/.yinsh.env"
+SECRET_VARS=(ANTHROPIC_API_KEY)
+if [ -f "$ENV_FILE" ]; then
+  echo "    overlaying secrets from $ENV_FILE"
+  # shellcheck source=/dev/null
+  set -a; source "$ENV_FILE"; set +a
+  for VAR in "${SECRET_VARS[@]}"; do
+    VAL="${!VAR-}"
+    if [ -n "$VAL" ]; then
+      if /usr/libexec/PlistBuddy \
+          -c "Set :EnvironmentVariables:$VAR $VAL" \
+          "$LAUNCH_DIR/$SERVER_PLIST" 2>/dev/null; then
+        echo "    injected $VAR"
+      else
+        # Placeholder didn't exist — Add it instead. Lets new secrets
+        # land even if the repo plist hasn't shipped the placeholder yet.
+        /usr/libexec/PlistBuddy \
+          -c "Add :EnvironmentVariables:$VAR string $VAL" \
+          "$LAUNCH_DIR/$SERVER_PLIST" \
+          && echo "    added $VAR (no placeholder in repo plist)"
+      fi
+    fi
+  done
+else
+  echo "    no $ENV_FILE found — secrets (e.g. ANTHROPIC_API_KEY) will not be injected"
+  echo "    /api/import_screenshot will return 503 until you create one"
+fi
 echo
 
 echo "==> [3/6] [$(ts)] Unloading LaunchAgents (if loaded)..."
