@@ -40,6 +40,15 @@ from yinsh_ml.game.types import GamePhase, Move, MoveType  # noqa: E402
 from yinsh_ml.network.wrapper import NetworkWrapper  # noqa: E402
 from yinsh_ml.utils.encoding import StateEncoder  # noqa: E402
 
+from analysis_board.screenshot_import import (  # noqa: E402
+    ScreenshotImportError,
+    call_claude_vision,
+    check_rate_limit,
+    decode_and_validate_image,
+    record_rate_limit,
+    validate_claude_response,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("analysis_board")
 
@@ -823,6 +832,114 @@ def api_move():  # type: ignore[no-untyped-def]
     # Best-effort: append to the per-day game log. Failures don't bubble up.
     _log_move_event(payload, move_spec, result)
     return jsonify(result)
+
+
+def _client_ip() -> str:
+    """Pick the most-trustworthy client IP available.
+
+    Cloudflare adds ``CF-Connecting-IP`` for tunneled traffic; behind
+    cloudflared the remote_addr is always 127.0.0.1, so we'd be
+    rate-limiting "the tunnel" instead of "the user" without this.
+    Falls back to ``X-Forwarded-For`` (first hop) and finally remote_addr.
+    """
+    cf = request.headers.get("CF-Connecting-IP")
+    if cf:
+        return cf.strip()
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+@app.route("/api/import_screenshot", methods=["POST"])
+def api_import_screenshot():  # type: ignore[no-untyped-def]
+    """Parse a YINSH board image into a position payload via Claude vision.
+
+    Request body::
+
+        {"image_base64": "<base64>", "mime_type": "image/png"}
+
+    Response (success)::
+
+        {
+          "ok": True,
+          "position": {
+            "pieces": [{"pos": "E5", "piece": "WHITE_RING"}, ...],
+            "phase": "MAIN_GAME",
+            "side_to_move": "WHITE",
+            "scores": {"WHITE": 0, "BLACK": 0},
+          },
+          "confidence": "high" | "medium" | "low",
+          "notes": "free-text caveats",
+        }
+
+    Failure modes — all body-shaped with an ``errors`` array (the
+    frontend has a single parse path for these); HTTP status reflects
+    severity (400 / 429 / 502 / 503).
+    """
+    payload = request.get_json(force=True, silent=False) or {}
+
+    # Validate image inputs BEFORE checking rate limit — caller gets a
+    # crisp 400 on malformed input instead of burning quota on a parse
+    # we'd reject anyway.
+    try:
+        image_b64, mime_type = decode_and_validate_image(
+            payload.get("image_base64"),
+            payload.get("mime_type"),
+        )
+    except ScreenshotImportError as e:
+        return jsonify({"ok": False, "errors": [e.user_message]}), e.status
+
+    client_ip = _client_ip()
+    if not check_rate_limit(client_ip):
+        return jsonify({
+            "ok": False,
+            "errors": [
+                f"Rate limit hit ({client_ip}). Max 10 imports/hour per IP "
+                "to keep public-deployment Claude API costs predictable. "
+                "Try again in an hour."
+            ],
+        }), 429
+
+    try:
+        raw_parsed = call_claude_vision(image_b64, mime_type)
+        usage = raw_parsed.pop("_usage", None)
+        validated = validate_claude_response(raw_parsed)
+    except ScreenshotImportError as e:
+        # Failures don't count against the rate limit. Tells the user
+        # to retry without sweating the quota.
+        return jsonify({"ok": False, "errors": [e.user_message]}), e.status
+    except Exception as e:  # noqa: BLE001
+        log.exception("screenshot import unexpected failure")
+        return jsonify({
+            "ok": False,
+            "errors": [f"Screenshot import failed: {e}"],
+        }), 500
+
+    # Success — burn one rate-limit slot.
+    record_rate_limit(client_ip)
+
+    if usage is not None:
+        log.info(
+            "screenshot import: ip=%s confidence=%s pieces=%d "
+            "tokens(in=%d/out=%d cache_create=%d cache_read=%d)",
+            client_ip,
+            validated["confidence"],
+            len(validated["position"]["pieces"]),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+        )
+    else:
+        log.info(
+            "screenshot import: ip=%s confidence=%s pieces=%d",
+            client_ip,
+            validated["confidence"],
+            len(validated["position"]["pieces"]),
+        )
+
+    return jsonify({"ok": True, **validated})
 
 
 def main() -> None:
