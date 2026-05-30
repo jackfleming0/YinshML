@@ -33,6 +33,7 @@ from .match_runner import MatchRunner
 from .pi import PIRouter, RoutingDecision
 from .registry import EvalResult, GateItem, OrchestrationStore
 from .spec import ExperimentSpec
+from .triage import TriageResult, TriageWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class Scheduler:
         panel_input_builder: Optional[PanelInputBuilder] = None,
         match_runner_factory: Optional[MatchRunnerFactory] = None,
         interpreter: Optional[PIInterpreter] = None,
+        triage: Optional[TriageWorkflow] = None,
         max_concurrent: int = 1,
     ):
         self.store = store
@@ -75,6 +77,8 @@ class Scheduler:
         self.router = router or PIRouter()
         # Rung 1: optional Claude-authored narrative. None -> templated writeups.
         self.interpreter = interpreter
+        # Rung 2: optional triage workflow for ambiguous results. None -> no triage.
+        self.triage = triage
         self.output_dir = output_dir
         self.launcher_factory = launcher_factory
         self.panel_input_builder = panel_input_builder or _default_panel_input
@@ -131,6 +135,21 @@ class Scheduler:
         tier0 = self.funnel.run_tier0(panel_input, match_runner)
         decision = self.router.route(tier0)
 
+        # Rung 2: on an ambiguous result, let the triage workflow gather more
+        # evidence (more games / inspect failures), then RE-ROUTE on the updated
+        # statistics — not on the agent's opinion. The gate boundary is preserved.
+        triage_result: Optional[TriageResult] = None
+        if (
+            decision.route == "gate"
+            and decision.gate_kind == "review"
+            and self.triage is not None
+            and match_runner is not None
+        ):
+            triage_result = self.triage.run(spec, tier0, match_runner)
+            if triage_result is not None:
+                tier0 = triage_result.tier0
+                decision = self.router.route(tier0)
+
         # Rung 1: the LLM advises (narrative), the rules gate (routing already decided).
         interpretation: Optional[Interpretation] = (
             self.interpreter.interpret(spec, tier0, decision)
@@ -140,7 +159,7 @@ class Scheduler:
 
         self._persist(spec, launch, tier0, decision)
         report_path = self.journal.write_report(
-            launch.experiment_id, spec, tier0, decision, interpretation
+            launch.experiment_id, spec, tier0, decision, interpretation, triage_result
         )
         # Feed headline stays deterministic (scannable route + record); the LLM's
         # one-liner enriches the detail when available.

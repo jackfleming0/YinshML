@@ -23,6 +23,7 @@ from .interpreter import Interpretation, PIInterpreter
 from .journal import Journal
 from .pi import PIRouter, RoutingDecision
 from .scheduler import Scheduler
+from .triage import TriageResult, TriageVerdict, TriageWorkflow
 
 __all__ = [
     "ExperimentSpec",
@@ -34,5 +35,6 @@ __all__ = [
     "Journal",
     "PIRouter", "RoutingDecision",
     "Interpretation", "PIInterpreter",
+    "TriageWorkflow", "TriageResult", "TriageVerdict",
     "Scheduler",
 ]

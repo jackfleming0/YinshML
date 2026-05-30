@@ -31,15 +31,17 @@ def schedule(config_path, baseline_id, target, name, llm, db_path, output_dir):
     """Schedule + run an experiment from CONFIG_PATH, then Tier-0 evaluate it."""
     from ...orchestration import (
         EvaluationFunnel, ExperimentSpec, Journal, OrchestrationStore,
-        PIInterpreter, Scheduler,
+        PIInterpreter, Scheduler, TriageWorkflow,
     )
 
     store = OrchestrationStore(db_path)
+    funnel = EvaluationFunnel()
     scheduler = Scheduler(
         store=store,
         journal=Journal(output_dir),
-        funnel=EvaluationFunnel(),
+        funnel=funnel,
         interpreter=PIInterpreter() if llm else None,
+        triage=TriageWorkflow(funnel) if llm else None,
         output_dir=output_dir,
     )
     spec = ExperimentSpec(

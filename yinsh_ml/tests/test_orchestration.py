@@ -187,7 +187,8 @@ class FakeLauncher(Launcher):
         )
 
 
-def _make_scheduler(tmp_path, launcher, match_runner=None, panel_input=None, interpreter=None):
+def _make_scheduler(tmp_path, launcher, match_runner=None, panel_input=None,
+                    interpreter=None, triage=None):
     db_path = str(tmp_path / "experiments.db")
     store = OrchestrationStore(db_path)
     journal = Journal(str(tmp_path))
@@ -203,6 +204,7 @@ def _make_scheduler(tmp_path, launcher, match_runner=None, panel_input=None, int
             (lambda spec, launch: panel_input) if panel_input is not None else None
         ),
         interpreter=interpreter,
+        triage=triage,
     )
     return scheduler, store, db_path
 
@@ -412,3 +414,149 @@ def test_scheduler_without_interpreter_still_works(tmp_path):
     scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
     assert store.get_status("exp_nollm") == "awaiting_ratification"
     assert "PI read" not in (tmp_path / "journal" / "exp_nollm.md").read_text()
+
+
+# --------------------------------------------------------------------------
+# Rung 2 — triage workflow (code-controlled tool loop)
+# --------------------------------------------------------------------------
+
+from yinsh_ml.orchestration import TriageResult, TriageVerdict, TriageWorkflow
+from yinsh_ml.orchestration.triage import _TriageTools
+
+
+def _ambiguous_tier0(max_games=40):
+    """A real inconclusive Tier-0 result that leaves room in the game budget."""
+    funnel = EvaluationFunnel(batch_size=10, max_games=max_games)
+    return funnel.run_tier0(_healthy_input(), FakeMatchRunner(win_frac=0.5))
+
+
+def test_triage_tool_orders_games_and_recomputes(tmp_path):
+    tier0 = _ambiguous_tier0(max_games=40)
+    funnel = EvaluationFunnel(batch_size=10, max_games=200)
+    tools = _TriageTools(tier0, FakeMatchRunner(win_frac=0.8), funnel)
+
+    msg = tools.order_more_games(120)
+    assert tools.games_added == 120
+    assert "SPRT now: accept_h1" in msg  # strong candidate crosses the boundary
+    assert tools.build_updated_tier0().is_clear_win
+
+
+def _tool_use(name, tid, inp):
+    return SimpleNamespace(type="tool_use", name=name, id=tid, input=inp)
+
+
+class _ScriptedMessages:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def create(self, **kwargs):
+        return self._responses.pop(0)
+
+
+class _ScriptedClient:
+    """Fake anthropic client that replays scripted tool-use responses."""
+
+    def __init__(self, responses):
+        self.messages = _ScriptedMessages(responses)
+
+
+def test_triage_workflow_orders_games_then_resolves():
+    tier0 = _ambiguous_tier0(max_games=40)
+    assert tier0.is_ambiguous  # precondition
+
+    client = _ScriptedClient([
+        SimpleNamespace(  # turn 1: order more games
+            content=[_tool_use("order_more_games", "t1", {"n": 120})],
+            stop_reason="tool_use",
+        ),
+        SimpleNamespace(  # turn 2: conclude
+            content=[_tool_use("submit_triage", "t2", {
+                "recommendation": "resolved_promote",
+                "rationale": "More games made it decisive.",
+                "evidence_summary": "Strong win after the added games.",
+            })],
+            stop_reason="tool_use",
+        ),
+    ])
+    workflow = TriageWorkflow(
+        EvaluationFunnel(batch_size=10, max_games=200), client=client
+    )
+
+    result = workflow.run(
+        ExperimentSpec(config_path="x.yaml", baseline_id="b"),
+        tier0,
+        FakeMatchRunner(win_frac=0.8),
+    )
+
+    assert isinstance(result, TriageResult)
+    assert result.games_added == 120
+    assert result.verdict.recommendation == "resolved_promote"
+    # Routing flips on the RECOMPUTED statistics, not the agent's word.
+    assert result.tier0.is_clear_win
+
+
+def test_triage_workflow_returns_none_on_failure():
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("no API key")
+    workflow = TriageWorkflow(EvaluationFunnel(), client=client)
+    result = workflow.run(
+        ExperimentSpec(config_path="x.yaml", baseline_id="b"),
+        _ambiguous_tier0(),
+        FakeMatchRunner(0.8),
+    )
+    assert result is None
+
+
+class _StubTriage:
+    def __init__(self, result):
+        self.result = result
+
+    def run(self, spec, tier0, match_runner):
+        return self.result
+
+
+def test_scheduler_triage_reroutes_ambiguous_to_promotion(tmp_path):
+    # Ambiguous result (50% win rate) -> triage gathers evidence -> re-route.
+    healthy = {"policy_target_entropy_mean": 1.2, "value_accuracy": 0.6, "value_variance": 0.05}
+    launcher = FakeLauncher(str(tmp_path / "experiments.db"), "exp_tri", final_metrics=healthy)
+
+    # The triage stub returns a re-evaluated clear-win Tier-0 (as if more games settled it).
+    win_tier0 = EvaluationFunnel(batch_size=10, max_games=200).run_tier0(
+        _healthy_input(), FakeMatchRunner(win_frac=0.8)
+    )
+    stub = _StubTriage(TriageResult(
+        win_tier0,
+        TriageVerdict("resolved_promote", "settled by more games", "116W/44L"),
+        games_added=120,
+    ))
+
+    scheduler, store, _ = _make_scheduler(
+        tmp_path, launcher, match_runner=FakeMatchRunner(win_frac=0.5), triage=stub
+    )
+    result = scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
+
+    # Was ambiguous; triage's added evidence re-routed it to the promotion gate.
+    assert result.decision.gate_kind == "promotion"
+    assert store.get_status("exp_tri") == "awaiting_ratification"
+    report = (tmp_path / "journal" / "exp_tri.md").read_text()
+    assert "Triage" in report and "120" in report
+
+
+def test_scheduler_clear_result_skips_triage(tmp_path):
+    # A decisive result must NOT invoke triage (only ambiguous review-gate results do).
+    healthy = {"policy_target_entropy_mean": 1.2, "value_accuracy": 0.6, "value_variance": 0.05}
+    launcher = FakeLauncher(str(tmp_path / "experiments.db"), "exp_clear", final_metrics=healthy)
+
+    called = {"ran": False}
+
+    class _SpyTriage:
+        def run(self, spec, tier0, match_runner):
+            called["ran"] = True
+            return None
+
+    scheduler, store, _ = _make_scheduler(
+        tmp_path, launcher, match_runner=FakeMatchRunner(win_frac=0.8), triage=_SpyTriage()
+    )
+    scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
+    assert called["ran"] is False  # clear win never reached triage
+    assert store.get_status("exp_clear") == "awaiting_ratification"

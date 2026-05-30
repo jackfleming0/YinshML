@@ -79,7 +79,7 @@ proposes work. All rungs run on Opus 4.8 and degrade gracefully without an API k
 | Rung | Type | Module | Status |
 |---|---|---|---|
 | **1** | Augmented step (single call) | `interpreter.py::PIInterpreter` | **built** |
-| **2** | Workflow (code-controlled tool loop) | triage + diagnosis | planned |
+| **2** | Workflow (code-controlled tool loop) | `triage.py::TriageWorkflow` | **built** |
 | **3** | Agent (model-driven trajectory) | next-experiment proposer | planned |
 
 **Rung 1 — PI interpreter.** Replaces the templated writeup with a Claude-authored
@@ -92,6 +92,19 @@ to its template — the pipeline never breaks. Enable/disable per run with
 `yinsh-track schedule ... --llm / --no-llm` (on by default). Teaches: structured
 outputs, prompt caching (the frozen rubric rides the cache), adaptive thinking,
 graceful degradation. Cost ≈ $0.05/run.
+
+**Rung 2 — triage workflow.** The first real agentic loop, but **code holds the
+reins**. When a result is *ambiguous* (inconclusive SPRT or a panel flag), Claude is
+given bounded tools — `order_more_games`, `inspect_failure` — and decides what
+evidence to gather before the human is involved; our code runs the manual loop,
+executes the tools, and caps the budget (`max_iterations`, the game budget). The
+safety property: the tools only *gather evidence*; the result is then **re-routed on
+the deterministically-recomputed SPRT over the new games**, not on Claude's opinion —
+so a candidate can self-resolve to a clear win (still gated for promotion) or a clear
+loss (auto-rejected), draining the ratification bottleneck without ever letting the
+model promote on its own. Wired in the scheduler on the review-gate path only;
+shares the `--llm` flag. Teaches: tool-surface design, the manual agentic loop,
+human-in-the-loop boundaries.
 
 ## Note on imports
 

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .interpreter import Interpretation
     from .pi import RoutingDecision
     from .spec import ExperimentSpec
+    from .triage import TriageResult
 
 
 class Journal:
@@ -39,17 +40,19 @@ class Journal:
         tier0: "Tier0Result",
         decision: "RoutingDecision",
         interpretation: "Interpretation | None" = None,
+        triage: "TriageResult | None" = None,
     ) -> str:
         """Write the per-experiment report; return its path.
 
         When an ``interpretation`` is supplied (Rung 1 — the PI interpreter), its
         Claude-authored read and reasons-to-doubt are rendered; otherwise the
-        report falls back to the deterministic template.
+        report falls back to the deterministic template. When ``triage`` is supplied
+        (Rung 2), the evidence the workflow gathered is rendered too.
         """
         self.journal_dir.mkdir(parents=True, exist_ok=True)
         path = self.journal_dir / f"{experiment_id}.md"
         path.write_text(
-            self._render_report(experiment_id, spec, tier0, decision, interpretation)
+            self._render_report(experiment_id, spec, tier0, decision, interpretation, triage)
         )
         return str(path)
 
@@ -72,6 +75,7 @@ class Journal:
         tier0: "Tier0Result",
         decision: "RoutingDecision",
         interpretation: "Interpretation | None" = None,
+        triage: "TriageResult | None" = None,
     ) -> str:
         o = tier0.outcome
         lines = [
@@ -111,6 +115,19 @@ class Journal:
         for c in tier0.panel.checks:
             mark = "⚠️ SKIP" if c.skipped else ("✅" if c.passed else "❌")
             lines.append(f"- {mark} **{c.name}** — {c.detail}")
+
+        # Triage (Rung 2 — agentic evidence-gathering). Present only when it ran.
+        if triage is not None:
+            lines += [
+                "",
+                "## Triage (agent-gathered evidence)",
+                "",
+                f"- **Recommendation:** {triage.verdict.recommendation}",
+                f"- **Games ordered during triage:** {triage.games_added}",
+                f"- {triage.verdict.rationale}",
+            ]
+            if triage.verdict.evidence_summary:
+                lines.append(f"- Evidence: {triage.verdict.evidence_summary}")
 
         # PI read (Rung 1 — Claude-authored). Present only when the interpreter ran.
         if interpretation is not None:
