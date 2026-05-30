@@ -1876,7 +1876,8 @@ class YinshTrainer:
                 'value': current_value_lr
             },
             gradient_norm=max(stats_accum['gradient_norm'], 1e-8),
-            loss_improvement=stats_accum['loss_improvement']
+            loss_improvement=stats_accum['loss_improvement'],
+            policy_entropy=stats_accum.get('policy_entropy', 0.0),
         )
 
         if self.metrics_logger is not None:

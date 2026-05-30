@@ -14,5 +14,6 @@ from . import tensorboard
 from . import migrate
 from . import launch
 from . import config
+from . import orchestrate
 
-__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search', 'tensorboard', 'migrate', 'launch', 'config'] 
+__all__ = ['start', 'list_cmd', 'compare', 'reproduce', 'search', 'tensorboard', 'migrate', 'launch', 'config', 'orchestrate']

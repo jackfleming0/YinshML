@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-05-30T14:56:30",
+  "source_dirs": [
+    "experiments"
+  ],
+  "n_metric_files": 15,
+  "observed": {
+    "value_accuracy": {
+      "n": 15,
+      "min": 0.0638531454248366,
+      "p10": 0.06856971153846154,
+      "median": 0.08644028465346534,
+      "max": 0.11699412128712872,
+      "mean": 0.08894764231325093
+    },
+    "value_loss": {
+      "n": 15,
+      "min": 2.238204035392174,
+      "p10": 2.689838194235777,
+      "median": 8.813246689220467,
+      "max": 9.22292210505559,
+      "mean": 7.685764221334018
+    },
+    "policy_loss": {
+      "n": 15,
+      "min": 0.829548773704431,
+      "p10": 0.8306653768588335,
+      "median": 0.9715547931739708,
+      "max": 1.153875754021182,
+      "mean": 0.992309728238846
+    }
+  },
+  "thresholds": {
+    "min_value_accuracy": 0.0319,
+    "max_value_loss": 27.67,
+    "max_policy_loss": 3.46
+  },
+  "notes": [
+    "min_value_accuracy=0.0319 = 0.5 x observed min (0.0639); value_accuracy spans [0.064, 0.117] across the reference runs \u2014 a weak health signal at this scale, so this is a loose collapse guard, not a quality bar.",
+    "max_value_loss=27.67 = 3x observed max (9.223); value_loss spans [2.238, 9.223] \u2014 flags divergence (loss explosion / NaN), not normal variation.",
+    "max_policy_loss=3.46 = 3x observed max (1.154); policy_loss spans [0.830, 1.154] \u2014 flags divergence (loss explosion / NaN), not normal variation."
+  ]
+}

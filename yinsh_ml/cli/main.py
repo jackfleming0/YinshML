@@ -10,7 +10,7 @@ import click
 from typing import Optional
 
 from .config import get_config, set_config, CLIConfig
-from .commands import start, list_cmd, compare, reproduce, search, tensorboard, migrate, launch
+from .commands import start, list_cmd, compare, reproduce, search, tensorboard, migrate, launch, orchestrate
 from .completion import generate_completion_script, install_completion
 
 
@@ -121,6 +121,10 @@ cli.add_command(search.search)
 cli.add_command(tensorboard.tensorboard)
 cli.add_command(migrate.migrate)
 cli.add_command(launch.launch)
+cli.add_command(orchestrate.schedule)
+cli.add_command(orchestrate.propose)
+cli.add_command(orchestrate.gate)
+cli.add_command(orchestrate.ratify)
 
 
 @cli.command()

@@ -28,6 +28,11 @@ class EpochMetrics:
     learning_rates: Dict[str, float]
     gradient_norm: float
     loss_improvement: float  # Relative to previous epoch
+    # Mean entropy of the network's PREDICTED policy distribution over the epoch
+    # (not the MCTS target entropy). Low values mean the policy is collapsing onto
+    # a narrow set of moves — the signal the failure panel's policy_entropy check
+    # reads. Optional/defaulted for backward compatibility with older callers.
+    policy_entropy: float = 0.0
 
 class MetricsLogger:
     def __init__(self, save_dir: Path, debug: bool = False):
