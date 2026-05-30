@@ -21,6 +21,7 @@
         <div class="mode-toggle" role="tablist">
           <button class="mode-btn" data-mode="setup" role="tab" aria-selected="false">Set up position</button>
           <button class="mode-btn active" data-mode="play" role="tab" aria-selected="true">Play</button>
+          <button class="mode-btn" data-mode="review" role="tab" aria-selected="false">Review game</button>
         </div>
         <div class="play-controls" id="play-controls" hidden>
           <div class="turn-badge" id="turn-badge" data-side="WHITE">
@@ -271,6 +272,48 @@
             Show engine analysis
           </label>
           <button id="game-resign" class="secondary">End game</button>
+        </div>
+      </section>
+
+      <section class="block review-block" id="review-block" hidden>
+        <h2 class="review-title">Review a BGA game</h2>
+        <p class="review-hint">
+          Paste a Board Game Arena game URL or table id. The server fetches
+          + replays it; you step through ply by ply with engine commentary
+          at each position.
+        </p>
+        <label class="field">
+          <span>BGA game URL or table id</span>
+          <input id="review-input" type="text"
+                 placeholder="https://boardgamearena.com/5/yinsh?table=…  or  859379688"
+                 autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="actions">
+          <button id="review-import" class="primary">Import</button>
+          <button id="review-clear" class="link-button" hidden>Clear</button>
+        </div>
+        <div class="review-status" id="review-status" hidden></div>
+        <div class="review-meta" id="review-meta" hidden>
+          <div class="review-meta-row">
+            <span class="review-meta-label">White</span>
+            <span id="review-white-player">—</span>
+          </div>
+          <div class="review-meta-row">
+            <span class="review-meta-label">Black</span>
+            <span id="review-black-player">—</span>
+          </div>
+          <div class="review-meta-row">
+            <span class="review-meta-label">Result</span>
+            <span id="review-result">—</span>
+          </div>
+          <div class="review-meta-row review-meta-step">
+            <span class="review-meta-label">Step</span>
+            <span id="review-step-counter">—</span>
+          </div>
+        </div>
+        <div class="review-controls" id="review-controls" hidden>
+          <button id="review-prev" class="secondary" disabled>← prev</button>
+          <button id="review-next" class="secondary" disabled>next →</button>
         </div>
       </section>
 

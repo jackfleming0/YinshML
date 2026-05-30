@@ -92,6 +92,11 @@ const state = {
                              //   { phase: "setup"|"playing"|"ended",
                              //     humanSide, computerSide, computerSims,
                              //     spoilersEnabled, thinking, winner }
+  review: null,              // null outside Review mode. When a game is loaded:
+                             //   { tableId, metadata, steps, currentStep,
+                             //     baseSnapshot } — baseSnapshot stores the
+                             //   non-review state we restore on exit so a
+                             //   composed Setup position survives the trip.
   playSessionId: _uuid(),    // sent with every /api/move so server-side logs
                              // can be reconstructed into discrete games offline.
                              // Regenerated on Clear / startGame / setup→play.
@@ -702,6 +707,20 @@ const lineJustPlayedEl = $("line-just-played");
 const linePrevBtn = $("line-prev");
 const lineNextBtn = $("line-next");
 const lineReturnBtn = $("line-return");
+// Review mode (BGA game import + step-through)
+const reviewBlock = $("review-block");
+const reviewInput = $("review-input");
+const reviewImportBtn = $("review-import");
+const reviewClearBtn = $("review-clear");
+const reviewStatusEl = $("review-status");
+const reviewMetaEl = $("review-meta");
+const reviewWhiteEl = $("review-white-player");
+const reviewBlackEl = $("review-black-player");
+const reviewResultEl = $("review-result");
+const reviewStepCounterEl = $("review-step-counter");
+const reviewControlsEl = $("review-controls");
+const reviewPrevBtn = $("review-prev");
+const reviewNextBtn = $("review-next");
 
 clearBtn.addEventListener("click", () => {
   state.pieces.clear();
@@ -1123,17 +1142,24 @@ function applyModeStyling(mode) {
   // body has no mode class and per-mode CSS never fires.
   document.body.classList.toggle("mode-setup", mode === "setup");
   document.body.classList.toggle("mode-play", mode === "play");
+  document.body.classList.toggle("mode-review", mode === "review");
 
   paletteBlock.classList.toggle("hidden-in-play", mode !== "setup");
   playControls.hidden = mode !== "play";
+  // History block is meaningful in Play (live moves) and Review (BGA replay).
+  // In Setup there's no game flow, so hide it.
   historyBlock.hidden = mode === "setup";
   if (sideFieldEl) sideFieldEl.classList.toggle("locked", mode !== "setup");
+  // The Review block is gated by its own `hidden` attribute (we toggle here)
+  // AND by a `body.mode-review` CSS rule — the latter exists so a stale
+  // `hidden=false` from a prior session doesn't bleed through.
+  if (reviewBlock) reviewBlock.hidden = mode !== "review";
 
   const sub = document.getElementById("sidebar-subtitle");
   if (sub) {
-    sub.textContent = mode === "setup"
-      ? "Compose a position, ask the network."
-      : "Play YINSH — vs yourself or the engine.";
+    if (mode === "setup") sub.textContent = "Compose a position, ask the network.";
+    else if (mode === "review") sub.textContent = "Step through a BGA replay with engine analysis.";
+    else sub.textContent = "Play YINSH — vs yourself or the engine.";
   }
 }
 
@@ -1148,9 +1174,31 @@ function applyOpponentStyling(opp) {
 
 async function setMode(mode) {
   if (state.mode === mode) return;
+  // Leaving Review tears down the loaded game and restores the prior pieces.
+  // Without this the next mode would land on the last-viewed BGA step instead
+  // of whatever the user had before.
+  if (state.mode === "review" && mode !== "review") {
+    exitReviewMode({ silent: true });
+  }
   state.mode = mode;
   applyModeStyling(mode);
   state.selectedSource = null;
+
+  if (mode === "review") {
+    boardHint.textContent = "Paste a BGA URL on the right to import a game.";
+    setArmedTool(null);
+    // Tear down any in-flight Play game so leaving Review back to Play doesn't
+    // resume an unrelated game state.
+    if (state.game) endGameSession();
+    state.history = [];
+    state.gameOver = false;
+    state.winner = null;
+    moveHistoryEl.innerHTML = "";
+    updateUndoBtn();
+    enterReviewMode();
+    render();
+    return;
+  }
 
   if (mode === "play") {
     boardHint.textContent = "Click a ring of the side to move, then click a destination. Or click any top-move row to apply.";
@@ -1627,6 +1675,328 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "ArrowLeft") { ev.preventDefault(); applyLineStep(state.lineMode.currentStep - 1); }
   else if (ev.key === "ArrowRight") { ev.preventDefault(); applyLineStep(state.lineMode.currentStep + 1); }
   else if (ev.key === "Escape") { ev.preventDefault(); exitLineMode(); }
+});
+
+// ---------- Review mode (BGA game import + step-through) ----------
+//
+// Lives alongside but does NOT share state with line-mode (PV walking). Two
+// distinct workflows: line-mode walks an engine PV from the live position,
+// review-mode walks a finished human game from a paste. The board renderer
+// is shared but the navigation surfaces and state are independent.
+
+function enterReviewMode() {
+  // Snapshot whatever the user had open so a non-empty Setup or completed
+  // game survives the trip into review and back.
+  const baseSnapshot = {
+    pieces: new Map(state.pieces),
+    phase: phaseSel.value,
+    sideToMove: currentSide(),
+    moveMaker: state.moveMaker,
+    lastResult: state.lastResult,
+    legalMoves: state.legalMoves,
+    gameOver: state.gameOver,
+    winner: state.winner,
+  };
+  // Start with no game loaded — JS UI shows the input + Import button.
+  state.review = {
+    tableId: null,
+    metadata: null,
+    steps: null,
+    currentStep: 0,
+    baseSnapshot,
+  };
+  if (reviewInput) reviewInput.focus();
+  setReviewStatus(null);
+  reviewMetaEl.hidden = true;
+  reviewControlsEl.hidden = true;
+  reviewClearBtn.hidden = true;
+  // Reset the board to a clean state for the empty pre-import view.
+  state.pieces.clear();
+  state.hoverArrow = null;
+  state.selectedSource = null;
+  state.lastResult = null;
+  phaseSel.value = "RING_PLACEMENT";
+  const whiteRadio = document.querySelector('input[name="side"][value="WHITE"]');
+  if (whiteRadio) whiteRadio.checked = true;
+  updateDerivedStats();
+  updateTurnBadge("WHITE", "RING_PLACEMENT");
+  renderResult(null);
+}
+
+function exitReviewMode(opts = {}) {
+  if (!state.review) return;
+  const snap = state.review.baseSnapshot;
+  state.review = null;
+  if (snap) {
+    state.pieces.clear();
+    for (const [k, v] of snap.pieces) state.pieces.set(k, v);
+    phaseSel.value = snap.phase;
+    const sideRadio = document.querySelector(`input[name="side"][value="${snap.sideToMove}"]`);
+    if (sideRadio) sideRadio.checked = true;
+    state.moveMaker = snap.moveMaker;
+    state.lastResult = snap.lastResult;
+    state.legalMoves = snap.legalMoves;
+    state.gameOver = snap.gameOver;
+    state.winner = snap.winner;
+    updateDerivedStats();
+    updateTurnBadge(snap.sideToMove, snap.phase);
+    if (snap.lastResult) renderResult(snap.lastResult); else renderResult(null);
+  }
+  state.hoverArrow = null;
+  state.selectedSource = null;
+  moveHistoryEl.innerHTML = "";
+  if (!opts.silent) setStatus("Left review mode.", null);
+}
+
+function setReviewStatus(text, kind) {
+  if (!reviewStatusEl) return;
+  if (!text) {
+    reviewStatusEl.hidden = true;
+    reviewStatusEl.textContent = "";
+    reviewStatusEl.className = "review-status";
+    return;
+  }
+  reviewStatusEl.hidden = false;
+  reviewStatusEl.textContent = text;
+  reviewStatusEl.className = "review-status" + (kind ? " " + kind : "");
+}
+
+async function loadBgaGame() {
+  if (!state.review) return;
+  const raw = (reviewInput.value || "").trim();
+  if (!raw) {
+    setReviewStatus("Paste a BGA URL or table id first.", "error");
+    return;
+  }
+  reviewImportBtn.disabled = true;
+  setReviewStatus("Importing from BGA…", "thinking");
+  try {
+    const res = await fetch("/api/import_bga", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url_or_table_id: raw }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      setReviewStatus((data.errors || ["import failed"]).join(" · "), "error");
+      return;
+    }
+    state.review.tableId = data.table_id;
+    state.review.metadata = data.metadata;
+    state.review.steps = data.steps || [];
+    state.review.currentStep = 0;
+    renderReviewMetadata(data);
+    setReviewStatus(
+      data.cached
+        ? `Loaded table ${data.table_id} (cached).`
+        : `Imported table ${data.table_id} from BGA.`,
+      "success",
+    );
+    reviewMetaEl.hidden = false;
+    reviewControlsEl.hidden = false;
+    reviewClearBtn.hidden = false;
+    // Build the move-history list from the parsed plies so the user can see
+    // the whole game at a glance and click any ply to jump there.
+    moveHistoryEl.innerHTML = "";
+    state.review.steps.forEach((step, i) => {
+      if (i === 0) return;  // step 0 is the empty board
+      const li = document.createElement("li");
+      li.dataset.stepIdx = i;
+      li.innerHTML = `<span class="ply">${i}.</span><span>${formatMoveShort(step.move)}</span>`;
+      li.style.cursor = "pointer";
+      li.addEventListener("click", () => applyReviewStep(i));
+      moveHistoryEl.appendChild(li);
+    });
+    historyBlock.hidden = false;
+    await applyReviewStep(1);  // land on after-first-move so the board isn't empty
+  } catch (e) {
+    setReviewStatus("Request failed: " + e.message, "error");
+  } finally {
+    reviewImportBtn.disabled = false;
+  }
+}
+
+function renderReviewMetadata(data) {
+  const md = data.metadata || {};
+  const players = md.players || [];
+  const white = players.find((p) => p.color === "WHITE") || {};
+  const black = players.find((p) => p.color === "BLACK") || {};
+  const whiteLabel = white.name + (white.rating ? ` · ${white.rating}` : "");
+  const blackLabel = black.name + (black.rating ? ` · ${black.rating}` : "");
+  reviewWhiteEl.textContent = whiteLabel || "—";
+  reviewBlackEl.textContent = blackLabel || "—";
+  const result = md.result || {};
+  let resultText = "—";
+  if (result.winner) {
+    resultText = `${result.winner} wins · ${result.score || ""}`.trim();
+  } else if (result.score) {
+    resultText = `Draw · ${result.score}`;
+  }
+  reviewResultEl.textContent = resultText;
+}
+
+async function applyReviewStep(idx) {
+  if (!state.review || !state.review.steps) return;
+  const N = state.review.steps.length;
+  idx = Math.max(0, Math.min(N - 1, idx));
+  state.review.currentStep = idx;
+  const step = state.review.steps[idx];
+
+  // Animate the move that landed us here (when stepping forward by one).
+  // Skip animation for jumps and step 0.
+  const prevSnapshot = new Map(state.pieces);
+  const newPiecesMap = new Map();
+  for (const p of step.position.pieces) newPiecesMap.set(p.pos, p.piece);
+
+  if (step.move && idx === state.review.currentStep) {
+    try {
+      await animateMove({
+        move: step.move,
+        prevPieces: prevSnapshot,
+        newPieces: newPiecesMap,
+      });
+    } catch (_) { /* animation is best-effort */ }
+  }
+
+  applyNewPosition(step.position);
+  state.hoverArrow = step.move ? moveToArrow(step.move) : null;
+  state.selectedSource = null;
+  updateReviewNav();
+  highlightReviewHistoryEntry(idx);
+  render();
+  // Evaluate the current position so the analysis panel shows engine
+  // commentary at this ply. Don't await — let it stream in.
+  evaluateReviewPosition();
+}
+
+function updateReviewNav() {
+  if (!state.review || !state.review.steps) return;
+  const { steps, currentStep } = state.review;
+  const totalPlies = steps.length - 1;
+  reviewStepCounterEl.textContent = `${currentStep}/${totalPlies}`;
+  reviewPrevBtn.disabled = currentStep <= 0;
+  reviewNextBtn.disabled = currentStep >= steps.length - 1;
+}
+
+function highlightReviewHistoryEntry(idx) {
+  for (const li of moveHistoryEl.querySelectorAll("li")) {
+    li.classList.toggle("current", parseInt(li.dataset.stepIdx, 10) === idx);
+  }
+  // Scroll the current ply into view if it's outside the visible window.
+  const currentLi = moveHistoryEl.querySelector("li.current");
+  if (currentLi && typeof currentLi.scrollIntoView === "function") {
+    currentLi.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
+async function evaluateReviewPosition() {
+  if (!state.review || !state.review.steps) return;
+  if (!modelSel.value) {
+    // Models still loading — defer one tick and retry once.
+    setTimeout(evaluateReviewPosition, 250);
+    return;
+  }
+  const step = state.review.steps[state.review.currentStep];
+  if (!step || !step.position) return;
+  const payload = {
+    ...step.position,
+    model_id: modelSel.value,
+    num_sims: Math.max(0, parseInt(numSims.value, 10) || 0),
+    top_k: 8,
+    evaluation_mode: evalModeEl.value,
+    heuristic_weight: parseFloat(heuristicWeightEl.value) || MCTS_DEFAULTS.heuristic_weight,
+    c_puct: parseFloat(cPuctEl.value) || MCTS_DEFAULTS.c_puct,
+    fpu_reduction: parseFloat(fpuReductionEl.value) || MCTS_DEFAULTS.fpu_reduction,
+  };
+  try {
+    const res = await fetch("/api/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      setStatus((data.errors || ["evaluation failed"]).join(" · "), "error");
+      renderResult(null);
+      return;
+    }
+    state.lastResult = data;
+    state.legalMoves = data.legal_moves || [];
+    renderResult(data);
+    setStatus(
+      `Step ${state.review.currentStep}/${state.review.steps.length - 1} · ` +
+      `${data.side_to_move} to move · ${data.num_valid_moves} legal moves`,
+      "success",
+    );
+  } catch (e) {
+    setStatus("Request failed: " + e.message, "error");
+  }
+}
+
+if (reviewImportBtn) reviewImportBtn.addEventListener("click", loadBgaGame);
+if (reviewInput) {
+  reviewInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      loadBgaGame();
+    }
+  });
+}
+if (reviewPrevBtn) {
+  reviewPrevBtn.addEventListener("click", () => {
+    if (state.review) applyReviewStep(state.review.currentStep - 1);
+  });
+}
+if (reviewNextBtn) {
+  reviewNextBtn.addEventListener("click", () => {
+    if (state.review) applyReviewStep(state.review.currentStep + 1);
+  });
+}
+if (reviewClearBtn) {
+  reviewClearBtn.addEventListener("click", () => {
+    // "Clear" within Review = ditch the loaded game and reset the input,
+    // but stay in Review mode so the user can paste another URL.
+    state.review.tableId = null;
+    state.review.metadata = null;
+    state.review.steps = null;
+    state.review.currentStep = 0;
+    reviewInput.value = "";
+    setReviewStatus(null);
+    reviewMetaEl.hidden = true;
+    reviewControlsEl.hidden = true;
+    reviewClearBtn.hidden = true;
+    moveHistoryEl.innerHTML = "";
+    state.pieces.clear();
+    state.hoverArrow = null;
+    state.lastResult = null;
+    phaseSel.value = "RING_PLACEMENT";
+    updateDerivedStats();
+    updateTurnBadge("WHITE", "RING_PLACEMENT");
+    renderResult(null);
+    render();
+    reviewInput.focus();
+  });
+}
+
+// Keyboard nav for review walking. Independent of line-mode's listener so
+// they can coexist; ←/→/Esc are handled here only when review is active.
+document.addEventListener("keydown", (ev) => {
+  if (!state.review || !state.review.steps) return;
+  // Don't steal arrow keys from text input — the user might be editing the URL.
+  if (document.activeElement && (
+      document.activeElement.tagName === "INPUT" ||
+      document.activeElement.tagName === "TEXTAREA" ||
+      document.activeElement.tagName === "SELECT")) return;
+  if (ev.key === "ArrowLeft") {
+    ev.preventDefault();
+    applyReviewStep(state.review.currentStep - 1);
+  } else if (ev.key === "ArrowRight") {
+    ev.preventDefault();
+    applyReviewStep(state.review.currentStep + 1);
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    setMode("play");
+  }
 });
 
 // ---------- Boot ----------

@@ -28,6 +28,15 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from analysis_board.bga_import import (  # noqa: E402
+    BGAImportError,
+    cache_load,
+    cache_save,
+    check_rate_limit,
+    parse_url_or_id,
+    record_rate_limit,
+    replay_to_steps,
+)
 from yinsh_ml.game.constants import (  # noqa: E402
     PieceType,
     Player,
@@ -68,6 +77,20 @@ _mcts_lock = threading.Lock()
 # trip the model up. Path is relative to the repo root (ROOT). Logging is
 # best-effort — a write failure must NOT break the response to the user.
 GAME_LOG_DIR = ROOT / "analysis_board" / "multiplayer" / "deploy" / "games"
+
+# Cache for BGA Review-mode imports. One file per table id; LRU-evicted by
+# the import module so total on-disk footprint stays bounded. Path is server-
+# private — exposed only via the Review-mode `/api/import_bga` endpoint, not
+# served as static content.
+BGA_CACHE_DIR = ROOT / "analysis_board" / "multiplayer" / "bga_imports"
+
+# Default cookies path. ``~/.bga_cookies.json`` is what scripts/bga_fetch.py
+# uses; honoring the same default keeps local-dev flow uniform between the
+# bulk crawler and the Review-mode endpoint. Override with ``YNS_BGA_COOKIES``.
+BGA_COOKIES_PATH = os.environ.get(
+    "YNS_BGA_COOKIES",
+    str(Path.home() / ".bga_cookies.json"),
+)
 
 
 def _log_move_event(
@@ -823,6 +846,118 @@ def api_move():  # type: ignore[no-untyped-def]
     # Best-effort: append to the per-day game log. Failures don't bubble up.
     _log_move_event(payload, move_spec, result)
     return jsonify(result)
+
+
+def _build_bga_scraper():
+    """Construct a BGAScraper with cookies loaded. Returns None on auth
+    failure. Pulled out so tests can monkey-patch the constructor without
+    reaching into ``yinsh_ml.data.scrapers``.
+    """
+    # Lazy import — the scraper pulls ``certifi`` and a urllib stack we don't
+    # want to load until somebody actually requests an import. Keeps server
+    # startup fast and keeps the rest of the API independent of the scraper.
+    from yinsh_ml.data.scrapers.bga import BGAScraper  # noqa: WPS433
+
+    scraper = BGAScraper()
+    cookies_path = BGA_COOKIES_PATH
+    if not Path(cookies_path).exists():
+        log.warning("BGA cookies file not found at %s", cookies_path)
+        return None
+    if not scraper.load_cookies(cookies_path):
+        log.warning("BGA cookies at %s failed auth probe", cookies_path)
+        return None
+    return scraper
+
+
+@app.route("/api/import_bga", methods=["POST"])
+def api_import_bga():  # type: ignore[no-untyped-def]
+    """Import a BGA YINSH replay for Review-mode step-through.
+
+    Caches each successful import on disk so re-visits don't re-spend BGA's
+    200/day per-account cap; rate-limits novel imports per remote IP so a
+    single visitor can't burn the whole day's allowance.
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    raw_input = payload.get("url_or_table_id")
+    if raw_input is None:
+        return jsonify({"ok": False, "errors": ["url_or_table_id is required"]}), 400
+
+    try:
+        table_id = parse_url_or_id(raw_input)
+    except BGAImportError as e:
+        return jsonify({"ok": False, "errors": [e.user_message]}), e.status
+
+    # Cache hit short-circuits everything: no BGA fetch, no rate-limit charge.
+    cached = cache_load(BGA_CACHE_DIR, table_id)
+    if cached is not None:
+        log.info("BGA cache hit for table %s", table_id)
+        # ``cached: True`` after the spread so prior-iteration values can't
+        # mask the cache-hit flag (the saved payload doesn't carry one).
+        return jsonify({"ok": True, **cached, "table_id": table_id, "cached": True})
+
+    # Novel import — check rate limit BEFORE doing any work. Cookies / scrape
+    # / replay failures shouldn't burn the user's allowance, so the actual
+    # record_rate_limit call happens after a successful import below.
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not check_rate_limit(client_ip):
+        return jsonify({
+            "ok": False,
+            "errors": [
+                f"Rate limit hit ({client_ip}). Max 5 novel BGA imports/hour "
+                "per IP — cached games don't count."
+            ],
+        }), 429
+
+    scraper = _build_bga_scraper()
+    if scraper is None:
+        return jsonify({
+            "ok": False,
+            "errors": [
+                "BGA cookies missing or expired — see analysis_board/multiplayer/"
+                "deploy/README.md for the Review-mode cookies setup."
+            ],
+        }), 200
+
+    try:
+        # BGACapHit is the only daily-cap signal that's worth distinguishing
+        # from "this particular game failed." Catch it via the type name so
+        # we don't have to thread the symbol through bga_import.py.
+        parsed = scraper.scrape_game(table_id)
+    except Exception as e:  # noqa: BLE001
+        if e.__class__.__name__ == "BGACapHit":
+            return jsonify({
+                "ok": False,
+                "errors": [
+                    "BGA daily replay cap hit. Try again tomorrow, or import "
+                    "a different game that's already cached."
+                ],
+            }), 200
+        log.exception("BGA scrape raised for table %s", table_id)
+        return jsonify({
+            "ok": False,
+            "errors": [f"BGA fetch failed: {e}"],
+        }), 200
+
+    if parsed is None:
+        return jsonify({
+            "ok": False,
+            "errors": [
+                f"BGA returned no replay for table {table_id} — table may not "
+                "exist, may be private, or may be a different game."
+            ],
+        }), 200
+
+    try:
+        playback = replay_to_steps(parsed, _serialize_state, _serialize_move)
+    except BGAImportError as e:
+        return jsonify({"ok": False, "errors": [e.user_message]}), e.status
+
+    # Save the bare playback to disk; ``cached`` is response-only metadata so
+    # the on-disk value can't override the cache-hit flag on later reads.
+    cache_save(BGA_CACHE_DIR, table_id, playback)
+    record_rate_limit(client_ip)
+    log.info("BGA import succeeded for table %s (%d steps)", table_id, len(playback["steps"]))
+    return jsonify({"ok": True, "table_id": table_id, "cached": False, **playback})
 
 
 def main() -> None:
