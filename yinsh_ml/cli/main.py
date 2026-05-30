@@ -122,6 +122,7 @@ cli.add_command(tensorboard.tensorboard)
 cli.add_command(migrate.migrate)
 cli.add_command(launch.launch)
 cli.add_command(orchestrate.schedule)
+cli.add_command(orchestrate.propose)
 cli.add_command(orchestrate.gate)
 cli.add_command(orchestrate.ratify)
 

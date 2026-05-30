@@ -70,6 +70,41 @@ def schedule(config_path, baseline_id, target, name, llm, db_path, output_dir):
 
 
 @click.command()
+@click.option("--goal", default="Propose the next experiment to push toward a stronger model.",
+              help="The objective to hand the proposer agent.")
+@click.option("--db", "db_path", default=DEFAULT_DB, help="Path to experiments.db")
+@click.option("--output-dir", default="experiments", help="Experiment output dir.")
+def propose(goal, db_path, output_dir):
+    """Run the Rung-3 proposer agent: review results, propose the next experiment."""
+    import time
+
+    from ...orchestration import Journal, OrchestrationStore, ProposerAgent
+
+    store = OrchestrationStore(db_path)
+    agent = ProposerAgent(store)
+    click.echo("Proposer agent reviewing the registry...")
+    proposal = agent.propose(goal)
+
+    if proposal is None:
+        raise click.ClickException(
+            "No proposal produced (no ANTHROPIC_API_KEY, agent error, or nothing to propose)."
+        )
+
+    proposal_id = f"proposal_{int(time.time())}"
+    path = Journal(output_dir).write_proposal(proposal_id, proposal)
+    click.echo("")
+    click.echo(click.style(f"Proposal: {proposal.hypothesis}", fg="green"))
+    click.echo(f"  Base config: {proposal.base_config}")
+    click.echo(f"  Overrides:   {proposal.overrides}")
+    click.echo(f"  Rationale:   {proposal.rationale}")
+    click.echo(f"\nWritten to {path}")
+    click.echo(click.style(
+        "\nReview it, then run it with `yinsh-track schedule` — the agent does not "
+        "spend compute on its own.", fg="yellow",
+    ))
+
+
+@click.command()
 @click.option("--db", "db_path", default=DEFAULT_DB, help="Path to experiments.db")
 def gate(db_path):
     """List decisions blocked on your sign-off (the ratification queue)."""

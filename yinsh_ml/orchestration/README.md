@@ -80,7 +80,7 @@ proposes work. All rungs run on Opus 4.8 and degrade gracefully without an API k
 |---|---|---|---|
 | **1** | Augmented step (single call) | `interpreter.py::PIInterpreter` | **built** |
 | **2** | Workflow (code-controlled tool loop) | `triage.py::TriageWorkflow` | **built** |
-| **3** | Agent (model-driven trajectory) | next-experiment proposer | planned |
+| **3** | Agent (model-driven trajectory) | `proposer.py::ProposerAgent` | **built** |
 
 **Rung 1 — PI interpreter.** Replaces the templated writeup with a Claude-authored
 interpretation: a structured read (`messages.parse` → Pydantic), reasons-to-doubt,
@@ -105,6 +105,17 @@ loss (auto-rejected), draining the ratification bottleneck without ever letting 
 model promote on its own. Wired in the scheduler on the review-gate path only;
 shares the `--llm` flag. Teaches: tool-surface design, the manual agentic loop,
 human-in-the-loop boundaries.
+
+**Rung 3 — proposer agent.** The self-propagating piece: it reads what's been tried
+(`list_experiments`, `get_experiment` — read-only) and *proposes the next experiment
+to run*, closing the loop results → proposal → run → results. Unlike Rung 2's narrow
+triage, the model drives its own trajectory (which results to inspect, when it has
+enough); code only caps `max_iterations`. The guardrail, straight from the autonomy
+policy: opening a *new direction* is the irreversible lever, so the tools are
+read-only and the output is a **proposal artifact** (`experiments/proposals/<id>.md`)
+for you to review and `schedule` — the agent never spends compute itself. Run it with
+`yinsh-track propose`. Teaches: agent design, read-only tool surfaces, guardrails,
+cost-of-error containment. Cost ≈ $0.11/proposal.
 
 ## Note on imports
 

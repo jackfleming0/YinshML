@@ -22,6 +22,7 @@ from .funnel import EvaluationFunnel, Tier0Result
 from .interpreter import Interpretation, PIInterpreter
 from .journal import Journal
 from .pi import PIRouter, RoutingDecision
+from .proposer import Proposal, ProposerAgent
 from .scheduler import Scheduler
 from .triage import TriageResult, TriageVerdict, TriageWorkflow
 
@@ -36,5 +37,6 @@ __all__ = [
     "PIRouter", "RoutingDecision",
     "Interpretation", "PIInterpreter",
     "TriageWorkflow", "TriageResult", "TriageVerdict",
+    "ProposerAgent", "Proposal",
     "Scheduler",
 ]

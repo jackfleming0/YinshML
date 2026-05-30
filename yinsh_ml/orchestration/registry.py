@@ -185,6 +185,71 @@ class OrchestrationStore:
             ).fetchall()
             return [self._row_to_eval(r) for r in rows]
 
+    # --- read views for the proposer (Rung 3) -----------------------------
+
+    def experiment_digest(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Recent experiments with their latest eval — the proposer's overview.
+
+        Reads the shared ``experiments`` table (written by ``ExperimentDB``); returns
+        ``[]`` if no experiments have been created yet.
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT experiment_id, name, status FROM experiments "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return []  # experiments table not created yet
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            evals = self.get_evals(r["experiment_id"])
+            last = evals[-1] if evals else None
+            out.append({
+                "experiment_id": r["experiment_id"],
+                "name": r["name"],
+                "status": r["status"],
+                "last_eval": None if last is None else {
+                    "baseline": last.baseline_id,
+                    "record": f"{last.wins}W/{last.draws}D/{last.losses}L",
+                    "sprt": last.sprt_verdict,
+                    "panel_green": last.panel_green,
+                },
+            })
+        return out
+
+    def experiment_detail(self, experiment_id: str) -> Optional[Dict[str, Any]]:
+        """Full config + eval history for one experiment (proposer drill-down)."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT experiment_id, name, status, config_json "
+                    "FROM experiments WHERE experiment_id = ?",
+                    (experiment_id,),
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        return {
+            "experiment_id": row["experiment_id"],
+            "name": row["name"],
+            "status": row["status"],
+            "config_json": row["config_json"],
+            "evals": [
+                {
+                    "tier": e.tier,
+                    "baseline": e.baseline_id,
+                    "record": f"{e.wins}W/{e.draws}D/{e.losses}L",
+                    "sprt": e.sprt_verdict,
+                    "panel_green": e.panel_green,
+                    "panel": e.panel(),
+                }
+                for e in self.get_evals(experiment_id)
+            ],
+        }
+
     # --- gate queue -------------------------------------------------------
 
     def enqueue_gate(self, item: GateItem) -> int:

@@ -56,6 +56,14 @@ class Journal:
         )
         return str(path)
 
+    def write_proposal(self, proposal_id: str, proposal) -> str:
+        """Persist a Rung-3 experiment proposal as a reviewable Markdown artifact."""
+        proposals_dir = self.root / "proposals"
+        proposals_dir.mkdir(parents=True, exist_ok=True)
+        path = proposals_dir / f"{proposal_id}.md"
+        path.write_text(proposal.to_markdown(proposal_id))
+        return str(path)
+
     def append_feed(self, experiment_id: str, headline: str, detail: str) -> None:
         """Append a one-entry digest line for this result to FEED.md."""
         self.root.mkdir(parents=True, exist_ok=True)

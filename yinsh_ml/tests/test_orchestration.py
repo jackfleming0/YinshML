@@ -560,3 +560,93 @@ def test_scheduler_clear_result_skips_triage(tmp_path):
     scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
     assert called["ran"] is False  # clear win never reached triage
     assert store.get_status("exp_clear") == "awaiting_ratification"
+
+
+# --------------------------------------------------------------------------
+# Rung 3 — proposer agent (model-driven trajectory)
+# --------------------------------------------------------------------------
+
+from yinsh_ml.orchestration import Proposal, ProposerAgent
+from yinsh_ml.orchestration.registry import EvalResult
+
+
+def _seed_registry(tmp_path):
+    """Seed one completed experiment + eval so the proposer has something to read."""
+    db_path = str(tmp_path / "experiments.db")
+    db = ExperimentDB(db_path)
+    db.create_experiment(ExperimentRecord(
+        experiment_id="seed1", name="baseline-run", status="promoted",
+        config_json='{"mcts": {"early_simulations": 100}}',
+    ))
+    store = OrchestrationStore(db_path)
+    store.record_eval(EvalResult(
+        experiment_id="seed1", baseline_id=None, tier=0,
+        wins=30, draws=2, losses=10, sprt_verdict="accept_h1", sprt_llr=3.5,
+        wilson_lower=0.6, wilson_upper=0.85, panel_green=True,
+        panel_json='{"green": true, "checks": []}',
+    ))
+    return store
+
+
+def test_registry_digest_and_detail(tmp_path):
+    store = _seed_registry(tmp_path)
+
+    digest = store.experiment_digest()
+    assert digest[0]["experiment_id"] == "seed1"
+    assert digest[0]["last_eval"]["sprt"] == "accept_h1"
+
+    detail = store.experiment_detail("seed1")
+    assert detail["evals"][0]["record"] == "30W/2D/10L"
+    assert store.experiment_detail("nope") is None
+
+
+def test_proposer_explores_then_proposes(tmp_path):
+    store = _seed_registry(tmp_path)
+    client = _ScriptedClient([
+        SimpleNamespace(  # explore: overview
+            content=[_tool_use("list_experiments", "t1", {"limit": 10})],
+            stop_reason="tool_use",
+        ),
+        SimpleNamespace(  # explore: drill down
+            content=[_tool_use("get_experiment", "t2", {"experiment_id": "seed1"})],
+            stop_reason="tool_use",
+        ),
+        SimpleNamespace(  # decide
+            content=[_tool_use("propose_experiment", "t3", {
+                "base_config": "configs/smoke.yaml",
+                "overrides": {"mcts.early_simulations": 200},
+                "hypothesis": "More search fixes the offense-only collapse.",
+                "rationale": "seed1 won but more search should harden defense.",
+            })],
+            stop_reason="tool_use",
+        ),
+    ])
+
+    proposal = ProposerAgent(store, client=client).propose()
+
+    assert isinstance(proposal, Proposal)
+    assert proposal.overrides == {"mcts.early_simulations": 200}
+    assert "search" in proposal.hypothesis.lower()
+    # The agent really drove the trajectory: it explored before proposing.
+    assert client.messages._responses == []  # all three turns consumed
+
+
+def test_proposer_returns_none_on_failure(tmp_path):
+    store = _seed_registry(tmp_path)
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("no API key")
+    assert ProposerAgent(store, client=client).propose() is None
+
+
+def test_journal_writes_proposal_artifact(tmp_path):
+    proposal = Proposal(
+        base_config="configs/smoke.yaml",
+        overrides={"mcts.c_puct": 1.5},
+        hypothesis="HYP-MARKER",
+        rationale="RAT-MARKER",
+    )
+    path = Journal(str(tmp_path)).write_proposal("prop1", proposal)
+    text = (tmp_path / "proposals" / "prop1.md").read_text()
+    assert "HYP-MARKER" in text
+    assert "c_puct" in text
+    assert "yinsh-track schedule" in text  # the human-in-the-loop run instruction
