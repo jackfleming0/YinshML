@@ -429,39 +429,36 @@ prompt cache hits — ~10× cheaper than the first one).
 `YNS_MAX_NUM_SIMS` (3200 in the plist) protects public visitors from one
 client queuing a multi-minute, lock-serialized search that blocks
 everyone else. But the owner sometimes wants to go far deeper (256000
-sims on a quiet position). `YNS_OWNER_TOKEN` grants exactly that: a
-request carrying the matching token skips the cap; everyone else stays
-capped.
+sims on a quiet position). `YNS_OWNER_TOKEN` grants exactly that: an
+*analysis* request carrying the matching token skips the cap; everyone
+else stays capped. (Play-mode engine moves never carry the token and are
+additionally hard-clamped to 3200 client-side, so a game against the
+engine always stays snappy.)
 
-#### 1. Generate a secret and drop it into the plist
+The committed token is the simple shared secret `jackfleming` — enough to
+stop friends from *accidentally* queuing a giant run, not a real
+credential. If you ever need actual protection, swap in
+`openssl rand -hex 24` and update the plist + the value you paste into the
+board.
 
-```bash
-openssl rand -hex 24   # copy the output
-```
+#### 1. (Already done) token lives in the plist
 
-Edit `com.jackfleming.yinsh-server.plist`, paste it between the
-`YNS_OWNER_TOKEN` tags (replace the empty `<string></string>`), then
-reload:
+`com.jackfleming.yinsh-server.plist` ships with:
 
 ```xml
 <key>YNS_OWNER_TOKEN</key>
-<string>your-long-random-secret</string>
+<string>jackfleming</string>
 ```
 
-```bash
-yinsh-redeploy
-```
-
-**Do not commit the real value** — keep it only in the installed copy
-under `~/Library/LaunchAgents/`. Empty (the committed default) = bypass
-disabled, so nobody gets extra budget.
+If you change it, run `yinsh-redeploy` so launchd picks up the new env
+var. Empty = bypass disabled.
 
 #### 2. Paste the same token into the board, once
 
 On your own machine: Engine settings → Advanced MCTS → **Owner token**,
-paste the secret. It's stored in your browser's `localStorage`
-(`yns_owner_token`) and sent with every eval, so you only do this once
-per browser. Public visitors leave it blank.
+type `jackfleming`. It's stored in your browser's `localStorage`
+(`yns_owner_token`) and sent with every analysis eval, so you only do this
+once per browser. Public visitors leave it blank.
 
 #### 3. Verify
 

@@ -699,6 +699,13 @@ const gameSetupBlock = $("game-setup-block");
 const gameStatusBlock = $("game-status-block");
 const gameHumanSideEl = $("game-human-side");
 const gameSimsEl = $("game-sims");
+// Play-mode engine is hard-capped here regardless of the owner-token cap
+// bypass: a game against the engine should stay at a sane, snappy budget
+// (the "Deep — 3200 sims" dropdown ceiling), not balloon into a multi-minute
+// per-move analysis. The owner bypass is for one-off position analysis only;
+// the play-mode payload (currentPositionPayload) deliberately omits the token,
+// and this clamp guards against a tampered dropdown value too.
+const PLAY_MODE_MAX_SIMS = 3200;
 const gameModelEl = $("game-model");
 const gameSpoilersEl = $("game-spoilers");
 const gameSpoilersInlineEl = $("game-spoilers-inline");
@@ -1294,7 +1301,7 @@ async function startGame() {
   let humanSide = gameHumanSideEl.value;
   if (humanSide === "random") humanSide = Math.random() < 0.5 ? "WHITE" : "BLACK";
   const computerSide = humanSide === "WHITE" ? "BLACK" : "WHITE";
-  const computerSims = parseInt(gameSimsEl.value, 10) || 800;
+  const computerSims = Math.min(PLAY_MODE_MAX_SIMS, parseInt(gameSimsEl.value, 10) || 800);
   const spoilersEnabled = !!gameSpoilersEl.checked;
   // Sync the main model dropdown to the game-setup choice so all the
   // existing /api/evaluate plumbing (which reads from modelSel.value) picks
