@@ -79,7 +79,7 @@ def test_panel_flags_value_saturation():
 def test_panel_skips_absent_signals_without_blocking():
     panel = FailurePanel().evaluate(PanelInput())  # nothing supplied
     assert panel.green  # skips don't block
-    assert len(panel.skips) == 4
+    assert len(panel.skips) == 6  # entropy, value_calib, value_loss, policy_loss, draw_rate, offense
 
 
 def test_offense_only_detector_flags_runaway():
@@ -861,3 +861,44 @@ def test_calibrate_derives_threshold_from_run_metrics(tmp_path):
     # floor = 0.5 x observed min (0.064) = 0.032
     assert result["thresholds"]["min_value_accuracy"] == 0.032
     assert result["observed"]["value_accuracy"]["min"] == 0.064
+    # loss ceilings = 3x observed max
+    assert result["thresholds"]["max_value_loss"] == 24.0   # 3 x 8.0
+    assert result["thresholds"]["max_policy_loss"] == 3.0   # 3 x 1.0
+
+
+# --------------------------------------------------------------------------
+# Loss-divergence collapse check (the signal that actually catches a bad run)
+# --------------------------------------------------------------------------
+
+def test_loss_divergence_passes_healthy_and_skips_absent():
+    panel = FailurePanel(max_value_loss=27.0, max_policy_loss=3.5)
+    r = panel.evaluate(PanelInput(value_loss=8.0, policy_loss=1.0))
+    assert next(c for c in r.checks if c.name == "value_loss").passed
+    assert next(c for c in r.checks if c.name == "policy_loss").passed
+    # absent -> skip, not flag
+    r2 = panel.evaluate(PanelInput())
+    assert next(c for c in r2.checks if c.name == "value_loss").skipped
+
+
+def test_loss_divergence_flags_nan_and_explosion():
+    panel = FailurePanel(max_value_loss=27.0)
+    nan = panel.evaluate(PanelInput(value_loss=float("nan")))
+    assert not next(c for c in nan.checks if c.name == "value_loss").passed
+    inf = panel.evaluate(PanelInput(value_loss=float("inf")))
+    assert not next(c for c in inf.checks if c.name == "value_loss").passed
+    big = panel.evaluate(PanelInput(value_loss=999.0))
+    assert not next(c for c in big.checks if c.name == "value_loss").passed
+
+
+def test_panel_green_on_healthy_real_scale_candidate():
+    # The realistic shape of a healthy run at this codebase's scale.
+    panel = FailurePanel.from_calibration({
+        "thresholds": {"min_value_accuracy": 0.0319, "max_value_loss": 27.67, "max_policy_loss": 3.46}
+    })
+    r = panel.evaluate(PanelInput(value_accuracy=0.089, value_loss=8.0, policy_loss=1.0))
+    assert r.green, [c.detail for c in r.failures]
+
+
+def test_panel_input_from_metrics_maps_losses():
+    pi = PanelInput.from_metrics({"value_loss": 8.5, "policy_loss": 1.1, "value_accuracy": 0.09})
+    assert pi.value_loss == 8.5 and pi.policy_loss == 1.1 and pi.value_accuracy == 0.09

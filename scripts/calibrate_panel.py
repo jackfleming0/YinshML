@@ -109,6 +109,19 @@ def calibrate(run_dirs: List[str]) -> Dict:
             "is a loose collapse guard, not a quality bar."
         )
 
+    # Loss-divergence ceilings: 3x the worst observed final loss. A run only flags if
+    # its loss is far above anything a real run reached — i.e. it actually blew up.
+    # (NaN/Inf is always caught regardless of the ceiling.)
+    for sig, key in (("value_loss", "max_value_loss"), ("policy_loss", "max_policy_loss")):
+        if sig in observed:
+            ceiling = round(observed[sig]["max"] * 3.0, 2)
+            thresholds[key] = ceiling
+            notes.append(
+                f"{key}={ceiling} = 3x observed max ({observed[sig]['max']:.3f}); "
+                f"{sig} spans [{observed[sig]['min']:.3f}, {observed[sig]['max']:.3f}] — "
+                "flags divergence (loss explosion / NaN), not normal variation."
+            )
+
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "source_dirs": run_dirs,

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-30T14:17:04",
+  "generated_at": "2026-05-30T14:56:30",
   "source_dirs": [
     "experiments"
   ],
@@ -31,9 +31,13 @@
     }
   },
   "thresholds": {
-    "min_value_accuracy": 0.0319
+    "min_value_accuracy": 0.0319,
+    "max_value_loss": 27.67,
+    "max_policy_loss": 3.46
   },
   "notes": [
-    "min_value_accuracy=0.0319 = 0.5 x observed min (0.0639); value_accuracy spans [0.064, 0.117] across the reference runs \u2014 a weak health signal at this scale, so this is a loose collapse guard, not a quality bar."
+    "min_value_accuracy=0.0319 = 0.5 x observed min (0.0639); value_accuracy spans [0.064, 0.117] across the reference runs \u2014 a weak health signal at this scale, so this is a loose collapse guard, not a quality bar.",
+    "max_value_loss=27.67 = 3x observed max (9.223); value_loss spans [2.238, 9.223] \u2014 flags divergence (loss explosion / NaN), not normal variation.",
+    "max_policy_loss=3.46 = 3x observed max (1.154); policy_loss spans [0.830, 1.154] \u2014 flags divergence (loss explosion / NaN), not normal variation."
   ]
 }

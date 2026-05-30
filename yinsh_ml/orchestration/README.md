@@ -150,9 +150,19 @@ python scripts/calibrate_panel.py --runs experiments   # writes configs/panel_ca
 the bootstrap auto-load `configs/panel_calibration.json` if present. A grounded
 calibration (from the repo's existing runs) is committed; **re-run the tool on your
 Mac with your real configs** — thresholds tuned to a CPU smoke aren't the right ones
-for a Mac-trained model. Note: at this scale `value_accuracy` is a *weak* health
-signal (it barely moves); `value_loss` tracks learning far better, and wiring a
-value-loss / policy-entropy collapse check is a worthwhile follow-up.
+for a Mac-trained model.
+
+### Loss-divergence collapse check
+
+`value_accuracy` is a *weak* health signal at this scale (it barely moves), so the
+panel also runs **loss-divergence checks** on `value_loss` and `policy_loss` — the
+signals that actually catch a broken run. They flag a non-finite (NaN/Inf) loss
+unconditionally, and a finite loss above a calibrated ceiling (3× the worst observed
+real-run loss, so only a genuine explosion trips it — e.g. `value_loss > 27.67`).
+The NaN/Inf guard needs no calibration; the ceiling comes from `calibrate_panel.py`.
+A network *policy-entropy* collapse check is still pending — training doesn't yet
+emit network policy entropy (only the MCTS *target* entropy, a different quantity),
+so that `policy_entropy` check skips until the signal is logged on the training side.
 
 ### Why `LocalLauncher` drives `run_training.py`
 

@@ -72,6 +72,8 @@ class PanelInput:
     policy_entropy: Optional[float] = None
     value_accuracy: Optional[float] = None
     value_variance: Optional[float] = None
+    value_loss: Optional[float] = None
+    policy_loss: Optional[float] = None
     draw_rate: Optional[float] = None
     # Per-game signed "completed-runs differential" trajectories (one list per
     # sampled game, signed so + favors the candidate). Used by the offense-only
@@ -89,6 +91,8 @@ class PanelInput:
             policy_entropy=metrics.get("policy_target_entropy_mean"),
             value_accuracy=metrics.get("value_accuracy"),
             value_variance=metrics.get("value_variance"),
+            value_loss=metrics.get("value_loss"),
+            policy_loss=metrics.get("policy_loss"),
         )
         data.update(overrides)
         return cls(**data)
@@ -103,6 +107,8 @@ class FailurePanel:
         min_value_accuracy: float = 0.02,
         min_value_variance: float = 1e-3,
         max_draw_rate: float = 0.85,
+        max_value_loss: float = 50.0,
+        max_policy_loss: float = 20.0,
         offense_only_growth: float = 3.0,
         offense_only_window: int = 8,
     ):
@@ -110,6 +116,8 @@ class FailurePanel:
         self.min_value_accuracy = min_value_accuracy
         self.min_value_variance = min_value_variance
         self.max_draw_rate = max_draw_rate
+        self.max_value_loss = max_value_loss
+        self.max_policy_loss = max_policy_loss
         self.offense_only_growth = offense_only_growth
         self.offense_only_window = offense_only_window
 
@@ -139,9 +147,32 @@ class FailurePanel:
             checks=[
                 self._policy_entropy(data.policy_entropy),
                 self._value_calibration(data.value_accuracy, data.value_variance),
+                self._loss_divergence("value_loss", data.value_loss, self.max_value_loss),
+                self._loss_divergence("policy_loss", data.policy_loss, self.max_policy_loss),
                 self._draw_rate(data.draw_rate),
                 self._offense_only(data.run_diff_trajectories),
             ]
+        )
+
+    def _loss_divergence(self, name: str, loss: Optional[float], ceiling: float) -> CheckResult:
+        """Catch a training run that blew up: NaN/Inf loss, or a finite loss far
+        above the normal operating range. This is the signal that actually flags a
+        bad run — unlike value_accuracy, an exploded loss is unambiguous. The ceiling
+        is calibrated from real runs (``scripts/calibrate_panel.py``); the NaN/Inf
+        guard needs no calibration.
+        """
+        import math
+
+        if loss is None:
+            return CheckResult(name, True, f"skipped (no {name} logged)", skipped=True)
+        if not math.isfinite(loss):
+            return CheckResult(name, False, f"{name}={loss} — DIVERGED (non-finite loss)", value=None)
+        ok = loss <= ceiling
+        return CheckResult(
+            name, ok,
+            f"{name}={loss:.3f} (ceiling {ceiling}); "
+            + ("in range" if ok else "DIVERGED — loss far above normal operating range"),
+            value=loss,
         )
 
     def _policy_entropy(self, entropy: Optional[float]) -> CheckResult:
