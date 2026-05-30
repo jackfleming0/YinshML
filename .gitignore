@@ -38,6 +38,10 @@ analysis_board/multiplayer/data_runs/
 # Per-day JSONL game logs from /api/move — private (friend play patterns),
 # accumulating, never push to the public repo.
 analysis_board/multiplayer/deploy/games/
+# Server-side cache for the Review-mode BGA imports. LRU, capped at 1000
+# entries, rebuilt on demand from BGA — never source of truth, never
+# checked in.
+analysis_board/multiplayer/bga_imports/
 
 # Allowed root-level documentation
 !CLAUDE.md
