@@ -23,11 +23,15 @@ DEFAULT_DB = "experiments/experiments.db"
 @click.option("--target", type=click.Choice(["local", "cloud"]), default="local",
               help="Where to run (cloud is a stubbed seam).")
 @click.option("--name", default="", help="Human label for the run.")
+@click.option("--iterations", type=int, default=None,
+              help="Override the config's num_iterations (e.g. 1 for a quick run).")
+@click.option("--games-dir", default=None,
+              help="Replayable game parquet dir for the offense-only audit.")
 @click.option("--llm/--no-llm", default=True,
               help="Use the Claude PI interpreter for the writeup (needs ANTHROPIC_API_KEY).")
 @click.option("--db", "db_path", default=DEFAULT_DB, help="Path to experiments.db")
 @click.option("--output-dir", default="experiments", help="Experiment output dir.")
-def schedule(config_path, baseline_id, target, name, llm, db_path, output_dir):
+def schedule(config_path, baseline_id, target, name, iterations, games_dir, llm, db_path, output_dir):
     """Schedule + run an experiment from CONFIG_PATH, then Tier-0 evaluate it."""
     from ...orchestration import (
         EvaluationFunnel, ExperimentSpec, Journal, OrchestrationStore,
@@ -46,6 +50,7 @@ def schedule(config_path, baseline_id, target, name, llm, db_path, output_dir):
     )
     spec = ExperimentSpec(
         config_path=config_path, name=name, baseline_id=baseline_id, target=target,
+        iterations=iterations, games_dir=games_dir,
     )
 
     click.echo(f"Scheduling {config_path} (baseline={baseline_id or 'none'}, target={target})...")

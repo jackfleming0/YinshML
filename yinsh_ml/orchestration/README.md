@@ -8,7 +8,7 @@ results to a non-blocking **feed** (visibility) or a blocking **gate**
 | Capability | Reused from |
 |---|---|
 | Experiment as a first-class object + SQLite registry | `yinsh_ml/experiments/experiment_db.py` |
-| Per-experiment execution engine | `yinsh_ml/training/supervisor.py` via `ExperimentRunner` |
+| Per-experiment execution engine | `scripts/run_training.py` (the real training entrypoint) |
 | Win-rate confidence intervals | `yinsh_ml/utils/stats.py::wilson_bounds` |
 | Head-to-head match play | `yinsh_ml/utils/tournament.py::ModelTournament` |
 
@@ -118,6 +118,39 @@ read-only and the output is a **proposal artifact** (`experiments/proposals/<id>
 for you to review and `schedule` — the agent never spends compute itself. Run it with
 `yinsh-track propose`. Teaches: agent design, read-only tool surfaces, guardrails,
 cost-of-error containment. Cost ≈ $0.11/proposal.
+
+## Production shakedown
+
+Before trusting the pipeline with real compute, run the shakedown — it exercises
+the *real* path (train → checkpoint → eval) end-to-end on a small config:
+
+```bash
+python scripts/bootstrap_orchestration.py                 # baseline + self-vs-self integrity
+python scripts/bootstrap_orchestration.py --full          # + a candidate-vs-baseline run
+```
+
+It trains a baseline through `run_training.py`, then plays that checkpoint against a
+copy of itself through the funnel and asserts the eval does **not** rate a model
+stronger than itself (SPRT must not be `accept_h1`). A model "beating" itself means
+the eval is broken — catch it here, not after a week of runs.
+
+### Why `LocalLauncher` drives `run_training.py`
+
+The repo's configs are all in the campaign format
+(`self_play:`/`trainer:`/`arena:`/`num_iterations:`) consumed by `run_training.py`.
+An earlier version of the launcher went through `experiments.ExperimentRunner`,
+which expects a *different* schema and whose loader **silently drops unrecognized
+keys** — so pointing it at a real config quietly ran a default 10-iteration job
+instead of the configured one. `LocalLauncher` now subprocesses the real entrypoint
+(so orchestrated runs behave exactly like manual ones) and records the run in the
+shared `experiments.db` itself. Checkpoints land under
+`<output_dir>/<experiment_id>/<timestamp>/iteration_<N>/`; the locator globs
+recursively, so the match runner and panel find them regardless of the timestamp dir.
+
+> **Note:** `run_training.py` imports `coremltools` (macOS CoreML export). It's in
+> `requirements.txt`; on a fresh non-Mac box you may need `pip install coremltools`
+> for the import to resolve (the native proxy is unused off-Mac — the warnings are
+> benign).
 
 ## Note on imports
 

@@ -35,6 +35,10 @@ class ExperimentSpec:
     target: LaunchTarget = "local"
     """Where to run. ``cloud`` is a stubbed seam in this slice."""
 
+    iterations: Optional[int] = None
+    """Override the config's ``num_iterations`` (e.g. for a quick bootstrap run).
+    ``None`` uses whatever the config specifies."""
+
     games_dir: Optional[str] = None
     """Directory of replayable game parquet (GameRecorder format) for the
     offense-only-equilibrium audit. If unset, the panel looks for a conventional

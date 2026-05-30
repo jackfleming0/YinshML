@@ -736,3 +736,78 @@ def test_default_panel_input_makes_offense_only_check_live(tmp_path):
     panel = FailurePanel().evaluate(panel_input)
     offense = next(c for c in panel.checks if c.name == "offense_only_equilibrium")
     assert not offense.skipped  # the gap is closed — the check now actually runs
+
+
+# --------------------------------------------------------------------------
+# LocalLauncher — real training entrypoint wiring (subprocess mocked)
+# --------------------------------------------------------------------------
+
+import json as _json
+from pathlib import Path as _Path
+
+from yinsh_ml.orchestration import LocalLauncher
+from yinsh_ml.experiments.experiment_db import ExperimentDB
+
+
+class _FakeProc:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+def _fake_runner(returncode=0, write_metrics=True):
+    """Mimics subprocess.run on run_training.py, optionally writing a metrics JSON."""
+    calls = []
+
+    def runner(cmd, cwd=None):
+        calls.append(cmd)
+        if returncode == 0 and write_metrics:
+            save_dir = _Path(cmd[cmd.index("--save-dir") + 1])
+            mdir = save_dir / "20260101_000000" / "metrics"
+            mdir.mkdir(parents=True, exist_ok=True)
+            (mdir / "iteration_0.json").write_text(_json.dumps({
+                "metrics": {"training": [
+                    {"policy_loss": 1.2, "value_loss": 0.5, "value_accuracy": 0.62}
+                ]}
+            }))
+        return _FakeProc(returncode)
+
+    runner.calls = calls
+    return runner
+
+
+def _campaign_config(tmp_path):
+    p = tmp_path / "cfg.yaml"
+    p.write_text("num_iterations: 1\nname: boot-run\nself_play:\n  num_simulations: 8\n")
+    return str(p)
+
+
+def test_local_launcher_runs_real_entrypoint_and_records(tmp_path):
+    cfg = _campaign_config(tmp_path)
+    runner = _fake_runner(returncode=0)
+    launcher = LocalLauncher(output_dir=str(tmp_path / "exp"), runner=runner)
+
+    result = launcher.launch(ExperimentSpec(config_path=cfg, iterations=1))
+
+    assert result.status == "completed"
+    assert result.final_metrics["value_accuracy"] == 0.62  # read from the metrics JSON
+    # It drove the REAL training entrypoint, not ExperimentRunner.
+    cmd = runner.calls[0]
+    assert cmd[1].endswith("run_training.py")
+    assert "--config" in cmd and "--save-dir" in cmd and "--iterations" in cmd
+    # And recorded the run in the shared registry.
+    db = ExperimentDB(str(tmp_path / "exp" / "experiments.db"))
+    rec = db.get_experiment(result.experiment_id)
+    assert rec is not None and rec.status == "completed"
+    assert _json.loads(rec.config_json)["num_iterations"] == 1  # real config snapshotted
+
+
+def test_local_launcher_failed_training_marks_failed(tmp_path):
+    cfg = _campaign_config(tmp_path)
+    launcher = LocalLauncher(output_dir=str(tmp_path / "exp"), runner=_fake_runner(returncode=1))
+
+    result = launcher.launch(ExperimentSpec(config_path=cfg))
+
+    assert result.status == "failed"
+    assert result.final_metrics == {}
+    db = ExperimentDB(str(tmp_path / "exp" / "experiments.db"))
+    assert db.get_experiment(result.experiment_id).status == "failed"
