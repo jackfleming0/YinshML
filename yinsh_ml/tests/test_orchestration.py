@@ -811,3 +811,53 @@ def test_local_launcher_failed_training_marks_failed(tmp_path):
     assert result.final_metrics == {}
     db = ExperimentDB(str(tmp_path / "exp" / "experiments.db"))
     assert db.get_experiment(result.experiment_id).status == "failed"
+
+
+# --------------------------------------------------------------------------
+# Panel calibration (thresholds derived from real run metrics)
+# --------------------------------------------------------------------------
+
+def test_panel_from_calibration_overrides_thresholds(tmp_path):
+    cal = tmp_path / "cal.json"
+    cal.write_text(_json.dumps({"thresholds": {"min_value_accuracy": 0.0319},
+                                "observed": {}, "notes": []}))
+    panel = FailurePanel.from_calibration(str(cal))
+    assert panel.min_value_accuracy == 0.0319
+
+    # A real-scale value_accuracy that the old 0.40 default wrongly flagged now passes.
+    result = panel.evaluate(PanelInput(value_accuracy=0.089))
+    vc = next(c for c in result.checks if c.name == "value_calibration")
+    assert vc.passed
+
+
+def test_panel_from_calibration_ignores_unknown_keys(tmp_path):
+    cal = tmp_path / "cal.json"
+    cal.write_text(_json.dumps({"thresholds": {"min_value_accuracy": 0.03,
+                                               "some_future_key": 123}}))
+    panel = FailurePanel.from_calibration(str(cal))  # must not raise
+    assert panel.min_value_accuracy == 0.03
+
+
+def test_calibrate_derives_threshold_from_run_metrics(tmp_path):
+    """calibrate() reads real-shaped metrics JSON and recommends a grounded floor."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "calibrate_panel", str(_Path(__file__).resolve().parents[2] / "scripts" / "calibrate_panel.py")
+    )
+    calmod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(calmod)
+
+    # Two synthetic runs with real-shaped metrics (value_accuracy ~0.06-0.12).
+    for run, va in [("runA", 0.064), ("runB", 0.117)]:
+        mdir = tmp_path / run / "20260101_000000" / "metrics"
+        mdir.mkdir(parents=True, exist_ok=True)
+        (mdir / "iteration_0.json").write_text(_json.dumps({
+            "metrics": {"training": [{"value_accuracy": va, "value_loss": 8.0, "policy_loss": 1.0}]}
+        }))
+
+    result = calmod.calibrate([str(tmp_path)])
+    assert result["n_metric_files"] == 2
+    # floor = 0.5 x observed min (0.064) = 0.032
+    assert result["thresholds"]["min_value_accuracy"] == 0.032
+    assert result["observed"]["value_accuracy"]["min"] == 0.064

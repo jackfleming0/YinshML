@@ -8,6 +8,7 @@
 !yinsh_ml/**
 !configs/
 !configs/*.yaml
+!configs/panel_calibration.json
 configs/local/
 !experiments/
 !experiments/**

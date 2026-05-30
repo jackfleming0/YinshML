@@ -29,17 +29,25 @@ DEFAULT_DB = "experiments/experiments.db"
               help="Replayable game parquet dir for the offense-only audit.")
 @click.option("--llm/--no-llm", default=True,
               help="Use the Claude PI interpreter for the writeup (needs ANTHROPIC_API_KEY).")
+@click.option("--calibration", default="configs/panel_calibration.json",
+              help="Panel calibration file (auto-loaded if it exists).")
 @click.option("--db", "db_path", default=DEFAULT_DB, help="Path to experiments.db")
 @click.option("--output-dir", default="experiments", help="Experiment output dir.")
-def schedule(config_path, baseline_id, target, name, iterations, games_dir, llm, db_path, output_dir):
+def schedule(config_path, baseline_id, target, name, iterations, games_dir, llm,
+             calibration, db_path, output_dir):
     """Schedule + run an experiment from CONFIG_PATH, then Tier-0 evaluate it."""
+    import os as _os
+
     from ...orchestration import (
-        EvaluationFunnel, ExperimentSpec, Journal, OrchestrationStore,
+        EvaluationFunnel, ExperimentSpec, FailurePanel, Journal, OrchestrationStore,
         PIInterpreter, Scheduler, TriageWorkflow,
     )
 
     store = OrchestrationStore(db_path)
-    funnel = EvaluationFunnel()
+    panel = FailurePanel.from_calibration(calibration) if _os.path.isfile(calibration) else None
+    if panel is not None:
+        click.echo(f"Loaded panel calibration from {calibration}")
+    funnel = EvaluationFunnel(panel=panel)
     scheduler = Scheduler(
         store=store,
         journal=Journal(output_dir),

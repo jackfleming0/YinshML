@@ -134,6 +134,26 @@ copy of itself through the funnel and asserts the eval does **not** rate a model
 stronger than itself (SPRT must not be `accept_h1`). A model "beating" itself means
 the eval is broken — catch it here, not after a week of runs.
 
+### Panel calibration (don't trust guessed thresholds)
+
+The failure-panel thresholds can't be guessed — they depend on the value-head mode
+and this codebase's metric scales. Measured against real runs, `value_accuracy` sits
+around **0.06–0.12** (it's a 7-class value head), so the original `0.40` default
+would have flagged *every* real candidate. `scripts/calibrate_panel.py` derives
+grounded thresholds from actual run metrics:
+
+```bash
+python scripts/calibrate_panel.py --runs experiments   # writes configs/panel_calibration.json
+```
+
+`FailurePanel.from_calibration(...)` loads them, and `yinsh-track schedule` /
+the bootstrap auto-load `configs/panel_calibration.json` if present. A grounded
+calibration (from the repo's existing runs) is committed; **re-run the tool on your
+Mac with your real configs** — thresholds tuned to a CPU smoke aren't the right ones
+for a Mac-trained model. Note: at this scale `value_accuracy` is a *weak* health
+signal (it barely moves); `value_loss` tracks learning far better, and wiring a
+value-loss / policy-entropy collapse check is a worthwhile follow-up.
+
 ### Why `LocalLauncher` drives `run_training.py`
 
 The repo's configs are all in the campaign format

@@ -54,7 +54,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from yinsh_ml.orchestration import (
-        EvaluationFunnel, ExperimentSpec, Journal, OrchestrationStore, Scheduler,
+        EvaluationFunnel, ExperimentSpec, FailurePanel, Journal, OrchestrationStore, Scheduler,
     )
     from yinsh_ml.orchestration.failure_panel import PanelInput
     from yinsh_ml.orchestration.match_runner import TournamentMatchRunner
@@ -63,8 +63,12 @@ def main() -> int:
     device = args.device or _detect_device()
     checks: list[tuple[str, bool, str]] = []
 
+    cal = Path("configs/panel_calibration.json")
+    panel = FailurePanel.from_calibration(str(cal)) if cal.is_file() else None
+    if panel is not None:
+        print(f"Loaded panel calibration from {cal}")
     store = OrchestrationStore(str(Path(args.output_dir) / "experiments.db"))
-    funnel = EvaluationFunnel(batch_size=10, max_games=args.games)
+    funnel = EvaluationFunnel(panel=panel, batch_size=10, max_games=args.games)
     scheduler = Scheduler(
         store=store, journal=Journal(args.output_dir), funnel=funnel,
         output_dir=args.output_dir,

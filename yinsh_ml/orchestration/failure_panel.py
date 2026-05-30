@@ -19,6 +19,7 @@ slice ships Tier 0 only.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 
@@ -99,7 +100,7 @@ class FailurePanel:
     def __init__(
         self,
         min_policy_entropy: float = 0.5,
-        min_value_accuracy: float = 0.40,
+        min_value_accuracy: float = 0.02,
         min_value_variance: float = 1e-3,
         max_draw_rate: float = 0.85,
         offense_only_growth: float = 3.0,
@@ -111,6 +112,27 @@ class FailurePanel:
         self.max_draw_rate = max_draw_rate
         self.offense_only_growth = offense_only_growth
         self.offense_only_window = offense_only_window
+
+    @classmethod
+    def from_calibration(cls, source) -> "FailurePanel":
+        """Build a panel with thresholds derived from real runs.
+
+        ``source`` is a path to a calibration JSON (see ``scripts/calibrate_panel.py``)
+        or an already-loaded dict. Only the ``thresholds`` keys present are overridden;
+        the rest keep the (deliberately loose) defaults. Unknown keys are ignored so a
+        newer calibration file can't break an older panel.
+        """
+        import json as _json
+
+        if isinstance(source, (str, Path)):
+            with open(source) as f:
+                data = _json.load(f)
+        else:
+            data = dict(source)
+        thresholds = data.get("thresholds", data) if isinstance(data, dict) else {}
+        valid = {f for f in cls.__init__.__code__.co_varnames if f != "self"}
+        kwargs = {k: v for k, v in thresholds.items() if k in valid}
+        return cls(**kwargs)
 
     def evaluate(self, data: PanelInput) -> PanelResult:
         return PanelResult(
