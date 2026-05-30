@@ -28,6 +28,16 @@
              "Deep" option to test whether the dial is real or placebo. -->
         <key>YNS_MAX_NUM_SIMS</key>
         <string>3200</string>
+        <!-- Owner bypass for the cap above. An eval request carrying this
+             token (Advanced MCTS → "Owner token" in the board, persisted to
+             your browser's localStorage) skips YNS_MAX_NUM_SIMS, so you can
+             run 256000-sim searches while public visitors stay capped. This
+             is a deliberately simple shared secret, not a strong credential —
+             it only needs to stop friends from *accidentally* queuing a giant
+             run, not a determined attacker. Swap in `openssl rand -hex 24` if
+             you ever need real protection. Empty = bypass disabled. -->
+        <key>YNS_OWNER_TOKEN</key>
+        <string>jackfleming</string>
         <!-- MPS = Apple Silicon GPU. Fall back to "cpu" if MPS misbehaves. -->
         <key>YNS_DEVICE</key>
         <string>mps</string>

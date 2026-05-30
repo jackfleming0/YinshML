@@ -174,7 +174,7 @@
 
           <label class="field">
             <span>MCTS sims <em>(0 = raw policy)</em></span>
-            <input id="num-sims" type="number" value="0" min="0" max="2000" step="50" />
+            <input id="num-sims" type="number" value="0" min="0" max="256000" step="50" />
           </label>
 
           <details class="advanced-mcts" id="advanced-mcts">
@@ -199,6 +199,11 @@
               <label class="field">
                 <span>fpu_reduction <em>(unvisited-child penalty)</em></span>
                 <input id="fpu-reduction" type="number" value="0.25" min="0" max="1" step="0.05" />
+              </label>
+              <label class="field">
+                <span>Owner token <em>(bypass public sims cap)</em></span>
+                <input id="owner-token" type="password" value="" autocomplete="off"
+                       placeholder="leave blank — owner only" />
               </label>
             </div>
             <div class="advanced-hint">

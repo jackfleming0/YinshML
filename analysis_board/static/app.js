@@ -630,7 +630,22 @@ const heuristicWeightEl = $("heuristic-weight");
 const heuristicWeightField = $("heuristic-weight-field");
 const cPuctEl = $("c-puct");
 const fpuReductionEl = $("fpu-reduction");
+const ownerTokenEl = $("owner-token");
 const resetAdvancedBtn = $("reset-advanced");
+
+// Owner token: persisted to localStorage so it survives reloads (the owner
+// pastes it once). Empty for every normal/public visitor. Sent with eval
+// requests to bypass the public YNS_MAX_NUM_SIMS cap server-side.
+const OWNER_TOKEN_KEY = "yns_owner_token";
+if (ownerTokenEl) {
+  ownerTokenEl.value = localStorage.getItem(OWNER_TOKEN_KEY) || "";
+  ownerTokenEl.addEventListener("change", () => {
+    const v = ownerTokenEl.value.trim();
+    if (v) localStorage.setItem(OWNER_TOKEN_KEY, v);
+    else localStorage.removeItem(OWNER_TOKEN_KEY);
+  });
+}
+const ownerToken = () => (ownerTokenEl ? ownerTokenEl.value.trim() : "");
 
 // Advanced-MCTS defaults — kept here as the single source of truth for
 // the reset button and the server-side defaults (they must agree).
@@ -684,6 +699,13 @@ const gameSetupBlock = $("game-setup-block");
 const gameStatusBlock = $("game-status-block");
 const gameHumanSideEl = $("game-human-side");
 const gameSimsEl = $("game-sims");
+// Play-mode engine is hard-capped here regardless of the owner-token cap
+// bypass: a game against the engine should stay at a sane, snappy budget
+// (the "Deep — 3200 sims" dropdown ceiling), not balloon into a multi-minute
+// per-move analysis. The owner bypass is for one-off position analysis only;
+// the play-mode payload (currentPositionPayload) deliberately omits the token,
+// and this clamp guards against a tampered dropdown value too.
+const PLAY_MODE_MAX_SIMS = 3200;
 const gameModelEl = $("game-model");
 const gameSpoilersEl = $("game-spoilers");
 const gameSpoilersInlineEl = $("game-spoilers-inline");
@@ -840,6 +862,7 @@ function currentPayload() {
     side_to_move: sideEl ? sideEl.value : "WHITE",
     scores: derivedScores(),
     num_sims: Math.max(0, parseInt(numSims.value, 10) || 0),
+    owner_token: ownerToken(),
     top_k: 8,
     move_maker: state.moveMaker,
     // Advanced MCTS knobs — server falls back to training defaults if absent,
@@ -888,10 +911,15 @@ async function evaluate(opts = {}) {
         captureNote = " · capture: remove a ring";
       }
     }
+    // If the public cap clamped the search, say so out loud instead of
+    // silently running fewer sims than requested.
+    const capNote = data.capped_from
+      ? ` · ⚠ capped to ${data.num_sims} of ${data.capped_from} requested (public limit)`
+      : "";
     setStatus(
       `${data.mode === "mcts" ? "MCTS" : "Network policy"} · ` +
-      `${data.side_to_move} to move${captureNote} · ${data.num_valid_moves} legal moves`,
-      "success",
+      `${data.side_to_move} to move${captureNote} · ${data.num_valid_moves} legal moves${capNote}`,
+      data.capped_from ? "warning" : "success",
     );
     renderResult(data);
   } catch (e) {
@@ -1273,7 +1301,7 @@ async function startGame() {
   let humanSide = gameHumanSideEl.value;
   if (humanSide === "random") humanSide = Math.random() < 0.5 ? "WHITE" : "BLACK";
   const computerSide = humanSide === "WHITE" ? "BLACK" : "WHITE";
-  const computerSims = parseInt(gameSimsEl.value, 10) || 800;
+  const computerSims = Math.min(PLAY_MODE_MAX_SIMS, parseInt(gameSimsEl.value, 10) || 800);
   const spoilersEnabled = !!gameSpoilersEl.checked;
   // Sync the main model dropdown to the game-setup choice so all the
   // existing /api/evaluate plumbing (which reads from modelSel.value) picks
@@ -2118,6 +2146,7 @@ async function evaluateReviewPosition() {
     ...step.position,
     model_id: modelSel.value,
     num_sims: Math.max(0, parseInt(numSims.value, 10) || 0),
+    owner_token: ownerToken(),
     top_k: 8,
     evaluation_mode: evalModeEl.value,
     heuristic_weight: parseFloat(heuristicWeightEl.value) || MCTS_DEFAULTS.heuristic_weight,

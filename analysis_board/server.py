@@ -12,6 +12,7 @@ Run with::
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -78,6 +79,14 @@ DEVICE = os.environ.get("YNS_DEVICE")  # None = auto-detect
 # dev). On the deployed Mac mini we set YNS_MAX_NUM_SIMS=1600 via launchd
 # so a friend on the public URL can't accidentally queue 3200-sim runs.
 MAX_NUM_SIMS = int(os.environ.get("YNS_MAX_NUM_SIMS", "0"))
+
+# Owner bypass for MAX_NUM_SIMS. When set to a non-empty secret, a request
+# carrying the matching token (X-Yns-Owner-Token header, or "owner_token" in
+# the JSON body) skips the cap entirely — so the owner can queue arbitrarily
+# deep searches (256000 sims if they feel like it) while anonymous public
+# visitors stay capped and can't hang the shared, lock-serialized engine.
+# Empty default = bypass disabled (no token grants extra budget).
+OWNER_TOKEN = os.environ.get("YNS_OWNER_TOKEN", "")
 
 # Serialize MCTS searches across concurrent requests. The MCTS instances in
 # _mcts_cache are shared by all callers hitting the same (model_id, num_sims,
@@ -605,8 +614,12 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         return jsonify({"ok": False, "errors": ["model_id is required"]}), 400
 
     num_sims = int(payload.get("num_sims", 0))
+    # Owner bypass: a matching token skips the public cap. Constant-time
+    # compare; only active when YNS_OWNER_TOKEN is configured non-empty.
+    provided_token = request.headers.get("X-Yns-Owner-Token") or str(payload.get("owner_token", ""))
+    is_owner = bool(OWNER_TOKEN) and hmac.compare_digest(provided_token, OWNER_TOKEN)
     capped_from = None
-    if MAX_NUM_SIMS > 0 and num_sims > MAX_NUM_SIMS:
+    if MAX_NUM_SIMS > 0 and not is_owner and num_sims > MAX_NUM_SIMS:
         capped_from = num_sims
         num_sims = MAX_NUM_SIMS
         log.info("capping num_sims %d → %d (YNS_MAX_NUM_SIMS)", capped_from, num_sims)
@@ -793,6 +806,12 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         "num_valid_moves": len(valid_moves),
         "top_moves": top,
         "legal_moves": _legal_moves_payload(valid_moves),
+        # Effective sims actually run, plus the pre-cap request if the public
+        # cap clamped it (null when uncapped / owner-bypassed). Lets the UI
+        # tell the user "ran 3200 of 256000 requested" instead of silently
+        # lying about the search depth.
+        "num_sims": num_sims,
+        "capped_from": capped_from,
     })
 
 
