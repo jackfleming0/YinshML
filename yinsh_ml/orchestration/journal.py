@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .funnel import Tier0Result
+    from .interpreter import Interpretation
     from .pi import RoutingDecision
     from .spec import ExperimentSpec
 
@@ -37,11 +38,19 @@ class Journal:
         spec: "ExperimentSpec",
         tier0: "Tier0Result",
         decision: "RoutingDecision",
+        interpretation: "Interpretation | None" = None,
     ) -> str:
-        """Write the per-experiment report; return its path."""
+        """Write the per-experiment report; return its path.
+
+        When an ``interpretation`` is supplied (Rung 1 — the PI interpreter), its
+        Claude-authored read and reasons-to-doubt are rendered; otherwise the
+        report falls back to the deterministic template.
+        """
         self.journal_dir.mkdir(parents=True, exist_ok=True)
         path = self.journal_dir / f"{experiment_id}.md"
-        path.write_text(self._render_report(experiment_id, spec, tier0, decision))
+        path.write_text(
+            self._render_report(experiment_id, spec, tier0, decision, interpretation)
+        )
         return str(path)
 
     def append_feed(self, experiment_id: str, headline: str, detail: str) -> None:
@@ -62,6 +71,7 @@ class Journal:
         spec: "ExperimentSpec",
         tier0: "Tier0Result",
         decision: "RoutingDecision",
+        interpretation: "Interpretation | None" = None,
     ) -> str:
         o = tier0.outcome
         lines = [
@@ -102,8 +112,25 @@ class Journal:
             mark = "⚠️ SKIP" if c.skipped else ("✅" if c.passed else "❌")
             lines.append(f"- {mark} **{c.name}** — {c.detail}")
 
-        # Reasons-to-doubt: the PI layer's honesty channel.
-        doubts = self._reasons_to_doubt(tier0)
+        # PI read (Rung 1 — Claude-authored). Present only when the interpreter ran.
+        if interpretation is not None:
+            lines += [
+                "",
+                f"## PI read ({self._model_label})",
+                "",
+                f"*Confidence: {interpretation.confidence}*",
+                "",
+                interpretation.assessment,
+                "",
+                f"**Suggested next step:** {interpretation.suggested_next_step}",
+            ]
+
+        # Reasons-to-doubt: the honesty channel. Prefer the PI's, fall back to template.
+        doubts = (
+            interpretation.reasons_to_doubt
+            if interpretation is not None and interpretation.reasons_to_doubt
+            else self._reasons_to_doubt(tier0)
+        )
         lines += ["", "## Reasons to doubt this conclusion", ""]
         if doubts:
             lines += [f"- {d}" for d in doubts]
@@ -112,6 +139,8 @@ class Journal:
 
         lines.append("")
         return "\n".join(lines)
+
+    _model_label = "Claude Opus 4.8"
 
     @staticmethod
     def _reasons_to_doubt(tier0: "Tier0Result") -> list[str]:

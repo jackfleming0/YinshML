@@ -19,6 +19,7 @@ from .launcher import Launcher, LocalLauncher, CloudLauncher, LaunchResult
 from .match_runner import MatchRunner, MatchOutcome
 from .failure_panel import FailurePanel, PanelResult, CheckResult
 from .funnel import EvaluationFunnel, Tier0Result
+from .interpreter import Interpretation, PIInterpreter
 from .journal import Journal
 from .pi import PIRouter, RoutingDecision
 from .scheduler import Scheduler
@@ -32,5 +33,6 @@ __all__ = [
     "EvaluationFunnel", "Tier0Result",
     "Journal",
     "PIRouter", "RoutingDecision",
+    "Interpretation", "PIInterpreter",
     "Scheduler",
 ]

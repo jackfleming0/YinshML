@@ -69,6 +69,30 @@ the seams. Deliberately deferred:
 - **Anchor-ladder update on promotion** — `ratify` marks `promoted`; making the
   promoted model the next baseline is a follow-up.
 
+## Agentic layers (the ladder)
+
+True agency is added in rungs, each reusing the last. The guiding rule throughout:
+**the LLM advises, the rules gate** — a model call never decides promotion/rejection
+(that stays deterministic in `pi.py`); the LLM enriches judgment and, higher up,
+proposes work. All rungs run on Opus 4.8 and degrade gracefully without an API key.
+
+| Rung | Type | Module | Status |
+|---|---|---|---|
+| **1** | Augmented step (single call) | `interpreter.py::PIInterpreter` | **built** |
+| **2** | Workflow (code-controlled tool loop) | triage + diagnosis | planned |
+| **3** | Agent (model-driven trajectory) | next-experiment proposer | planned |
+
+**Rung 1 — PI interpreter.** Replaces the templated writeup with a Claude-authored
+interpretation: a structured read (`messages.parse` → Pydantic), reasons-to-doubt,
+and a suggested next step. It is *not* an agent — one call, no tools, no loop. The
+routing decision is already made deterministically before it runs; the interpreter
+only authors the narrative that lands in the journal and feed. If `ANTHROPIC_API_KEY`
+is unset or the call fails, `interpret()` returns `None` and the journal falls back
+to its template — the pipeline never breaks. Enable/disable per run with
+`yinsh-track schedule ... --llm / --no-llm` (on by default). Teaches: structured
+outputs, prompt caching (the frozen rubric rides the cache), adaptive thinking,
+graceful degradation. Cost ≈ $0.05/run.
+
 ## Note on imports
 
 Importing this package transitively pulls `torch` via `yinsh_ml.utils` (whose

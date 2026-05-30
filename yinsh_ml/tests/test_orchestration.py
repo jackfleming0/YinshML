@@ -187,7 +187,7 @@ class FakeLauncher(Launcher):
         )
 
 
-def _make_scheduler(tmp_path, launcher, match_runner=None, panel_input=None):
+def _make_scheduler(tmp_path, launcher, match_runner=None, panel_input=None, interpreter=None):
     db_path = str(tmp_path / "experiments.db")
     store = OrchestrationStore(db_path)
     journal = Journal(str(tmp_path))
@@ -202,6 +202,7 @@ def _make_scheduler(tmp_path, launcher, match_runner=None, panel_input=None):
         panel_input_builder=(
             (lambda spec, launch: panel_input) if panel_input is not None else None
         ),
+        interpreter=interpreter,
     )
     return scheduler, store, db_path
 
@@ -292,3 +293,122 @@ def test_scheduler_queue_runs_all(tmp_path):
     results = scheduler.run_queue()
     assert len(results) == 1
     assert scheduler.pending == 0
+
+
+# --------------------------------------------------------------------------
+# Rung 1 — PI interpreter (the augmented step)
+# --------------------------------------------------------------------------
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from yinsh_ml.orchestration import Interpretation, PIInterpreter
+
+
+def _tier0_and_decision():
+    """Build a real (spec, tier0, decision) triple for interpreter tests."""
+    from yinsh_ml.orchestration import PIRouter
+
+    funnel = EvaluationFunnel(batch_size=10, max_games=200)
+    tier0 = funnel.run_tier0(_healthy_input(), FakeMatchRunner(win_frac=0.8))
+    decision = PIRouter().route(tier0)
+    spec = ExperimentSpec(config_path="x.yaml", name="t", baseline_id="base1")
+    return spec, tier0, decision
+
+
+def test_interpreter_maps_parsed_output_and_caches_system():
+    spec, tier0, decision = _tier0_and_decision()
+    client = MagicMock()
+    client.messages.parse.return_value = SimpleNamespace(
+        parsed_output=SimpleNamespace(
+            headline="Strong win vs baseline",
+            assessment="The candidate beat the baseline decisively with a clean panel.",
+            reasons_to_doubt=["Only one baseline", "Small decisive sample"],
+            suggested_next_step="Run the Tier-1 anchor ladder.",
+            confidence="medium",
+        )
+    )
+
+    interp = PIInterpreter(client=client).interpret(spec, tier0, decision)
+
+    assert isinstance(interp, Interpretation)
+    assert interp.headline == "Strong win vs baseline"
+    assert interp.reasons_to_doubt == ["Only one baseline", "Small decisive sample"]
+    assert interp.confidence == "medium"
+
+    # Built the request per the project defaults: Opus 4.8, adaptive thinking,
+    # a cached system rubric, and a structured output schema.
+    kwargs = client.messages.parse.call_args.kwargs
+    assert kwargs["model"] == "claude-opus-4-8"
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "output_format" in kwargs
+
+
+def test_interpreter_returns_none_on_failure():
+    # Any failure (no key, network, SDK) must degrade to the template, not raise.
+    spec, tier0, decision = _tier0_and_decision()
+    client = MagicMock()
+    client.messages.parse.side_effect = RuntimeError("no API key")
+    assert PIInterpreter(client=client).interpret(spec, tier0, decision) is None
+
+
+def test_journal_renders_pi_read_when_interpretation_present(tmp_path):
+    spec, tier0, decision = _tier0_and_decision()
+    interp = Interpretation(
+        headline="h",
+        assessment="ASSESSMENT-MARKER",
+        reasons_to_doubt=["DOUBT-MARKER"],
+        suggested_next_step="NEXT-MARKER",
+        confidence="low",
+    )
+    path = Journal(str(tmp_path)).write_report("e1", spec, tier0, decision, interp)
+    text = (tmp_path / "journal" / "e1.md").read_text()
+    assert "PI read" in text
+    assert "ASSESSMENT-MARKER" in text
+    assert "DOUBT-MARKER" in text
+    assert "NEXT-MARKER" in text
+
+
+def test_journal_falls_back_to_template_without_interpretation(tmp_path):
+    spec, tier0, decision = _tier0_and_decision()
+    Journal(str(tmp_path)).write_report("e2", spec, tier0, decision, None)
+    text = (tmp_path / "journal" / "e2.md").read_text()
+    assert "PI read" not in text
+    assert "Reasons to doubt" in text  # template's honesty section still present
+
+
+class _StubInterpreter:
+    def interpret(self, spec, tier0, decision):
+        return Interpretation(
+            headline="LLM-HEADLINE",
+            assessment="LLM-ASSESSMENT",
+            reasons_to_doubt=["d"],
+            suggested_next_step="s",
+            confidence="high",
+        )
+
+
+def test_scheduler_threads_interpretation_into_feed_and_report(tmp_path):
+    healthy = {"policy_target_entropy_mean": 1.2, "value_accuracy": 0.6, "value_variance": 0.05}
+    launcher = FakeLauncher(str(tmp_path / "experiments.db"), "exp_llm", final_metrics=healthy)
+    scheduler, _, _ = _make_scheduler(
+        tmp_path, launcher, match_runner=FakeMatchRunner(0.8), interpreter=_StubInterpreter()
+    )
+
+    scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
+
+    # LLM one-liner enriches the feed detail; assessment lands in the report.
+    assert "LLM-HEADLINE" in (tmp_path / "FEED.md").read_text()
+    assert "LLM-ASSESSMENT" in (tmp_path / "journal" / "exp_llm.md").read_text()
+
+
+def test_scheduler_without_interpreter_still_works(tmp_path):
+    # The whole pipeline must run with no interpreter wired (LLM is optional).
+    healthy = {"policy_target_entropy_mean": 1.2, "value_accuracy": 0.6, "value_variance": 0.05}
+    launcher = FakeLauncher(str(tmp_path / "experiments.db"), "exp_nollm", final_metrics=healthy)
+    scheduler, store, _ = _make_scheduler(tmp_path, launcher, match_runner=FakeMatchRunner(0.8))
+
+    scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
+    assert store.get_status("exp_nollm") == "awaiting_ratification"
+    assert "PI read" not in (tmp_path / "journal" / "exp_nollm.md").read_text()

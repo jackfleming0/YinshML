@@ -26,6 +26,7 @@ from typing import Callable, List, Optional
 
 from .failure_panel import FailurePanel, PanelInput
 from .funnel import EvaluationFunnel, Tier0Result
+from .interpreter import Interpretation, PIInterpreter
 from .journal import Journal
 from .launcher import Launcher, LaunchResult, get_launcher
 from .match_runner import MatchRunner
@@ -65,12 +66,15 @@ class Scheduler:
         launcher_factory: LauncherFactory = get_launcher,
         panel_input_builder: Optional[PanelInputBuilder] = None,
         match_runner_factory: Optional[MatchRunnerFactory] = None,
+        interpreter: Optional[PIInterpreter] = None,
         max_concurrent: int = 1,
     ):
         self.store = store
         self.journal = journal
         self.funnel = funnel or EvaluationFunnel()
         self.router = router or PIRouter()
+        # Rung 1: optional Claude-authored narrative. None -> templated writeups.
+        self.interpreter = interpreter
         self.output_dir = output_dir
         self.launcher_factory = launcher_factory
         self.panel_input_builder = panel_input_builder or _default_panel_input
@@ -127,12 +131,24 @@ class Scheduler:
         tier0 = self.funnel.run_tier0(panel_input, match_runner)
         decision = self.router.route(tier0)
 
+        # Rung 1: the LLM advises (narrative), the rules gate (routing already decided).
+        interpretation: Optional[Interpretation] = (
+            self.interpreter.interpret(spec, tier0, decision)
+            if self.interpreter is not None
+            else None
+        )
+
         self._persist(spec, launch, tier0, decision)
         report_path = self.journal.write_report(
-            launch.experiment_id, spec, tier0, decision
+            launch.experiment_id, spec, tier0, decision, interpretation
+        )
+        # Feed headline stays deterministic (scannable route + record); the LLM's
+        # one-liner enriches the detail when available.
+        feed_detail = (
+            interpretation.headline if interpretation is not None else decision.feed_detail
         )
         self.journal.append_feed(
-            launch.experiment_id, decision.feed_headline, decision.feed_detail
+            launch.experiment_id, decision.feed_headline, feed_detail
         )
 
         if decision.gate_kind is not None:
