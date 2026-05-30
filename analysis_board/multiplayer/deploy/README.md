@@ -165,6 +165,78 @@ pmset -g | grep -E "^ *(sleep|displaysleep)"
 - Replacing model checkpoints: drop new `.pt` into `models/<name>/`
   and reload the server LaunchAgent.
 
+## BGA cookies for Review mode (optional)
+
+The "Review game" mode on the analysis board lets visitors paste a
+[boardgamearena.com](https://boardgamearena.com) YINSH replay URL and step
+through it ply by ply with engine commentary. This requires a BGA session
+on the **server** to authenticate the replay fetch — there is no public BGA
+API, and BGA's replay endpoints reject anonymous requests. Cookies stay
+server-side and are never exposed to the frontend.
+
+Skipping this section is fine: Review mode still loads, but pasting a URL
+will return a friendly "BGA cookies missing or expired" error. Setup, Play,
+and Play-vs-Engine all work unaffected.
+
+### One-time, on the Mac mini
+
+1. **Log into boardgamearena.com in a browser** (any account: must be
+   verified, >24h old, and have played at least 2 games — BGA's own
+   requirements for replay access).
+2. **Export the session cookies** to `~/.bga_cookies.json` using a browser
+   extension like
+   [Cookie-Editor](https://chrome.google.com/webstore/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm)
+   or [EditThisCookie](https://www.editthiscookie.com). The file must be a
+   JSON object mapping cookie name → value. **Required cookies** (export
+   all of these — fewer will cause `/archive` requests to fail with "not
+   logged in"):
+   ```
+   PHPSESSID
+   TournoiEnLigne_sso_id
+   TournoiEnLigne_sso_user
+   TournoiEnLigneid
+   TournoiEnLigneidt
+   TournoiEnLignetk
+   TournoiEnLignetkt
+   ```
+3. **Tighten permissions** — this is an active session credential:
+   ```bash
+   chmod 600 ~/.bga_cookies.json
+   ```
+4. **Restart the server** so it picks up the cookies on next import:
+   ```bash
+   yinsh-redeploy
+   ```
+
+### Path override
+
+The server defaults to `~/.bga_cookies.json`. Override via the
+`YNS_BGA_COOKIES` env var if your setup needs a different location:
+
+```xml
+<!-- in com.jackfleming.yinsh-server.plist, inside <dict>EnvironmentVariables</dict> -->
+<key>YNS_BGA_COOKIES</key>
+<string>/path/to/cookies.json</string>
+```
+
+The default path matches what `scripts/bga_fetch.py` (the bulk crawler)
+uses, so a single cookie export works for both tools.
+
+### When the session expires
+
+BGA rotates session credentials periodically. When the server starts
+returning "BGA cookies missing or expired" on every import, re-export from
+the browser and repeat step 2. There is no automatic refresh — BGA's login
+flow is JS-rendered and resists scripting.
+
+### Rate limits
+
+The endpoint caches every successful import under
+`analysis_board/multiplayer/bga_imports/` (last 1000 games, LRU) so repeat
+visits to the same game cost nothing. Novel imports are rate-limited to 5
+per IP per hour. Both bounds protect BGA's 200/day per-account cap from
+being exhausted by a single visitor.
+
 ## Laptop-side log pull (separate from Mac mini setup)
 
 The Mac mini server writes one JSONL file per UTC day to `games/`
