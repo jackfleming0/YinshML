@@ -35,4 +35,9 @@ class ExperimentSpec:
     target: LaunchTarget = "local"
     """Where to run. ``cloud`` is a stubbed seam in this slice."""
 
+    games_dir: Optional[str] = None
+    """Directory of replayable game parquet (GameRecorder format) for the
+    offense-only-equilibrium audit. If unset, the panel looks for a conventional
+    ``<save_dir>/parquet_data`` and otherwise skips that check."""
+
     tags: list[str] = field(default_factory=list)

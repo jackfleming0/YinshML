@@ -61,11 +61,13 @@ the seams. Deliberately deferred:
 - **Tiers 1–2** — only Tier 0 (failure panel + SPRT vs predecessor) runs.
   `EvaluationFunnel.run_tier1/run_tier2` are `NotImplementedError` seams for the
   anchor ladder, heuristic/GH-engine gauntlet, and human milestones.
-- **PI reasoning** — the writeup is templated from the result row, not yet
-  LLM-authored. The routing seam stays the same when that deepens.
-- **Run-diff trajectory extraction** — the offense-only check runs on supplied
-  trajectories; wiring it from parquet is the `_default_panel_input` gap (the
-  check skips, visibly, until then).
+- **PI reasoning** — now LLM-authored (see Rung 1 below); falls back to a template
+  when no API key is set.
+- **Run-diff trajectory extraction** — **wired** (`trajectories.py`): the
+  offense-only check now extracts per-game completed-runs-differential trajectories
+  from replayable game parquet (`spec.games_dir` or `<save_dir>/parquet_data`) and
+  runs for real. It still skips (gracefully) for training-only runs that record no
+  replayable games.
 - **Anchor-ladder update on promotion** — `ratify` marks `promoted`; making the
   promoted model the next baseline is a follow-up.
 

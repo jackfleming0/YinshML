@@ -237,12 +237,21 @@ class Scheduler:
 
 
 def _default_panel_input(spec: ExperimentSpec, launch: LaunchResult) -> PanelInput:
-    """Build panel signals from the run's final metrics.
+    """Build panel signals from the run's final metrics + replayable games.
 
-    Run-diff trajectory extraction from parquet (for the offense-only detector) is
-    a noted gap — left ``None`` here, so that check skips until wired.
+    The offense-only-equilibrium check needs per-game completed-runs-differential
+    trajectories; we extract them from a replayable game parquet — ``spec.games_dir``
+    if given, else a conventional ``<save_dir>/parquet_data``. When neither exists
+    (e.g. a training-only run that didn't record games), trajectories stay ``None``
+    and that single check skips; the rest of the panel is unaffected.
     """
-    return PanelInput.from_metrics(launch.final_metrics)
+    trajectories = None
+    games_dir = spec.games_dir or os.path.join(launch.save_dir or "", "parquet_data")
+    if games_dir and os.path.isdir(games_dir):
+        from .trajectories import run_diff_trajectories_from_parquet
+
+        trajectories = run_diff_trajectories_from_parquet(games_dir) or None
+    return PanelInput.from_metrics(launch.final_metrics, run_diff_trajectories=trajectories)
 
 
 def _default_match_runner(

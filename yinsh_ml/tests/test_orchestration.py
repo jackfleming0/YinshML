@@ -650,3 +650,89 @@ def test_journal_writes_proposal_artifact(tmp_path):
     assert "HYP-MARKER" in text
     assert "c_puct" in text
     assert "yinsh-track schedule" in text  # the human-in-the-loop run instruction
+
+
+# --------------------------------------------------------------------------
+# Offense-only trajectory extraction (makes the panel check go live)
+# --------------------------------------------------------------------------
+
+import random as _random
+
+from yinsh_ml.orchestration import (
+    run_diff_trajectories_from_parquet,
+    trajectory_from_replay,
+)
+
+
+def _record_random_game(tmp_path, n_plies=40, seed=0, game_id="g1"):
+    """Play a short random-legal game and persist it as replayable parquet."""
+    from yinsh_ml.game.game_state import GameState
+    from yinsh_ml.self_play.data_storage import ParquetDataStorage, StorageConfig
+    from yinsh_ml.self_play.game_recorder import GameRecorder
+
+    storage = ParquetDataStorage(
+        StorageConfig(output_dir=str(tmp_path), parquet_dir="parquet_data", batch_size=1)
+    )
+    recorder = GameRecorder(output_dir=str(tmp_path), save_json=False)
+    recorder.start_game(game_id)
+
+    gs = GameState()
+    rng = _random.Random(seed)
+    for _ in range(n_plies):
+        moves = gs.get_valid_moves()
+        if not moves:
+            break
+        move = rng.choice(moves)
+        recorder.record_turn(gs, move, gs.current_player)
+        gs.make_move(move)
+
+    record = recorder.end_game(gs)
+    storage.store_game_record(record)  # batch_size=1 flushes immediately
+    return storage.parquet_dir
+
+
+def test_run_diff_trajectories_from_parquet_roundtrip(tmp_path):
+    parquet_dir = _record_random_game(tmp_path)
+    trajs = run_diff_trajectories_from_parquet(parquet_dir, sample_k=8)
+    assert len(trajs) == 1
+    assert len(trajs[0]) >= 2
+    assert all(isinstance(x, float) for x in trajs[0])
+
+
+def test_trajectory_perspective_negates(tmp_path):
+    from yinsh_ml.game.types import Player
+    from yinsh_ml.viz.game_replay import list_games, load_game
+
+    parquet_dir = _record_random_game(tmp_path)
+    gid = str(list_games(parquet_dir)["game_id"].iloc[0])
+    replay = load_game(parquet_dir, gid)
+
+    white = trajectory_from_replay(replay, Player.WHITE)
+    black = trajectory_from_replay(replay, Player.BLACK)
+    # completed-runs differential is (mine - opponent's), so the perspectives mirror.
+    assert white == [-x for x in black]
+
+
+def test_run_diff_trajectories_missing_dir_returns_empty(tmp_path):
+    assert run_diff_trajectories_from_parquet(tmp_path / "does_not_exist") == []
+
+
+def test_default_panel_input_makes_offense_only_check_live(tmp_path):
+    from yinsh_ml.orchestration import FailurePanel
+    from yinsh_ml.orchestration.launcher import LaunchResult
+    from yinsh_ml.orchestration.scheduler import _default_panel_input
+
+    parquet_dir = _record_random_game(tmp_path)
+    spec = ExperimentSpec(config_path="x.yaml", baseline_id="b", games_dir=str(parquet_dir))
+    launch = LaunchResult(
+        experiment_id="e", status="completed", save_dir=str(tmp_path),
+        final_metrics={"value_accuracy": 0.6, "value_variance": 0.05,
+                       "policy_target_entropy_mean": 1.2},
+    )
+
+    panel_input = _default_panel_input(spec, launch)
+    assert panel_input.run_diff_trajectories  # populated, not None/empty
+
+    panel = FailurePanel().evaluate(panel_input)
+    offense = next(c for c in panel.checks if c.name == "offense_only_equilibrium")
+    assert not offense.skipped  # the gap is closed — the check now actually runs
