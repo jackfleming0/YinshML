@@ -160,9 +160,14 @@ signals that actually catch a broken run. They flag a non-finite (NaN/Inf) loss
 unconditionally, and a finite loss above a calibrated ceiling (3× the worst observed
 real-run loss, so only a genuine explosion trips it — e.g. `value_loss > 27.67`).
 The NaN/Inf guard needs no calibration; the ceiling comes from `calibrate_panel.py`.
-A network *policy-entropy* collapse check is still pending — training doesn't yet
-emit network policy entropy (only the MCTS *target* entropy, a different quantity),
-so that `policy_entropy` check skips until the signal is logged on the training side.
+
+The **policy-entropy collapse check is now live**: the trainer logs the network's
+predicted-policy entropy (`EpochMetrics.policy_entropy`, distinct from the MCTS
+target entropy), the launcher threads it into the panel, and `policy_entropy` flags
+when the policy collapses onto a narrow set of moves. Its floor is calibrated by
+`calibrate_panel.py` once you have runs trained after this change (older runs lack
+the field, so it skips on them). Recalibrate on the Mac after your first run to
+ground `min_policy_entropy` to your model's real entropy scale.
 
 ### Why `LocalLauncher` drives `run_training.py`
 

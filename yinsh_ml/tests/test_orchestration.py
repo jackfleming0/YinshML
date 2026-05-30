@@ -766,7 +766,8 @@ def _fake_runner(returncode=0, write_metrics=True):
             mdir.mkdir(parents=True, exist_ok=True)
             (mdir / "iteration_0.json").write_text(_json.dumps({
                 "metrics": {"training": [
-                    {"policy_loss": 1.2, "value_loss": 0.5, "value_accuracy": 0.62}
+                    {"policy_loss": 1.2, "value_loss": 0.5, "value_accuracy": 0.62,
+                     "policy_entropy": 4.3}
                 ]}
             }))
         return _FakeProc(returncode)
@@ -790,6 +791,7 @@ def test_local_launcher_runs_real_entrypoint_and_records(tmp_path):
 
     assert result.status == "completed"
     assert result.final_metrics["value_accuracy"] == 0.62  # read from the metrics JSON
+    assert result.final_metrics["policy_entropy"] == 4.3    # network-policy entropy threaded through
     # It drove the REAL training entrypoint, not ExperimentRunner.
     cmd = runner.calls[0]
     assert cmd[1].endswith("run_training.py")
@@ -899,6 +901,16 @@ def test_panel_green_on_healthy_real_scale_candidate():
     assert r.green, [c.detail for c in r.failures]
 
 
-def test_panel_input_from_metrics_maps_losses():
-    pi = PanelInput.from_metrics({"value_loss": 8.5, "policy_loss": 1.1, "value_accuracy": 0.09})
+def test_panel_input_from_metrics_maps_losses_and_entropy():
+    pi = PanelInput.from_metrics({
+        "value_loss": 8.5, "policy_loss": 1.1, "value_accuracy": 0.09, "policy_entropy": 4.2,
+    })
     assert pi.value_loss == 8.5 and pi.policy_loss == 1.1 and pi.value_accuracy == 0.09
+    # Maps the NETWORK policy entropy (collapse signal), not the MCTS target entropy.
+    assert pi.policy_entropy == 4.2
+
+
+def test_from_metrics_does_not_use_target_entropy_for_collapse_check():
+    # A run with only target entropy logged must NOT populate the collapse signal.
+    pi = PanelInput.from_metrics({"policy_target_entropy_mean": 0.3})
+    assert pi.policy_entropy is None  # -> check skips, no false flag

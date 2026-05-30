@@ -123,9 +123,9 @@ class LocalLauncher(Launcher):
         ``run_training.py`` nests a timestamp dir under ``save_dir``, so we glob
         recursively. Only signals the supervisor actually emits are returned; the
         rest stay absent so the panel skips those checks rather than false-flagging.
-        (``value_variance`` and a network policy-entropy signal aren't emitted; the
-        available ``train/policy_target_entropy_mean`` is the *target* entropy, a
-        different quantity, so it is deliberately not mapped to the collapse check.)
+        ``policy_entropy`` is the network's PREDICTED policy entropy (the collapse
+        signal), distinct from the MCTS target entropy. ``value_variance`` isn't
+        emitted, so that part of the value check stays absent.
         """
         files = glob.glob(os.path.join(save_dir, "**", "metrics", "iteration_*.json"), recursive=True)
         if not files:
@@ -154,6 +154,7 @@ class LocalLauncher(Launcher):
             "policy_loss": last.get("policy_loss"),
             "value_loss": last.get("value_loss"),
             "value_accuracy": last.get("value_accuracy"),
+            "policy_entropy": last.get("policy_entropy"),
         }
 
 

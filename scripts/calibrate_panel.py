@@ -35,9 +35,10 @@ from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Signals we can read from the supervisor's metrics JSON today. value_variance and a
-# network policy-entropy signal aren't emitted, so they're not calibrated here.
-_SIGNALS = ["value_accuracy", "value_loss", "policy_loss"]
+# Signals we can read from the supervisor's metrics JSON. policy_entropy is the
+# network's predicted-policy entropy (present on runs trained after that metric was
+# added); older runs won't have it, so it's calibrated only when found.
+_SIGNALS = ["value_accuracy", "value_loss", "policy_loss", "policy_entropy"]
 
 
 def _final_iter_signals(metrics_json: Path) -> Optional[Dict[str, float]]:
@@ -107,6 +108,16 @@ def calibrate(run_dirs: List[str]) -> Dict:
             f"[{observed['value_accuracy']['min']:.3f}, {observed['value_accuracy']['max']:.3f}] "
             "across the reference runs — a weak health signal at this scale, so this "
             "is a loose collapse guard, not a quality bar."
+        )
+
+    if "policy_entropy" in observed:
+        # Loose collapse floor: half the lowest observed network-policy entropy.
+        floor = round(max(0.0, observed["policy_entropy"]["min"] * 0.5), 4)
+        thresholds["min_policy_entropy"] = floor
+        notes.append(
+            f"min_policy_entropy={floor} = 0.5 x observed min "
+            f"({observed['policy_entropy']['min']:.4f}); flags the policy collapsing "
+            "onto a narrow set of moves."
         )
 
     # Loss-divergence ceilings: 3x the worst observed final loss. A run only flags if

@@ -88,7 +88,9 @@ class PanelInput:
         parquet is left to the caller (pass ``run_diff_trajectories=``).
         """
         data = dict(
-            policy_entropy=metrics.get("policy_target_entropy_mean"),
+            # The network's predicted-policy entropy (the collapse signal), NOT the
+            # MCTS target entropy. Absent on pre-this-change runs -> check skips.
+            policy_entropy=metrics.get("policy_entropy"),
             value_accuracy=metrics.get("value_accuracy"),
             value_variance=metrics.get("value_variance"),
             value_loss=metrics.get("value_loss"),
