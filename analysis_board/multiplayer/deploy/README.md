@@ -468,6 +468,18 @@ warning; clear the token and the same request reports
 `⚠ capped to 3200 of 5000 requested`. Server-side, an over-cap request
 *without* the token logs `capping num_sims …`; *with* it, no such line.
 
+#### Big searches run as background jobs
+
+A synchronous request can't survive the Cloudflare tunnel's ~100s response
+timeout, so anything above **8000 sims** is dispatched to `/api/evaluate_async`:
+the search runs on a background thread, the status banner shows a live
+`done/total · % · elapsed` readout, and the SPA polls `/api/evaluate_result/<id>`
+~1Hz until it lands. This is what makes a true 128000-sim owner search complete
+(≈15 min on the singleton search path) instead of dying with the
+`Unexpected token '<'` HTML-timeout error. Searches still run one-at-a-time
+server-wide (the `NetworkWrapper` tensor pool isn't thread-safe), so while a
+long owner job churns, other users' analyses queue behind it.
+
 ### Lock the URL down later (add auth)
 
 If public access becomes a problem, add a Cloudflare Access policy:

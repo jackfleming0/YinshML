@@ -613,9 +613,15 @@ class MCTS:
                 return self.fast_simulations
         return base
 
-    def search(self, state: GameState, move_number: int) -> np.ndarray:
+    def search(self, state: GameState, move_number: int, progress_callback=None) -> np.ndarray:
         """
         Run MCTS simulations for the given state and move number.
+
+        ``progress_callback``, if given, is called as ``progress_callback(done,
+        total)`` roughly every 64 simulations (and once at the end). It's an
+        opt-in hook for long-running interactive searches (e.g. the analysis
+        board's async job runner reporting a progress bar); when ``None`` the
+        loop is untouched, so the training/self-play path pays nothing.
         """
         # Choose rollout budget based on the current move number (+ optional fast/slow split)
         budget = self._get_budget(move_number)
@@ -637,6 +643,8 @@ class MCTS:
         simulation_states = []  # Track states acquired from pool for cleanup
         
         for sim in range(budget):
+            if progress_callback is not None and sim % 64 == 0:
+                progress_callback(sim, budget)
             node = root
             search_path = [node]
             current_state = self._acquire_state_copy(state)
@@ -732,6 +740,9 @@ class MCTS:
         # Clean up simulation states
         for state in simulation_states:
             self._release_state(state)
+
+        if progress_callback is not None:
+            progress_callback(budget, budget)
 
         # --- After all simulations ---
         # Calculate final move probabilities based on visit counts
