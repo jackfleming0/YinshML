@@ -46,7 +46,12 @@ ALLOWED_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 # Opus 4.7 would be ~5x more expensive per call with no expected quality
 # bump on this task (board layouts are visually simple, the labels are the
 # hard part and Sonnet handles them fine in testing).
-DEFAULT_MODEL = os.environ.get("YNS_SCREENSHOT_IMPORT_MODEL", "claude-sonnet-4-6")
+# Opus is materially better at fine-grained spatial reasoning on
+# perspective-warped hex grids than Sonnet — ~3x cost per parse (~$0.05
+# vs ~$0.02) is noise at friend-tester traffic. Override via
+# YNS_SCREENSHOT_IMPORT_MODEL=claude-sonnet-4-6 in ~/.yinsh.env if you
+# want the cheaper path for high-volume use.
+DEFAULT_MODEL = os.environ.get("YNS_SCREENSHOT_IMPORT_MODEL", "claude-opus-4-6")
 
 # Valid game phases the model can return. ROW_COMPLETION and RING_REMOVAL
 # are real engine phases but very hard to detect from a static image; we
@@ -162,8 +167,13 @@ def decode_and_validate_image(image_b64: Any, mime_type: Any) -> Tuple[str, str]
 # Kept as a module constant so prompt-cache hashing is stable across calls.
 # Any byte change here invalidates the cache; see `shared/prompt-caching.md`.
 SYSTEM_PROMPT = """You are parsing a YINSH game position from a board image. \
-YINSH is played on a hexagonal grid of 85 valid positions, labeled by \
-column (A-K) and row (1-11). The valid rows per column are:
+Call the submit_yinsh_position tool with your best parse.
+
+## The board
+
+YINSH is played on a hexagonal grid of 85 valid intersections, labeled by \
+column letter (A-K, left-to-right) and row number (1-11, bottom-to-top). \
+Not every column has every row — the board is a hexagon, not a square:
 
 A: 2,3,4,5
 B: 1,2,3,4,5,6,7
@@ -177,64 +187,75 @@ I: 4,5,6,7,8,9,10,11
 J: 5,6,7,8,9,10,11
 K: 7,8,9,10
 
-Any other column/row combination is off the board.
+Any other (column, row) combination is off the board.
 
-Pieces:
-- WHITE_RING: an open / hollow ring shape, light or white colored
-- BLACK_RING: an open / hollow ring shape, dark or black colored
-- WHITE_MARKER: a solid disc, light or white colored
-- BLACK_MARKER: a solid disc, dark or black colored
+## Pieces
 
-Each player starts with 5 rings. The game has three phases:
-- RING_PLACEMENT: rings being placed, no markers on board yet, each side \
-has fewer than 5 rings on the board
-- MAIN_GAME: both sides have 5 rings (or fewer if captures have happened), \
-markers may be present
-- RING_REMOVAL / ROW_COMPLETION: mid-capture sequences; hard to detect from \
-a static image. Default to MAIN_GAME unless you have strong evidence \
-otherwise.
+- WHITE_RING / BLACK_RING: hollow rings (open center, visible donut shape)
+- WHITE_MARKER / BLACK_MARKER: solid filled discs (no hole)
 
-Side to move is usually NOT visible in a static board photo. Return \
-"unknown" for side_to_move unless the source clearly indicates it (e.g. an \
-on-screen turn indicator in a digital screenshot).
+"White" reads as cream/ivory/off-white. "Black" reads as dark gray, \
+charcoal, or near-black.
 
-Score (captured rings) may be visible as side-of-board scoreboards or as \
-removed-ring indicators. If not visible, default to 0/0.
+## How to find positions in 3D-perspective renders
 
-OUTPUT FORMAT: Respond with a JSON object only — no prose, no markdown \
-code fences, no commentary. The exact schema:
+Most images you'll receive are RENDERED in 3D perspective (the board is \
+tilted ~20-30° from top-down, viewed from above-and-in-front). This makes \
+naive cell-counting unreliable — distant rows appear compressed.
 
-{
-  "pieces": [
-    {"pos": "E5", "piece": "WHITE_RING"},
-    {"pos": "F6", "piece": "BLACK_MARKER"},
-    ...
-  ],
-  "phase": "MAIN_GAME",
-  "side_to_move": "WHITE" | "BLACK" | "unknown",
-  "scores": {"WHITE": 0, "BLACK": 0},
-  "confidence": "high" | "medium" | "low",
-  "notes": "any caveats about the parse, e.g. occluded areas, ambiguous \
-pieces, glare"
-}
+**Use the printed coordinate labels as your primary reference.** The board \
+has column letters A-K printed in light gray just below the bottom edge \
+of each column, and row numbers 1-11 printed to the left of the leftmost \
+intersection of each row. Find these labels first, then identify each \
+piece's column by which letter is directly below it, and its row by which \
+number is directly to its left along the same horizontal line.
 
-Rules:
-- "pos" must be a valid board position from the table above (e.g. "E5", \
-"K7", "B1"). Lowercase letters are not valid; emit uppercase.
-- Each (pos, piece) pair is one piece. Do not emit multiple pieces at \
-the same position.
-- "phase" must be exactly one of: RING_PLACEMENT, MAIN_GAME, ROW_COMPLETION, \
-RING_REMOVAL.
-- "side_to_move" must be exactly one of: WHITE, BLACK, unknown.
-- "confidence" reflects YOUR overall confidence in the parse. Use "low" \
-if many pieces are occluded, the image is heavily distorted, or you are \
-guessing on phase.
-- "notes" is a short free-text string; empty string "" if nothing to add.
-- Do not invent pieces in heavily occluded areas — list those concerns in \
-"notes" instead of guessing.
+If a piece appears between two columns or two rows, prefer the label \
+whose intersection it more clearly sits on. If genuinely ambiguous \
+between two adjacent cells, pick one and call out the ambiguity in notes \
+— DO NOT emit both cells.
 
-If the image is clearly not a YINSH board, return an empty pieces array \
-with confidence "low" and notes explaining what you see instead.
+## Captured-ring scoreboards (not playable pieces!)
+
+The board's two opposite corners may show smaller rings sitting in \
+reserve slots. These are CAPTURED rings (score indicators), NOT pieces on \
+the playing surface. Do not include them in the `pieces` array. Instead:
+- Back-left corner (low column letters, low row numbers) → WHITE's \
+captured rings → score.WHITE = how many filled slots
+- Front-right corner (high columns, high rows) → BLACK's captured → \
+score.BLACK
+Each side has up to 3 reserve slots (3 captures = win).
+
+## Phase
+
+- RING_PLACEMENT: both sides have fewer than 5 rings on the board, no \
+markers anywhere
+- MAIN_GAME: 5 rings per side (or fewer if captures happened) AND/OR \
+markers present
+- RING_REMOVAL / ROW_COMPLETION: rare mid-capture states; default to \
+MAIN_GAME unless clearly otherwise
+
+## Side to move
+
+Usually NOT visible in a static board image. Return "unknown" unless an \
+on-screen turn indicator (e.g. "WHITE to move" text, highlighted side \
+panel) is clearly visible.
+
+## Output rules
+
+- `pos` is uppercase column + row, e.g. "E5", "K7", "B1". Must be a valid \
+position from the table above.
+- One piece per position. Never emit two pieces at the same `pos`.
+- `confidence`: use "low" if many pieces are occluded, the image is \
+heavily distorted, you couldn't find the coordinate labels, or you're \
+guessing on phase. Otherwise "medium" or "high".
+- `notes`: short free-text describing any caveats (occluded areas, \
+ambiguous columns/rows, glare). Empty string "" if nothing to add.
+- Do not invent pieces in occluded areas — describe the occlusion in \
+`notes` instead of guessing.
+
+If the image is clearly not a YINSH board, call the tool with an empty \
+`pieces` array, confidence "low", and notes explaining what you see.
 """
 
 # Frontend hint embedded in the user turn — short, deterministic. The
