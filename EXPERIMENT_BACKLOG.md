@@ -624,8 +624,15 @@ blocking. The fix is E16.
 
 ### E16 prototype — symmetric weight regularizer for training loss
 
-Prototype in `scripts/prototype_e16_symmetric_loss.py`. NOT wired into
-trainer.py yet — runnable standalone for verification.
+> **✓ IMPLEMENTED 2026-05-31** in `trainer.py` (commit e1c6d55). This section is
+> the original 05-30 prototype design, kept for rationale. The as-built version
+> differs in two ways the top snapshot covers: the policy KL is **masked to the
+> valid-move support** (the unmasked full-softmax KL was ~100× inflated by
+> never-trained invalid-move logits), and `value_weight` was set from a
+> gradient-pressure + dynamic investigation (default 20, not the prototype's 0.5).
+
+Prototype in `scripts/prototype_e16_symmetric_loss.py` — runnable standalone for
+verification of the loss math.
 
 **Loss formulation:**
 ```
@@ -656,8 +663,8 @@ finding that asymmetry scales with game complexity. The regularizer
 is nonzero and well-behaved — meaningful gradient signal to push
 weights toward symmetric subspace.
 
-**Trainer integration sketch (~30 LOC change, NOT yet applied to
-trainer.py):**
+**Trainer integration sketch** (the original 05-30 plan; the as-built
+version landed 2026-05-31, commit e1c6d55 — masked KL + value_weight=20):
 
 ```python
 # In yinsh_ml/training/trainer.py train_step / train_epoch:
@@ -684,19 +691,19 @@ visit distributions — fixing the residual 25%.
 |---|---|---|
 | L1: Dropout(0) in policy head | ✓ Validated 2026-05-29 | Unblocks policy-head sharpening |
 | L2: Label smoothing ε=0.1 | ✓ Validated 2026-05-29 | Prevents overconfidence collapse |
-| **L3a: Symmetric MCTS at inference** | **✓ Validated 2026-05-30, SHIP NOW** | Breaks 75% of path-dependence; +6 to +22 pp WR bonus |
-| **L3d: Symmetric weight regularizer (E16)** | **Prototyped 2026-05-30, ready to wire** | Fix residual 25% by pulling weights into D2-symmetric subspace |
+| **L3a: Symmetric MCTS at inference** | **✓ SHIPPED 2026-05-31 (commit 09a6d86), not yet deployed** | Breaks 75% of path-dependence; +6 to +22 pp WR bonus |
+| **L3d: Symmetric weight regularizer (E16)** | **✓ WIRED 2026-05-31 (commit e1c6d55)** | Fix residual 25% by pulling weights into D2-symmetric subspace |
 | L3b: iter1-corpus pretrain (E7) | Not yet tested | Better teacher quality for main-game |
 | L3c: Phase-aware exploration (E9) | Not yet tested | More diversity at placement |
 
 ### Action items emerging from 2026-05-30
 
-1. **Ship symmetric MCTS at inference** (E8 reference implementation
-   in `scripts/measure_symmetric_openings.py::symmetric_search`).
-   ~50 LOC adapter for `analysis_board/multiplayer/deploy/` —
-   pure win, no retraining.
-2. **Wire E16 prototype into trainer.py** for the next cloud training
-   run. ~30 LOC, prototype validated. Apply with alpha=0.1 and K=10.
+1. **✓ DONE 2026-05-31 — Ship symmetric MCTS at inference** (commit 09a6d86;
+   `analysis_board/server.py::_symmetric_search_batch`, default-on + UI toggle).
+   Code-complete, not yet deployed (needs `git push` + `yinsh-redeploy`).
+2. **✓ DONE 2026-05-31 — Wire E16 into trainer.py** (commit e1c6d55; alpha=0.1,
+   K=10, value_weight=20 from investigation). L2 landed in
+   `run_supervised_pretraining.py`, not trainer.py (soft-target loss there).
 3. **De-prioritized**: E12/E13 (sim/sample sweeps) — H_W confirmed
    means these would measure noise, not signal. Skip.
 4. **Optional supporting evidence (30 min)**: E15 audit of training
@@ -711,10 +718,10 @@ visit distributions — fixing the residual 25%.
 |---|---|---|
 | L1: Dropout(0) in policy head | ✓ Validated | Unblocks policy-head sharpening |
 | L2: Label smoothing ε=0.1 | ✓ Validated | Prevents overconfidence collapse |
-| **L3a: Symmetric MCTS at inference** | **✓ Validated, SHIP NOW** | Breaks 75% of path-dependence; +6 to +22 pp WR bonus |
+| **L3a: Symmetric MCTS at inference** | **✓ SHIPPED 2026-05-31 (09a6d86), not yet deployed** | Breaks 75% of path-dependence; +6 to +22 pp WR bonus |
 | L3b: iter1-corpus pretrain (E7) | Not yet tested | Better teacher quality for main-game |
 | L3c: Phase-aware exploration (E9) | Not yet tested | More diversity at placement |
-| L3d: Symmetric weight regularizer (E16) | Pending E11 result | Fix residual 25% if weights asymmetric |
+| L3d: Symmetric weight regularizer (E16) | ✓ WIRED 2026-05-31 (e1c6d55) | Fix residual 25% by pulling weights into D2-symmetric subspace |
 
 **Ship-immediately item:** wire E8 (symmetric MCTS) into deployed
 inference path. Pure win, no retraining. Users see better play +
