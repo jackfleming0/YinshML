@@ -388,6 +388,13 @@ def main() -> None:
                 'warmup_iters', trainer_cfg.get('search_consistency_warmup_iters', 3)
             )
         ),
+        # E2: placement-only value distillation (grounds the value head where it's
+        # blind). Pair with policy_weight: 0.0 for value-only.
+        'search_consistency_placement_only': bool(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'placement_only', trainer_cfg.get('search_consistency_placement_only', False)
+            )
+        ),
         # E16 symmetric-weight regularizer. Off by default. Reads from a nested
         # `trainer.symmetric_reg:` block when present, with flat-key fallback.
         # value_weight default 20.0 is measured (investigate_e16_value_weight.py).

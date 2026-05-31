@@ -510,6 +510,7 @@ class YinshTrainer:
                  search_consistency_long_sims: int = 64,
                  search_consistency_batch_size: int = 32,
                  search_consistency_warmup_iters: int = 3,
+                 search_consistency_placement_only: bool = False,
                  enable_symmetric_reg: bool = False,
                  symmetric_reg_weight: float = 0.1,
                  symmetric_reg_value_weight: float = 20.0,
@@ -675,6 +676,11 @@ class YinshTrainer:
         self.search_consistency_long_sims = int(search_consistency_long_sims)
         self.search_consistency_batch_size = int(search_consistency_batch_size)
         self.search_consistency_warmup_iters = int(search_consistency_warmup_iters)
+        # E2: when True, the consistency probe distills deep-search VALUES into
+        # only RING_PLACEMENT positions — grounding the value head where it's
+        # otherwise blind (no markers → ~0 heuristic signal, terminal outcome
+        # ~60 plies away). Pair with search_consistency_weight=0 (value-only).
+        self.search_consistency_placement_only = bool(search_consistency_placement_only)
         self._sc_mcts = None  # lazy
         self._sc_step_counter = 0
         self._sc_loss_history: list = []  # rolling, capped
@@ -1496,7 +1502,18 @@ class YinshTrainer:
 
         n = self.experience.size()
         sample_size = min(self.search_consistency_batch_size, n)
-        indices = np.random.choice(n, size=sample_size, replace=False)
+        if self.search_consistency_placement_only:
+            # E2: restrict distillation to RING_PLACEMENT positions. Placement is
+            # the first 10 plies (5 rings/side), so move_number < 10 is an exact,
+            # decode-free filter using the buffer's move_numbers deque.
+            move_nos = np.fromiter(self.experience.move_numbers, dtype=np.int64, count=n)
+            placement_idx = np.nonzero(move_nos < 10)[0]
+            if placement_idx.size == 0:
+                return None  # no placement positions buffered yet
+            sample_size = min(sample_size, placement_idx.size)
+            indices = np.random.choice(placement_idx, size=sample_size, replace=False)
+        else:
+            indices = np.random.choice(n, size=sample_size, replace=False)
 
         # Force eval mode for the MCTS-distillation searches so the
         # subsequent training-mode forward (later in this method) is the

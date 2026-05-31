@@ -91,8 +91,20 @@ trainer:
   warmup_epochs: 1
   enable_autocast: true
   soft_value_target_sigma: 0.5
+  # E2 — placement value-grounding. Refocus the search-consistency probe entirely
+  # on RING_PLACEMENT and distill ONLY the deep-search value (policy_weight: 0).
+  # The value head is blind during placement (no markers → ~0 heuristic signal,
+  # terminal outcome ~60 plies away), so without this self-play can't fairly
+  # arbitrate which opening style actually wins. Lets the corpus EXPOSE styles
+  # (E10) and self-play + a grounded value head ARBITRATE them.
   search_consistency:
     enabled: true
+    placement_only: true     # E2: only distill RING_PLACEMENT positions
+    policy_weight: 0.0       # value-only — corpus + E16 + self-play shape the policy
+    value_weight: 1.0
+    every_k_steps: 5         # deeper cadence for the value-blind phase
+    long_sims: 128           # deeper search → better placement value target
+    warmup_iters: 0          # ground placement from iteration 1
   # E16 symmetric-weight regularizer (THE NEW KNOB for this run).
   symmetric_reg:
     enabled: true

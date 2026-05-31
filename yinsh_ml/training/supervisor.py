@@ -374,6 +374,7 @@ class TrainingSupervisor:
         search_consistency_long_sims = int(self.mode_settings.get('search_consistency_long_sims', 64))
         search_consistency_batch_size = int(self.mode_settings.get('search_consistency_batch_size', 32))
         search_consistency_warmup_iters = int(self.mode_settings.get('search_consistency_warmup_iters', 3))
+        search_consistency_placement_only = bool(self.mode_settings.get('search_consistency_placement_only', False))
         # E16 symmetric-weight regularizer (Task 2). Off unless config opts in.
         enable_symmetric_reg = bool(self.mode_settings.get('enable_symmetric_reg', False))
         symmetric_reg_weight = float(self.mode_settings.get('symmetric_reg_weight', 0.1))
@@ -560,6 +561,7 @@ class TrainingSupervisor:
             search_consistency_long_sims=search_consistency_long_sims,
             search_consistency_batch_size=search_consistency_batch_size,
             search_consistency_warmup_iters=search_consistency_warmup_iters,
+            search_consistency_placement_only=search_consistency_placement_only,
             enable_symmetric_reg=enable_symmetric_reg,
             symmetric_reg_weight=symmetric_reg_weight,
             symmetric_reg_value_weight=symmetric_reg_value_weight,
