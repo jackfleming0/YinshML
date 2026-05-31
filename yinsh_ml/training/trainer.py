@@ -509,6 +509,10 @@ class YinshTrainer:
                  search_consistency_long_sims: int = 64,
                  search_consistency_batch_size: int = 32,
                  search_consistency_warmup_iters: int = 3,
+                 enable_symmetric_reg: bool = False,
+                 symmetric_reg_weight: float = 0.1,
+                 symmetric_reg_value_weight: float = 0.5,
+                 symmetric_reg_every_k_steps: int = 10,
                  max_oversampling: Optional[float] = None):
         """
         Initialize the trainer.
@@ -592,6 +596,22 @@ class YinshTrainer:
                 until iteration N. Early iterations have a noisy network
                 whose long-search outputs are themselves unreliable
                 targets; warming up lets the policy stabilize first.
+            enable_symmetric_reg: E16 symmetric-weight regularizer. When True,
+                every `symmetric_reg_every_k_steps` batches the trainer forwards
+                the net on all 4 D2 board symmetries and adds a penalty pulling
+                the prediction toward the symmetric mean (policy KL + value
+                asymmetry MSE). Constrains weights to the D2-symmetric subspace,
+                which data augmentation alone does not. Default False.
+            symmetric_reg_weight: Outer multiplier α on the whole regularizer
+                term (added to policy+value loss). 0.1 keeps it a regularizer,
+                not a primary objective.
+            symmetric_reg_value_weight: Inner weight on the value-asymmetry MSE
+                relative to the policy-KL term (matches the E16 prototype's
+                value_weight=0.5).
+            symmetric_reg_every_k_steps: Apply the regularizer every K
+                `train_step` calls. Each regularized step costs ~3 extra
+                forwards (the 3 non-identity transforms; identity is reused).
+                K=10 ≈ +30% wall-clock on regularized steps only.
             max_oversampling: Optional cap on per-phase sampling weights
                 (T3.7). Default ``None`` preserves legacy behavior — config
                 must opt in (e.g. ``max_oversampling: 4.0``) to enable the
@@ -646,6 +666,21 @@ class YinshTrainer:
         self._sc_mcts = None  # lazy
         self._sc_step_counter = 0
         self._sc_loss_history: list = []  # rolling, capped
+        # E16 symmetric-weight regularizer (Task 2). Every K steps, forward the
+        # net on all 4 D2 board symmetries and penalize divergence between the
+        # symmetrized prediction and the identity one — pushing the WEIGHTS into
+        # the symmetric subspace (D2 *data* augmentation only symmetrizes the
+        # data, not the weights; see E11 — value head varies 2.8× across
+        # orientations by move 8). Off by default; armed via config for the
+        # symmetry-fix run. The transform tensors (spatial cell-gather + full
+        # 7433-move-index permutation per tid) are constant given the encoder,
+        # so they're built once, lazily, on first regularized step.
+        self.enable_symmetric_reg = bool(enable_symmetric_reg)
+        self.symmetric_reg_weight = float(symmetric_reg_weight)
+        self.symmetric_reg_value_weight = float(symmetric_reg_value_weight)
+        self.symmetric_reg_every_k_steps = max(1, int(symmetric_reg_every_k_steps))
+        self._symmetric_reg_tensors = None  # lazy: [(cell_src, policy_perm), ...]
+        self._symmetric_reg_step_counter = 0
         # LR schedule state. `_global_epoch` is incremented once per
         # `train_epoch()` and drives scheduler fast-forward on reinit.
         self.lr_schedule = lr_schedule
@@ -941,6 +976,146 @@ class YinshTrainer:
                 for _ in range(resume_epoch):
                     self.policy_scheduler.step()
                     self.value_scheduler.step()
+
+    def _build_full_policy_permutation(self, augmenter, encoder, transform_id):
+        """Build the full ``[total_moves]`` policy-index permutation for one D2
+        transform: ``perm[idx_of(M)] = idx_of(T(M))`` for every move M in the
+        action space.
+
+        The mapping is state-independent — move_to_index is a pure function of
+        the move, so the permutation of the whole 7433-slot move space is fixed
+        given the board geometry. (The augmenter's per-state
+        `_build_index_permutation` is the same idea restricted to a position's
+        legal moves.) We enumerate every move directly from the board positions
+        and the REMOVE_MARKERS line table — `StateEncoder.move_to_index` is the
+        authoritative forward map (the `idx_to_move_map` dict is legacy/unused
+        and never populated). Reuses the validated `_transform_move`. Asserts a
+        full bijection so a silent indexing bug can't quietly drop policy mass.
+        """
+        from ..game.types import Move, MoveType  # noqa: WPS433
+        from ..game.constants import Position  # noqa: WPS433
+        from ..utils.encoding import _REMOVE_MARKERS_LINES  # noqa: WPS433
+
+        coord_map = augmenter._coord_maps[transform_id]  # noqa: SLF001
+        n = encoder.total_moves
+        perm = np.full(n, -1, dtype=np.int64)
+        positions = [Position.from_string(p) for p in encoder.position_to_index]
+
+        def _set(move):
+            t_move = augmenter._transform_move(move, coord_map)  # noqa: SLF001
+            if t_move is None:
+                raise ValueError(
+                    f"D2 transform {transform_id} sent {move} off-board — the "
+                    "valid set is supposed to be closed under D2"
+                )
+            perm[encoder.move_to_index(move)] = encoder.move_to_index(t_move)
+
+        for p in positions:
+            _set(Move(type=MoveType.PLACE_RING, player=None, source=p))
+            _set(Move(type=MoveType.REMOVE_RING, player=None, source=p))
+        for src in positions:
+            for dst in positions:
+                if src != dst:
+                    _set(Move(type=MoveType.MOVE_RING, player=None, source=src, destination=dst))
+        for line in _REMOVE_MARKERS_LINES:
+            _set(Move(type=MoveType.REMOVE_MARKERS, player=None, markers=tuple(line)))
+
+        if (perm < 0).any() or len(set(perm.tolist())) != n:
+            raise ValueError(
+                f"symmetric policy permutation for transform {transform_id} is "
+                f"not a bijection ({len(set(perm.tolist()))} distinct, "
+                f"{int((perm < 0).sum())} unfilled, of {n})"
+            )
+        return perm
+
+    def _build_symmetric_reg_tensors(self):
+        """Precompute the per-transform tensors the E16 regularizer needs, once.
+
+        For each non-identity D2 transform (180°, diagonal, anti-diagonal):
+          - ``cell_src``: a ``[121]`` gather index over the flattened 11×11 grid
+            such that ``transformed[:, :, f] = state[:, :, cell_src[f]]`` — i.e.
+            the geometric transform of the *input* tensor (all channels;
+            spatially-uniform channels are unchanged). Equivalent to the
+            augmenter's `_transform_state`, vectorized + differentiable.
+          - ``policy_perm``: the ``[total_moves]`` move-index permutation that
+            maps a policy on the transformed action space back to the original.
+        """
+        from .augmentation import YinshSymmetryAugmenter  # noqa: WPS433
+        from ..utils.encoding import StateEncoder  # noqa: WPS433
+
+        augmenter = YinshSymmetryAugmenter(
+            include_reflections=True, state_encoder=StateEncoder(),
+        )
+        encoder = self.state_encoder
+        out = []
+        for tid in (1, 2, 3):
+            coord_map = augmenter._coord_maps[tid]  # noqa: SLF001
+            cell_src = list(range(121))
+            for (orow, ocol), (nrow, ncol) in coord_map.items():
+                cell_src[nrow * 11 + ncol] = orow * 11 + ocol
+            cell_src_t = torch.tensor(cell_src, dtype=torch.long, device=self.device)
+            perm = self._build_full_policy_permutation(augmenter, encoder, tid)
+            perm_t = torch.tensor(perm, dtype=torch.long, device=self.device)
+            out.append((cell_src_t, perm_t))
+        logger.info("E16 symmetric regularizer: built transform tensors for 3 D2 symmetries")
+        return out
+
+    def _symmetric_reg_term(self, states, pred_logits, pred_values, target_probs):
+        """E16 regularizer for one batch: forward the net on the 3 non-identity
+        D2 transforms (the identity is reused from the main forward), map each
+        policy back to the original action space, and penalize divergence from
+        the symmetric mean.
+
+        The policy KL is restricted to the moves that carry training signal —
+        ``target_probs > 0`` (the MCTS visit support). The full 7433-slot softmax
+        also covers ~7300 invalid moves whose logits are never supervised and
+        carry meaningless asymmetry; including them swamps the term (~100×) and
+        would make the regularizer chase invalid-move symmetry instead of the
+        value-head asymmetry that E11 identified as the real problem. Each
+        policy is masked to that support and renormalized so all 4 are
+        distributions over the same valid set before averaging.
+
+        Returns ``(loss_tensor, diagnostics)``; ``loss_tensor`` already carries
+        the outer α weight, so the caller just adds it to total_loss.
+        """
+        if self._symmetric_reg_tensors is None:
+            self._symmetric_reg_tensors = self._build_symmetric_reg_tensors()
+
+        eps = 1e-9
+        b = states.shape[0]
+        mask = (target_probs > 0).float()  # [B, total_moves] — valid-move support
+
+        def _masked_dist(logits):
+            p = F.softmax(logits.float(), dim=1) * mask
+            return p / (p.sum(dim=1, keepdim=True) + eps)
+
+        flat = states.reshape(b, states.shape[1], -1)  # [B, C, 121]
+        # Identity (tid=0): reuse the main forward. fp32 for stable KL/logs.
+        policy0 = _masked_dist(pred_logits)
+        policies = [policy0]
+        values = [pred_values.float().reshape(b, -1)]
+
+        for cell_src, perm in self._symmetric_reg_tensors:
+            state_t = flat[:, :, cell_src].reshape(states.shape)
+            with self._autocast():
+                logits_t, value_t = self.network.network(state_t)
+            # Map logits on the transformed action space back to the original:
+            # out[:, perm[k]] = logits_t[:, k] (D2 is an involution, so the same
+            # perm that sends original→transformed sends transformed→original).
+            logits_orig = torch.empty_like(logits_t)
+            logits_orig.index_copy_(1, perm, logits_t)
+            policies.append(_masked_dist(logits_orig))
+            values.append(value_t.float().reshape(b, -1))
+
+        policy_sym = torch.stack(policies, dim=0).mean(dim=0)
+        # KL(policy_sym || policy_0): pull the identity prediction toward the
+        # symmetric mean, over the valid support only. Mean over the batch.
+        kl = (policy_sym * (torch.log(policy_sym + eps) - torch.log(policy0 + eps))).sum(dim=1).mean()
+        vstack = torch.stack(values, dim=0)  # [4, B, K]
+        value_asym = ((vstack - vstack.mean(dim=0, keepdim=True)) ** 2).mean()
+
+        loss = self.symmetric_reg_weight * (kl + self.symmetric_reg_value_weight * value_asym)
+        return loss, {"sym_kl": float(kl.item()), "sym_value_asym": float(value_asym.item())}
 
     def train_step(self,
                    batch_size: int,
@@ -1248,7 +1423,26 @@ class YinshTrainer:
             # no path through value_head) and is updated by SGD (via
             # `value_optimizer`). Per-head clip max_norms are preserved by
             # clipping the disjoint param sets independently before step().
+            # ---- E16 symmetric-weight regularizer (every K steps) ----
+            # Computed outside autocast on purpose: the term forwards the 3
+            # transforms in autocast internally but does its KL/log math in
+            # fp32. Adds to the joint loss so its gradient flows into the trunk
+            # (and both heads) through the same single backward.
+            sym_reg_loss = None
+            if self.enable_symmetric_reg:
+                self._symmetric_reg_step_counter += 1
+                if self._symmetric_reg_step_counter % self.symmetric_reg_every_k_steps == 0:
+                    sym_reg_loss, sym_diag = self._symmetric_reg_term(
+                        states, pred_logits, pred_values, target_probs,
+                    )
+                    logger.info(
+                        "E16 sym-reg: kl=%.5f value_asym=%.5f (alpha=%.2f)",
+                        sym_diag["sym_kl"], sym_diag["sym_value_asym"], self.symmetric_reg_weight,
+                    )
+
             total_loss = policy_loss + value_loss
+            if sym_reg_loss is not None:
+                total_loss = total_loss + sym_reg_loss
             total_loss.backward()
 
             policy_params = [p for n, p in self.network.network.named_parameters()

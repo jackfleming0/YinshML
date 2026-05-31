@@ -298,7 +298,7 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
             # 2-D soft/one-hot targets → soft-target NLL.
             if policies.dim() == 1:
                 expert_moves = policies.long()
-                policy_loss = F.cross_entropy(pred_logits, expert_moves)
+                policy_loss = F.cross_entropy(pred_logits, expert_moves, label_smoothing=args.label_smoothing)
             else:
                 log_probs = F.log_softmax(pred_logits, dim=1)
                 policy_loss = -(policies * log_probs).sum(dim=1).mean()
@@ -442,7 +442,7 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
 
             if policies.dim() == 1:
                 expert_moves = policies.long()
-                policy_loss = F.cross_entropy(pred_logits, expert_moves)
+                policy_loss = F.cross_entropy(pred_logits, expert_moves, label_smoothing=args.label_smoothing)
             else:
                 log_probs = F.log_softmax(pred_logits, dim=1)
                 policy_loss = -(policies * log_probs).sum(dim=1).mean()
@@ -505,6 +505,12 @@ def main():
                        help='Weight decay (default: 1e-4)')
     parser.add_argument('--value-weight', type=float, default=1.0,
                        help='Weight for value loss relative to policy (default: 1.0)')
+    parser.add_argument('--label-smoothing', type=float, default=0.1,
+                       help='L2: policy label smoothing for hard-target CE. Keeps '
+                            'entropy in the policy so training on sharp expert '
+                            'targets (under Dropout=0) does not over-concentrate '
+                            'to a single modal opening. Validated at 0.1; set 0 '
+                            'to disable. No-op for soft/distribution targets.')
     parser.add_argument('--val-split', type=float, default=0.1,
                        help='Validation split fraction (default: 0.1)')
 

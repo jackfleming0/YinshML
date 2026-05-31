@@ -31,6 +31,41 @@ a clear next step, this file is the first thing to read.
 
 ---
 
+## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
+
+The 2026-05-29/30 work was recovered from a stash (it was never committed; the
+`policy-dropout-fix` branch was empty) onto **`policy-symmetry-fixes`**. Then:
+
+- **L1 (Dropout 0.3→0)** — recovered into `model.py` (commit f8bdbcb).
+- **L3a (symmetric MCTS at inference)** — shipped to the analysis board:
+  `server.py::_symmetric_search_batch` (sync + async paths), default-on via
+  `YNS_SYMMETRIC_MCTS`, UI toggle, effective-4×-budget async routing. Validated
+  on deployed iter1_ema: opening D6 concentration 0.857→0.214 (commit 09a6d86).
+  **Code-complete, not yet deployed** (needs `git push` + `yinsh-redeploy`).
+- **L2 (label smoothing ε=0.1)** — wired into **`scripts/run_supervised_pretraining.py`**
+  (`--label-smoothing`, default 0.1, applied to the hard-target CE). NB: the
+  handoff said "trainer.py", but trainer.py's policy loss is a *soft*-target CE
+  (MCTS visit distributions) where classic label smoothing doesn't apply. The
+  validated dry-run (`dry_run_dropout_plus_ls.py`) used the *supervised* hard-
+  target CE — that's where L2 belongs.
+- **E16 (symmetric-weight regularizer)** — wired into `trainer.py`
+  (`enable_symmetric_reg`, α=`symmetric_reg_weight` 0.1, K=`symmetric_reg_every_k_steps`
+  10, `symmetric_reg_value_weight` 0.5), threaded through the supervisor from
+  `mode_settings`, off by default. Full faithful policy-KL + value-asymmetry
+  form. The full 7433-move-index permutation is precomputed once and **verified
+  to exactly match the validated per-state augmenter permutation**; policy KL is
+  masked to the `target_probs>0` valid-move support (the unmasked full-softmax KL
+  was ~100× inflated by never-trained invalid-move logits). Tests:
+  `yinsh_ml/tests/test_symmetric_regularizer.py`. The kl-vs-value_asym balance is
+  logged every K steps and tunable via config for the run.
+
+**Remaining: Task 3** — next cloud run stacking L1+L2+E16 (supervised pretrain
+with `--label-smoothing 0.1` on a Dropout=0 net, then self-play with
+`enable_symmetric_reg: true`). Symmetric MCTS (L3a) stays as a deploy-time
+noise-reducer even once the network is symmetric.
+
+---
+
 ## Status snapshot (as of 2026-05-29 ~13:30 UTC)
 
 **Active investigation:** placement pathology + plateau diagnostics.
