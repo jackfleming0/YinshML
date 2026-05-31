@@ -45,6 +45,13 @@ class ExperimentSpec:
     """Override the config's ``num_iterations`` (e.g. for a quick bootstrap run).
     ``None`` uses whatever the config specifies."""
 
+    init_checkpoint: Optional[str] = None
+    """Warm-start the candidate from this checkpoint's weights (the
+    ``run_training.py --init-checkpoint`` path: loads model weights only, resets the
+    optimizer + iteration counter, starts a fresh run). This is the "iterate on my
+    champion" loop — train a change on top of your best model. ``None`` = train from
+    scratch."""
+
     games_dir: Optional[str] = None
     """Directory of replayable game parquet (GameRecorder format) for the
     offense-only-equilibrium audit. If unset, the panel looks for a conventional

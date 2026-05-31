@@ -72,6 +72,15 @@ the seams. Deliberately deferred:
 - **Baseline by checkpoint path** — `--baseline-checkpoint <path>` (or
   `spec.baseline_checkpoint`) evaluates a candidate against a real model file (e.g.
   your champion `best_model.pt`), not only against an orchestration experiment id.
+- **Improvement loop (warm-start)** — `--init-checkpoint <path>` warm-starts the
+  candidate from a checkpoint's weights (the `run_training.py --init-checkpoint`
+  path: weights only, optimizer/iteration reset). `--champion <path>` is the
+  shortcut for "iterate on my best": it warm-starts *from* and evaluates *against*
+  the same model. The improvement-loop run is:
+  ```bash
+  yinsh-track schedule <config> --champion experiments/<run>/best_model.pt \
+    --audit-games 10 --iterations <N>
+  ```
 - **Anchor-ladder update on promotion** — `ratify` marks `promoted`; making the
   promoted model the next baseline is a follow-up.
 

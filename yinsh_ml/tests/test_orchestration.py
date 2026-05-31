@@ -798,11 +798,49 @@ def test_local_launcher_runs_real_entrypoint_and_records(tmp_path):
     cmd = runner.calls[0]
     assert cmd[1].endswith("run_training.py")
     assert "--config" in cmd and "--save-dir" in cmd and "--iterations" in cmd
+    assert "--init-checkpoint" not in cmd  # no warm-start unless requested
     # And recorded the run in the shared registry.
     db = ExperimentDB(str(tmp_path / "exp" / "experiments.db"))
     rec = db.get_experiment(result.experiment_id)
     assert rec is not None and rec.status == "completed"
     assert _json.loads(rec.config_json)["num_iterations"] == 1  # real config snapshotted
+
+
+def test_local_launcher_passes_init_checkpoint_for_warm_start(tmp_path):
+    cfg = _campaign_config(tmp_path)
+    runner = _fake_runner(returncode=0)
+    launcher = LocalLauncher(output_dir=str(tmp_path / "exp"), runner=runner)
+
+    launcher.launch(ExperimentSpec(config_path=cfg, init_checkpoint="/champ/best_model.pt"))
+
+    cmd = runner.calls[0]
+    assert "--init-checkpoint" in cmd
+    assert cmd[cmd.index("--init-checkpoint") + 1] == "/champ/best_model.pt"
+
+
+def test_cli_champion_sets_both_init_and_baseline():
+    # The --champion shortcut should warm-start from AND evaluate against one model.
+    from click.testing import CliRunner
+    from unittest.mock import patch
+    from yinsh_ml.cli.commands import orchestrate
+
+    captured = {}
+
+    class _StopScheduler(Exception):
+        pass
+
+    def _spec_capture(*a, **k):
+        captured.update(k)
+        raise _StopScheduler  # bail out before any real run
+
+    with patch("yinsh_ml.orchestration.ExperimentSpec", side_effect=_spec_capture):
+        CliRunner().invoke(
+            orchestrate.schedule,
+            ["cfg.yaml", "--champion", "/champ/best.pt", "--no-llm"],
+            catch_exceptions=True,
+        )
+    assert captured.get("init_checkpoint") == "/champ/best.pt"
+    assert captured.get("baseline_checkpoint") == "/champ/best.pt"
 
 
 def test_local_launcher_failed_training_marks_failed(tmp_path):

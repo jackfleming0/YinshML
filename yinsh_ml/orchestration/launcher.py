@@ -95,6 +95,9 @@ class LocalLauncher(Launcher):
         ]
         if spec.iterations is not None:
             cmd += ["--iterations", str(spec.iterations)]
+        if spec.init_checkpoint:
+            # Warm-start: run_training loads weights only, resets optimizer/iteration.
+            cmd += ["--init-checkpoint", str(spec.init_checkpoint)]
 
         logger.info("Launching training: %s", " ".join(cmd))
         proc = self._runner(cmd, cwd=str(_REPO_ROOT))

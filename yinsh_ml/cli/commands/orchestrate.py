@@ -23,6 +23,13 @@ DEFAULT_DB = "experiments/experiments.db"
 @click.option("--baseline-checkpoint", default=None,
               help="Path to a baseline checkpoint (.pt or run dir) — e.g. your champion "
                    "best_model.pt. Takes precedence over --baseline.")
+@click.option("--init-checkpoint", default=None,
+              help="Warm-start the candidate from this checkpoint (weights only). The "
+                   "'iterate on my champion' loop.")
+@click.option("--champion", default=None,
+              help="Shortcut for the improvement loop: warm-start FROM and evaluate "
+                   "AGAINST this checkpoint (sets both --init-checkpoint and "
+                   "--baseline-checkpoint).")
 @click.option("--target", type=click.Choice(["local", "cloud"]), default="local",
               help="Where to run (cloud is a stubbed seam).")
 @click.option("--name", default="", help="Human label for the run.")
@@ -39,10 +46,17 @@ DEFAULT_DB = "experiments/experiments.db"
               help="Panel calibration file (auto-loaded if it exists).")
 @click.option("--db", "db_path", default=DEFAULT_DB, help="Path to experiments.db")
 @click.option("--output-dir", default="experiments", help="Experiment output dir.")
-def schedule(config_path, baseline_id, baseline_checkpoint, target, name, iterations,
-             games_dir, audit_games, llm, calibration, db_path, output_dir):
+def schedule(config_path, baseline_id, baseline_checkpoint, init_checkpoint, champion,
+             target, name, iterations, games_dir, audit_games, llm, calibration,
+             db_path, output_dir):
     """Schedule + run an experiment from CONFIG_PATH, then Tier-0 evaluate it."""
     import os as _os
+
+    # --champion is the improvement-loop shortcut: warm-start from AND judge against
+    # the same model (explicit flags win if also given).
+    if champion:
+        init_checkpoint = init_checkpoint or champion
+        baseline_checkpoint = baseline_checkpoint or champion
 
     from ...orchestration import (
         EvaluationFunnel, ExperimentSpec, FailurePanel, Journal, OrchestrationStore,
@@ -65,8 +79,8 @@ def schedule(config_path, baseline_id, baseline_checkpoint, target, name, iterat
     )
     spec = ExperimentSpec(
         config_path=config_path, name=name, baseline_id=baseline_id,
-        baseline_checkpoint=baseline_checkpoint, target=target,
-        iterations=iterations, games_dir=games_dir,
+        baseline_checkpoint=baseline_checkpoint, init_checkpoint=init_checkpoint,
+        target=target, iterations=iterations, games_dir=games_dir,
     )
 
     _baseline_desc = baseline_checkpoint or baseline_id or "none"
