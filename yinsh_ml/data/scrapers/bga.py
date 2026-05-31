@@ -103,9 +103,29 @@ class BGAScraper:
         """
         try:
             with open(cookies_path) as f:
-                cookie_map = _json.load(f)
+                raw_cookies = _json.load(f)
         except OSError as e:
             logger.error(f"Failed to read cookies file {cookies_path}: {e}")
+            return False
+
+        # Accept two on-disk shapes:
+        #   1. Simple mapping:  {"PHPSESSID": "...", "TournoiEnLigneid": "..."}
+        #   2. Browser-export array (Cookie-Editor / EditThisCookie):
+        #      [{"name": "PHPSESSID", "value": "...", "domain": ...}, ...]
+        # Normalize both to a name->value mapping before building the jar.
+        if isinstance(raw_cookies, dict):
+            cookie_map = raw_cookies
+        elif isinstance(raw_cookies, list):
+            cookie_map = {
+                c["name"]: c.get("value", "")
+                for c in raw_cookies
+                if isinstance(c, dict) and c.get("name")
+            }
+        else:
+            logger.error(
+                f"Unexpected cookies file shape ({type(raw_cookies).__name__}) "
+                f"at {cookies_path} — expected a mapping or a list of cookie objects"
+            )
             return False
 
         for name, value in cookie_map.items():

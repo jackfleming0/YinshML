@@ -295,3 +295,47 @@ class TestFetchRawCapDetection:
         payload = {'status': 1, 'data': {'logs': [], 'players': {}}}
         scraper = self._make_scraper(monkeypatch, payload)
         assert scraper.fetch_raw(999) == payload
+
+
+class TestLoadCookies:
+    """`load_cookies` must accept both on-disk cookie shapes.
+
+    Regression: browser cookie-export extensions (Cookie-Editor /
+    EditThisCookie) write a JSON *array* of cookie objects, not the simple
+    `{name: value}` mapping. The old loop called `.items()` unconditionally
+    and crashed the analysis-board import endpoint with
+    `AttributeError: 'list' object has no attribute 'items'`.
+    """
+
+    def _logged_in_scraper(self, monkeypatch):
+        scraper = BGAScraper(delay=0)
+        # Probe succeeds: a body with 'logged_user' and no 'not_logged_user'.
+        monkeypatch.setattr(scraper, '_fetch', lambda url, **kw: 'logged_user ok')
+        return scraper
+
+    def _names_in_jar(self, scraper):
+        return {c.name for c in scraper._cookie_jar}
+
+    def test_mapping_shape(self, monkeypatch, tmp_path):
+        path = tmp_path / 'cookies.json'
+        path.write_text(json.dumps({'PHPSESSID': 'abc', 'TournoiEnLigneid': 'xyz'}))
+        scraper = self._logged_in_scraper(monkeypatch)
+        assert scraper.load_cookies(str(path)) is True
+        assert {'PHPSESSID', 'TournoiEnLigneid'} <= self._names_in_jar(scraper)
+
+    def test_browser_export_array_shape(self, monkeypatch, tmp_path):
+        path = tmp_path / 'cookies.json'
+        path.write_text(json.dumps([
+            {'name': 'PHPSESSID', 'value': 'abc', 'domain': '.boardgamearena.com'},
+            {'name': 'TournoiEnLigneid', 'value': 'xyz', 'domain': '.boardgamearena.com'},
+        ]))
+        scraper = self._logged_in_scraper(monkeypatch)
+        # Must not raise AttributeError, and must populate the jar.
+        assert scraper.load_cookies(str(path)) is True
+        assert {'PHPSESSID', 'TournoiEnLigneid'} <= self._names_in_jar(scraper)
+
+    def test_unexpected_shape_returns_false(self, monkeypatch, tmp_path):
+        path = tmp_path / 'cookies.json'
+        path.write_text(json.dumps('not-a-cookie-container'))
+        scraper = self._logged_in_scraper(monkeypatch)
+        assert scraper.load_cookies(str(path)) is False
