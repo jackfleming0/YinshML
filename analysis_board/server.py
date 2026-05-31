@@ -927,6 +927,7 @@ def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
             if job is not None:
                 job["progress"] = {"done": int(done), "total": int(total)}
 
+    started = time.time()
     try:
         gs, valid_moves, num_sims = ctx["gs"], ctx["valid_moves"], ctx["num_sims"]
         # Serialize the whole compute on _mcts_lock. The NetworkWrapper's
@@ -958,13 +959,19 @@ def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
             gs, valid_moves, mode=mode, value=value, best_value=best_value,
             top=top, num_sims=num_sims, capped_from=ctx["capped_from"],
         )
+        elapsed = time.time() - started
+        rate = (num_sims / elapsed) if elapsed > 0 else 0.0
+        log.info(
+            "async eval job %s done: %d sims in %.1fs (%.0f sims/s)",
+            job_id, num_sims, elapsed, rate,
+        )
         with _jobs_lock:
             job = _jobs.get(job_id)
             if job is not None:
                 job.update(status="done", result=result, finished_at=time.time())
                 job["progress"] = {"done": num_sims, "total": num_sims}
     except Exception as e:  # noqa: BLE001
-        log.exception("async eval job %s failed", job_id)
+        log.exception("async eval job %s failed after %.1fs", job_id, time.time() - started)
         with _jobs_lock:
             job = _jobs.get(job_id)
             if job is not None:
