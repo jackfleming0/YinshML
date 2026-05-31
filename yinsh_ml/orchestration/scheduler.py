@@ -69,6 +69,8 @@ class Scheduler:
         match_runner_factory: Optional[MatchRunnerFactory] = None,
         interpreter: Optional[PIInterpreter] = None,
         triage: Optional[TriageWorkflow] = None,
+        audit_games: int = 0,
+        audit_recorder=None,
         max_concurrent: int = 1,
     ):
         self.store = store
@@ -79,6 +81,10 @@ class Scheduler:
         self.interpreter = interpreter
         # Rung 2: optional triage workflow for ambiguous results. None -> no triage.
         self.triage = triage
+        # Optional: record N candidate self-play games post-training so the
+        # offense-only check has trajectories to read. 0 -> off.
+        self.audit_games = audit_games
+        self._audit_recorder = audit_recorder or _default_audit_recorder
         self.output_dir = output_dir
         self.launcher_factory = launcher_factory
         self.panel_input_builder = panel_input_builder or _default_panel_input
@@ -126,10 +132,18 @@ class Scheduler:
 
         self.store.set_status(launch.experiment_id, "evaluated")
 
+        # Optional: record candidate self-play games so the offense-only check has
+        # trajectories. Writes to <save_dir>/parquet_data, where the panel input
+        # builder looks. Best-effort — failures just leave the check skipping.
+        if self.audit_games and not spec.games_dir:
+            candidate_ckpt = _latest_checkpoint(launch.save_dir)
+            if candidate_ckpt:
+                self._audit_recorder(candidate_ckpt, self.audit_games, launch.save_dir)
+
         panel_input = self.panel_input_builder(spec, launch)
         match_runner = (
             self.match_runner_factory(spec, launch, self.output_dir)
-            if spec.baseline_id
+            if (spec.baseline_id or spec.baseline_checkpoint)
             else None
         )
         tier0 = self.funnel.run_tier0(panel_input, match_runner)
@@ -189,7 +203,7 @@ class Scheduler:
         self.store.record_eval(
             EvalResult(
                 experiment_id=launch.experiment_id,
-                baseline_id=spec.baseline_id,
+                baseline_id=(spec.baseline_id or spec.baseline_checkpoint),
                 tier=0,
                 wins=tier0.outcome.wins,
                 losses=tier0.outcome.losses,
@@ -236,6 +250,13 @@ class Scheduler:
 # --- default hooks (real wiring; bypassed by injected fakes in tests) -----
 
 
+def _default_audit_recorder(checkpoint: str, num_games: int, save_dir: str):
+    """Default hook: record candidate self-play games (lazy import keeps torch out)."""
+    from .audit_games import record_candidate_games
+
+    return record_candidate_games(checkpoint, num_games, save_dir)
+
+
 def _default_panel_input(spec: ExperimentSpec, launch: LaunchResult) -> PanelInput:
     """Build panel signals from the run's final metrics + replayable games.
 
@@ -254,16 +275,32 @@ def _default_panel_input(spec: ExperimentSpec, launch: LaunchResult) -> PanelInp
     return PanelInput.from_metrics(launch.final_metrics, run_diff_trajectories=trajectories)
 
 
+def _resolve_checkpoint(path_or_dir: str) -> Optional[str]:
+    """A direct ``.pt`` path is used as-is; a directory is globbed for the latest."""
+    if not path_or_dir:
+        return None
+    if os.path.isfile(path_or_dir):
+        return path_or_dir
+    if os.path.isdir(path_or_dir):
+        return _latest_checkpoint(path_or_dir)
+    return None
+
+
 def _default_match_runner(
     spec: ExperimentSpec, launch: LaunchResult, output_dir: str
 ) -> Optional[MatchRunner]:
     """Locate candidate + baseline checkpoints and build a real match runner.
 
+    The baseline is resolved from ``spec.baseline_checkpoint`` (a direct path to a
+    champion model) if set, else from ``spec.baseline_id`` (an orchestration run).
     Degrades gracefully: if either checkpoint can't be found the SPRT is skipped
     (the result then routes to review rather than auto-advancing).
     """
     candidate = _latest_checkpoint(launch.save_dir)
-    baseline = _latest_checkpoint(os.path.join(output_dir, spec.baseline_id or ""))
+    if spec.baseline_checkpoint:
+        baseline = _resolve_checkpoint(spec.baseline_checkpoint)
+    else:
+        baseline = _latest_checkpoint(os.path.join(output_dir, spec.baseline_id or ""))
     if candidate is None or baseline is None:
         logger.warning(
             "Could not locate checkpoints (candidate=%s, baseline=%s); skipping SPRT.",

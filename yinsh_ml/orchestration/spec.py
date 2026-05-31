@@ -32,6 +32,12 @@ class ExperimentSpec:
     review rather than auto-advanced.
     """
 
+    baseline_checkpoint: Optional[str] = None
+    """Direct path to a baseline checkpoint (``.pt`` file or a run dir to glob) to
+    judge against — e.g. your current champion `best_model.pt`. Takes precedence
+    over ``baseline_id``; lets you evaluate a candidate against a real model that
+    isn't an orchestration experiment."""
+
     target: LaunchTarget = "local"
     """Where to run. ``cloud`` is a stubbed seam in this slice."""
 

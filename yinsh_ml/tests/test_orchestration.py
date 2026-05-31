@@ -164,11 +164,13 @@ def test_funnel_strong_but_flagged_is_ambiguous():
 class FakeLauncher(Launcher):
     """Creates an experiments row (like ExperimentRunner) and returns a result."""
 
-    def __init__(self, db_path, experiment_id, status="completed", final_metrics=None):
+    def __init__(self, db_path, experiment_id, status="completed", final_metrics=None,
+                 save_dir=""):
         self.db_path = db_path
         self.experiment_id = experiment_id
         self.status = status
         self.final_metrics = final_metrics or {}
+        self.save_dir = save_dir
 
     def launch(self, spec):
         db = ExperimentDB(self.db_path)
@@ -182,7 +184,7 @@ class FakeLauncher(Launcher):
         return LaunchResult(
             experiment_id=self.experiment_id,
             status=self.status,
-            save_dir="",
+            save_dir=self.save_dir,
             final_metrics=self.final_metrics,
         )
 
@@ -914,3 +916,94 @@ def test_from_metrics_does_not_use_target_entropy_for_collapse_check():
     # A run with only target entropy logged must NOT populate the collapse signal.
     pi = PanelInput.from_metrics({"policy_target_entropy_mean": 0.3})
     assert pi.policy_entropy is None  # -> check skips, no false flag
+
+
+# --------------------------------------------------------------------------
+# Baseline-by-checkpoint-path (evaluate a candidate against your real champion)
+# --------------------------------------------------------------------------
+
+def test_resolve_checkpoint_file_and_dir(tmp_path):
+    from yinsh_ml.orchestration.scheduler import _resolve_checkpoint
+
+    # direct .pt file -> used as-is
+    ckpt = tmp_path / "best_model.pt"
+    ckpt.write_text("x")
+    assert _resolve_checkpoint(str(ckpt)) == str(ckpt)
+
+    # a run dir -> globbed for the latest checkpoint
+    run = tmp_path / "run" / "iteration_3"
+    run.mkdir(parents=True)
+    (run / "checkpoint_iteration_3.pt").write_text("x")
+    assert _resolve_checkpoint(str(tmp_path / "run")).endswith("checkpoint_iteration_3.pt")
+
+    assert _resolve_checkpoint(str(tmp_path / "nope")) is None
+    assert _resolve_checkpoint("") is None
+
+
+def test_scheduler_runs_match_for_baseline_checkpoint(tmp_path):
+    # A candidate with a baseline *checkpoint* (not an experiment id) must play a match.
+    healthy = {"policy_target_entropy_mean": 1.2, "value_accuracy": 0.6, "value_variance": 0.05}
+    launcher = FakeLauncher(str(tmp_path / "experiments.db"), "exp_ck", final_metrics=healthy)
+    scheduler, store, _ = _make_scheduler(
+        tmp_path, launcher, match_runner=FakeMatchRunner(win_frac=0.8)
+    )
+    # match_runner_factory is injected, so this exercises the "baseline_checkpoint
+    # triggers a match" wiring without needing a real model.
+    spec = ExperimentSpec(
+        config_path="x.yaml", baseline_checkpoint="/path/to/champion/best_model.pt"
+    )
+    result = scheduler.process(spec)
+
+    assert result.tier0.had_baseline           # the SPRT actually ran
+    assert result.decision.gate_kind == "promotion"   # decisive win -> promotion gate
+    # the baseline path is recorded as the eval's baseline identifier
+    assert store.get_evals("exp_ck")[0].baseline_id == "/path/to/champion/best_model.pt"
+
+
+# --------------------------------------------------------------------------
+# Candidate game audit (makes offense-only fire on real candidates)
+# --------------------------------------------------------------------------
+
+def test_scheduler_records_audit_games_when_enabled(tmp_path):
+    # Give the fake launcher a save_dir with a checkpoint so the audit can find it.
+    save_dir = tmp_path / "run"
+    (save_dir / "iteration_0").mkdir(parents=True)
+    ckpt = save_dir / "iteration_0" / "checkpoint_iteration_0.pt"
+    ckpt.write_text("x")
+
+    healthy = {"policy_target_entropy_mean": 1.2, "value_accuracy": 0.6, "value_variance": 0.05}
+    launcher = FakeLauncher(
+        str(tmp_path / "experiments.db"), "exp_audit", final_metrics=healthy,
+        save_dir=str(save_dir),
+    )
+
+    calls = []
+
+    def spy_recorder(checkpoint, num_games, sd):
+        calls.append((checkpoint, num_games, sd))
+
+    db_path = str(tmp_path / "experiments.db")
+    store = OrchestrationStore(db_path)
+    scheduler = Scheduler(
+        store=store, journal=Journal(str(tmp_path)),
+        funnel=EvaluationFunnel(batch_size=10, max_games=200), output_dir=str(tmp_path),
+        launcher_factory=lambda target, outdir: launcher,
+        match_runner_factory=lambda spec, launch, outdir: FakeMatchRunner(0.8),
+        panel_input_builder=lambda spec, launch: PanelInput(value_accuracy=0.6),
+        audit_games=3, audit_recorder=spy_recorder,
+    )
+    scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
+
+    assert len(calls) == 1
+    assert calls[0][1] == 3                       # num_games passed through
+    assert calls[0][0].endswith("checkpoint_iteration_0.pt")  # located the candidate ckpt
+
+
+def test_scheduler_skips_audit_when_disabled(tmp_path):
+    healthy = {"policy_target_entropy_mean": 1.2, "value_accuracy": 0.6, "value_variance": 0.05}
+    launcher = FakeLauncher(str(tmp_path / "experiments.db"), "exp_noaudit", final_metrics=healthy)
+    called = []
+    scheduler, _, _ = _make_scheduler(tmp_path, launcher, match_runner=FakeMatchRunner(0.8))
+    scheduler._audit_recorder = lambda *a: called.append(a)  # default audit_games=0
+    scheduler.process(ExperimentSpec(config_path="x.yaml", baseline_id="b"))
+    assert called == []  # audit off by default

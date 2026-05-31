@@ -20,6 +20,9 @@ DEFAULT_DB = "experiments/experiments.db"
 @click.argument("config_path")
 @click.option("--baseline", "baseline_id", default=None,
               help="Experiment id of the anchor/predecessor to judge against.")
+@click.option("--baseline-checkpoint", default=None,
+              help="Path to a baseline checkpoint (.pt or run dir) — e.g. your champion "
+                   "best_model.pt. Takes precedence over --baseline.")
 @click.option("--target", type=click.Choice(["local", "cloud"]), default="local",
               help="Where to run (cloud is a stubbed seam).")
 @click.option("--name", default="", help="Human label for the run.")
@@ -27,14 +30,17 @@ DEFAULT_DB = "experiments/experiments.db"
               help="Override the config's num_iterations (e.g. 1 for a quick run).")
 @click.option("--games-dir", default=None,
               help="Replayable game parquet dir for the offense-only audit.")
+@click.option("--audit-games", type=int, default=0,
+              help="Record N candidate self-play games post-training so the offense-only "
+                   "check runs (a few is enough; each is an MCTS game).")
 @click.option("--llm/--no-llm", default=True,
               help="Use the Claude PI interpreter for the writeup (needs ANTHROPIC_API_KEY).")
 @click.option("--calibration", default="configs/panel_calibration.json",
               help="Panel calibration file (auto-loaded if it exists).")
 @click.option("--db", "db_path", default=DEFAULT_DB, help="Path to experiments.db")
 @click.option("--output-dir", default="experiments", help="Experiment output dir.")
-def schedule(config_path, baseline_id, target, name, iterations, games_dir, llm,
-             calibration, db_path, output_dir):
+def schedule(config_path, baseline_id, baseline_checkpoint, target, name, iterations,
+             games_dir, audit_games, llm, calibration, db_path, output_dir):
     """Schedule + run an experiment from CONFIG_PATH, then Tier-0 evaluate it."""
     import os as _os
 
@@ -54,14 +60,17 @@ def schedule(config_path, baseline_id, target, name, iterations, games_dir, llm,
         funnel=funnel,
         interpreter=PIInterpreter() if llm else None,
         triage=TriageWorkflow(funnel) if llm else None,
+        audit_games=audit_games,
         output_dir=output_dir,
     )
     spec = ExperimentSpec(
-        config_path=config_path, name=name, baseline_id=baseline_id, target=target,
+        config_path=config_path, name=name, baseline_id=baseline_id,
+        baseline_checkpoint=baseline_checkpoint, target=target,
         iterations=iterations, games_dir=games_dir,
     )
 
-    click.echo(f"Scheduling {config_path} (baseline={baseline_id or 'none'}, target={target})...")
+    _baseline_desc = baseline_checkpoint or baseline_id or "none"
+    click.echo(f"Scheduling {config_path} (baseline={_baseline_desc}, target={target})...")
     result = scheduler.process(spec)
 
     click.echo("")

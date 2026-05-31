@@ -24,6 +24,7 @@ from .journal import Journal
 from .pi import PIRouter, RoutingDecision
 from .proposer import Proposal, ProposerAgent
 from .scheduler import Scheduler
+from .audit_games import record_candidate_games
 from .trajectories import run_diff_trajectories_from_parquet, trajectory_from_replay
 from .triage import TriageResult, TriageVerdict, TriageWorkflow
 
@@ -40,5 +41,6 @@ __all__ = [
     "TriageWorkflow", "TriageResult", "TriageVerdict",
     "ProposerAgent", "Proposal",
     "run_diff_trajectories_from_parquet", "trajectory_from_replay",
+    "record_candidate_games",
     "Scheduler",
 ]

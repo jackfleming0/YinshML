@@ -64,10 +64,14 @@ the seams. Deliberately deferred:
 - **PI reasoning** — now LLM-authored (see Rung 1 below); falls back to a template
   when no API key is set.
 - **Run-diff trajectory extraction** — **wired** (`trajectories.py`): the
-  offense-only check now extracts per-game completed-runs-differential trajectories
-  from replayable game parquet (`spec.games_dir` or `<save_dir>/parquet_data`) and
-  runs for real. It still skips (gracefully) for training-only runs that record no
-  replayable games.
+  offense-only check extracts per-game completed-runs-differential trajectories from
+  replayable game parquet (`spec.games_dir` or `<save_dir>/parquet_data`). Since
+  training self-play writes no replayable games, `--audit-games N` (`audit_games.py`)
+  records N candidate MCTS self-play games post-training so the check fires on the
+  candidate's own play; without it the check skips gracefully.
+- **Baseline by checkpoint path** — `--baseline-checkpoint <path>` (or
+  `spec.baseline_checkpoint`) evaluates a candidate against a real model file (e.g.
+  your champion `best_model.pt`), not only against an orchestration experiment id.
 - **Anchor-ladder update on promotion** — `ratify` marks `promoted`; making the
   promoted model the next baseline is a follow-up.
 
