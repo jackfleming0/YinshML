@@ -17,7 +17,6 @@ not include `anthropic`). Test seams:
 from __future__ import annotations
 
 import base64
-import json
 import os
 import sys
 from pathlib import Path
@@ -300,15 +299,37 @@ class TestRateLimit:
 
 class StubClient:
     """Records calls and returns canned responses. Mimics
-    ``anthropic.Anthropic`` enough for ``call_claude_vision``."""
+    ``anthropic.Anthropic`` enough for ``call_claude_vision``.
 
-    def __init__(self, response_text: str = "", raise_exception: Exception = None):
-        self.response_text = response_text
+    With tool-use forcing, the real Anthropic SDK returns a tool_use
+    block whose ``.input`` is the validated JSON. We mirror that shape.
+    Pass ``tool_input=None`` to simulate a model that didn't call the
+    tool (e.g. hit max_tokens mid-reasoning, or refused).
+    """
+
+    def __init__(
+        self,
+        *,
+        tool_input: Any = "DEFAULT",
+        raise_exception: Exception = None,
+        stop_reason: str = "tool_use",
+        extra_blocks: List[Any] = None,
+    ):
+        # Default to a minimal valid position so most tests don't have to
+        # spell it out. Pass `tool_input=None` to omit the tool_use block
+        # entirely.
+        if tool_input == "DEFAULT":
+            tool_input = {
+                "pieces": [], "phase": "MAIN_GAME", "side_to_move": "WHITE",
+                "scores": {"WHITE": 0, "BLACK": 0}, "confidence": "low",
+                "notes": "",
+            }
+        self.tool_input = tool_input
         self.raise_exception = raise_exception
+        self.stop_reason = stop_reason
+        self.extra_blocks = extra_blocks or []
         self.calls: List[Dict[str, Any]] = []
         self.messages = self
-        # usage exposed via the returned message; track it here for
-        # assertions if needed.
         self.last_usage = SimpleNamespace(
             input_tokens=100,
             output_tokens=200,
@@ -320,69 +341,86 @@ class StubClient:
         self.calls.append(kwargs)
         if self.raise_exception is not None:
             raise self.raise_exception
-        text_block = SimpleNamespace(type="text", text=self.response_text)
+        content = list(self.extra_blocks)
+        if self.tool_input is not None:
+            content.append(SimpleNamespace(
+                type="tool_use",
+                name="submit_yinsh_position",
+                input=self.tool_input,
+            ))
         return SimpleNamespace(
-            content=[text_block],
+            content=content,
             usage=self.last_usage,
+            stop_reason=self.stop_reason,
         )
 
 
 class TestCallClaudeVision:
-    def test_parses_clean_json_response(self):
+    def test_extracts_tool_use_input(self):
         from analysis_board.screenshot_import import call_claude_vision
-        stub = StubClient(response_text=json.dumps({
+        stub = StubClient(tool_input={
             "pieces": [{"pos": "E5", "piece": "WHITE_RING"}],
             "phase": "MAIN_GAME",
             "side_to_move": "WHITE",
             "scores": {"WHITE": 0, "BLACK": 0},
             "confidence": "high",
             "notes": "",
-        }))
+        })
         result = call_claude_vision(ONE_PX_PNG_B64, "image/png", client=stub)
         assert result["pieces"] == [{"pos": "E5", "piece": "WHITE_RING"}]
         # Usage is attached to the parsed dict for the endpoint to log.
         assert "_usage" in result
 
+    def test_forces_position_tool(self):
+        """Without tool_choice forcing, Sonnet preambles before the
+        tool call and we hit the no-tool_use path. Pin this so a refactor
+        that drops tool_choice gets caught."""
+        from analysis_board.screenshot_import import call_claude_vision
+        stub = StubClient()
+        call_claude_vision(ONE_PX_PNG_B64, "image/png", client=stub)
+        sent = stub.calls[0]
+        assert sent["tool_choice"] == {
+            "type": "tool", "name": "submit_yinsh_position",
+        }
+        # And the tool definition must actually be present in tools.
+        tools = sent["tools"]
+        assert any(t.get("name") == "submit_yinsh_position" for t in tools)
+
     def test_caches_system_prompt(self):
         """The system prompt must be sent with cache_control set, otherwise
         repeat calls don't get the ~10x input-cost discount."""
         from analysis_board.screenshot_import import call_claude_vision
-        stub = StubClient(response_text=json.dumps({
-            "pieces": [], "phase": "MAIN_GAME", "side_to_move": "WHITE",
-            "scores": {"WHITE": 0, "BLACK": 0}, "confidence": "low", "notes": "",
-        }))
+        stub = StubClient()
         call_claude_vision(ONE_PX_PNG_B64, "image/png", client=stub)
         sent_system = stub.calls[0]["system"]
         assert isinstance(sent_system, list)
         assert sent_system[0]["cache_control"] == {"type": "ephemeral"}
 
-    def test_strips_code_fences(self):
+    def test_raises_when_model_skips_the_tool(self):
+        """If the model refuses or hits max_tokens before tool_use, no
+        tool_use block is emitted. Surface a useful error to the caller
+        rather than crashing on a missing .input."""
+        from analysis_board.screenshot_import import (
+            ScreenshotImportError, call_claude_vision,
+        )
+        stub = StubClient(tool_input=None, stop_reason="max_tokens")
+        with pytest.raises(ScreenshotImportError) as exc:
+            call_claude_vision(ONE_PX_PNG_B64, "image/png", client=stub)
+        assert "tool" in exc.value.user_message.lower()
+        # stop_reason should be surfaced in the error message for debug.
+        assert "max_tokens" in exc.value.user_message
+
+    def test_ignores_preamble_text_block(self):
+        """If the model emits a text block alongside the tool_use (rare
+        but legal), we still extract from the tool_use. The earlier
+        text-mode implementation broke on this kind of mixed response."""
         from analysis_board.screenshot_import import call_claude_vision
-        wrapped = "```json\n" + json.dumps({
-            "pieces": [], "phase": "MAIN_GAME", "side_to_move": "WHITE",
-            "scores": {"WHITE": 0, "BLACK": 0}, "confidence": "low", "notes": "",
-        }) + "\n```"
-        stub = StubClient(response_text=wrapped)
+        text_preamble = SimpleNamespace(
+            type="text", text="Analyzing the board...",
+        )
+        stub = StubClient(extra_blocks=[text_preamble])
         result = call_claude_vision(ONE_PX_PNG_B64, "image/png", client=stub)
-        assert result["pieces"] == []
-
-    def test_raises_on_non_json(self):
-        from analysis_board.screenshot_import import (
-            ScreenshotImportError, call_claude_vision,
-        )
-        stub = StubClient(response_text="I am not JSON, sorry")
-        with pytest.raises(ScreenshotImportError) as exc:
-            call_claude_vision(ONE_PX_PNG_B64, "image/png", client=stub)
-        assert "non-JSON" in exc.value.user_message
-
-    def test_raises_on_empty_response(self):
-        from analysis_board.screenshot_import import (
-            ScreenshotImportError, call_claude_vision,
-        )
-        stub = StubClient(response_text="")
-        with pytest.raises(ScreenshotImportError) as exc:
-            call_claude_vision(ONE_PX_PNG_B64, "image/png", client=stub)
-        assert "empty" in exc.value.user_message.lower()
+        assert "pieces" in result
 
     def test_wraps_sdk_exceptions(self):
         from analysis_board.screenshot_import import (

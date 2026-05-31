@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 import os
 import threading
 import time
@@ -241,10 +240,99 @@ with confidence "low" and notes explaining what you see instead.
 # Frontend hint embedded in the user turn — short, deterministic. The
 # system prompt is the cached portion; this stays uncached but is tiny.
 USER_DIRECTIVE = (
-    "Parse the YINSH board position shown in this image. "
-    "Respond with the JSON object specified in the system prompt and "
-    "nothing else."
+    "Parse the YINSH board position shown in this image and call the "
+    "submit_yinsh_position tool with the result."
 )
+
+# Tool-use schema. Forcing the model to call this tool via
+# tool_choice={"type": "tool", "name": ...} guarantees structured output —
+# Sonnet (especially with extended-thinking-like reasoning) routinely
+# preambles before JSON when asked for "JSON only," so an earlier text-mode
+# implementation hit "non-JSON response" failures. Tool-use bypasses the
+# text channel entirely; the model's output goes through Anthropic's
+# server-side schema validator before reaching us.
+POSITION_TOOL = {
+    "name": "submit_yinsh_position",
+    "description": (
+        "Submit the YINSH board position parsed from the image. Call this "
+        "tool exactly once with your best parse of the board."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pieces": {
+                "type": "array",
+                "description": (
+                    "Every piece visible on the board. Do not invent "
+                    "pieces in occluded areas — note occlusion in `notes` "
+                    "instead. No duplicate `pos` values."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "pos": {
+                            "type": "string",
+                            "description": (
+                                "Uppercase column + row, e.g. 'E5', 'K7', "
+                                "'B1'. Must be a valid YINSH position."
+                            ),
+                        },
+                        "piece": {
+                            "type": "string",
+                            "enum": sorted(VALID_PIECES),
+                        },
+                    },
+                    "required": ["pos", "piece"],
+                },
+            },
+            "phase": {
+                "type": "string",
+                "enum": sorted(VALID_PHASES),
+                "description": (
+                    "Default to MAIN_GAME unless you have strong evidence "
+                    "otherwise. RING_REMOVAL / ROW_COMPLETION are rare "
+                    "mid-capture states unlikely to be visible in a static "
+                    "image."
+                ),
+            },
+            "side_to_move": {
+                "type": "string",
+                "enum": sorted(VALID_SIDES | {"unknown"}),
+                "description": (
+                    "Usually 'unknown' for static board images. Only "
+                    "WHITE/BLACK if an on-screen turn indicator is clearly "
+                    "visible."
+                ),
+            },
+            "scores": {
+                "type": "object",
+                "properties": {
+                    "WHITE": {"type": "integer", "minimum": 0, "maximum": 3},
+                    "BLACK": {"type": "integer", "minimum": 0, "maximum": 3},
+                },
+                "required": ["WHITE", "BLACK"],
+            },
+            "confidence": {
+                "type": "string",
+                "enum": sorted(VALID_CONFIDENCES),
+                "description": (
+                    "Your overall confidence in this parse. Use 'low' if "
+                    "many pieces are occluded, the image is heavily "
+                    "distorted, or you are guessing on phase."
+                ),
+            },
+            "notes": {
+                "type": "string",
+                "description": (
+                    "Short free-text caveats about the parse (occluded "
+                    "areas, ambiguous pieces, glare). Empty string if "
+                    "nothing to add."
+                ),
+            },
+        },
+        "required": ["pieces", "phase", "side_to_move", "scores", "confidence", "notes"],
+    },
+}
 
 
 def _get_anthropic_client():
@@ -295,11 +383,11 @@ def call_claude_vision(
         message = client.messages.create(
             model=model,
             max_tokens=2048,
-            # Top-level auto-caching: caches the largest cacheable prefix
-            # (system prompt + tool definitions if any). Since we have no
-            # tools, this caches just the system prompt. The actual image
-            # bytes vary per request and live after the breakpoint, so
-            # they don't invalidate the cache.
+            # Auto-caches the cacheable prefix (system prompt + tools
+            # definitions). The breakpoint sits on the system prompt; the
+            # tool schema gets cached alongside since it appears before
+            # the cache marker in the canonical ordering. Image bytes
+            # vary per request and live in the user turn — uncached.
             system=[
                 {
                     "type": "text",
@@ -307,6 +395,14 @@ def call_claude_vision(
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
+            tools=[POSITION_TOOL],
+            # FORCE the model to call submit_yinsh_position rather than
+            # respond in text. With text-mode the model routinely
+            # preambled ("I need to carefully analyze..."), breaking
+            # json.loads. Tool use guarantees structured output —
+            # Anthropic validates the input against POSITION_TOOL's
+            # input_schema server-side before returning.
+            tool_choice={"type": "tool", "name": "submit_yinsh_position"},
             messages=[
                 {
                     "role": "user",
@@ -332,39 +428,25 @@ def call_claude_vision(
             status=502,
         )
 
-    # Stitch all text blocks together. Sonnet should return one text
-    # block but the API contract allows multiple.
-    text_parts: List[str] = []
+    # With tool_choice forcing the tool, the response should contain
+    # exactly one tool_use block whose .input is the parsed position.
+    # Defensive against unexpected stop_reasons (max_tokens before tool
+    # call, refusal, etc.).
+    parsed: Optional[Dict[str, Any]] = None
     for block in message.content:
-        if getattr(block, "type", None) == "text":
-            text_parts.append(getattr(block, "text", ""))
-    raw_text = "".join(text_parts).strip()
-    if not raw_text:
-        raise ScreenshotImportError(
-            "Claude returned an empty response",
-            status=200,
-        )
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_yinsh_position":
+            raw_input = getattr(block, "input", None)
+            if isinstance(raw_input, dict):
+                parsed = raw_input
+            break
 
-    # Tolerate accidental code-fence wrapping even though the prompt
-    # asks for raw JSON — cheap defense against a regression.
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        # `json\n{...}\n` after stripping ticks
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
-
-    try:
-        parsed = json.loads(raw_text)
-    except json.JSONDecodeError as e:
+    if parsed is None:
+        stop_reason = getattr(message, "stop_reason", "unknown")
         raise ScreenshotImportError(
-            f"Claude returned non-JSON response: {e}. Got: {raw_text[:200]!r}",
-            status=200,
-        )
-
-    if not isinstance(parsed, dict):
-        raise ScreenshotImportError(
-            f"Claude returned a non-object JSON value: {type(parsed).__name__}",
+            f"Claude did not call the submit_yinsh_position tool "
+            f"(stop_reason={stop_reason}). The image may not be parseable "
+            f"as a YINSH board, or the model hit max_tokens. Try a clearer "
+            f"or smaller image.",
             status=200,
         )
 
