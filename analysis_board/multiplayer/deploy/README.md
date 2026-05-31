@@ -468,6 +468,35 @@ warning; clear the token and the same request reports
 `⚠ capped to 3200 of 5000 requested`. Server-side, an over-cap request
 *without* the token logs `capping num_sims …`; *with* it, no such line.
 
+#### Batched search (the speed lever)
+
+The analysis board uses **batched MCTS** (`search_batch`): it collects a batch
+of leaf nodes and evaluates them in one network forward pass instead of one pass
+per simulation — **10-20× faster on Apple Silicon** for `pure_neural`/`hybrid`.
+With Dirichlet disabled (as the board runs it) the results are *identical* to the
+old per-leaf path — same visit counts, same value — just much faster (verified by
+`yinsh_ml/tests/test_mcts_serial_vs_batch_parity.py`). `pure_heuristic` mode
+can't batch (heuristics are per-position), so it stays at the old speed.
+
+Batch size defaults to 64; override deployment-wide with the `YNS_BATCH_SIZE`
+env var, or per request with a `batch_size` field in the `/api/evaluate` body.
+Bigger batches mean fewer network calls (faster) at the cost of slightly more
+virtual-loss-guided selection; 64 is a good balance for big searches.
+
+#### Big searches run as background jobs
+
+Even batched, a search can exceed the Cloudflare tunnel's ~100s response
+timeout, so anything above **8000 sims** is dispatched to `/api/evaluate_async`:
+the search runs on a background thread, the status banner shows a live
+`done/total · % · elapsed` readout, and the SPA polls `/api/evaluate_result/<id>`
+twice a second until it lands — instead of the request dying with the
+`Unexpected token '<'` HTML-timeout error. The server logs
+`async eval job … done: N sims in X.Xs (Y sims/s)` on completion, so the real
+batched rate is visible in `yinsh-server.log` — handy for deciding whether to
+raise the 8000 cutoff. Searches still run one-at-a-time server-wide (the
+`NetworkWrapper` tensor pool isn't thread-safe), so while a long owner job
+churns, other users' analyses queue behind it.
+
 ### Lock the URL down later (add auth)
 
 If public access becomes a problem, add a Cloudflare Access policy:

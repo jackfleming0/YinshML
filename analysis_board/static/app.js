@@ -647,6 +647,19 @@ if (ownerTokenEl) {
 }
 const ownerToken = () => (ownerTokenEl ? ownerTokenEl.value.trim() : "");
 
+// Above this many sims, route Analyze through the async job endpoint
+// (background thread + polling) instead of one synchronous request, so a long
+// search can't be killed by the Cloudflare tunnel's ~100s response timeout.
+// The server now uses batched MCTS (search_batch — 10-20x faster on Apple
+// Silicon for pure_neural), so most searches finish well under that window;
+// but pure_heuristic mode doesn't batch, so this cutoff stays conservative to
+// be safe across all eval modes. Raise it once the deploy logs show the real
+// batched sims/s if you'd rather keep big pure_neural searches fully sync.
+const ASYNC_SIM_THRESHOLD = 8000;
+// Poll cadence for async jobs — snappy enough that short batched searches
+// feel responsive, light enough that a 15-min job is ~2 req/s.
+const ASYNC_POLL_MS = 500;
+
 // Advanced-MCTS defaults — kept here as the single source of truth for
 // the reset button and the server-side defaults (they must agree).
 const MCTS_DEFAULTS = {
@@ -884,49 +897,115 @@ async function evaluate(opts = {}) {
   }
   evalBtn.disabled = true;
   const sims = Math.max(0, parseInt(numSims.value, 10) || 0);
-  setStatus(sims > 0 ? `Running MCTS (${sims} sims)…` : "Asking the network…", "thinking");
+  setStatus(sims > 0 ? `Running MCTS (${sims.toLocaleString()} sims)…` : "Asking the network…", "thinking");
   try {
-    const res = await fetch("/api/evaluate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(currentPayload()),
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      setStatus((data.errors || ["evaluation failed"]).join(" · "), "error");
-      renderResult(null);
-      return;
-    }
-    state.lastResult = data;
-    state.legalMoves = data.legal_moves || [];
-    updateTurnBadge(data.side_to_move, data.phase);
-    // In Play mode, multi-row capture sequences keep the same player on
-    // move across multiple plies. Make this unambiguous in the status
-    // banner so it doesn't look like a turn-flip bug.
-    let captureNote = "";
-    if (state.mode === "play") {
-      if (data.phase === "ROW_COMPLETION") {
-        captureNote = " · capture: pick a row to remove";
-      } else if (data.phase === "RING_REMOVAL") {
-        captureNote = " · capture: remove a ring";
+    const payload = currentPayload();
+    if (sims > ASYNC_SIM_THRESHOLD) {
+      // Long search — run it as a background job so the HTTP request (and the
+      // proxy) doesn't time out waiting ~minutes for the result.
+      await runAsyncEvaluation(payload, sims);
+    } else {
+      const res = await fetch("/api/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus((data.errors || ["evaluation failed"]).join(" · "), "error");
+        renderResult(null);
+        return;
       }
+      applyEvalResult(data);
     }
-    // If the public cap clamped the search, say so out loud instead of
-    // silently running fewer sims than requested.
-    const capNote = data.capped_from
-      ? ` · ⚠ capped to ${data.num_sims} of ${data.capped_from} requested (public limit)`
-      : "";
-    setStatus(
-      `${data.mode === "mcts" ? "MCTS" : "Network policy"} · ` +
-      `${data.side_to_move} to move${captureNote} · ${data.num_valid_moves} legal moves${capNote}`,
-      data.capped_from ? "warning" : "success",
-    );
-    renderResult(data);
   } catch (e) {
     setStatus("Request failed: " + e.message, "error");
     renderResult(null);
   } finally {
     evalBtn.disabled = false;
+  }
+}
+
+// Render a finished /api/evaluate (or async job) result into the UI.
+function applyEvalResult(data) {
+  state.lastResult = data;
+  state.legalMoves = data.legal_moves || [];
+  updateTurnBadge(data.side_to_move, data.phase);
+  // In Play mode, multi-row capture sequences keep the same player on move
+  // across multiple plies. Make this unambiguous so it doesn't look like a
+  // turn-flip bug.
+  let captureNote = "";
+  if (state.mode === "play") {
+    if (data.phase === "ROW_COMPLETION") {
+      captureNote = " · capture: pick a row to remove";
+    } else if (data.phase === "RING_REMOVAL") {
+      captureNote = " · capture: remove a ring";
+    }
+  }
+  // If the public cap clamped the search, say so out loud instead of
+  // silently running fewer sims than requested.
+  const capNote = data.capped_from
+    ? ` · ⚠ capped to ${data.num_sims} of ${data.capped_from} requested (public limit)`
+    : "";
+  setStatus(
+    `${data.mode === "mcts" ? "MCTS" : "Network policy"} · ` +
+    `${data.side_to_move} to move${captureNote} · ${data.num_valid_moves} legal moves${capNote}`,
+    data.capped_from ? "warning" : "success",
+  );
+  renderResult(data);
+}
+
+// Drive a long search via the async job endpoint: kick it off, then poll for
+// progress until it finishes. Keeps the UI responsive and dodges the proxy's
+// response timeout on multi-minute searches.
+async function runAsyncEvaluation(payload, sims) {
+  const startRes = await fetch("/api/evaluate_async", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const start = await startRes.json();
+  if (!start.ok) {
+    setStatus((start.errors || ["evaluation failed"]).join(" · "), "error");
+    renderResult(null);
+    return;
+  }
+  const jobId = start.job_id;
+  const t0 = Date.now();
+  // Poll until the job reports done or error.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, ASYNC_POLL_MS));
+    let poll;
+    try {
+      const pollRes = await fetch(`/api/evaluate_result/${jobId}`);
+      poll = await pollRes.json();
+    } catch (e) {
+      // Transient blip while a long search churns — keep polling.
+      continue;
+    }
+    if (!poll.ok) {
+      setStatus((poll.errors || ["lost track of the search job"]).join(" · "), "error");
+      renderResult(null);
+      return;
+    }
+    if (poll.status === "error") {
+      setStatus((poll.errors || ["search failed"]).join(" · "), "error");
+      renderResult(null);
+      return;
+    }
+    if (poll.status === "done") {
+      applyEvalResult(poll.result);
+      return;
+    }
+    // running — update the progress readout.
+    const done = (poll.progress && poll.progress.done) || 0;
+    const total = (poll.progress && poll.progress.total) || sims;
+    const pct = total ? Math.floor((100 * done) / total) : 0;
+    const elapsed = Math.floor((Date.now() - t0) / 1000);
+    setStatus(
+      `Running MCTS · ${done.toLocaleString()}/${total.toLocaleString()} sims · ${pct}% · ${elapsed}s`,
+      "thinking",
+    );
   }
 }
 
