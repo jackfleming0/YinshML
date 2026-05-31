@@ -1,0 +1,133 @@
+# symmetry_fixes_mcts200.yaml — the L1+L2+E16 foundation run.
+#
+# Stacks the three policy/symmetry fixes from the 2026-05-29..31 work onto the
+# Branch D.2 (15-channel enhanced) recipe:
+#   L1  Dropout(0.3)->0 in the policy head — already in model.py (architecture),
+#       so it applies automatically to every net built here. Nothing to set.
+#   L2  Label smoothing — applied during SUPERVISED PRETRAIN (a CLI flag on
+#       run_supervised_pretraining.py, see the launch sequence below), NOT here:
+#       this loop's policy loss is soft-target (MCTS visit distributions), where
+#       classic label smoothing doesn't apply.
+#   E16 Symmetric-weight regularizer — the `trainer.symmetric_reg` block below.
+#       value_weight=20 is measured (scripts/investigate_e16_value_weight.py +
+#       investigate_e16_dynamic.py); watch the per-K-step kl / value_asym logs and
+#       push toward 50 if value_asym keeps climbing.
+#
+# LAUNCH SEQUENCE (see D2_PREP.md for the corpus story):
+#   1. 15-channel engine corpus (the only real prerequisite — yngine_volume.npz
+#      is 6-channel). Path B is built + tested:
+#        python scripts/regenerate_npz_with_enhanced_encoder.py \
+#            --input expert_games/yngine_volume.npz \
+#            --output expert_games/yngine_volume_15ch_mmap/ --workers 16
+#   2. Supervised pretrain WITH the fixes -> the warm-start checkpoint:
+#        python scripts/run_supervised_pretraining.py \
+#            --data-dir expert_games/yngine_volume_15ch_mmap/ \
+#            --use-enhanced-encoding --label-smoothing 0.1 \
+#            --enable-symmetric-reg \
+#            --value-mode classification --value-head-type spatial \
+#            --output-dir models/supervised_symmetry
+#   3. Self-play loop (this config), warm-starting from that checkpoint:
+#        python scripts/run_training.py -c configs/symmetry_fixes_mcts200.yaml \
+#            --init-checkpoint models/supervised_symmetry/best_supervised.pt
+#
+# Go/no-go read: the plateau was post-iter-1, so watch whether value
+# discrimination / value-outcome correlation / WR-vs-anchor keep climbing
+# through iters 2-3 instead of flattening. You'll know by iter 2-3.
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_symmetry
+
+encoding:
+  type: enhanced   # 15-channel — must match the warm-start checkpoint's encoder
+
+network:
+  value_head_type: spatial   # matches models/supervised_2026-05-27 (spatial head)
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 200
+  late_simulations: 100
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 4
+  use_shared_evaluator: false
+  games_per_iteration: 100
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true
+  # E16 symmetric-weight regularizer (THE NEW KNOB for this run).
+  symmetric_reg:
+    enabled: true
+    weight: 0.1          # outer alpha
+    value_weight: 20.0   # measured; raise toward 50 if value_asym climbs
+    every_k_steps: 10
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 100
+  promotion_threshold: 0.20
+  tournament_sliding_window: 3
+  eval_seed: 20260531
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
