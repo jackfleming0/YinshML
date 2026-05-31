@@ -648,11 +648,17 @@ if (ownerTokenEl) {
 const ownerToken = () => (ownerTokenEl ? ownerTokenEl.value.trim() : "");
 
 // Above this many sims, route Analyze through the async job endpoint
-// (background thread + polling) instead of a single synchronous request.
-// A synchronous search much past ~14k sims can't return within the
-// Cloudflare tunnel's ~100s window; 8000 keeps a safe margin (~56s worst
-// case at ~7ms/sim) while leaving small, snappy searches on the sync path.
+// (background thread + polling) instead of one synchronous request, so a long
+// search can't be killed by the Cloudflare tunnel's ~100s response timeout.
+// The server now uses batched MCTS (search_batch — 10-20x faster on Apple
+// Silicon for pure_neural), so most searches finish well under that window;
+// but pure_heuristic mode doesn't batch, so this cutoff stays conservative to
+// be safe across all eval modes. Raise it once the deploy logs show the real
+// batched sims/s if you'd rather keep big pure_neural searches fully sync.
 const ASYNC_SIM_THRESHOLD = 8000;
+// Poll cadence for async jobs — snappy enough that short batched searches
+// feel responsive, light enough that a 15-min job is ~2 req/s.
+const ASYNC_POLL_MS = 500;
 
 // Advanced-MCTS defaults — kept here as the single source of truth for
 // the reset button and the server-side defaults (they must agree).
@@ -966,9 +972,9 @@ async function runAsyncEvaluation(payload, sims) {
   }
   const jobId = start.job_id;
   const t0 = Date.now();
-  // Poll ~1Hz until the job reports done or error.
+  // Poll until the job reports done or error.
   for (;;) {
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, ASYNC_POLL_MS));
     let poll;
     try {
       const pollRes = await fetch(`/api/evaluate_result/${jobId}`);

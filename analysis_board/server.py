@@ -91,6 +91,15 @@ MAX_NUM_SIMS = int(os.environ.get("YNS_MAX_NUM_SIMS", "0"))
 # Empty default = bypass disabled (no token grants extra budget).
 OWNER_TOKEN = os.environ.get("YNS_OWNER_TOKEN", "")
 
+# Leaf-batch size for MCTS.search_batch(): collect this many leaves before one
+# batched network forward pass. The analysis board uses the batched search
+# (10-20x faster than the per-leaf singleton path on Apple Silicon); with
+# dirichlet disabled + a deterministic net, results are identical to the serial
+# path (see test_mcts_serial_vs_batch_parity). Overridable per request via the
+# "batch_size" payload field for tuning. 64 trades a little search shape for
+# throughput on big searches; the duplicate-leaf guard handles batch>budget.
+DEFAULT_BATCH_SIZE = int(os.environ.get("YNS_BATCH_SIZE", "64"))
+
 # Serialize all network inference / MCTS search across threads. Two reasons:
 # (1) the MCTS instances in _mcts_cache are shared by all callers hitting the
 # same (model_id, num_sims, ...) tuple, so concurrent users would race on
@@ -775,6 +784,7 @@ def _prepare_evaluation(payload, is_owner):
             f"evaluation_mode must be pure_neural / pure_heuristic / hybrid, got {evaluation_mode!r}"
         ]}, 400)
     heuristic_weight = float(payload.get("heuristic_weight", 0.5))
+    batch_size = max(1, int(payload.get("batch_size", DEFAULT_BATCH_SIZE)))
 
     try:
         gs = build_state(payload)
@@ -796,6 +806,7 @@ def _prepare_evaluation(payload, is_owner):
         "fpu_reduction": fpu_reduction,
         "evaluation_mode": evaluation_mode,
         "heuristic_weight": heuristic_weight,
+        "batch_size": batch_size,
         "gs": gs,
         "valid_moves": valid_moves,
     }, None
@@ -883,7 +894,7 @@ def api_evaluate():  # type: ignore[no-untyped-def]
                 mcts.reset_tree()
             except AttributeError:
                 mcts._cached_root = None  # fallback for older engine versions
-            probs = mcts.search(gs, move_number=1)
+            probs = mcts.search_batch(gs, move_number=1, batch_size=ctx["batch_size"])
             top, value, _ = _mcts_result_from_probs(
                 mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
             )
@@ -946,7 +957,10 @@ def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
                     evaluation_mode=ctx["evaluation_mode"],
                     heuristic_weight=ctx["heuristic_weight"],
                 )
-                probs = mcts.search(gs, move_number=1, progress_callback=_progress)
+                probs = mcts.search_batch(
+                    gs, move_number=1, batch_size=ctx["batch_size"],
+                    progress_callback=_progress,
+                )
                 top, value, _ = _mcts_result_from_probs(
                     mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
                 )
