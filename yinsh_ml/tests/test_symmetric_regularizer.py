@@ -52,8 +52,10 @@ def test_policy_permutations_are_bijections(trainer):
     tensors = trainer._build_symmetric_reg_tensors()
     n = trainer.state_encoder.total_moves
     assert len(tensors) == 3
-    for _cell_src, perm in tensors:
+    for _cell_src, perm, inv_perm in tensors:
         assert sorted(perm.tolist()) == list(range(n))
+        # inv_perm must be the gather-form inverse: inv_perm[perm[k]] == k
+        assert perm[inv_perm].tolist() == list(range(n))
 
 
 def test_global_perm_matches_validated_per_state_perm(trainer):

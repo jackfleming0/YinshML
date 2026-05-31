@@ -1063,8 +1063,16 @@ class YinshTrainer:
                 cell_src[nrow * 11 + ncol] = orow * 11 + ocol
             cell_src_t = torch.tensor(cell_src, dtype=torch.long, device=self.device)
             perm = self._build_full_policy_permutation(augmenter, encoder, tid)
+            # inv_perm is the gather index that maps a policy/logit vector on the
+            # transformed action space back to the original: out[:, j] = src[:,
+            # inv_perm[j]]. We use gather (index_select) rather than the in-place
+            # scatter index_copy_ because the latter is unimplemented on MPS, so
+            # E16 would crash on local Apple-Silicon runs (cloud/CUDA is fine).
+            inv_perm = np.empty_like(perm)
+            inv_perm[perm] = np.arange(len(perm))
             perm_t = torch.tensor(perm, dtype=torch.long, device=self.device)
-            out.append((cell_src_t, perm_t))
+            inv_perm_t = torch.tensor(inv_perm, dtype=torch.long, device=self.device)
+            out.append((cell_src_t, perm_t, inv_perm_t))
         logger.info("E16 symmetric regularizer: built transform tensors for 3 D2 symmetries")
         return out
 
@@ -1103,15 +1111,15 @@ class YinshTrainer:
         policies = [policy0]
         values = [pred_values.float().reshape(b, -1)]
 
-        for cell_src, perm in self._symmetric_reg_tensors:
+        for cell_src, _perm, inv_perm in self._symmetric_reg_tensors:
             state_t = flat[:, :, cell_src].reshape(states.shape)
             with self._autocast():
                 logits_t, value_t = self.network.network(state_t)
-            # Map logits on the transformed action space back to the original:
-            # out[:, perm[k]] = logits_t[:, k] (D2 is an involution, so the same
-            # perm that sends original→transformed sends transformed→original).
-            logits_orig = torch.empty_like(logits_t)
-            logits_orig.index_copy_(1, perm, logits_t)
+            # Map logits on the transformed action space back to the original
+            # via gather: logits_orig[:, j] = logits_t[:, inv_perm[j]]. (D2 is an
+            # involution, so the same geometry that sends original→transformed
+            # sends transformed→original; inv_perm is the gather form of that.)
+            logits_orig = logits_t.index_select(1, inv_perm)
             policies.append(_masked_dist(logits_orig))
             values.append(value_t.float().reshape(b, -1))
 

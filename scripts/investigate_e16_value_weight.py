@@ -62,11 +62,10 @@ def kl_and_value_asym(net, states, masks, reg_tensors, encoder):
     logits0, value0 = net(states)
     policies = [masked_dist(logits0)]
     values = [value0.float().reshape(b, -1)]
-    for cell_src, perm in reg_tensors:
+    for cell_src, _perm, inv_perm in reg_tensors:
         st = flat[:, :, cell_src].reshape(states.shape)
         lt, vt = net(st)
-        lo = torch.empty_like(lt)
-        lo.index_copy_(1, perm, lt)
+        lo = lt.index_select(1, inv_perm)
         policies.append(masked_dist(lo))
         values.append(vt.float().reshape(b, -1))
 

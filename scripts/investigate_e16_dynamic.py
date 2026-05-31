@@ -30,6 +30,7 @@ def parse_args():
     p.add_argument('--lr', type=float, default=5e-5)
     p.add_argument('--alpha', type=float, default=0.1)
     p.add_argument('--weights', default='0.5,10,20')
+    p.add_argument('--device', default=None, help='cpu | mps | cuda (default: auto)')
     p.add_argument('--seed', type=int, default=0)
     return p.parse_args()
 
@@ -56,10 +57,9 @@ def reg_terms(net, states, masks, reg_tensors):
     l0, v0 = net(states)
     pols = [md(l0)]
     vals = [v0.float().reshape(b, -1)]
-    for cell_src, perm in reg_tensors:
+    for cell_src, _perm, inv_perm in reg_tensors:
         lt, vt = net(flat[:, :, cell_src].reshape(states.shape))
-        lo = torch.empty_like(lt)
-        lo.index_copy_(1, perm, lt)
+        lo = lt.index_select(1, inv_perm)
         pols.append(md(lo))
         vals.append(vt.float().reshape(b, -1))
     psym = torch.stack(pols, 0).mean(0)
@@ -74,21 +74,25 @@ def main():
     weights = [float(x) for x in args.weights.split(',')]
     rng = np.random.default_rng(args.seed)
 
-    nw = NetworkWrapper(model_path=args.checkpoint, device='cpu', use_enhanced_encoding=True)
+    dev = args.device or ('mps' if torch.backends.mps.is_available()
+                          else ('cuda' if torch.cuda.is_available() else 'cpu'))
+    print(f"device: {dev}")
+    nw = NetworkWrapper(model_path=args.checkpoint, device=dev, use_enhanced_encoding=True)
     enc = nw.state_encoder
-    tr = YinshTrainer(network=nw, device='cpu', enable_symmetric_reg=True)
+    tr = YinshTrainer(network=nw, device=dev, enable_symmetric_reg=True)
     reg_tensors = tr._build_symmetric_reg_tensors()
     base_state = copy.deepcopy(nw.network.state_dict())
+    device = torch.device(dev)
 
     d = np.load(args.data)
     n_total = d['states'].shape[0]
     idx = rng.choice(n_total, size=min(args.pool, n_total), replace=False)
-    states = torch.from_numpy(d['states'][idx].astype(np.float32))
+    states = torch.from_numpy(d['states'][idx].astype(np.float32)).to(device)
     # hard policy targets
     pol = d['policy_indices'][idx] if 'policy_indices' in d.files else d['policies'][idx].argmax(1)
-    targets = torch.from_numpy(pol.astype(np.int64))
-    tvals = torch.from_numpy(d['values'][idx].astype(np.float32)).reshape(-1)
-    masks = torch.from_numpy(np.stack([valid_mask(enc, s) for s in d['states'][idx].astype(np.float32)]))
+    targets = torch.from_numpy(pol.astype(np.int64)).to(device)
+    tvals = torch.from_numpy(d['values'][idx].astype(np.float32)).reshape(-1).to(device)
+    masks = torch.from_numpy(np.stack([valid_mask(enc, s) for s in d['states'][idx].astype(np.float32)])).to(device)
     print(f"pool={len(idx)} positions, batch={args.batch}, steps={args.steps}, "
           f"lr={args.lr}, alpha={args.alpha}\n")
 
@@ -103,7 +107,7 @@ def main():
         for step in range(args.steps):
             if ptr + args.batch > len(order):
                 order = rng.permutation(len(idx)); ptr = 0
-            bi = torch.from_numpy(order[ptr:ptr + args.batch]); ptr += args.batch
+            bi = torch.from_numpy(order[ptr:ptr + args.batch]).to(device); ptr += args.batch
             sb, tb, vb, mb = states[bi], targets[bi], tvals[bi], masks[bi]
             opt.zero_grad()
             kl, va, logits, value = reg_terms(net, sb, mb, reg_tensors)
