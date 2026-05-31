@@ -47,11 +47,21 @@ The 2026-05-29/30 work was recovered from a stash (it was never committed; the
   handoff said "trainer.py", but trainer.py's policy loss is a *soft*-target CE
   (MCTS visit distributions) where classic label smoothing doesn't apply. The
   validated dry-run (`dry_run_dropout_plus_ls.py`) used the *supervised* hard-
-  target CE — that's where L2 belongs.
-- **E16 (symmetric-weight regularizer)** — wired into `trainer.py`
-  (`enable_symmetric_reg`, α=`symmetric_reg_weight` 0.1, K=`symmetric_reg_every_k_steps`
-  10, `symmetric_reg_value_weight` 0.5), threaded through the supervisor from
-  `mode_settings`, off by default. Full faithful policy-KL + value-asymmetry
+  target CE — that's where L2 belongs. (Fixed a latent crash from the first L2
+  edit: a `replace_all` had put `args.label_smoothing` into `evaluate()`, which
+  has no `args` — the real run would have NameError'd at first validation. Caught
+  by a full end-to-end script smoke; `evaluate()` now takes the param.)
+- **E16 (symmetric-weight regularizer)** — extracted to a **shared module
+  `yinsh_ml/training/symmetric_reg.py`** and wired into **BOTH** training halves:
+  `trainer.py` (self-play, `enable_symmetric_reg` via supervisor `mode_settings`)
+  AND `run_supervised_pretraining.py` (`--enable-symmetric-reg`). The supervised
+  pretrain is where most of the representation + its D2 asymmetry is learned (the
+  dynamic probe showed value_asym growing 6.7× under supervised task pressure),
+  so enforcing weight symmetry there stops self-play from inheriting an already-
+  asymmetric net. Self-play masks the policy KL to MCTS visit support
+  (`target_probs>0`); supervised has hard targets so it decodes the valid-move
+  mask from the batch states (regularized steps only). α=0.1, K=10,
+  value_weight=20; off by default. Full faithful policy-KL + value-asymmetry
   form. The full 7433-move-index permutation is precomputed once and **verified
   to exactly match the validated per-state augmenter permutation**; policy KL is
   masked to the `target_probs>0` valid-move support (the unmasked full-softmax KL
@@ -72,10 +82,13 @@ The 2026-05-29/30 work was recovered from a stash (it was never committed; the
   - **MPS note:** E16 originally used `index_copy_` (unimplemented on MPS); now a
     gather (`index_select`) so it runs on Apple Silicon too.
 
-**Remaining: Task 3** — next cloud run stacking L1+L2+E16 (supervised pretrain
-with `--label-smoothing 0.1` on a Dropout=0 net, then self-play with
-`enable_symmetric_reg: true`). Symmetric MCTS (L3a) stays as a deploy-time
-noise-reducer even once the network is symmetric.
+**Remaining: Task 3** — next cloud run stacking L1+L2+E16 end-to-end:
+supervised pretrain with `--use-enhanced-encoding --label-smoothing 0.1
+--enable-symmetric-reg` on a Dropout=0 net, then self-play with
+`enable_symmetric_reg: true` in the config. No config enables E16 yet — one
+still needs writing (mirror `branchD2_enhanced` + the symmetric_reg keys).
+Symmetric MCTS (L3a) stays as a deploy-time noise-reducer even once the network
+is symmetric.
 
 ---
 
