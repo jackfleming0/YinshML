@@ -613,9 +613,15 @@ class MCTS:
                 return self.fast_simulations
         return base
 
-    def search(self, state: GameState, move_number: int) -> np.ndarray:
+    def search(self, state: GameState, move_number: int, progress_callback=None) -> np.ndarray:
         """
         Run MCTS simulations for the given state and move number.
+
+        ``progress_callback``, if given, is called as ``progress_callback(done,
+        total)`` roughly every 64 simulations (and once at the end). It's an
+        opt-in hook for long-running interactive searches (e.g. the analysis
+        board's async job runner reporting a progress bar); when ``None`` the
+        loop is untouched, so the training/self-play path pays nothing.
         """
         # Choose rollout budget based on the current move number (+ optional fast/slow split)
         budget = self._get_budget(move_number)
@@ -637,6 +643,8 @@ class MCTS:
         simulation_states = []  # Track states acquired from pool for cleanup
         
         for sim in range(budget):
+            if progress_callback is not None and sim % 64 == 0:
+                progress_callback(sim, budget)
             node = root
             search_path = [node]
             current_state = self._acquire_state_copy(state)
@@ -733,6 +741,9 @@ class MCTS:
         for state in simulation_states:
             self._release_state(state)
 
+        if progress_callback is not None:
+            progress_callback(budget, budget)
+
         # --- After all simulations ---
         # Calculate final move probabilities based on visit counts
         temp = self.get_temperature(move_number)
@@ -825,13 +836,19 @@ class MCTS:
 
         return move_probs
 
-    def search_batch(self, state: GameState, move_number: int, batch_size: int = 32) -> np.ndarray:
+    def search_batch(self, state: GameState, move_number: int, batch_size: int = 32,
+                     progress_callback=None) -> np.ndarray:
         """
         Run MCTS simulations with batched leaf node evaluation for improved throughput.
 
         Instead of evaluating each leaf node individually, this method collects multiple
         leaf nodes and evaluates them all at once using the network's predict_batch method.
         This provides 10-20x speedup on M2 by utilizing CPU/Neural Engine more efficiently.
+
+        ``progress_callback``, if given, is called as ``progress_callback(done,
+        total)`` roughly every 64 simulations (and once at the end) — an opt-in
+        hook for long interactive searches (the analysis board's async runner).
+        ``None`` (default) leaves the hot loop untouched.
 
         Args:
             state: The current game state
@@ -884,6 +901,8 @@ class MCTS:
         # `is_expanded`, so the retry's selection descends past it.
         sim = 0
         while sim < budget:
+            if progress_callback is not None and sim % 64 == 0:
+                progress_callback(sim, budget)
             node = root
             search_path = [node]
             current_state = self._acquire_state_copy(state)
@@ -970,6 +989,9 @@ class MCTS:
             self._evaluate_and_backup_batch(batch_leaves, root, move_number=move_number)
             batch_leaves = []
             in_flight_node_ids = set()
+
+        if progress_callback is not None:
+            progress_callback(budget, budget)
 
         # Clean up simulation states
         for s in simulation_states:

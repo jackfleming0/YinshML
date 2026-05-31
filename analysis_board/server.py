@@ -18,12 +18,15 @@ import logging
 import os
 import sys
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -88,13 +91,39 @@ MAX_NUM_SIMS = int(os.environ.get("YNS_MAX_NUM_SIMS", "0"))
 # Empty default = bypass disabled (no token grants extra budget).
 OWNER_TOKEN = os.environ.get("YNS_OWNER_TOKEN", "")
 
-# Serialize MCTS searches across concurrent requests. The MCTS instances in
-# _mcts_cache are shared by all callers hitting the same (model_id, num_sims,
-# ...) tuple, so two concurrent users would race on reset_tree() / search() /
-# _cached_root. Enforce single-MCTS-at-a-time: queue requests behind whoever
-# is currently searching. Acceptable at the ~5-user scale (worst case 5 *
-# 1600-sim eval ≈ 1 minute for the last user).
+# Leaf-batch size for MCTS.search_batch(): collect this many leaves before one
+# batched network forward pass. The analysis board uses the batched search
+# (10-20x faster than the per-leaf singleton path on Apple Silicon); with
+# dirichlet disabled + a deterministic net, results are identical to the serial
+# path (see test_mcts_serial_vs_batch_parity). Overridable per request via the
+# "batch_size" payload field for tuning. 64 trades a little search shape for
+# throughput on big searches; the duplicate-leaf guard handles batch>budget.
+DEFAULT_BATCH_SIZE = int(os.environ.get("YNS_BATCH_SIZE", "64"))
+
+# Serialize all network inference / MCTS search across threads. Two reasons:
+# (1) the MCTS instances in _mcts_cache are shared by all callers hitting the
+# same (model_id, num_sims, ...) tuple, so concurrent users would race on
+# reset_tree() / search() / _cached_root; (2) the NetworkWrapper's TensorPool
+# is not thread-safe, so a background async-job search and a request-thread
+# eval must never do inference at the same time. Every inference path (sync
+# MCTS eval, sync raw-policy eval, and the async worker) holds this lock — one
+# search at a time, server-wide. Acceptable at the ~5-user scale.
 _mcts_lock = threading.Lock()
+
+# --- Async evaluation jobs ---------------------------------------------------
+# Big owner searches (e.g. 128000 sims ≈ 15 min on the singleton search path)
+# can't return within the Cloudflare tunnel's ~100s response window, so the
+# synchronous /api/evaluate times out with an HTML 524 page. /api/evaluate_async
+# instead runs the search on a background daemon thread and reports progress via
+# /api/evaluate_result/<job_id>, which the SPA polls ~1Hz. The search still
+# holds _mcts_lock (the TensorPool isn't thread-safe — see _run_eval_job), so
+# only one search runs at a time; but the lightweight poll endpoint doesn't take
+# that lock, so progress keeps flowing while a long job churns.
+_jobs: Dict[str, Dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+# Keep finished jobs around briefly so the poller can fetch the result, then
+# evict so the dict doesn't grow unbounded.
+_JOB_TTL_SECONDS = 600
 
 # Append-only per-day JSONL log of every successful /api/move event. Used
 # to reconstruct friend-played games offline for qualitative analysis:
@@ -259,46 +288,71 @@ def get_mcts(
         round(float(heuristic_weight), 3),
     )
     if key not in _mcts_cache:
-        # Lazy import — MCTS pulls a wide chain of training-side deps.
-        from yinsh_ml.training.self_play import MCTS  # noqa: WPS433
-
-        wrapper = get_wrapper(model_id)
-        heuristic_evaluator = None
-        if evaluation_mode in ("pure_heuristic", "hybrid"):
-            from yinsh_ml.heuristics.evaluator import YinshHeuristics  # noqa: WPS433
-            # Per evaluator.py:60 docstring: MCTS callers should disable
-            # forced-sequence detection since MCTS does the lookahead itself,
-            # ~30× heuristic speedup with no search-quality loss.
-            heuristic_evaluator = YinshHeuristics(enable_forced_sequence_detection=False)
-        log.info(
-            "constructing MCTS(model=%s, sims=%d, c_puct=%.2f, fpu=%.2f, mode=%s, hw=%.2f)",
-            model_id, num_sims, c_puct, fpu_reduction, evaluation_mode, heuristic_weight,
-        )
-        _mcts_cache[key] = MCTS(
-            network=wrapper,
-            evaluation_mode=evaluation_mode,
-            heuristic_evaluator=heuristic_evaluator,
-            heuristic_weight=heuristic_weight,
-            num_simulations=num_sims,
-            late_simulations=num_sims,
-            simulation_switch_ply=999,
+        _mcts_cache[key] = _construct_mcts(
+            model_id, num_sims,
             c_puct=c_puct,
             fpu_reduction=fpu_reduction,
-            initial_temp=1.0,
-            final_temp=1.0,
-            annealing_steps=1,
-            dirichlet_alpha=0.0,
-            epsilon_mix_start=0.0,
-            epsilon_mix_end=0.0,
-            # Subtree reuse must be ENABLED for the analysis board so the
-            # root tree survives `search()` and we can extract principal
-            # variations afterward. We compensate by calling
-            # `mcts.reset_tree()` before every /api/evaluate search so each
-            # call is from a fresh root — no stale subtree carryover.
-            enable_subtree_reuse=True,
-            mcts_metrics=None,
+            evaluation_mode=evaluation_mode,
+            heuristic_weight=heuristic_weight,
         )
     return _mcts_cache[key]
+
+
+def _construct_mcts(
+    model_id: str,
+    num_sims: int,
+    *,
+    c_puct: float = 1.0,
+    fpu_reduction: float = 0.25,
+    evaluation_mode: str = "pure_neural",
+    heuristic_weight: float = 0.5,
+):
+    """Build a fresh MCTS instance configured for the analysis board.
+
+    Used directly (un-cached, private to the caller) by the async job runner
+    so a long owner search doesn't share ``_cached_root`` / ``_mcts_lock`` with
+    the interactive cache — and wrapped by ``get_mcts`` for the cached
+    synchronous path.
+    """
+    # Lazy import — MCTS pulls a wide chain of training-side deps.
+    from yinsh_ml.training.self_play import MCTS  # noqa: WPS433
+
+    wrapper = get_wrapper(model_id)
+    heuristic_evaluator = None
+    if evaluation_mode in ("pure_heuristic", "hybrid"):
+        from yinsh_ml.heuristics.evaluator import YinshHeuristics  # noqa: WPS433
+        # Per evaluator.py:60 docstring: MCTS callers should disable
+        # forced-sequence detection since MCTS does the lookahead itself,
+        # ~30× heuristic speedup with no search-quality loss.
+        heuristic_evaluator = YinshHeuristics(enable_forced_sequence_detection=False)
+    log.info(
+        "constructing MCTS(model=%s, sims=%d, c_puct=%.2f, fpu=%.2f, mode=%s, hw=%.2f)",
+        model_id, num_sims, c_puct, fpu_reduction, evaluation_mode, heuristic_weight,
+    )
+    return MCTS(
+        network=wrapper,
+        evaluation_mode=evaluation_mode,
+        heuristic_evaluator=heuristic_evaluator,
+        heuristic_weight=heuristic_weight,
+        num_simulations=num_sims,
+        late_simulations=num_sims,
+        simulation_switch_ply=999,
+        c_puct=c_puct,
+        fpu_reduction=fpu_reduction,
+        initial_temp=1.0,
+        final_temp=1.0,
+        annealing_steps=1,
+        dirichlet_alpha=0.0,
+        epsilon_mix_start=0.0,
+        epsilon_mix_end=0.0,
+        # Subtree reuse must be ENABLED for the analysis board so the
+        # root tree survives `search()` and we can extract principal
+        # variations afterward. We compensate by calling
+        # `mcts.reset_tree()` before every search so each call is from a
+        # fresh root — no stale subtree carryover.
+        enable_subtree_reuse=True,
+        mcts_metrics=None,
+    )
 
 
 def _extract_pv_for_move(root, top_move, depth: int = 5, min_visits: int = 10):
@@ -596,6 +650,30 @@ def _top_moves(
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 
+@app.errorhandler(Exception)
+def _json_api_errors(e):  # type: ignore[no-untyped-def]
+    """Return JSON (not Flask's default HTML page) for any unhandled error on
+    an ``/api/*`` route.
+
+    Without this, a server-side 500 hands the SPA an HTML error page and the
+    frontend's ``res.json()`` dies with the cryptic "Unexpected token '<',
+    \"<!DOCTYPE\"... is not valid JSON". With it, the real exception message
+    reaches the user. (Note: this can't catch a *proxy* timeout — e.g. the
+    Cloudflare tunnel's ~100s 524 page — since that HTML never originates
+    from Flask; in that case the SPA still sees DOCTYPE, which itself confirms
+    the request died upstream rather than in the app.)
+    """
+    status = e.code if isinstance(e, HTTPException) and e.code else 500
+    if not request.path.startswith("/api/"):
+        # Preserve default behavior for the SPA shell / static assets.
+        if isinstance(e, HTTPException):
+            return e
+        raise e
+    if status >= 500:
+        log.exception("unhandled error on %s", request.path)
+    return jsonify({"ok": False, "errors": [f"{type(e).__name__}: {e}"]}), status
+
+
 @app.route("/")
 def index():  # type: ignore[no-untyped-def]
     return send_from_directory(app.static_folder, "index.html")
@@ -606,18 +684,90 @@ def api_models():  # type: ignore[no-untyped-def]
     return jsonify(_models)
 
 
-@app.route("/api/evaluate", methods=["POST"])
-def api_evaluate():  # type: ignore[no-untyped-def]
-    payload = request.get_json(force=True, silent=False) or {}
+def _mcts_result_from_probs(mcts, probs, gs, valid_moves, model_id, top_k, num_sims):
+    """Turn a finished MCTS search into the response's move list.
+
+    Assumes ``mcts.search(...)`` already ran (its tree is in
+    ``mcts._cached_root``) and produced ``probs``. Returns
+    ``(top_moves, value, top_move)``. Shared verbatim by the synchronous
+    ``/api/evaluate`` route and the async job worker so both render identical
+    top-move tables, best-move values, and principal variations.
+    """
+    value = float(getattr(mcts, "last_root_value", 0.0))
+    # Back-compute visit counts from the distribution: with
+    # initial_temp=final_temp=1.0 the engine returns probs proportional to
+    # visit counts, so visits ≈ round(prob * num_sims) (off by at most 1).
+    visit_counts: Dict[int, int] = {}
+    for m in valid_moves:
+        i = _encoder.move_to_index(m)
+        visit_counts[i] = int(round(float(probs[i]) * num_sims))
+    top = _top_moves(probs, valid_moves, top_k, include_visits=True, visit_counts=visit_counts)
+    # Best-move-value: a complementary signal to root.Q, per entry, so the UI
+    # can flag opposite-sign divergences (MCTS picked move N but the network
+    # value at the resulting position disagrees with search-averaged root.Q).
+    wrapper_for_bm = get_wrapper(model_id)
+    for entry in top:
+        matched = _match_entry_to_move(entry, valid_moves)
+        entry["best_move_value"] = (
+            _best_move_value(wrapper_for_bm, gs, matched) if matched is not None else None
+        )
+    top_move = max(valid_moves, key=lambda m: float(probs[_encoder.move_to_index(m)]))
+    # Principal variations — read from the live MCTS tree, matching each
+    # top_moves entry back to its root child by move descriptor.
+    try:
+        root = mcts._cached_root  # noqa: SLF001
+        if root is not None:
+            for entry in top:
+                matched_move = None
+                for m in root.children.keys():
+                    if m.type.name != entry["type"]:
+                        continue
+                    if entry.get("source") and str(m.source) != entry["source"]:
+                        continue
+                    if entry.get("destination") and (m.destination is None or str(m.destination) != entry["destination"]):
+                        continue
+                    if entry.get("markers"):
+                        mset = set(str(p) for p in (m.markers or ()))
+                        if mset != set(entry["markers"]):
+                            continue
+                    matched_move = m
+                    break
+                if matched_move is None:
+                    entry["principal_variation"] = []
+                    continue
+                # depth=8, min_visits=4: explore deeper but cut off when search
+                # hasn't allocated enough budget to trust the best-child pick.
+                pv_steps = _extract_pv_for_move(root, matched_move, depth=8, min_visits=4)
+                entry["principal_variation"] = _serialize_pv(gs, pv_steps)
+    except Exception as e:  # noqa: BLE001
+        log.warning("PV extraction failed: %s", e)
+        for entry in top:
+            entry.setdefault("principal_variation", [])
+    return top, value, top_move
+
+
+def _owner_token_ok(payload) -> bool:
+    """True if the request carries the configured owner token (constant-time).
+
+    Empty ``YNS_OWNER_TOKEN`` ⇒ always False (bypass disabled).
+    """
+    provided = request.headers.get("X-Yns-Owner-Token") or str(payload.get("owner_token", ""))
+    return bool(OWNER_TOKEN) and hmac.compare_digest(provided, OWNER_TOKEN)
+
+
+def _prepare_evaluation(payload, is_owner):
+    """Parse + validate an evaluate request, shared by the sync and async paths.
+
+    Returns ``(ctx, None)`` on success, or ``(None, (error_body, status))`` for
+    a client-facing failure. ``ctx`` carries the parsed knobs (with the public
+    cap already applied unless ``is_owner``) plus the built GameState and its
+    legal moves — so both paths apply the cap and owner bypass identically.
+    """
     model_id = payload.get("model_id")
     if not model_id:
-        return jsonify({"ok": False, "errors": ["model_id is required"]}), 400
+        return None, ({"ok": False, "errors": ["model_id is required"]}, 400)
 
     num_sims = int(payload.get("num_sims", 0))
-    # Owner bypass: a matching token skips the public cap. Constant-time
-    # compare; only active when YNS_OWNER_TOKEN is configured non-empty.
-    provided_token = request.headers.get("X-Yns-Owner-Token") or str(payload.get("owner_token", ""))
-    is_owner = bool(OWNER_TOKEN) and hmac.compare_digest(provided_token, OWNER_TOKEN)
     capped_from = None
     if MAX_NUM_SIMS > 0 and not is_owner and num_sims > MAX_NUM_SIMS:
         capped_from = num_sims
@@ -625,174 +775,74 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         log.info("capping num_sims %d → %d (YNS_MAX_NUM_SIMS)", capped_from, num_sims)
     top_k = int(payload.get("top_k", 8))
     # Advanced MCTS knobs — defaults match training so the headline reading
-    # reflects what the trained agent "thinks." Override to stress-test the
-    # position from a different angle.
+    # reflects what the trained agent "thinks."
     c_puct = float(payload.get("c_puct", 1.0))
     fpu_reduction = float(payload.get("fpu_reduction", 0.25))
     evaluation_mode = str(payload.get("evaluation_mode", "pure_neural"))
     if evaluation_mode not in ("pure_neural", "pure_heuristic", "hybrid"):
-        return jsonify({"ok": False, "errors": [
+        return None, ({"ok": False, "errors": [
             f"evaluation_mode must be pure_neural / pure_heuristic / hybrid, got {evaluation_mode!r}"
-        ]}), 400
+        ]}, 400)
     heuristic_weight = float(payload.get("heuristic_weight", 0.5))
+    batch_size = max(1, int(payload.get("batch_size", DEFAULT_BATCH_SIZE)))
 
-    # Build state
     try:
         gs = build_state(payload)
     except (KeyError, ValueError) as e:
-        return jsonify({"ok": False, "errors": [str(e)]}), 200
-
-    # Validate
+        return None, ({"ok": False, "errors": [str(e)]}, 200)
     try:
         valid_moves = gs.get_valid_moves()
     except Exception as e:  # noqa: BLE001
-        return jsonify({"ok": False, "errors": [f"invalid position: {e}"]}), 200
-
+        return None, ({"ok": False, "errors": [f"invalid position: {e}"]}, 200)
     if not valid_moves:
-        return jsonify({
-            "ok": False,
-            "errors": ["no legal moves available from this position"],
-        }), 200
+        return None, ({"ok": False, "errors": ["no legal moves available from this position"]}, 200)
 
-    # Evaluate
-    if num_sims > 0:
-        mcts = get_mcts(
-            model_id, num_sims,
-            c_puct=c_puct,
-            fpu_reduction=fpu_reduction,
-            evaluation_mode=evaluation_mode,
-            heuristic_weight=heuristic_weight,
+    return {
+        "model_id": model_id,
+        "num_sims": num_sims,
+        "capped_from": capped_from,
+        "top_k": top_k,
+        "c_puct": c_puct,
+        "fpu_reduction": fpu_reduction,
+        "evaluation_mode": evaluation_mode,
+        "heuristic_weight": heuristic_weight,
+        "batch_size": batch_size,
+        "gs": gs,
+        "valid_moves": valid_moves,
+    }, None
+
+
+def _evaluate_policy(ctx):
+    """num_sims==0 raw-policy path. Returns ``(top_moves, value, top_move)``."""
+    gs, valid_moves = ctx["gs"], ctx["valid_moves"]
+    wrapper = get_wrapper(ctx["model_id"])
+    move_probs_t, value_t = wrapper.predict_from_state(gs)
+    probs_np = move_probs_t.detach().cpu().numpy()
+    if probs_np.ndim > 1:
+        probs_np = probs_np[0]
+    # Mask to valid moves, renormalize
+    masked = np.zeros_like(probs_np)
+    for m in valid_moves:
+        i = _encoder.move_to_index(m)
+        masked[i] = probs_np[i]
+    s = masked.sum()
+    probs = masked / s if s > 1e-12 else masked
+    value = float(value_t.detach().cpu().reshape(-1)[0].item())
+    top = _top_moves(probs, valid_moves, ctx["top_k"], include_visits=False)
+    # Per-entry best_move_value (raw-policy mode also benefits — lets the user
+    # see which low-ranked moves still have positive after-value).
+    for entry in top:
+        matched = _match_entry_to_move(entry, valid_moves)
+        entry["best_move_value"] = (
+            _best_move_value(wrapper, gs, matched) if matched is not None else None
         )
-        # Hold the lock from reset_tree through PV extraction — the cached
-        # MCTS instance + its _cached_root are shared across users, so a
-        # concurrent search would race with this one's tree state. Acquired
-        # here, released either on the MCTS-failure early-return path below
-        # or in the PV extraction's `finally` at the end of this branch.
-        _mcts_lock.acquire()
-        # Reset before each call — subtree reuse is enabled so we can read
-        # the tree post-search, but each /api/evaluate is logically a fresh
-        # position; we don't want last search's tree biasing this one.
-        try:
-            mcts.reset_tree()
-        except AttributeError:
-            mcts._cached_root = None  # fallback for older engine versions
-        except Exception as e:  # noqa: BLE001
-            log.exception("MCTS reset_tree raised")
-            _mcts_lock.release()
-            return jsonify({"ok": False, "errors": [f"MCTS reset failed: {e}"]}), 500
-        try:
-            probs = mcts.search(gs, move_number=1)
-        except Exception as e:  # noqa: BLE001
-            log.exception("MCTS search failed")
-            _mcts_lock.release()
-            return jsonify({"ok": False, "errors": [f"MCTS failed: {e}"]}), 500
-        value = float(getattr(mcts, "last_root_value", 0.0))
-        # MCTS with enable_subtree_reuse=False clears root.children after
-        # search, so we can't read visit_count directly. Back-compute from
-        # the returned distribution: with initial_temp=final_temp=1.0, the
-        # MCTS engine returns probs proportional to visit counts, so
-        # visits ≈ round(prob * num_sims). Off by at most 1 in edge cases.
-        visit_counts: Dict[int, int] = {}
-        for m in valid_moves:
-            i = _encoder.move_to_index(m)
-            visit_counts[i] = int(round(float(probs[i]) * num_sims))
-        top = _top_moves(probs, valid_moves, top_k, include_visits=True, visit_counts=visit_counts)
-        mode = "mcts"
-        # Best-move-value: a complementary signal to root.Q. Compute for
-        # every entry so the UI can flag opposite-sign divergences per-row
-        # (where MCTS picked move N but the network value at the resulting
-        # position disagrees with the search-averaged root.Q).
-        wrapper_for_bm = get_wrapper(model_id)
-        for entry in top:
-            matched = _match_entry_to_move(entry, valid_moves)
-            entry["best_move_value"] = (
-                _best_move_value(wrapper_for_bm, gs, matched) if matched is not None else None
-            )
-        # Headline best_move_value = the top-1 move's. Convenient for the
-        # existing single-value display; per-row values are also available.
-        best_value = top[0].get("best_move_value") if top else None
-        top_move = max(valid_moves, key=lambda m: float(probs[_encoder.move_to_index(m)]))
-        # Principal variations — extract from the live MCTS tree before the
-        # next call resets it. Attach each PV to its corresponding top_moves
-        # entry by matching move_to_index.
-        try:
-            root = mcts._cached_root  # noqa: SLF001
-            if root is not None:
-                # Map move_idx → original Move object in root.children (lets us
-                # look up the right Move for each top_moves entry).
-                idx_to_root_move = {}
-                for m in root.children.keys():
-                    try:
-                        idx_to_root_move[_encoder.move_to_index(m)] = m
-                    except Exception:  # noqa: BLE001
-                        continue
-                for entry in top:
-                    # Reconstruct the move's index from the description fields.
-                    # We don't carry idx in entry, so re-derive from the
-                    # serialized move; cheaper to find by move source/dest.
-                    matched_move = None
-                    for m in root.children.keys():
-                        if m.type.name != entry["type"]:
-                            continue
-                        if entry.get("source") and str(m.source) != entry["source"]:
-                            continue
-                        if entry.get("destination") and (m.destination is None or str(m.destination) != entry["destination"]):
-                            continue
-                        if entry.get("markers"):
-                            mset = set(str(p) for p in (m.markers or ()))
-                            if mset != set(entry["markers"]):
-                                continue
-                        matched_move = m
-                        break
-                    if matched_move is None:
-                        entry["principal_variation"] = []
-                        continue
-                    # depth=8, min_visits=4: explore deeper into the tree but
-                    # cut off when search hasn't allocated enough budget to
-                    # trust the "best child" pick. The frontend displays
-                    # visit counts per ply so the user can spot when plies
-                    # are getting tentative (single-digit visits).
-                    pv_steps = _extract_pv_for_move(root, matched_move, depth=8, min_visits=4)
-                    entry["principal_variation"] = _serialize_pv(gs, pv_steps)
-        except Exception as e:  # noqa: BLE001
-            log.warning("PV extraction failed: %s", e)
-            for entry in top:
-                entry.setdefault("principal_variation", [])
-        finally:
-            # Release the MCTS lock after PV extraction — the next queued
-            # request can now reset_tree() and run its own search.
-            _mcts_lock.release()
-    else:
-        wrapper = get_wrapper(model_id)
-        try:
-            move_probs_t, value_t = wrapper.predict_from_state(gs)
-        except Exception as e:  # noqa: BLE001
-            log.exception("network predict failed")
-            return jsonify({"ok": False, "errors": [f"predict failed: {e}"]}), 500
-        probs_np = move_probs_t.detach().cpu().numpy()
-        if probs_np.ndim > 1:
-            probs_np = probs_np[0]
-        # Mask to valid moves, renormalize
-        masked = np.zeros_like(probs_np)
-        for m in valid_moves:
-            i = _encoder.move_to_index(m)
-            masked[i] = probs_np[i]
-        s = masked.sum()
-        probs = masked / s if s > 1e-12 else masked
-        value = float(value_t.detach().cpu().reshape(-1)[0].item())
-        top = _top_moves(probs, valid_moves, top_k, include_visits=False)
-        mode = "policy"
-        # Per-entry best_move_value (raw-policy mode also benefits — lets
-        # the user see which low-ranked moves still have positive after-value).
-        for entry in top:
-            matched = _match_entry_to_move(entry, valid_moves)
-            entry["best_move_value"] = (
-                _best_move_value(wrapper, gs, matched) if matched is not None else None
-            )
-        best_value = top[0].get("best_move_value") if top else None
-        top_move = max(valid_moves, key=lambda m: float(probs[_encoder.move_to_index(m)]))
+    top_move = max(valid_moves, key=lambda m: float(probs[_encoder.move_to_index(m)]))
+    return top, value, top_move
 
-    return jsonify({
+
+def _finalize_eval_response(gs, valid_moves, *, mode, value, best_value, top, num_sims, capped_from):
+    """Assemble the JSON body returned by both the sync route and async job."""
+    return {
         "ok": True,
         "mode": mode,
         "value": value,
@@ -812,7 +862,186 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         # lying about the search depth.
         "num_sims": num_sims,
         "capped_from": capped_from,
+    }
+
+
+@app.route("/api/evaluate", methods=["POST"])
+def api_evaluate():  # type: ignore[no-untyped-def]
+    payload = request.get_json(force=True, silent=False) or {}
+    ctx, err = _prepare_evaluation(payload, _owner_token_ok(payload))
+    if err is not None:
+        body, status = err
+        return jsonify(body), status
+
+    gs, valid_moves, num_sims = ctx["gs"], ctx["valid_moves"], ctx["num_sims"]
+    if num_sims > 0:
+        mcts = get_mcts(
+            ctx["model_id"], num_sims,
+            c_puct=ctx["c_puct"],
+            fpu_reduction=ctx["fpu_reduction"],
+            evaluation_mode=ctx["evaluation_mode"],
+            heuristic_weight=ctx["heuristic_weight"],
+        )
+        # Hold _mcts_lock from reset_tree through PV extraction — the cached
+        # MCTS instance + its _cached_root are shared across users, so a
+        # concurrent search would race on the tree state.
+        _mcts_lock.acquire()
+        try:
+            # Reset before each call — subtree reuse is enabled so we can read
+            # the tree post-search, but each /api/evaluate is logically a fresh
+            # position; we don't want last search's tree biasing this one.
+            try:
+                mcts.reset_tree()
+            except AttributeError:
+                mcts._cached_root = None  # fallback for older engine versions
+            probs = mcts.search_batch(gs, move_number=1, batch_size=ctx["batch_size"])
+            top, value, _ = _mcts_result_from_probs(
+                mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
+            )
+        finally:
+            _mcts_lock.release()
+        mode = "mcts"
+    else:
+        # Raw-policy inference also touches the non-thread-safe TensorPool, so
+        # serialize it on _mcts_lock too (an async job's background search may
+        # be doing inference concurrently).
+        with _mcts_lock:
+            top, value, _ = _evaluate_policy(ctx)
+        mode = "policy"
+
+    best_value = top[0].get("best_move_value") if top else None
+    return jsonify(_finalize_eval_response(
+        gs, valid_moves, mode=mode, value=value, best_value=best_value,
+        top=top, num_sims=num_sims, capped_from=ctx["capped_from"],
+    ))
+
+
+# --- Async evaluation: kick a long search onto a background thread ----------
+
+def _evict_stale_jobs() -> None:
+    now = time.time()
+    with _jobs_lock:
+        stale = [
+            jid for jid, j in _jobs.items()
+            if j.get("finished_at") and now - j["finished_at"] > _JOB_TTL_SECONDS
+        ]
+        for jid in stale:
+            _jobs.pop(jid, None)
+
+
+def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
+    """Worker body: run the (possibly very long) search on its own private
+    MCTS instance, reporting progress, then stash the finished response."""
+    def _progress(done, total):
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if job is not None:
+                job["progress"] = {"done": int(done), "total": int(total)}
+
+    started = time.time()
+    try:
+        gs, valid_moves, num_sims = ctx["gs"], ctx["valid_moves"], ctx["num_sims"]
+        # Serialize the whole compute on _mcts_lock. The NetworkWrapper's
+        # TensorPool is NOT thread-safe, so this background search's inference
+        # must never overlap a request-thread's inference. We use a private
+        # MCTS instance (own _cached_root) but still take the global lock so
+        # only one search/inference runs server-wide at a time. Progress is
+        # reported via _progress (guarded by the separate _jobs_lock), so the
+        # poller keeps updating even while this lock is held.
+        with _mcts_lock:
+            if num_sims > 0:
+                mcts = _construct_mcts(
+                    ctx["model_id"], num_sims,
+                    c_puct=ctx["c_puct"],
+                    fpu_reduction=ctx["fpu_reduction"],
+                    evaluation_mode=ctx["evaluation_mode"],
+                    heuristic_weight=ctx["heuristic_weight"],
+                )
+                probs = mcts.search_batch(
+                    gs, move_number=1, batch_size=ctx["batch_size"],
+                    progress_callback=_progress,
+                )
+                top, value, _ = _mcts_result_from_probs(
+                    mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
+                )
+                mode = "mcts"
+            else:
+                top, value, _ = _evaluate_policy(ctx)
+                mode = "policy"
+        best_value = top[0].get("best_move_value") if top else None
+        result = _finalize_eval_response(
+            gs, valid_moves, mode=mode, value=value, best_value=best_value,
+            top=top, num_sims=num_sims, capped_from=ctx["capped_from"],
+        )
+        elapsed = time.time() - started
+        rate = (num_sims / elapsed) if elapsed > 0 else 0.0
+        log.info(
+            "async eval job %s done: %d sims in %.1fs (%.0f sims/s)",
+            job_id, num_sims, elapsed, rate,
+        )
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if job is not None:
+                job.update(status="done", result=result, finished_at=time.time())
+                job["progress"] = {"done": num_sims, "total": num_sims}
+    except Exception as e:  # noqa: BLE001
+        log.exception("async eval job %s failed after %.1fs", job_id, time.time() - started)
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if job is not None:
+                job.update(status="error", error=f"{type(e).__name__}: {e}", finished_at=time.time())
+
+
+@app.route("/api/evaluate_async", methods=["POST"])
+def api_evaluate_async():  # type: ignore[no-untyped-def]
+    """Start a search on a background thread; return a job_id immediately.
+
+    For searches too large to finish inside the proxy's response window
+    (anything above ~10k sims over the Cloudflare tunnel). Poll
+    /api/evaluate_result/<job_id> for progress and the eventual result.
+    """
+    payload = request.get_json(force=True, silent=False) or {}
+    ctx, err = _prepare_evaluation(payload, _owner_token_ok(payload))
+    if err is not None:
+        body, status = err
+        return jsonify(body), status
+
+    _evict_stale_jobs()
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "running",
+            "progress": {"done": 0, "total": ctx["num_sims"]},
+            "result": None,
+            "error": None,
+            "created_at": time.time(),
+            "finished_at": None,
+        }
+    threading.Thread(target=_run_eval_job, args=(job_id, ctx), daemon=True).start()
+    log.info("async eval job %s started (sims=%d)", job_id, ctx["num_sims"])
+    return jsonify({
+        "ok": True,
+        "job_id": job_id,
+        "num_sims": ctx["num_sims"],
+        "capped_from": ctx["capped_from"],
     })
+
+
+@app.route("/api/evaluate_result/<job_id>")
+def api_evaluate_result(job_id):  # type: ignore[no-untyped-def]
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return jsonify({"ok": False, "errors": ["unknown or expired job_id"]}), 404
+        status = job["status"]
+        progress = dict(job.get("progress") or {})
+        error = job.get("error")
+        result = job.get("result")
+    if status == "running":
+        return jsonify({"ok": True, "status": "running", "progress": progress})
+    if status == "error":
+        return jsonify({"ok": True, "status": "error", "errors": [error or "search failed"]})
+    return jsonify({"ok": True, "status": "done", "progress": progress, "result": result})
 
 
 @app.route("/api/move", methods=["POST"])
