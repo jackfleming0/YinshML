@@ -56,8 +56,15 @@ The 2026-05-29/30 work was recovered from a stash (it was never committed; the
   to exactly match the validated per-state augmenter permutation**; policy KL is
   masked to the `target_probs>0` valid-move support (the unmasked full-softmax KL
   was ~100× inflated by never-trained invalid-move logits). Tests:
-  `yinsh_ml/tests/test_symmetric_regularizer.py`. The kl-vs-value_asym balance is
-  logged every K steps and tunable via config for the run.
+  `yinsh_ml/tests/test_symmetric_regularizer.py`. **`symmetric_reg_value_weight`
+  default set to 10.0** (was a guessed 0.5) from a measured gradient-pressure
+  analysis (`scripts/investigate_e16_value_weight.py`): value_asym penalizes a
+  scalar value in ~[-1,1] while policy-KL lives on a simplex, so at 0.5 the value
+  term exerted only ~1/20th the gradient pressure of the policy term — backwards,
+  since E11 named the value head the dominant asymmetry. ~10 equalizes ‖grad‖ on
+  the shared trunk; raise toward 15-20 to prioritize value. Both magnitudes are
+  logged every K steps — tune live (a CPU dynamic probe is impractical at ~50s/
+  step on this net; confirm on the GPU run instead).
 
 **Remaining: Task 3** — next cloud run stacking L1+L2+E16 (supervised pretrain
 with `--label-smoothing 0.1` on a Dropout=0 net, then self-play with
