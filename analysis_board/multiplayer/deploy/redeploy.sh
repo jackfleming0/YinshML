@@ -43,7 +43,7 @@ echo "    server + tunnel plists copied"
 # permissions tight (chmod 600). Add new secret names to the SECRET_VARS
 # list below when /api/* endpoints need them.
 ENV_FILE="$HOME/.yinsh.env"
-SECRET_VARS=(ANTHROPIC_API_KEY)
+SECRET_VARS=()
 if [ -f "$ENV_FILE" ]; then
   echo "    overlaying secrets from $ENV_FILE"
   # shellcheck source=/dev/null
@@ -66,8 +66,7 @@ if [ -f "$ENV_FILE" ]; then
     fi
   done
 else
-  echo "    no $ENV_FILE found — secrets (e.g. ANTHROPIC_API_KEY) will not be injected"
-  echo "    /api/import_screenshot will return 503 until you create one"
+  echo "    no $ENV_FILE found — no secrets to overlay (SECRET_VARS is empty by default)"
 fi
 echo
 

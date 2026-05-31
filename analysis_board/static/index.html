@@ -52,10 +52,16 @@
       </div>
       <div class="board-wrap">
         <div id="board-3d" class="board-3d" aria-label="YINSH board" role="img"></div>
-        <button id="reset-view-btn" class="board-overlay-btn" title="Reset view" aria-label="Reset view">
+        <button id="reset-view-btn" class="board-overlay-btn" title="Reset view (default 3D tilt)" aria-label="Reset view">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polyline points="1 4 1 10 7 10"></polyline>
             <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+          </svg>
+        </button>
+        <button id="snap-top-down" class="board-overlay-btn board-overlay-btn-secondary" title="Top-down view (for screenshots)" aria-label="Top-down view">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+            <circle cx="12" cy="12" r="3"></circle>
           </svg>
         </button>
         <div class="hint" id="board-hint">Drag a piece from the palette onto a board intersection. Right-click to erase.</div>
@@ -135,31 +141,6 @@
             <span class="label">Erase</span>
           </button>
         </div>
-      </section>
-
-      <section class="block import-block" id="import-block">
-        <div class="block-title">Import from image <span class="block-hint">paste, drop, or pick</span></div>
-        <div class="import-dropzone" id="import-dropzone" tabindex="0"
-             role="button" aria-label="Import board screenshot">
-          <div class="import-dropzone-prompt">
-            <span class="import-dropzone-icon" aria-hidden="true">▣</span>
-            <div class="import-dropzone-text">
-              <strong>Drop a screenshot, paste with ⌘V, or click to pick.</strong>
-              <small>BGA, Yucata, Boardspace, phone photo — any clear board.</small>
-            </div>
-          </div>
-          <input type="file" id="import-file-input" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
-        </div>
-        <div class="import-status" id="import-status" hidden></div>
-        <div class="import-tip">
-          For best parse accuracy on screenshots of THIS board, flatten the
-          camera to top-down first — the vision model struggles with
-          perspective.
-          <button id="snap-top-down" class="link-button" type="button">↧ Flatten board</button>
-        </div>
-        <label class="import-auto-analyze" title="Run /api/evaluate immediately after a successful import.">
-          <input type="checkbox" id="import-auto-analyze" /> Analyze immediately after import
-        </label>
       </section>
 
       <section class="block setup-actions-block" id="setup-actions-block">
