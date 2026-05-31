@@ -21,6 +21,10 @@ experiments/**/*.pkl
 experiments/**/*.pkl.gz
 experiments/**/*.mlpackage
 experiments/**/*.mlmodel
+# Orchestration registry DB — a local artifact, regenerated per machine.
+experiments/**/*.db
+experiments/**/*.db-wal
+experiments/**/*.db-shm
 experiments/**/*.npy
 experiments/**/*.npz
 !pyproject.toml
