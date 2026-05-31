@@ -511,7 +511,7 @@ class YinshTrainer:
                  search_consistency_warmup_iters: int = 3,
                  enable_symmetric_reg: bool = False,
                  symmetric_reg_weight: float = 0.1,
-                 symmetric_reg_value_weight: float = 10.0,
+                 symmetric_reg_value_weight: float = 20.0,
                  symmetric_reg_every_k_steps: int = 10,
                  max_oversampling: Optional[float] = None):
         """
@@ -606,16 +606,19 @@ class YinshTrainer:
                 term (added to policy+value loss). 0.1 keeps it a regularizer,
                 not a primary objective.
             symmetric_reg_value_weight: Inner weight on the value-asymmetry MSE
-                relative to the policy-KL term. Default 10.0 from a measured
-                gradient-pressure analysis (scripts/investigate_e16_value_weight.py):
+                relative to the policy-KL term. Default 20.0 from a static
+                gradient-pressure analysis + a dynamic probe
+                (scripts/investigate_e16_value_weight.py, investigate_e16_dynamic.py):
                 value_asym penalizes a SCALAR value in ~[-1,1] while policy-KL
-                lives on a probability simplex, so the two have very different
-                natural scales — at the prototype's 0.5 the value term exerted
-                only ~1/20th the gradient pressure of the policy term. ~10
-                equalizes ‖grad‖ on the shared trunk; raise toward 15-20 to
-                prioritize the value head (E11: value asymmetry is the dominant
-                symptom). The kl / value_asym magnitudes are logged every K
-                steps, so tune live.
+                lives on a probability simplex, so at the prototype's 0.5 the
+                value term exerted only ~1/20th the gradient pressure of the
+                policy term (value_asym grew 6.7x under task pressure). ~10
+                equalizes gradient pressure but only *slows* value drift; the
+                dynamic probe showed value-symmetry improving monotonically with
+                w (50 was the only weight to net-reduce value_asym, at modest +
+                largely-illusory policy cost). 20 holds value_asym ~flat with no
+                extra policy cost vs 10; push toward 50 if the per-K-step logs
+                show value_asym climbing.
             symmetric_reg_every_k_steps: Apply the regularizer every K
                 `train_step` calls. Each regularized step costs ~3 extra
                 forwards (the 3 non-identity transforms; identity is reused).

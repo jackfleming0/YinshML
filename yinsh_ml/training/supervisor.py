@@ -377,7 +377,7 @@ class TrainingSupervisor:
         # E16 symmetric-weight regularizer (Task 2). Off unless config opts in.
         enable_symmetric_reg = bool(self.mode_settings.get('enable_symmetric_reg', False))
         symmetric_reg_weight = float(self.mode_settings.get('symmetric_reg_weight', 0.1))
-        symmetric_reg_value_weight = float(self.mode_settings.get('symmetric_reg_value_weight', 10.0))
+        symmetric_reg_value_weight = float(self.mode_settings.get('symmetric_reg_value_weight', 20.0))
         symmetric_reg_every_k_steps = int(self.mode_settings.get('symmetric_reg_every_k_steps', 10))
         # EMA eval target — None disables entirely. When set, the trainer keeps
         # a shadow copy updated after every optimizer step, and the supervisor

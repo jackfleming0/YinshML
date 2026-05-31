@@ -57,14 +57,20 @@ The 2026-05-29/30 work was recovered from a stash (it was never committed; the
   masked to the `target_probs>0` valid-move support (the unmasked full-softmax KL
   was ~100× inflated by never-trained invalid-move logits). Tests:
   `yinsh_ml/tests/test_symmetric_regularizer.py`. **`symmetric_reg_value_weight`
-  default set to 10.0** (was a guessed 0.5) from a measured gradient-pressure
-  analysis (`scripts/investigate_e16_value_weight.py`): value_asym penalizes a
-  scalar value in ~[-1,1] while policy-KL lives on a simplex, so at 0.5 the value
-  term exerted only ~1/20th the gradient pressure of the policy term — backwards,
-  since E11 named the value head the dominant asymmetry. ~10 equalizes ‖grad‖ on
-  the shared trunk; raise toward 15-20 to prioritize value. Both magnitudes are
-  logged every K steps — tune live (a CPU dynamic probe is impractical at ~50s/
-  step on this net; confirm on the GPU run instead).
+  default set to 20.0** (was a guessed 0.5) from two investigations:
+  - **Static gradient pressure** (`scripts/investigate_e16_value_weight.py`):
+    value_asym penalizes a scalar value in ~[-1,1] while policy-KL lives on a
+    simplex, so at 0.5 the value term exerted only ~1/20th the gradient pressure
+    of the policy term. ~10 equalizes ‖grad‖ on the trunk.
+  - **Dynamic probe** (`scripts/investigate_e16_dynamic.py`, 150 steps × {0.5,10,
+    20,50} on MPS): under task pressure, value_asym grew 6.7× at w=0.5, ~2.7-3.2×
+    at w=10/20, and *shrank* (−17%) only at w=50; monotonic in w, with negligible
+    (and largely illusory — it's memorization acc) policy cost. So equal pressure
+    (10) only *slows* value drift; 20 holds it ~flat at no extra policy cost, 50
+    reverses it. Default 20; push toward 50 if the per-K-step logs show value_asym
+    climbing in the real run (where task pressure is weaker than this stress test).
+  - **MPS note:** E16 originally used `index_copy_` (unimplemented on MPS); now a
+    gather (`index_select`) so it runs on Apple Silicon too.
 
 **Remaining: Task 3** — next cloud run stacking L1+L2+E16 (supervised pretrain
 with `--label-smoothing 0.1` on a Dropout=0 net, then self-play with
