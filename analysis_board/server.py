@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -594,6 +595,30 @@ def _top_moves(
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+
+
+@app.errorhandler(Exception)
+def _json_api_errors(e):  # type: ignore[no-untyped-def]
+    """Return JSON (not Flask's default HTML page) for any unhandled error on
+    an ``/api/*`` route.
+
+    Without this, a server-side 500 hands the SPA an HTML error page and the
+    frontend's ``res.json()`` dies with the cryptic "Unexpected token '<',
+    \"<!DOCTYPE\"... is not valid JSON". With it, the real exception message
+    reaches the user. (Note: this can't catch a *proxy* timeout — e.g. the
+    Cloudflare tunnel's ~100s 524 page — since that HTML never originates
+    from Flask; in that case the SPA still sees DOCTYPE, which itself confirms
+    the request died upstream rather than in the app.)
+    """
+    status = e.code if isinstance(e, HTTPException) and e.code else 500
+    if not request.path.startswith("/api/"):
+        # Preserve default behavior for the SPA shell / static assets.
+        if isinstance(e, HTTPException):
+            return e
+        raise e
+    if status >= 500:
+        log.exception("unhandled error on %s", request.path)
+    return jsonify({"ok": False, "errors": [f"{type(e).__name__}: {e}"]}), status
 
 
 @app.route("/")
