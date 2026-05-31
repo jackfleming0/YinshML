@@ -19,6 +19,7 @@ from ..utils.enhanced_metrics import EnhancedMetricsCollector
 from ..utils.encoding import decode_phase_from_state
 from ..network.wrapper import NetworkWrapper
 from .ema import EMAShadow
+from . import symmetric_reg
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 
@@ -988,153 +989,29 @@ class YinshTrainer:
                     self.policy_scheduler.step()
                     self.value_scheduler.step()
 
-    def _build_full_policy_permutation(self, augmenter, encoder, transform_id):
-        """Build the full ``[total_moves]`` policy-index permutation for one D2
-        transform: ``perm[idx_of(M)] = idx_of(T(M))`` for every move M in the
-        action space.
-
-        The mapping is state-independent — move_to_index is a pure function of
-        the move, so the permutation of the whole 7433-slot move space is fixed
-        given the board geometry. (The augmenter's per-state
-        `_build_index_permutation` is the same idea restricted to a position's
-        legal moves.) We enumerate every move directly from the board positions
-        and the REMOVE_MARKERS line table — `StateEncoder.move_to_index` is the
-        authoritative forward map (the `idx_to_move_map` dict is legacy/unused
-        and never populated). Reuses the validated `_transform_move`. Asserts a
-        full bijection so a silent indexing bug can't quietly drop policy mass.
-        """
-        from ..game.types import Move, MoveType  # noqa: WPS433
-        from ..game.constants import Position  # noqa: WPS433
-        from ..utils.encoding import _REMOVE_MARKERS_LINES  # noqa: WPS433
-
-        coord_map = augmenter._coord_maps[transform_id]  # noqa: SLF001
-        n = encoder.total_moves
-        perm = np.full(n, -1, dtype=np.int64)
-        positions = [Position.from_string(p) for p in encoder.position_to_index]
-
-        def _set(move):
-            t_move = augmenter._transform_move(move, coord_map)  # noqa: SLF001
-            if t_move is None:
-                raise ValueError(
-                    f"D2 transform {transform_id} sent {move} off-board — the "
-                    "valid set is supposed to be closed under D2"
-                )
-            perm[encoder.move_to_index(move)] = encoder.move_to_index(t_move)
-
-        for p in positions:
-            _set(Move(type=MoveType.PLACE_RING, player=None, source=p))
-            _set(Move(type=MoveType.REMOVE_RING, player=None, source=p))
-        for src in positions:
-            for dst in positions:
-                if src != dst:
-                    _set(Move(type=MoveType.MOVE_RING, player=None, source=src, destination=dst))
-        for line in _REMOVE_MARKERS_LINES:
-            _set(Move(type=MoveType.REMOVE_MARKERS, player=None, markers=tuple(line)))
-
-        if (perm < 0).any() or len(set(perm.tolist())) != n:
-            raise ValueError(
-                f"symmetric policy permutation for transform {transform_id} is "
-                f"not a bijection ({len(set(perm.tolist()))} distinct, "
-                f"{int((perm < 0).sum())} unfilled, of {n})"
-            )
-        return perm
-
     def _build_symmetric_reg_tensors(self):
-        """Precompute the per-transform tensors the E16 regularizer needs, once.
-
-        For each non-identity D2 transform (180°, diagonal, anti-diagonal):
-          - ``cell_src``: a ``[121]`` gather index over the flattened 11×11 grid
-            such that ``transformed[:, :, f] = state[:, :, cell_src[f]]`` — i.e.
-            the geometric transform of the *input* tensor (all channels;
-            spatially-uniform channels are unchanged). Equivalent to the
-            augmenter's `_transform_state`, vectorized + differentiable.
-          - ``policy_perm``: the ``[total_moves]`` move-index permutation that
-            maps a policy on the transformed action space back to the original.
-        """
-        from .augmentation import YinshSymmetryAugmenter  # noqa: WPS433
-        from ..utils.encoding import StateEncoder  # noqa: WPS433
-
-        augmenter = YinshSymmetryAugmenter(
-            include_reflections=True, state_encoder=StateEncoder(),
-        )
-        encoder = self.state_encoder
-        out = []
-        for tid in (1, 2, 3):
-            coord_map = augmenter._coord_maps[tid]  # noqa: SLF001
-            cell_src = list(range(121))
-            for (orow, ocol), (nrow, ncol) in coord_map.items():
-                cell_src[nrow * 11 + ncol] = orow * 11 + ocol
-            cell_src_t = torch.tensor(cell_src, dtype=torch.long, device=self.device)
-            perm = self._build_full_policy_permutation(augmenter, encoder, tid)
-            # inv_perm is the gather index that maps a policy/logit vector on the
-            # transformed action space back to the original: out[:, j] = src[:,
-            # inv_perm[j]]. We use gather (index_select) rather than the in-place
-            # scatter index_copy_ because the latter is unimplemented on MPS, so
-            # E16 would crash on local Apple-Silicon runs (cloud/CUDA is fine).
-            inv_perm = np.empty_like(perm)
-            inv_perm[perm] = np.arange(len(perm))
-            perm_t = torch.tensor(perm, dtype=torch.long, device=self.device)
-            inv_perm_t = torch.tensor(inv_perm, dtype=torch.long, device=self.device)
-            out.append((cell_src_t, perm_t, inv_perm_t))
+        """Precompute the per-transform E16 tensors, once — delegates to
+        yinsh_ml/training/symmetric_reg.py::build_reg_tensors (shared with the
+        supervised pretrain path so both halves use identical geometry)."""
+        tensors = symmetric_reg.build_reg_tensors(self.state_encoder, self.device)
         logger.info("E16 symmetric regularizer: built transform tensors for 3 D2 symmetries")
-        return out
+        return tensors
 
     def _symmetric_reg_term(self, states, pred_logits, pred_values, target_probs):
-        """E16 regularizer for one batch: forward the net on the 3 non-identity
-        D2 transforms (the identity is reused from the main forward), map each
-        policy back to the original action space, and penalize divergence from
-        the symmetric mean.
-
-        The policy KL is restricted to the moves that carry training signal —
-        ``target_probs > 0`` (the MCTS visit support). The full 7433-slot softmax
-        also covers ~7300 invalid moves whose logits are never supervised and
-        carry meaningless asymmetry; including them swamps the term (~100×) and
-        would make the regularizer chase invalid-move symmetry instead of the
-        value-head asymmetry that E11 identified as the real problem. Each
-        policy is masked to that support and renormalized so all 4 are
-        distributions over the same valid set before averaging.
-
-        Returns ``(loss_tensor, diagnostics)``; ``loss_tensor`` already carries
-        the outer α weight, so the caller just adds it to total_loss.
-        """
+        """E16 regularizer for one batch — delegates to the shared
+        yinsh_ml/training/symmetric_reg.py. The valid-move mask is the MCTS visit
+        support (``target_probs > 0``); the identity forward is reused from the
+        main pass, so this costs ~3 extra forwards. Returns ``(loss, diagnostics)``
+        with the outer α already applied."""
         if self._symmetric_reg_tensors is None:
             self._symmetric_reg_tensors = self._build_symmetric_reg_tensors()
-
-        eps = 1e-9
-        b = states.shape[0]
         mask = (target_probs > 0).float()  # [B, total_moves] — valid-move support
-
-        def _masked_dist(logits):
-            p = F.softmax(logits.float(), dim=1) * mask
-            return p / (p.sum(dim=1, keepdim=True) + eps)
-
-        flat = states.reshape(b, states.shape[1], -1)  # [B, C, 121]
-        # Identity (tid=0): reuse the main forward. fp32 for stable KL/logs.
-        policy0 = _masked_dist(pred_logits)
-        policies = [policy0]
-        values = [pred_values.float().reshape(b, -1)]
-
-        for cell_src, _perm, inv_perm in self._symmetric_reg_tensors:
-            state_t = flat[:, :, cell_src].reshape(states.shape)
-            with self._autocast():
-                logits_t, value_t = self.network.network(state_t)
-            # Map logits on the transformed action space back to the original
-            # via gather: logits_orig[:, j] = logits_t[:, inv_perm[j]]. (D2 is an
-            # involution, so the same geometry that sends original→transformed
-            # sends transformed→original; inv_perm is the gather form of that.)
-            logits_orig = logits_t.index_select(1, inv_perm)
-            policies.append(_masked_dist(logits_orig))
-            values.append(value_t.float().reshape(b, -1))
-
-        policy_sym = torch.stack(policies, dim=0).mean(dim=0)
-        # KL(policy_sym || policy_0): pull the identity prediction toward the
-        # symmetric mean, over the valid support only. Mean over the batch.
-        kl = (policy_sym * (torch.log(policy_sym + eps) - torch.log(policy0 + eps))).sum(dim=1).mean()
-        vstack = torch.stack(values, dim=0)  # [4, B, K]
-        value_asym = ((vstack - vstack.mean(dim=0, keepdim=True)) ** 2).mean()
-
-        loss = self.symmetric_reg_weight * (kl + self.symmetric_reg_value_weight * value_asym)
-        return loss, {"sym_kl": float(kl.item()), "sym_value_asym": float(value_asym.item())}
+        return symmetric_reg.symmetric_reg_term(
+            self.network.network, states, pred_logits, pred_values, mask,
+            self._symmetric_reg_tensors,
+            value_weight=self.symmetric_reg_value_weight,
+            weight=self.symmetric_reg_weight, autocast=self._autocast,
+        )
 
     def train_step(self,
                    batch_size: int,

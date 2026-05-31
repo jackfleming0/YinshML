@@ -90,6 +90,20 @@ def test_cell_gather_matches_transform_state(trainer):
         assert np.array_equal(mine, aug._transform_state(se, tid))
 
 
+def test_valid_move_mask_matches_legal_moves(trainer):
+    """The decode-based mask (used by the supervised pretrain path, which has no
+    MCTS visit support) must equal each state's exact legal-move set."""
+    from yinsh_ml.training import symmetric_reg
+    enc = trainer.network.state_encoder
+    sts = [GameState(), _mid_game_state(4)]
+    batch = torch.from_numpy(np.stack([enc.encode_state(s).astype(np.float32) for s in sts]))
+    mask = symmetric_reg.valid_move_mask(enc, batch)
+    for i, st in enumerate(sts):
+        legal = {enc.move_to_index(m) for m in st.get_valid_moves()}
+        masked = set(np.nonzero(mask[i].cpu().numpy())[0].tolist())
+        assert masked == legal
+
+
 def test_regularizer_runs_and_backprops(trainer):
     """End-to-end: finite, non-negative loss; gradients reach the weights."""
     enc = trainer.network.state_encoder
