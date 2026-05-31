@@ -84,6 +84,22 @@ OWNER_TOKEN = os.environ.get("YNS_OWNER_TOKEN", "")
 # throughput on big searches; the duplicate-leaf guard handles batch>budget.
 DEFAULT_BATCH_SIZE = int(os.environ.get("YNS_BATCH_SIZE", "64"))
 
+# Symmetric MCTS — average the search policy over all 4 D2 board symmetries
+# (identity + 3 rotations/reflections) per evaluation, folding each variant's
+# policy back into the original action space. Cancels the path-dependent
+# visit-count asymmetry that makes the model play lopsided openings (iter1_ema
+# placed white's A5 ring 72% of games while its D2-orbit partners K7/E1/G11 sat
+# near 0% — impossible in a symmetric game). Measured to move A5 72%→40% and
+# lift white win-rate by leaf-eval noise reduction. Costs 4x the search
+# wall-clock; the client routes on the effective (4x) budget so big searches go
+# async and don't trip the proxy's ~100s window. Default ON for the deployed
+# board (the whole point of shipping it); YNS_SYMMETRIC_MCTS=0 disables, and a
+# per-request "symmetric": false in the payload overrides per call.
+SYMMETRIC_MCTS_DEFAULT = (
+    os.environ.get("YNS_SYMMETRIC_MCTS", "1").strip().lower()
+    not in ("0", "", "false", "no", "off")
+)
+
 # Serialize all network inference / MCTS search across threads. Two reasons:
 # (1) the MCTS instances in _mcts_cache are shared by all callers hitting the
 # same (model_id, num_sims, ...) tuple, so concurrent users would race on
@@ -197,6 +213,24 @@ _models: List[Dict[str, Any]] = []
 _wrapper_cache: Dict[str, NetworkWrapper] = {}
 _mcts_cache: Dict[Tuple[str, int], Any] = {}
 _encoder = StateEncoder()
+_augmenter = None  # YinshSymmetryAugmenter — built lazily (pulls training deps)
+
+
+def _get_augmenter():
+    """Lazily build the D2 symmetry augmenter used by symmetric MCTS.
+
+    Imported here, not at module top, because yinsh_ml.training.augmentation
+    pulls the training-side dependency chain — same reason MCTS is lazy-imported
+    in _construct_mcts. The augmenter is stateless across calls, so one shared
+    instance is fine under the global _mcts_lock.
+    """
+    global _augmenter
+    if _augmenter is None:
+        from yinsh_ml.training.augmentation import YinshSymmetryAugmenter  # noqa: WPS433
+        _augmenter = YinshSymmetryAugmenter(
+            include_reflections=True, state_encoder=_encoder,
+        )
+    return _augmenter
 
 
 def discover_models() -> List[Dict[str, Any]]:
@@ -337,6 +371,88 @@ def _construct_mcts(
         enable_subtree_reuse=True,
         mcts_metrics=None,
     )
+
+
+def _symmetric_search_batch(mcts, ctx, *, progress_callback=None):
+    """Run MCTS over all 4 D2 board symmetries and return the visit-count
+    policy averaged back into the original action space.
+
+    Variant 0 is the identity and runs on the passed-in ``mcts`` so its tree
+    (and ``last_root_value``) survive for the PV / value extraction done by
+    ``_mcts_result_from_probs``. Variants 1-3 run on one throwaway instance
+    (``reset_tree`` between them); only their policies are folded into the
+    average — their trees are discarded.
+
+    Geometric transforms route through the basic 6-channel encoder purely as a
+    vehicle: encode → D2-transform the tensor → decode_state → a transformed
+    GameState that the network re-encodes itself, so this works regardless of
+    whether the network uses the basic or enhanced encoder. Scores survive the
+    round-trip — decode_state derives them from ring count, exact in MAIN_GAME /
+    RING_REMOVAL and differential-preserving during placement. Validated
+    end-to-end across full games and all phases by
+    scripts/measure_symmetric_openings.py.
+
+    A variant that fails to transform (edge/terminal decode) is skipped and the
+    average taken over the survivors — identity always counts, so the symmetric
+    result is never worse than a single plain search.
+    """
+    gs = ctx["gs"]
+    num_sims = ctx["num_sims"]
+    batch_size = ctx["batch_size"]
+    augmenter = _get_augmenter()
+    basic_state = _encoder.encode_state(gs)
+    total = 4 * num_sims
+
+    def _variant_progress(variant_idx):
+        # Offset each variant's 0..num_sims progress into a single 0..4*num_sims
+        # bar so the async poller shows smooth overall progress.
+        if progress_callback is None:
+            return None
+        base = variant_idx * num_sims
+        return lambda done, _total: progress_callback(base + done, total)
+
+    # Variant 0 — identity, on the real mcts (keeps its tree for PV extraction).
+    avg = np.asarray(
+        mcts.search_batch(
+            gs, move_number=1, batch_size=batch_size,
+            progress_callback=_variant_progress(0),
+        ),
+        dtype=np.float64,
+    )
+    n_valid = 1
+
+    variant_mcts = None
+    for tid in (1, 2, 3):
+        try:
+            transformed_basic = augmenter._transform_state(basic_state, tid)  # noqa: SLF001
+            transformed_gs = _encoder.decode_state(transformed_basic)
+            if variant_mcts is None:
+                variant_mcts = _construct_mcts(
+                    ctx["model_id"], num_sims,
+                    c_puct=ctx["c_puct"], fpu_reduction=ctx["fpu_reduction"],
+                    evaluation_mode=ctx["evaluation_mode"],
+                    heuristic_weight=ctx["heuristic_weight"],
+                )
+            else:
+                try:
+                    variant_mcts.reset_tree()
+                except AttributeError:
+                    variant_mcts._cached_root = None  # noqa: SLF001
+            policy_i = variant_mcts.search_batch(
+                transformed_gs, move_number=1, batch_size=batch_size,
+                progress_callback=_variant_progress(tid),
+            )
+            # _transform_policy is a D2 involution: re-transforming a policy
+            # defined on transformed_basic's action space by the same tid maps
+            # it back onto gs's original action space.
+            avg += augmenter._transform_policy(transformed_basic, policy_i, tid)  # noqa: SLF001
+            n_valid += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("symmetric variant %d skipped: %s", tid, e)
+            continue
+
+    avg /= n_valid
+    return avg
 
 
 def _extract_pv_for_move(root, top_move, depth: int = 5, min_visits: int = 10):
@@ -769,6 +885,9 @@ def _prepare_evaluation(payload, is_owner):
         ]}, 400)
     heuristic_weight = float(payload.get("heuristic_weight", 0.5))
     batch_size = max(1, int(payload.get("batch_size", DEFAULT_BATCH_SIZE)))
+    # Symmetric MCTS averages over the 4 D2 board symmetries (4x search cost).
+    # Only meaningful for num_sims>0; the raw-policy path ignores it.
+    symmetric = bool(payload.get("symmetric", SYMMETRIC_MCTS_DEFAULT))
 
     try:
         gs = build_state(payload)
@@ -791,6 +910,7 @@ def _prepare_evaluation(payload, is_owner):
         "evaluation_mode": evaluation_mode,
         "heuristic_weight": heuristic_weight,
         "batch_size": batch_size,
+        "symmetric": symmetric,
         "gs": gs,
         "valid_moves": valid_moves,
     }, None
@@ -824,11 +944,14 @@ def _evaluate_policy(ctx):
     return top, value, top_move
 
 
-def _finalize_eval_response(gs, valid_moves, *, mode, value, best_value, top, num_sims, capped_from):
+def _finalize_eval_response(gs, valid_moves, *, mode, value, best_value, top, num_sims, capped_from, symmetric=False):
     """Assemble the JSON body returned by both the sync route and async job."""
     return {
         "ok": True,
         "mode": mode,
+        # True when the D2-symmetric averaging actually ran (mcts mode only) —
+        # lets the UI label the reading and explains the 4x search time.
+        "symmetric": bool(symmetric),
         "value": value,
         "best_move_value": best_value,
         "side_to_move": gs.current_player.name,
@@ -878,7 +1001,10 @@ def api_evaluate():  # type: ignore[no-untyped-def]
                 mcts.reset_tree()
             except AttributeError:
                 mcts._cached_root = None  # fallback for older engine versions
-            probs = mcts.search_batch(gs, move_number=1, batch_size=ctx["batch_size"])
+            if ctx["symmetric"]:
+                probs = _symmetric_search_batch(mcts, ctx)
+            else:
+                probs = mcts.search_batch(gs, move_number=1, batch_size=ctx["batch_size"])
             top, value, _ = _mcts_result_from_probs(
                 mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
             )
@@ -897,6 +1023,7 @@ def api_evaluate():  # type: ignore[no-untyped-def]
     return jsonify(_finalize_eval_response(
         gs, valid_moves, mode=mode, value=value, best_value=best_value,
         top=top, num_sims=num_sims, capped_from=ctx["capped_from"],
+        symmetric=ctx["symmetric"] and num_sims > 0,
     ))
 
 
@@ -941,10 +1068,13 @@ def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
                     evaluation_mode=ctx["evaluation_mode"],
                     heuristic_weight=ctx["heuristic_weight"],
                 )
-                probs = mcts.search_batch(
-                    gs, move_number=1, batch_size=ctx["batch_size"],
-                    progress_callback=_progress,
-                )
+                if ctx["symmetric"]:
+                    probs = _symmetric_search_batch(mcts, ctx, progress_callback=_progress)
+                else:
+                    probs = mcts.search_batch(
+                        gs, move_number=1, batch_size=ctx["batch_size"],
+                        progress_callback=_progress,
+                    )
                 top, value, _ = _mcts_result_from_probs(
                     mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
                 )
@@ -956,6 +1086,7 @@ def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
         result = _finalize_eval_response(
             gs, valid_moves, mode=mode, value=value, best_value=best_value,
             top=top, num_sims=num_sims, capped_from=ctx["capped_from"],
+            symmetric=ctx["symmetric"] and num_sims > 0,
         )
         elapsed = time.time() - started
         rate = (num_sims / elapsed) if elapsed > 0 else 0.0
