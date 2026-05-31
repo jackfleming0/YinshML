@@ -52,6 +52,8 @@ def parse_args():
     p.add_argument('--max-main-game', type=int, default=None, help='cap main-game positions')
     p.add_argument('--max-placement', type=int, default=None,
                    help='target total placement positions BEFORE augmentation (default: as many as the mix allows)')
+    p.add_argument('--ram-budget-gb', type=float, default=40.0,
+                   help='refuse to build a corpus needing more than this in RAM (guards OOM; raise --max-main-game to fit)')
     p.add_argument('--seed', type=int, default=0)
     return p.parse_args()
 
@@ -188,6 +190,15 @@ def main():
     mi = eng_main_idx
     if args.max_main_game and args.max_main_game < mi.size:
         mi = np.sort(rng.choice(mi, size=args.max_main_game, replace=False))
+    # RAM guard: the assembled corpus is held in memory before the mmap write.
+    # 15ch float32 ≈ 7.26 KB/position. Refuse to silently OOM the box.
+    est_gb = (place_s.shape[0] + mi.size) * 15 * 121 * 4 / 1e9
+    if est_gb > args.ram_budget_gb:
+        raise SystemExit(
+            f"Corpus would need ~{est_gb:.0f} GB in RAM (> --ram-budget-gb "
+            f"{args.ram_budget_gb}). Pass --max-main-game to cap main-game "
+            f"positions (e.g. --max-main-game {int(args.ram_budget_gb * 1e9 / (15*121*4) - place_s.shape[0]):,})."
+        )
     main_s = np.asarray(e_states[mi]).astype(np.float32)
     main_p = np.asarray(e_pol[mi]).astype(np.int64)
     main_v = np.asarray(e_vals[mi]).astype(np.float32)
