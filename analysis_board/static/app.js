@@ -17,6 +17,7 @@ import {
   clearArrow,
   pixelToBoardPos,
   resetView,
+  topDownView,
   animateMove,
   setCapturedRings,
   setSelectableHighlights,
@@ -109,6 +110,16 @@ const { domElement: boardEl } = initBoard3D(boardContainer);
 
 const resetViewBtn = document.getElementById("reset-view-btn");
 if (resetViewBtn) resetViewBtn.addEventListener("click", () => resetView());
+
+// Top-down camera snap — wired here at boot rather than alongside the
+// import-block code because the button is in the import block but the
+// view is a global camera state, not import-specific. Available in any
+// mode (you might want it for a clean screenshot to share, not just for
+// the import pipeline).
+const snapTopDownBtn = document.getElementById("snap-top-down");
+if (snapTopDownBtn) {
+  snapTopDownBtn.addEventListener("click", () => topDownView());
+}
 
 function render() {
   setPieces(state.pieces);

@@ -151,6 +151,12 @@
           <input type="file" id="import-file-input" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
         </div>
         <div class="import-status" id="import-status" hidden></div>
+        <div class="import-tip">
+          For best parse accuracy on screenshots of THIS board, flatten the
+          camera to top-down first — the vision model struggles with
+          perspective.
+          <button id="snap-top-down" class="link-button" type="button">↧ Flatten board</button>
+        </div>
         <label class="import-auto-analyze" title="Run /api/evaluate immediately after a successful import.">
           <input type="checkbox" id="import-auto-analyze" /> Analyze immediately after import
         </label>

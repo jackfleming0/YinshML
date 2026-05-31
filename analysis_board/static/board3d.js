@@ -602,6 +602,38 @@ export function resetView(durationMs = 450) {
   _resetTweenId = requestAnimationFrame(step);
 }
 
+// Snap the camera to a true overhead orthographic-ish view. Removes the
+// perspective tilt entirely — useful before taking a screenshot for
+// downstream parsing (the screenshot-import vision model struggles with
+// perspective-warped hex grids; top-down makes labels land where they
+// belong and eliminates the "is that K2 or off-board" ambiguity).
+export function topDownView(durationMs = 450) {
+  if (_resetTweenId) cancelAnimationFrame(_resetTweenId);
+  const startPos = M.camera.position.clone();
+  const startTarget = M.controls.target.clone();
+  // A tiny Z offset keeps the camera's up-vector well-defined; exactly
+  // (0, y, 0) at polar=0 with target (0,0,0) lands on a gimbal-lock edge
+  // case where OrbitControls' next rotate-attempt jumps to a random
+  // orientation. 0.001 is invisible to the eye but unambiguous to math.
+  const endPos = new THREE.Vector3(0, 22, 0.001);
+  const endTarget = new THREE.Vector3(0, 0, 0);
+  const t0 = performance.now();
+  M.controls.update();
+  function step(now) {
+    const t = Math.min(1, (now - t0) / durationMs);
+    const k = 1 - Math.pow(1 - t, 3);
+    M.camera.position.lerpVectors(startPos, endPos, k);
+    M.controls.target.lerpVectors(startTarget, endTarget, k);
+    M.controls.update();
+    if (t < 1) {
+      _resetTweenId = requestAnimationFrame(step);
+    } else {
+      _resetTweenId = null;
+    }
+  }
+  _resetTweenId = requestAnimationFrame(step);
+}
+
 // ---------- Internals ----------
 
 function _onResize() {
