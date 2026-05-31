@@ -55,6 +55,15 @@ trainer:
   warmup_epochs: 0
   enable_autocast: true
   soft_value_target_sigma: 0.5
+  # E2 placement value-grounding (same shape as the real config).
+  search_consistency:
+    enabled: true
+    placement_only: true
+    policy_weight: 0.0
+    value_weight: 1.0
+    every_k_steps: 1
+    long_sims: 8
+    warmup_iters: 0
   # E16 ON, fire every step so the smoke definitely exercises it.
   symmetric_reg:
     enabled: true
