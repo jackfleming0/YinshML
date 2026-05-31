@@ -130,6 +130,21 @@ class YinshNetwork(nn.Module):
                 self.main_blocks.append(AttentionBlock(num_channels))
 
         # Policy head (outputs move probabilities)
+        #
+        # DROPOUT EXPERIMENT (2026-05-29, branch policy-dropout-fix):
+        # The original Dropout(0.3) was diagnosed as the plateau cause —
+        # at training time, 30% of the 1024 bottleneck features get
+        # zeroed each forward pass, forcing the head to learn an
+        # ensemble-averaged solution. For 7,433-way classification with
+        # sharp MCTS targets, the minimum-loss solution under that
+        # constraint is near-uniform output, which is exactly what we
+        # measured on iter1_ema (peak 1.4%, uniform 1.2%) and iter5_ema
+        # (peak 0.033%, uniform 0.013%). See
+        # `analysis_board/multiplayer/EXPERIMENT_opening_theory.md` for
+        # the P1/P2/P3 diagnostic results.
+        #
+        # Dropout dropped to 0 here; if regularization is needed, add
+        # weight decay in the optimizer, not dropout in the bottleneck.
         self.policy_head = nn.Sequential(
             nn.Conv2d(num_channels, 64, 1),
             nn.BatchNorm2d(64),
@@ -137,7 +152,7 @@ class YinshNetwork(nn.Module):
             nn.Flatten(),
             nn.Linear(64 * 11 * 11, 1024),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.0),
             nn.Linear(1024, self.total_moves)
             # No activation here - we want raw logits
         )
