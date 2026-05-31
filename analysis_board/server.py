@@ -1206,12 +1206,35 @@ def api_import_bga():  # type: ignore[no-untyped-def]
         }), 200
 
     if parsed is None:
+        # The scraper captures the actual BGA upstream error (when there is
+        # one) in `last_fetch_error`. Most common cause we've seen in the
+        # wild: the game is still in progress — BGA's archive endpoint is
+        # post-game-only. Surface the upstream message verbatim plus a
+        # tailored hint if it smells like the in-progress case.
+        upstream = getattr(scraper, "last_fetch_error", None) or ""
+        upstream_lower = upstream.lower()
+        if any(s in upstream_lower for s in (
+            "not finished", "not yet", "in progress", "ongoing",
+            "not complete", "not over",
+        )):
+            user_message = (
+                f"Game {table_id} is still in progress — BGA only exposes "
+                "replays for finished games. Try again once the game ends."
+            )
+        elif upstream:
+            user_message = (
+                f"BGA returned an error for table {table_id}: {upstream}"
+            )
+        else:
+            user_message = (
+                f"BGA returned no replay for table {table_id}. Likely "
+                "causes: the game is still in progress (replay only "
+                "available after it ends), the table id is wrong, the "
+                "game is private, or it isn't YINSH."
+            )
         return jsonify({
             "ok": False,
-            "errors": [
-                f"BGA returned no replay for table {table_id} — table may not "
-                "exist, may be private, or may be a different game."
-            ],
+            "errors": [user_message],
         }), 200
 
     try:

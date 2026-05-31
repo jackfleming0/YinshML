@@ -73,6 +73,12 @@ class BGAScraper:
         )
         self._logged_in = False
         self._request_token: Optional[str] = None
+        # Set by fetch_raw when BGA returns a non-cap error so callers can
+        # surface the actual upstream message (in-progress game, private
+        # table, etc) instead of guessing. Cleared at the start of each
+        # fetch_raw call. The bulk crawler ignores it (returns-None
+        # contract preserved); the analysis-board wrapper reads it.
+        self.last_fetch_error: Optional[str] = None
 
     def load_cookies(self, cookies_path: str) -> bool:
         """Load a session by importing cookies exported from a browser.
@@ -314,8 +320,13 @@ class BGAScraper:
             Parsed JSON dict on success, or None on a per-table error
             (missing table, transient network failure, etc.).
         """
+        # Fresh state per call — last_fetch_error is "what happened on the
+        # most recent call," not an accumulator.
+        self.last_fetch_error = None
+
         if not self._logged_in:
             logger.error("Must login before scraping")
+            self.last_fetch_error = "scraper is not authenticated"
             return None
 
         # Request archive generation (prerequisite — BGA materializes the
@@ -333,6 +344,10 @@ class BGAScraper:
         data = self._fetch_json(logs_url)
 
         if not data:
+            self.last_fetch_error = (
+                "BGA returned an empty response; table may not exist "
+                "or the network call failed"
+            )
             return None
 
         if isinstance(data, dict) and str(data.get('status')) == '0':
@@ -340,6 +355,7 @@ class BGAScraper:
             if 'limit' in error.lower():
                 raise BGACapHit(error)
             logger.warning(f"BGA error for table {table_id}: {error}")
+            self.last_fetch_error = error or "BGA returned an unspecified error"
             return None
 
         return data
