@@ -54,6 +54,9 @@ def parse_args():
                    help='target total placement positions BEFORE augmentation (default: as many as the mix allows)')
     p.add_argument('--ram-budget-gb', type=float, default=40.0,
                    help='refuse to build a corpus needing more than this in RAM (guards OOM; raise --max-main-game to fit)')
+    p.add_argument('--rm-input-after-load', action='store_true',
+                   help='delete the engine corpus after loading it into RAM, before writing output '
+                        '(disk-frugal: peak disk = max(input,output) not sum; the input is reproducible)')
     p.add_argument('--seed', type=int, default=0)
     return p.parse_args()
 
@@ -203,6 +206,19 @@ def main():
     main_p = np.asarray(e_pol[mi]).astype(np.int64)
     main_v = np.asarray(e_vals[mi]).astype(np.float32)
     print(f'  main-game: {main_s.shape[0]:,}')
+
+    # Everything we need is now in RAM. On a disk-constrained box, delete the
+    # (large) 15ch engine corpus BEFORE writing the output, so peak disk is
+    # max(input, output) rather than their sum — lets the full corpus fit.
+    if args.rm_input_after_load:
+        import shutil
+        del e_states, e_pol, e_vals
+        eng = Path(args.engine_corpus)
+        if eng.is_dir():
+            shutil.rmtree(eng)
+        else:
+            eng.unlink(missing_ok=True)
+        print(f'  removed input {eng} to free disk before write')
 
     # --- combine + shuffle ---
     all_s = np.concatenate([place_s, main_s])
