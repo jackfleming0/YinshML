@@ -31,6 +31,87 @@ a clear next step, this file is the first thing to read.
 
 ---
 
+## Status snapshot (as of 2026-06-01 ~21:30 UTC) — symmetry run verdict + next-run strategy
+
+**The symmetry foundation run failed its strength goal.** `runs_symmetry/20260601_105750`
+(5-iter MCTS-200, from-scratch pretrain on the E10 corpus, L1+L2+E16+E2, model
+`symmetric-15ch-iter4-ema`). Color-balanced 60-game H2H vs the champion
+`iter1_ema_2026-05-27` (both 15ch): **sym15-final 12-48 = 20%** (sym 2/30 as white,
+10/30 as black — strong second-player/black advantage in-engine, so color-balancing
+was essential). Within-run tournaments tread water (45.5/50.0/46.0/46.5% per step,
+all promoted only by the lenient 0.20 gate); value discrimination plateaued
+0.26→0.035; anchor held 97.5-100% (no Branch-C collapse). **Symmetry WAS fixed**
+(first-move orbit CV ~2% vs old A5 72%).
+
+**Root cause = three confounded strength-reducing changes in one run** vs the iter1_ema
+baseline: (a) from-scratch pretrain on a corpus that was 45% random openings →
+over-flattened policy (empty-board peak 1.7%, PAcc 0.324); (b) `discrimination_weight: 0.0`
+(turned the value-spread prop OFF, betting E2 would replace it — it didn't); (c) added
+E16 pressure. All push flatter/weaker. Can't isolate which dominated — **we never ran a
+clean single-variable experiment.**
+
+**Meta-finding that reframes everything: nothing we have built has beaten iter1_ema.**
+Not E6 (lost 22-8), not the dropout-fix lineage (over-confidence collapse, WR 6%), not
+this run (lost 48-12). A pre-dropout-fix, pre-symmetry 05-27 model is still champion
+across 5 interventions. The plateau is not "iter1→iter2 won't climb"; it is "five
+targeted fixes failed to produce any model stronger than iter1_ema."
+
+**Strategic position (volume vs fine-tuning, Jack + AI, 2026-06-01):** volume is a
+*multiplier on the per-iteration improvement rate, and ours is ≈0* — adding iterations/data
+has only ever tread water or regressed. Do NOT scale throughput at current settings (buys a
+more confident plateau at the same Elo). The highest-prior plateau-break lever is **search
+DEPTH, not game count**: at 200 sims the MCTS-improved policy barely exceeds the raw net, so
+the training target ≈ the net → no gradient (P1 confirms amplification exists: KL 3.46 nats
+96→800 sims). **Throughput is not an alternative to fine-tuning — it is how you afford the
+depth that breaks the plateau.** Sequence: prove the lever cheaply, THEN build throughput to
+scale it.
+
+### E18 — Deploy symmetric MCTS (L3a/E8) to the analysis board  `[do first, ~1h, no training]`
+
+E8/L3a is **code-complete and validated, not yet live.** `server.py::_symmetric_search_batch`
+(sync+async, default-on via `YNS_SYMMETRIC_MCTS`, UI toggle); validated on deployed iter1_ema
+(opening D6 concentration 0.857→0.214; iter1 WR 48%→54%). Action: `git push` + `yinsh-redeploy`
+(Mac mini). Closes the friend-tester loop (the *original* trigger) with zero new training and a
+free main-game strength bump. The symmetry goal is solved at INFERENCE — stop spending training
+on it. (Residual: A5 still ~40% of orbit post-symmetrization — the "residual 25%" weight-symmetry
+question, E11/E16, is a separate, lower-priority strength-neutral cosmetic item.)
+
+### E19 — Plateau-break ablation LADDER from iter1_ema, H2H-gated  `[the real prize]`
+
+The experiment we have never run: change ONE variable at a time off the *known-good* base, and
+**measure H2H vs iter1_ema (color-balanced, ~60 games) at every rung.** Never rebuild from scratch.
+
+- **Rung 1 — depth only.** Continue-self-play from iter1_ema, sims 200→800, everything else
+  identical, 3 iters. Question: does deeper search alone beat the champion? (Highest prior.)
+- **Rung 2 — + dropout-off (L1) + label-smoothing (L2)** — only if rung 1 stalls. Lets the net
+  learn the deeper targets without the over-confidence collapse the bare dropout-fix hit.
+- **Rung 3 — + `discrimination_weight` on (≈0.5) + E2** — only if rung 2 stalls. Value-head hygiene.
+
+First rung that beats iter1_ema is the lever. **Decision gate:** a rung wins → proceed to E20 to
+scale it; all rungs stall → the plateau is structural — bank iter1_ema+E8 as the product and
+consider a deeper change (equivariant net E17 / value-head redesign / MuZero-style) rather than
+more of the same. **Measurement discipline:** north-star metric is H2H vs the FIXED champion
+iter1_ema, not the within-lineage tournament (which is blind to absolute strength — it green-checked
+5 iters of an 80-20 loser). Tighten promotion gate 0.20→0.55.
+
+### E20 — Throughput build (shared evaluator + bitboards) IN SERVICE OF depth  `[gated on E19]`
+
+Self-play is hard CPU-bound: 5090 at mean 32% util, ~40% of wall-clock at literal 0%, bursting to
+~90% (full iter-5 profile: `profiling/symmetry_run/gpu_util_iter5_selfplay.csv`). ~2-3× GPU headroom
+sits behind CPU troughs. Two levers, both spent on DEEPER search, not more shallow games:
+- **Shared/centralized evaluator** (`use_shared_evaluator: true`) — consolidate 16 workers' ragged
+  small batches into large GPU batches; decouples CPU expansion from GPU eval so they overlap.
+  Likely the bigger lever for raising the 4% median.
+- **Bitboards** in `board.py`/`moves.py` (currently pure-Python over 85-cell dicts/lists) — shrink the
+  CPU troughs. ROI = the board-ops share of worker CPU; **pending cProfile** (`profiling/cprof_selfplay.py`,
+  result TBD this session) to size it. If board-ops is a big slice → 2× plausible; if dominated by
+  MCTS-tree/torch-dispatch → smaller.
+- **Infra:** launch the next vast.ai box with `--cap-add SYS_PTRACE` so py-spy live-profiling works
+  (this run's container lacked it; cProfile was the workaround). Box python = `/venv/main/bin/python`.
+
+Only build E20 once E19 shows a real per-iteration learning rate — throughput multiplies improvement,
+it does not create it.
+
 ## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
 
 The 2026-05-29/30 work was recovered from a stash (it was never committed; the

@@ -219,8 +219,13 @@ checkpoint to the Mac as `symmetric-15ch-<stage>.pt`, where `<stage>` ∈
 
 | Model | Stage | Encoding / head | Switches thrown | Early impressions |
 |---|---|---|---|---|
-| `symmetric-15ch-best-supervised` | from-scratch supervised pretrain (12 ep, bf16, batch 512) | 15ch enhanced / spatial classification (7-class) | **L1** Dropout=0 · **L2** label-smoothing 0.1 · **E16** value_weight 20, K=10 · **E10** corpus (human 5% / engine 45% / random 50% placement, full 11.6M engine main-game, 4× D2 aug, 13.0M total) | ✅ **Symmetry fixed** — first-move orbit CV 2.0% (vs old A5 72% / twins ~0%); `value_asym` flat ~0.003. ⚠️ Openings symmetric but **uniform** (peak 1.7%, over-flattened by 45% random). Main-game PAcc 0.324 / VAcc ~0.61. Strength TBD (self-play). |
-| `symmetric-15ch-iter<N>-ema` | self-play iteration N EMA | same | config `symmetry_fixes_mcts200.yaml` (E16 vw=20 + E2 placement value-grounding, MCTS-200, 100 games/iter, 16 workers) | _pending — fill per iteration: anchor WR, tournament Elo, value discrimination, opening sharpness/symmetry_ |
+| `symmetric-15ch-best-supervised` | from-scratch supervised pretrain (12 ep, bf16, batch 512) | 15ch enhanced / spatial classification (7-class) | **L1** Dropout=0 · **L2** label-smoothing 0.1 · **E16** value_weight 20, K=10 · **E10** corpus (human 5% / engine 45% / random 50% placement, full 11.6M engine main-game, 4× D2 aug, 13.0M total) | ✅ **Symmetry fixed** — first-move orbit CV 2.0% (vs old A5 72% / twins ~0%); `value_asym` flat ~0.003. ⚠️ Openings symmetric but **uniform** (peak 1.7%, over-flattened by 45% random). Main-game PAcc 0.324 / VAcc ~0.61. |
+| `symmetric-15ch-iter1-ema` | self-play iteration 1 EMA | same | config `symmetry_fixes_mcts200.yaml` (E16 vw=20 + E2 placement value-grounding, MCTS-200, 100 games/iter, 16 workers) | **27% H2H vs iter1_ema_0527** (16/60 color-balanced; 33% W / 20% B). Anchor 92.5%. Discrimination 0.116. The *least-bad* model the run produced — base is already a 3:1 loss out of pretrain. |
+| `symmetric-15ch-iter4-ema` | self-play iteration 4 EMA (**final/promoted**) | same | same | **20% H2H vs iter1_ema_0527** (12/60 color-balanced; 7% W / 33% B). Anchor 97.5%. Discrimination 0.035. **Weaker than iter1** — self-play degraded it ~7pp. Verdict: run trades strength for symmetry; do NOT deploy. |
+
+> **Run verdict (2026-06-01):** strength goal FAILED. iter1_ema_2026-05-27 remains champion.
+> Root cause = confounded changes, dominated by the from-scratch + 45%-random base (iter1
+> already 27%). See `META_OBJECTIVE_BEAT_ITER1.md` + `EXPERIMENT_BACKLOG.md` E18-E20.
 
 > Provenance: branch `policy-symmetry-fixes`; full rationale for each switch in the
 > §"What this fixes" header above and `EXPERIMENT_BACKLOG.md`.
