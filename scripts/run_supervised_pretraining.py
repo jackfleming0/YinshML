@@ -536,6 +536,8 @@ def main():
                        help='Number of training epochs (default: 30)')
     parser.add_argument('--batch-size', type=int, default=256,
                        help='Batch size (default: 256)')
+    parser.add_argument('--num-workers', type=int, default=2,
+                       help='DataLoader worker processes (default 2; raise on many-core boxes to keep the GPU fed)')
     parser.add_argument('--lr', type=float, default=0.001,
                        help='Initial learning rate (default: 0.001)')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
@@ -648,11 +650,13 @@ def main():
     logger.info(f"Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                              shuffle=True, num_workers=2, pin_memory=True,
-                              persistent_workers=True)
+                              shuffle=True, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=args.num_workers > 0,
+                              prefetch_factor=4 if args.num_workers > 0 else None)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
-                            shuffle=False, num_workers=2, pin_memory=True,
-                            persistent_workers=True)
+                            shuffle=False, num_workers=args.num_workers, pin_memory=True,
+                            persistent_workers=args.num_workers > 0,
+                            prefetch_factor=4 if args.num_workers > 0 else None)
 
     # Create model
     model, device, resume_bundle = create_model(args)
