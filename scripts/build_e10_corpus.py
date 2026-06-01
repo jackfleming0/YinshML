@@ -204,10 +204,14 @@ def main():
             f"{args.ram_budget_gb}). Pass --max-main-game to cap main-game "
             f"positions (e.g. --max-main-game {int(args.ram_budget_gb * 1e9 / (15*121*4) - place_s.shape[0]):,})."
         )
-    main_s = np.asarray(e_states[mi]).astype(np.float32)
+    # e_states is already float32 — fancy-indexing it yields one new array; do
+    # NOT .astype(float32) (it would copy a second 84GB and OOM). Same for values.
+    main_s = e_states[mi]
+    if main_s.dtype != np.float32:
+        main_s = main_s.astype(np.float32)
     main_p = np.asarray(e_pol[mi]).astype(np.int64)
-    main_v = np.asarray(e_vals[mi]).astype(np.float32)
-    print(f'  main-game: {main_s.shape[0]:,}')
+    main_v = np.asarray(e_vals[mi], dtype=np.float32)
+    print(f'  main-game: {main_s.shape[0]:,} ({main_s.nbytes/1e9:.0f} GB in RAM)')
 
     # Everything we need is now in RAM. On a disk-constrained box, delete the
     # (large) 15ch engine corpus BEFORE writing the output, so peak disk is
@@ -222,28 +226,29 @@ def main():
             eng.unlink(missing_ok=True)
         print(f'  removed input {eng} to free disk before write')
 
-    # --- combine + shuffle ---
-    all_s = np.concatenate([place_s, main_s]); del place_s, main_s
-    all_p = np.concatenate([place_p, main_p]); del place_p, main_p
-    all_v = np.concatenate([place_v, main_v]); del place_v, main_v
-    if not args.no_shuffle:
-        # Skippable: run_supervised_pretraining does random_split + a shuffling
-        # DataLoader, so a pre-shuffle is redundant — and the in-RAM index copy
-        # doubles peak memory, which OOMs a full-corpus build. Use --no-shuffle.
-        order = rng.permutation(all_s.shape[0])
-        all_s, all_p, all_v = all_s[order], all_p[order], all_v[order]
-
+    # --- write placement block then main-game block straight to disk memmaps ---
+    # No in-RAM concat: holding a third full-corpus copy (~93GB) for np.concatenate
+    # is exactly what tips a full build past the RAM limit. Streaming into a
+    # pre-allocated memmap caps build RAM at place_s + main_s. Block order is fine
+    # — run_supervised_pretraining does random_split + a shuffling DataLoader.
+    n_place, n_main = place_s.shape[0], main_s.shape[0]
+    total = n_place + n_main
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
-    np.save(out / 'states.npy', all_s)
-    np.save(out / 'policy_indices.npy', all_p)
-    np.save(out / 'values.npy', all_v)
+    sm = np.lib.format.open_memmap(out / 'states.npy', mode='w+', dtype=np.float32,
+                                   shape=(total, 15, 11, 11))
+    pm = np.lib.format.open_memmap(out / 'policy_indices.npy', mode='w+', dtype=np.int64, shape=(total,))
+    vm = np.lib.format.open_memmap(out / 'values.npy', mode='w+', dtype=np.float32, shape=(total,))
+    sm[:n_place] = place_s; sm[n_place:] = main_s; del place_s, main_s
+    pm[:n_place] = place_p; pm[n_place:] = main_p
+    vm[:n_place] = place_v; vm[n_place:] = main_v
+    sm.flush(); pm.flush(); vm.flush(); del sm, pm, vm
     np.save(out / 'total_moves.npy', np.array(enc.total_moves, dtype=np.int64))
-    meta = {'total': int(all_s.shape[0]), 'placement': int(place_s.shape[0]),
-            'main_game': int(main_s.shape[0]), 'fracs': fr, 'augmented': args.augment,
+    meta = {'total': int(total), 'placement': int(n_place), 'main_game': int(n_main),
+            'fracs': fr, 'augmented': args.augment, 'shuffled': False,
             'channels': 15, 'total_moves': int(enc.total_moves)}
     (out / 'NOTES.md').write_text(
         '# E10 placement-diversified corpus\n\n```\n' + json.dumps(meta, indent=2) + '\n```\n')
-    print(f'\nWrote {all_s.shape[0]:,} positions to {out}/  (consume with '
+    print(f'\nWrote {total:,} positions to {out}/  (consume with '
           f'run_supervised_pretraining.py --data-dir {out})')
 
 
