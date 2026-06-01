@@ -31,6 +31,843 @@ a clear next step, this file is the first thing to read.
 
 ---
 
+## Status snapshot (as of 2026-06-01 ~21:30 UTC) — symmetry run verdict + next-run strategy
+
+**The symmetry foundation run failed its strength goal.** `runs_symmetry/20260601_105750`
+(5-iter MCTS-200, from-scratch pretrain on the E10 corpus, L1+L2+E16+E2, model
+`symmetric-15ch-iter4-ema`). Color-balanced 60-game H2H vs the champion
+`iter1_ema_2026-05-27` (both 15ch): **sym15-final 12-48 = 20%** (sym 2/30 as white,
+10/30 as black — strong second-player/black advantage in-engine, so color-balancing
+was essential). Within-run tournaments tread water (45.5/50.0/46.0/46.5% per step,
+all promoted only by the lenient 0.20 gate); value discrimination plateaued
+0.26→0.035; anchor held 97.5-100% (no Branch-C collapse). **Symmetry WAS fixed**
+(first-move orbit CV ~2% vs old A5 72%).
+
+**Root cause = three confounded strength-reducing changes in one run** vs the iter1_ema
+baseline: (a) from-scratch pretrain on a corpus that was 45% random openings →
+over-flattened policy (empty-board peak 1.7%, PAcc 0.324); (b) `discrimination_weight: 0.0`
+(turned the value-spread prop OFF, betting E2 would replace it — it didn't); (c) added
+E16 pressure. All push flatter/weaker. Can't isolate which dominated — **we never ran a
+clean single-variable experiment.**
+
+**Meta-finding that reframes everything: nothing we have built has beaten iter1_ema.**
+Not E6 (lost 22-8), not the dropout-fix lineage (over-confidence collapse, WR 6%), not
+this run (lost 48-12). A pre-dropout-fix, pre-symmetry 05-27 model is still champion
+across 5 interventions. The plateau is not "iter1→iter2 won't climb"; it is "five
+targeted fixes failed to produce any model stronger than iter1_ema."
+
+**Strategic position (volume vs fine-tuning, Jack + AI, 2026-06-01):** volume is a
+*multiplier on the per-iteration improvement rate, and ours is ≈0* — adding iterations/data
+has only ever tread water or regressed. Do NOT scale throughput at current settings (buys a
+more confident plateau at the same Elo). The highest-prior plateau-break lever is **search
+DEPTH, not game count**: at 200 sims the MCTS-improved policy barely exceeds the raw net, so
+the training target ≈ the net → no gradient (P1 confirms amplification exists: KL 3.46 nats
+96→800 sims). **Throughput is not an alternative to fine-tuning — it is how you afford the
+depth that breaks the plateau.** Sequence: prove the lever cheaply, THEN build throughput to
+scale it.
+
+### E18 — Deploy symmetric MCTS (L3a/E8) to the analysis board  `[do first, ~1h, no training]`
+
+E8/L3a is **code-complete and validated, not yet live.** `server.py::_symmetric_search_batch`
+(sync+async, default-on via `YNS_SYMMETRIC_MCTS`, UI toggle); validated on deployed iter1_ema
+(opening D6 concentration 0.857→0.214; iter1 WR 48%→54%). Action: `git push` + `yinsh-redeploy`
+(Mac mini). Closes the friend-tester loop (the *original* trigger) with zero new training and a
+free main-game strength bump. The symmetry goal is solved at INFERENCE — stop spending training
+on it. (Residual: A5 still ~40% of orbit post-symmetrization — the "residual 25%" weight-symmetry
+question, E11/E16, is a separate, lower-priority strength-neutral cosmetic item.)
+
+### E19 — Plateau-break ablation LADDER from iter1_ema, H2H-gated  `[the real prize]`
+
+The experiment we have never run: change ONE variable at a time off the *known-good* base, and
+**measure H2H vs iter1_ema (color-balanced, ~60 games) at every rung.** Never rebuild from scratch.
+
+- **Rung 1 — depth only.** Continue-self-play from iter1_ema, sims 200→800, everything else
+  identical, 3 iters. Question: does deeper search alone beat the champion? (Highest prior.)
+- **Rung 2 — + dropout-off (L1) + label-smoothing (L2)** — only if rung 1 stalls. Lets the net
+  learn the deeper targets without the over-confidence collapse the bare dropout-fix hit.
+- **Rung 3 — + `discrimination_weight` on (≈0.5) + E2** — only if rung 2 stalls. Value-head hygiene.
+
+First rung that beats iter1_ema is the lever. **Decision gate:** a rung wins → proceed to E20 to
+scale it; all rungs stall → the plateau is structural — bank iter1_ema+E8 as the product and
+consider a deeper change (equivariant net E17 / value-head redesign / MuZero-style) rather than
+more of the same. **Measurement discipline:** north-star metric is H2H vs the FIXED champion
+iter1_ema, not the within-lineage tournament (which is blind to absolute strength — it green-checked
+5 iters of an 80-20 loser). Tighten promotion gate 0.20→0.55.
+
+**Dual-arm extension — measure SLOPE, not just level (Jack, 2026-06-01).** The H2H verdict measures
+each model's *level* under a *broken* loop; the decision-relevant quantity is its *slope* under the
+fixed (deep-search) loop, and those can rank-order differently. sym15's weakness is shallow/data-induced
+(45%-random corpus, which self-play overwrites) and it carries learner advantages iter1_ema lacks —
+dropout=0, the D2 symmetry prior (≈4× sample efficiency), 15ch features — that only cash out once
+there's a signal to learn. So run **rung 1 as TWO parallel arms: seed A = iter1_ema, seed B =
+sym15-iter1-ema, IDENTICAL loop config (the only difference is the seed model).** H2H *both* arms vs a
+**frozen** copy of iter1_ema every iteration and compare slopes (A starts ~50% vs frozen-self, B at
+~27%). If B's curve rises steeper, the symmetric/15ch architecture is the better *substrate* and the
+big run pivots to it.
+- *Counter-prior (mild, not strong):* depth only helps if the value head can steer the deeper search,
+  and that's sym15's confirmed weak axis (discrimination 0.035 vs iter1_ema's calibrated slope 0.98) —
+  a possible chicken-and-egg trap. Defeasible (the value head can re-learn under a working loop), so
+  not strong enough to skip the measurement.
+
+**Implementation & infra (the elevated-runbook bit):**
+- **Training change is trivial:** `num_simulations: 200 → 800` in the self-play config. That is the
+  ONLY change for rung 1; both arms share it, the controlled variable is the seed model.
+- **Binding resource is CPU CORES, not the GPU.** Self-play is CPU-bound (5090 sat at ~32% mean util,
+  40% idle, at 200 sims). 800 sims ≈ 4× MCTS tree work → ~4× CPU load and ~4× wall-clock per iter.
+  One arm ≈ 80 cores (16 workers × ~5). **Two parallel arms ≈ 160 cores.**
+- **GPU *tier* barely matters; GPU *count* + memory do.** A 4090 handles the batched inference fine
+  even at 800 sims — do NOT pay up for a bigger GPU, it sits idle. But each arm wants its own card:
+  16 worker CUDA contexts ≈ 16 GB/arm, so two arms won't co-fit on one 24 GB GPU → **one GPU per arm.**
+- **Box-rental decision:** filter by **core count (≥160 for two arms) + 2 GPUs ≥16 GB each.** A
+  **dual-4090 box only wins if it ALSO has ~160+ cores** — many consumer dual-4090 instances ship with
+  32-64 cores and would be CPU-STARVED, *worse* than the single 192-core 5090 we used. Two clean options:
+  - **(a) Sequential on one high-core box** (e.g., the 192-core 5090): arm A (3 iters) then arm B.
+    Simplest, one box, ~2× wall-clock. Fine for a 2-3 iter diagnostic.
+  - **(b) Parallel on a ≥160-core dual-GPU box:** one arm per GPU, ~half the wall-clock, more
+    orchestration. Pick only if impatient.
+- **Eval overhead is real:** H2H every iter × 2 arms × ~45 min (60-game color-balanced on CUDA); drop
+  to 40 games if it dominates. Frozen iter1_ema is the fixed yardstick for both arms.
+- **Do NOT build E20 (shared evaluator / bitboards) for this diagnostic** — eat the 4× slowness;
+  throughput is only worth building once a rung proves depth works (R5/R9: prove the lever before
+  amplifying it). Next box: rent with `--cap-add SYS_PTRACE` (py-spy); interpreter `/venv/main/bin/python`.
+- **Rough cost:** 2-3 iters × 800 sims × 2 arms ≈ 20-30 GPU-h sequential (~10-15 h wall parallel) →
+  order $10-25 on vast.ai. Cost is not the constraint; cores + wall-clock are.
+
+### E20 — Throughput build (shared evaluator + bitboards) IN SERVICE OF depth  `[gated on E19]`
+
+Self-play is hard CPU-bound: 5090 at mean 32% util, ~40% of wall-clock at literal 0%, bursting to
+~90% (full iter-5 profile: `profiling/symmetry_run/gpu_util_iter5_selfplay.csv`). ~2-3× GPU headroom
+sits behind CPU troughs. Two levers, both spent on DEEPER search, not more shallow games:
+- **Shared/centralized evaluator** (`use_shared_evaluator: true`) — consolidate 16 workers' ragged
+  small batches into large GPU batches; decouples CPU expansion from GPU eval so they overlap.
+  Likely the bigger lever for raising the 4% median.
+- **Bitboards** in `board.py`/`moves.py` (currently pure-Python over 85-cell dicts/lists) — shrink the
+  CPU troughs. ROI = the board-ops share of worker CPU; **pending cProfile** (`profiling/cprof_selfplay.py`,
+  result TBD this session) to size it. If board-ops is a big slice → 2× plausible; if dominated by
+  MCTS-tree/torch-dispatch → smaller.
+- **Infra:** launch the next vast.ai box with `--cap-add SYS_PTRACE` so py-spy live-profiling works
+  (this run's container lacked it; cProfile was the workaround). Box python = `/venv/main/bin/python`.
+
+Only build E20 once E19 shows a real per-iteration learning rate — throughput multiplies improvement,
+it does not create it.
+
+## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
+
+The 2026-05-29/30 work was recovered from a stash (it was never committed; the
+`policy-dropout-fix` branch was empty) onto **`policy-symmetry-fixes`**. Then:
+
+- **L1 (Dropout 0.3→0)** — recovered into `model.py` (commit f8bdbcb).
+- **L3a (symmetric MCTS at inference)** — shipped to the analysis board:
+  `server.py::_symmetric_search_batch` (sync + async paths), default-on via
+  `YNS_SYMMETRIC_MCTS`, UI toggle, effective-4×-budget async routing. Validated
+  on deployed iter1_ema: opening D6 concentration 0.857→0.214 (commit 09a6d86).
+  **Code-complete, not yet deployed** (needs `git push` + `yinsh-redeploy`).
+- **L2 (label smoothing ε=0.1)** — wired into **`scripts/run_supervised_pretraining.py`**
+  (`--label-smoothing`, default 0.1, applied to the hard-target CE). NB: the
+  handoff said "trainer.py", but trainer.py's policy loss is a *soft*-target CE
+  (MCTS visit distributions) where classic label smoothing doesn't apply. The
+  validated dry-run (`dry_run_dropout_plus_ls.py`) used the *supervised* hard-
+  target CE — that's where L2 belongs. (Fixed a latent crash from the first L2
+  edit: a `replace_all` had put `args.label_smoothing` into `evaluate()`, which
+  has no `args` — the real run would have NameError'd at first validation. Caught
+  by a full end-to-end script smoke; `evaluate()` now takes the param.)
+- **E16 (symmetric-weight regularizer)** — extracted to a **shared module
+  `yinsh_ml/training/symmetric_reg.py`** and wired into **BOTH** training halves:
+  `trainer.py` (self-play, `enable_symmetric_reg` via supervisor `mode_settings`)
+  AND `run_supervised_pretraining.py` (`--enable-symmetric-reg`). The supervised
+  pretrain is where most of the representation + its D2 asymmetry is learned (the
+  dynamic probe showed value_asym growing 6.7× under supervised task pressure),
+  so enforcing weight symmetry there stops self-play from inheriting an already-
+  asymmetric net. Self-play masks the policy KL to MCTS visit support
+  (`target_probs>0`); supervised has hard targets so it decodes the valid-move
+  mask from the batch states (regularized steps only). α=0.1, K=10,
+  value_weight=20; off by default. Full faithful policy-KL + value-asymmetry
+  form. The full 7433-move-index permutation is precomputed once and **verified
+  to exactly match the validated per-state augmenter permutation**; policy KL is
+  masked to the `target_probs>0` valid-move support (the unmasked full-softmax KL
+  was ~100× inflated by never-trained invalid-move logits). Tests:
+  `yinsh_ml/tests/test_symmetric_regularizer.py`. **`symmetric_reg_value_weight`
+  default set to 20.0** (was a guessed 0.5) from two investigations:
+  - **Static gradient pressure** (`scripts/investigate_e16_value_weight.py`):
+    value_asym penalizes a scalar value in ~[-1,1] while policy-KL lives on a
+    simplex, so at 0.5 the value term exerted only ~1/20th the gradient pressure
+    of the policy term. ~10 equalizes ‖grad‖ on the trunk.
+  - **Dynamic probe** (`scripts/investigate_e16_dynamic.py`, 150 steps × {0.5,10,
+    20,50} on MPS): under task pressure, value_asym grew 6.7× at w=0.5, ~2.7-3.2×
+    at w=10/20, and *shrank* (−17%) only at w=50; monotonic in w, with negligible
+    (and largely illusory — it's memorization acc) policy cost. So equal pressure
+    (10) only *slows* value drift; 20 holds it ~flat at no extra policy cost, 50
+    reverses it. Default 20; push toward 50 if the per-K-step logs show value_asym
+    climbing in the real run (where task pressure is weaker than this stress test).
+  - **MPS note:** E16 originally used `index_copy_` (unimplemented on MPS); now a
+    gather (`index_select`) so it runs on Apple Silicon too.
+
+**Remaining: Task 3** — next cloud run stacking L1+L2+E16 end-to-end:
+supervised pretrain with `--use-enhanced-encoding --label-smoothing 0.1
+--enable-symmetric-reg` on a Dropout=0 net, then self-play with
+`enable_symmetric_reg: true` in the config. No config enables E16 yet — one
+still needs writing (mirror `branchD2_enhanced` + the symmetric_reg keys).
+Symmetric MCTS (L3a) stays as a deploy-time noise-reducer even once the network
+is symmetric.
+
+---
+
+## Status snapshot (as of 2026-05-29 ~13:30 UTC)
+
+**Active investigation:** placement pathology + plateau diagnostics.
+Full diagnosis in
+[`analysis_board/multiplayer/EXPERIMENT_opening_theory.md`](analysis_board/multiplayer/EXPERIMENT_opening_theory.md).
+
+- **Friend-tester feedback (2026-05-28):** engine plays anomalous
+  4-of-5 ring cluster opening. Investigation traced root cause:
+  yngine pretrain corpus has uniform-random placement targets (F6 at
+  1.3% = exactly uniform); supervised model faithfully learned uniform
+  policy; MCTS + FPU + uniform policy → "first-visited child wins all
+  visits" stall; modal opening (A5 for iter1_ema, D6 for supervised)
+  is path-dependence, not strategic preference.
+- **E6 dry-run (continued pretrain on H-vs-H full-game data) — VERDICT:
+  policy fix works, strength regresses.** F6 modal achieved (27% on
+  policy head, 80% in self-play), but H2H vs iter1_ema = **8-22 (27%
+  WR, Wilson 95% CI [0.14, 0.44]).** Continued pretrain on H-vs-H
+  main-game forgot yngine-learned tactics. **Retired as a production
+  path.**
+- **E7 (split-corpus pretrain) is the leading next candidate.**
+  Per-game placement sampled from human-replay + random + BGA-marginal;
+  main-game phase plays out with iter1_ema for both sides. Cleanly
+  separates the two fixes — human placement targets where we want
+  them, iter1-quality tactics where we want them. Cost ~$200 / ~16h
+  cloud for v1.
+- **Three plateau-diagnostic experiments (P1/P2/P3) gate E7
+  commitment.** Each ~1-4h, no cloud:
+  - P1 — MCTS amplification quality (does deeper search find moves the
+    raw policy didn't already know?)
+  - P2 — Value-head calibration on held-out H-vs-H positions
+  - P3 — Self-play policy-target signal (do MCTS visit dists differ
+    meaningfully from raw policy in recent replay buffer?)
+  Outcomes inform whether E7's mechanism actually breaks the post-iter1
+  plateau or just rearranges it.
+- **E7b (cross-teacher: iter1 + supervised + heuristic on different
+  sides) on standby.** If P3 shows self-play signal is near zero,
+  cross-teacher is the only version that can produce genuinely
+  disagreeing training targets.
+- **Earlier 2026-05-28 yngine benchmark still stands:** iter1_ema
+  17-0-0 SPRT vs yngine at both MCTS-200 and MCTS-800. Confirms
+  iter1 > yngine teacher quality, which is the load-bearing claim
+  for E7.
+
+### Architecture finding (2026-05-29) — Dropout(0.3) in policy head is the plateau cause
+
+P1/P2/P3 diagnostics ran 2026-05-29 afternoon:
+
+- **P1 — MCTS amplification**: ✓ works. 10 main-game positions, mean
+  KL(visits_800 || visits_96) = 3.46 nats, top-1 disagrees 50% of the
+  time between 96-sim and 800-sim search. Deep search finds different,
+  sharper distributions than shallow search.
+- **P2 — Value-head calibration**: ✓ calibrated. 5K H-vs-H positions,
+  linear-fit slope 0.98 (1.0 = perfect), Brier score 0.66 vs baseline
+  0.78 (15% improvement). Value predictions track actual outcomes
+  monotonically across the [-1,+1] range.
+- **P3 — Policy-target signal in self-play**: ✗ policy head can't
+  reproduce MCTS targets. KL(MCTS_visits || policy_pred) median 9.0
+  nats (max possible ~9 for 7,433-way classification), top-1 match
+  rate 0%, mean policy peak 0.000329 (uniform = 0.000134, so model is
+  ~2.5× uniform).
+
+Root cause located in `yinsh_ml/network/model.py` policy head:
+
+```python
+self.policy_head = nn.Sequential(
+    nn.Conv2d(num_channels, 64, 1), nn.BatchNorm2d(64), nn.ReLU(),
+    nn.Flatten(),
+    nn.Linear(64 * 11 * 11, 1024), nn.ReLU(),
+    nn.Dropout(0.3),                       # ← culprit
+    nn.Linear(1024, self.total_moves)
+)
+```
+
+Dropout(0.3) on the 1024-feature bottleneck before a 1024→7,433 layer
+forces ensemble-averaging over dropout subnetworks during training.
+For 7,433-way classification with sharp MCTS targets, the minimum-loss
+solution becomes near-uniform output. Even at eval time (dropout off),
+the trained weights produce flat output because they were calibrated
+to the averaged-subnetwork minimum-loss point during training.
+
+Consistent with all measured policy outputs across all training
+lineages (supervised, iter1, iter5) — they all converge to ~2-5×
+uniform peak, regardless of training data quality.
+
+### What this means for E6 / E7
+
+- **E6 dry-run negative result is partially confounded.** The
+  weak-policy issue at empty board WAS fixed by E6 (F6 27% policy
+  output) but the underlying architectural limit means the policy
+  head can still only produce ~25% peak — not the sharp 60-90%
+  distributions humans actually play. Some of E6's main-game
+  strength regression may also be the dropout limiting how well the
+  model can sharpen on new training signal.
+- **E7's claimed value is fully eclipsed by the dropout fix.** No
+  amount of better corpus quality matters if the policy head
+  architecturally cannot learn from it. E7 stays on the backlog as a
+  *future* improvement after the architecture fix lands, not as the
+  next priority.
+- **The fix is one line of code.** `Dropout(0.3)` → `Dropout(0.0)`
+  in `model.py:140`. AlphaZero-style policy heads typically don't
+  use dropout; regularization can come from weight decay (already
+  1e-4 on policy optimizer) or label smoothing if needed.
+
+### Branch `policy-dropout-fix` (2026-05-29)
+
+Created from main. Single change: `Dropout(0.3) → Dropout(0.0)` in
+`yinsh_ml/network/model.py` policy head with diagnostic comment.
+
+**Local validation in progress:** continued pretrain from
+`supervised_2026-05-27/best_supervised.pt` on `hvh_full_game_15ch.npz`
+(identical setup to E6 dry-run for direct A/B), 3 epochs,
+LR 5e-5, weight decay 1e-3. Output:
+`models/supervised_2026-05-27/dropout_patch.pt`.
+
+Test criteria:
+- Empty-board policy: peak > 0.05 (vs E6 dry-run's 0.27 was the
+  ceiling under dropout; if patched is similar or higher, no penalty;
+  if dramatically higher, dropout was the cap).
+- Policy entropy at empty board: should DROP (sharper distribution)
+  vs E6's value.
+- H2H vs iter1_ema: same Wilson-LB ≥ 0.50 non-regression bar as E6.
+
+If the patch validates, the next training run is the **architecturally
+patched recipe**: this dropout fix + E6's H-vs-H placement data + the
+existing self-play loop. E7 stays queued for later as a quality lift
+on top of the corrected architecture.
+
+### Validation results (2026-05-29, branch `policy-dropout-fix`) — patch works at the policy-head level, over-confidence is a new failure mode
+
+After patching `Dropout(0.3) → Dropout(0.0)`, ran the same continued-pretrain
+recipe as E6 dry-run (107K H-vs-H positions, 3 epochs, LR 5e-5, weight decay
+1e-3, 4× placement oversample). Output:
+`models/supervised_2026-05-27/dropout_patch.pt`.
+
+**Policy head learns dramatically faster:**
+
+| Metric | Before training | E6 (5 epochs) | Dropout-patched (3 epochs) |
+|---|---|---|---|
+| Empty-board peak | 1.39% | 27.2% | **31.3%** |
+| Empty-board entropy | 4.44 | ~3.5 | **3.39** |
+| Multiplier vs uniform | 1.04× | 20.3× | **22.4×** |
+
+The policy head sharpened past E6's epoch-5 ceiling in just epoch 2 (F6 28.9%
+at epoch 2 of the patched run vs F6 27.2% at epoch 5 of E6). Decisively
+confirms the diagnosis: Dropout(0.3) was the architectural cap on policy
+sharpness.
+
+**But self-play exposed a new failure mode — over-confidence collapse:**
+
+50-game deployed_sampled self-play on the patched model:
+- Slot-1 modal: **F6 100%** (every single game)
+- Aggregate cluster: F6/G6/G7/F7/G8 (mean_pw 1.26)
+- Tight-cluster rate: **100%** (all 50 games)
+- **White WR: 6% (3 of 50)** — catastrophic regression
+
+The over-confidence cause: cross-entropy on one-hot human-move targets with
+no label smoothing lets the policy head drive loss arbitrarily close to 0 by
+over-concentrating. AlphaZero-style training uses MCTS visit distributions
+(naturally entropic) as policy targets, which we don't have in the H-vs-H
+corpus. Label smoothing is the cheap approximation.
+
+**Label-smoothing variant (in progress, 2026-05-29 ~17:30 UTC):**
+Same setup but `F.cross_entropy(..., label_smoothing=0.1)`. Output target:
+`models/supervised_2026-05-27/dropout_plus_ls01.pt`. Epoch 1 result:
+- F6 = 12.9% (vs dropout-only 21.7% at same epoch)
+- Entropy = 4.69 (vs dropout-only 3.70)
+Smoothing is working as designed — preventing premature over-concentration.
+Two more epochs to land final result.
+
+### Reframing (Jack, 2026-05-29 ~17:50 UTC) — don't treat humans as ground truth
+
+**Key insight:** YINSH lacks anything like chess opening theory. BGA "top-10"
+is a few hundred enthusiasts, not centuries of accumulated wisdom. F6 might
+be the right opening, or it might just be cargo-culted as "the obvious first
+move." Treating the H-vs-H placement distribution as the *target* the model
+must converge to is an unsupported assumption.
+
+**Decisive evidence the model's current convergence is path-dependence, not
+strategy** — board symmetry argument:
+
+YINSH has D2 board symmetry (Klein 4-group: identity + 180° rotation + 2
+reflections). iter1_ema's slot-1 distribution:
+- A5: 72.0%
+- A2: 2.5%
+
+A2 is the horizontal-reflection partner of A5. In a D2-symmetric game, if
+A5 is genuinely strategically optimal, the model should play A2 (and the
+other two symmetry partners K7, K10) at ~equal rates — roughly 18% each.
+The observed 72%/2.5% asymmetry is *physically impossible* if the model
+had learned any real strategic principle. It can only happen via the FPU
++ uniform-policy MCTS-stall mechanism we diagnosed in P3. The symmetry
+breakage is the smoking gun for path-dependence.
+
+**Implication for the production recipe:**
+
+The right framing is "set the model up to *explore well*, then let it
+converge to whatever wins under symmetry-respecting search" — NOT "force
+it to match human play."
+
+| Old framing | New framing |
+|---|---|
+| Fix placement so it matches human play | Fix architecture so the model can express what it learns, then let exploration discover |
+| F6 modal is the target | Symmetric exploration is the target; whatever wins under self-play is the answer |
+| Use H-vs-H data to teach placement | Use H-vs-H to initialize away from uniform; use random + symmetric variants for exploration; let self-play decide |
+
+### Production recipe (2026-05-29 final) — what the next big training run should include
+
+Three layers, each individually validated this session:
+
+1. **Architecture**: `Dropout(0)` in policy head (this branch).
+   - Validated: policy head sharpens 22.4× from uniform in 3 epochs.
+   - Without this: policy head architecturally cannot represent sharp
+     distributions, regardless of training data quality.
+
+2. **Loss**: Cross-entropy with **label smoothing ε ≈ 0.05-0.1**, OR train
+   on MCTS visit distributions where available.
+   - Validated negatively: without smoothing, policy collapses to F6 100%
+     and white WR drops to 6%.
+   - Smoothing puts a floor on the loss, prevents over-confidence collapse.
+
+3. **Data + exploration**: split corpus (H-vs-H placement + iter1 main game)
+   AND aggressive exploration knobs (phase-aware Dirichlet + temperature +
+   FPU at placement) AND symmetric-MCTS at inference time.
+   - The H-vs-H placement is an *initialization* signal, not a target.
+   - iter1 main-game is the strongest tactical teacher we have (per yngine
+     benchmark, see [`YNGINE_BENCHMARK_RESULTS.md`](YNGINE_BENCHMARK_RESULTS.md)).
+   - Symmetric MCTS forces the model's output to respect game symmetry
+     regardless of any asymmetric weights — guarantees we don't see another
+     A5-style asymmetric collapse.
+   - Random + symmetric placement starts in corpus generation give the
+     model broad state coverage.
+
+### New experiment entries spun out from this session
+
+**E8 — Symmetric MCTS at inference time** (new, 2026-05-29)
+
+At each MCTS root expansion, evaluate the network on all 4 symmetric
+variants of the position (D2 Klein 4-group), then average policy + value
+across the variants before MCTS uses them. Guarantees output respects
+board symmetry regardless of policy-head weight asymmetries.
+
+- **Why this matters**: iter1_ema's A5 72% / A2 2.5% asymmetry is the
+  smoking gun for MCTS path-dependence. Even after fixing the policy head
+  (dropout patch), any residual asymmetry in the trained weights could
+  still produce symmetry-breaking convergence. Symmetric MCTS makes the
+  inference-time output mathematically symmetric.
+- **Cost**: 4× network forward at each MCTS leaf. Could be optimized by
+  batching the 4 variants. ~50 LOC + ~1 hour wall.
+- **Standard in AlphaZero implementations** (Leela, KataGo) — not a novel
+  invention, just not wired in this codebase.
+
+**E9 — Phase-aware exploration knobs** (already proposed as E1 in opening_theory
+doc — relabeled here for clarity)
+
+Per-phase Dirichlet + temperature + FPU settings:
+- `placement_dirichlet_alpha: 1.0` (vs 0.3 globally)
+- `placement_epsilon_mix: 0.5` (vs tapering 0.25 → 0.14)
+- `placement_temperature: 1.0` (vs tapering 1.0 → 0.55)
+- `placement_fpu_reduction: 0.0` (vs 0.25 — defensive against re-emergence
+  of FPU stall if policy ever drifts uniform)
+- Implementation: gate the existing knobs in
+  `yinsh_ml/training/self_play.py::MCTS` on `state.phase ==
+  GamePhase.RING_PLACEMENT`. ~30 LOC.
+
+**E10 — Random + symmetric placement injection in corpus generation**
+
+For corpus generation (whether E7-style iter1-vs-iter1 or future
+engine-corpus iterations):
+- 40% placement from H-vs-H human replay (initialization signal)
+- 20% from BGA marginal sampling (variety on the human distribution)
+- 20% uniform random (state-coverage diversity)
+- 20% **symmetric augmentation of human placements** (explicit symmetry
+  signal during training)
+- Each placement contributes the full D2 augmentation (4× data per
+  position) to ensure symmetric coverage.
+
+### Provenance / thread map (so the timeline is preserved)
+
+For future reference — what was discovered when, and how everything
+connects:
+
+1. **2026-05-28 early afternoon**: friend-tester feedback flagged the
+   weird opening in the deployed model. Triggered the entire
+   investigation in
+   [`analysis_board/multiplayer/EXPERIMENT_opening_theory.md`](analysis_board/multiplayer/EXPERIMENT_opening_theory.md).
+
+2. **2026-05-28 evening**: traced root cause to yngine corpus having
+   uniform random placement targets → supervised model learned uniform
+   policy → MCTS FPU + uniform policy creates path-dependent stall →
+   modal opening (A5 for iter1, D6 for supervised) is a tiny-difference
+   amplification, not a strategic choice.
+
+3. **2026-05-28 late evening**: E6 dry-run kicked off — continued pretrain
+   on H-vs-H to fix the data side of the problem.
+
+4. **2026-05-29 morning**: E6 dry-run completed. F6 modal recovered at
+   policy head (27%), but white WR regressed to 38% in self-play AND
+   E6 lost H2H vs iter1_ema 22-8 (Wilson LB [0.14, 0.44]). Data fix
+   alone wasn't enough.
+
+5. **2026-05-29 early afternoon**: ran P1/P2/P3 plateau diagnostics.
+   - P1 (MCTS amplification): ✓ works (mean KL 3.46 nats between 96
+     and 800 sims, top-1 changes 50% of the time)
+   - P2 (value-head calibration): ✓ calibrated (slope 0.98, Brier 15%
+     better than baseline)
+   - **P3 (policy-target signal)**: ✗ broken — KL(MCTS visits, policy
+     pred) median 9 nats, near-uniform policy outputs.
+
+6. **2026-05-29 mid-afternoon**: traced P3 result to architecture —
+   `Dropout(0.3)` on the policy head's 1024-feature bottleneck. Ensemble-
+   averaging during training caps the policy head's achievable sharpness
+   at training time, weights stay calibrated to that minimum-loss point
+   even after dropout is disabled at eval.
+
+7. **2026-05-29 late afternoon**: created branch `policy-dropout-fix`,
+   patched to `Dropout(0.0)`, ran continued pretrain. Validated: policy
+   sharpens past E6's ceiling in 3 epochs.
+
+8. **2026-05-29 evening**: tested patched model in self-play.
+   Over-confidence collapse — F6 100% modal, white WR 6%. Diagnosed as
+   one-hot CE without label smoothing letting the now-flexible policy
+   head drive loss to 0 by collapsing.
+
+9. **2026-05-29 evening (current)**: label smoothing variant in progress,
+   expected to demonstrate the production recipe.
+
+10. **Jack's reframing during step 9**: symmetry argument (A5 72% / A2
+    2.5% is unphysical for D2-symmetric game) — proves path-dependence,
+    drives the "don't force humans, set up for exploration" recipe.
+
+11. **Overnight 2026-05-29 → 2026-05-30 (~8h wall)**: built symmetric
+    MCTS at inference (averaged policy + value across 4 D2 transforms
+    per move). 50 games each of iter1_ema and dropout+LS.
+    Implementation: `scripts/measure_symmetric_openings.py`.
+
+12. **Symmetric MCTS results (2026-05-30 morning)** — decisive
+    validation of the symmetry hypothesis, plus unexpected main-game
+    strength bonus:
+
+    iter1_ema A5 orbit ({A5, K7, E1, G11}):
+
+    | Position | Vanilla iter1 (n=200) | Symmetric iter1 (n=50) |
+    |---|---|---|
+    | A5 | 72.0% | 40.0% |
+    | K7 | 0% | 8.0% |
+    | E1 | 0% | 6.0% |
+    | G11 | 1.0% | 0% |
+    | A5 share of orbit | **99%** | **74%** |
+
+    ~75% of path-dependence broken; A5 dropped from 72% → 40%.
+    White WR 48% → 54%.
+
+    Dropout+LS model: white WR **24% → 46%** under symmetric MCTS — a
+    massive +22 pp bonus from noise reduction in MCTS leaf evaluations
+    even though the policy is over-concentrated. Wasn't predicted.
+
+### E8 (VALIDATED) — symmetric MCTS at inference
+
+**Status:** validated overnight 2026-05-29 → 2026-05-30. Two clean
+benefits:
+1. Breaks ~75% of MCTS path-dependence (orbit partners activate)
+2. Improves main-game WR via noise reduction in leaf evaluations
+   (+6 pp for iter1, +22 pp for dropout+LS)
+
+**SHIP IMMEDIATELY**: 4× evaluation cost per move is well within the
+deployed_sampled budget. Wire into `analysis_board/multiplayer/deploy/`
+inference path. Even without retraining, gives users a less weird
+opening AND a stronger main game. The
+`symmetric_search()` function in `scripts/measure_symmetric_openings.py`
+is the reference implementation; ~50 LOC adapter for the deploy path.
+
+### Verifying the residual 25% — diagnostic experiments
+
+The orbit-internal asymmetry remaining after symmetric MCTS (A5 still
+~3× over orbit average — 20 vs 4/3/0 for K7/E1/G11) has four candidate
+causes. Each is testable with a small experiment, ordered by
+cost-to-information ratio.
+
+**Hypotheses for the residual 25%:**
+- **H_W: network weights are asymmetric** — D2 augmentation during
+  training didn't fully enforce weight symmetry. *(Highest prior — the
+  augmenter is opt-in per-sample and can skip transforms; even if
+  applied perfectly, gradient noise across batches might not converge
+  to D2-symmetric weights.)*
+- **H_M: MCTS noise** — at 96 sims with 85 valid moves, the 4
+  transformed searches each have stochastic visit counts that don't
+  fully cancel under averaging.
+- **H_N: sampling noise** — 50 games × temp 0.5 isn't enough to
+  resolve the true orbit distribution; with larger n it may converge
+  to uniform.
+- **H_E: encoding pipeline lossiness** — the augmenter's
+  encode→transform→decode roundtrip might introduce small artifacts.
+
+**E11 — Direct weight symmetry check** (5 min, ~30 LOC) — the prime
+diagnostic.
+
+For a single position s (e.g., empty board, then a few mid-game
+positions) and each transform tid:
+1. Compute s_tid = augmenter.transform_state(s, tid)
+2. Run network forward on s_tid → raw policy_tid, value_tid
+3. Inverse-transform policy_tid back to original action space
+4. Compare the 4 inverse-transformed policies against the original
+   policy bytewise (and against each other)
+
+If all 4 versions are equal (modulo numerical precision): network
+weights produce D2-symmetric outputs, residual asymmetry is purely
+MCTS-side. Eliminates H_W; focus on H_M/H_N.
+
+If they differ measurably: H_W is real. Magnitude tells us how much.
+
+**This is the single most informative test for the residual 25%.**
+Run E11 first.
+
+**E12 — MCTS sim-budget sweep** (~6h MPS) — diagnostic for H_M vs
+H_N.
+
+If E11 shows symmetric weights, the residual asymmetry is MCTS noise.
+Re-run symmetric MCTS at 200 and 400 sims (50 games each, ~3h + 6h).
+If orbit-internal asymmetry shrinks with sim budget → MCTS noise
+(H_M) is the cause. If it stays the same → sampling noise (H_N)
+dominates and we need more games.
+
+**E13 — Increase game count** (~12h MPS) — only if E11 says symmetric
+weights AND E12 says MCTS isn't the cause.
+
+Run 200 games of symmetric MCTS. With more samples the orbit
+distribution should converge toward symmetric if path-dependence is
+fully broken.
+
+**E14 — Augmenter pipeline integrity check** (15 min, ~20 LOC) —
+rule out H_E.
+
+For 100 random states from a replay buffer:
+- For each tid in {1, 2, 3}: state → transform tid → transform tid
+  (involution) → compare to original bytewise
+- For each tid: policy at state → forward transform → back transform
+  → compare bytewise
+- All round-trips must be exact
+
+If any state fails, the augmenter has a bug that explains some
+fraction of the residual asymmetry mechanically.
+
+**E15 — Training-time augmentation coverage audit** (30 min) —
+diagnostic for *why* H_W happens, if E11 confirms it.
+
+Pull saved `AugmentationStats` from a recent training run. Check:
+- `total_augmentations / num_train_samples` — should be ~4 with
+  reflections enabled
+- `invalid_transforms_skipped` — should be 0 or near-zero
+- Per-position augmentation count distribution — does any subset of
+  positions get systematically fewer augmentations?
+
+If significant skips, that's a candidate cause for non-symmetric
+weights.
+
+**E16 — Symmetric weight regularizer in training loss** — the fix
+if H_W is confirmed.
+
+Add a loss term that explicitly penalizes asymmetric output. For each
+training batch, compute output on D2-transformed versions, inverse-
+transform back, penalize KL divergence between the original and the
+average of the 4 inverse-transformed versions.
+
+~30 LOC change in `yinsh_ml/training/trainer.py`. Cost during
+training: 4× forward per step + a small KL term. Acts as continuous
+pressure to keep weights in the D2-symmetric subspace.
+
+**E17 — Explicit D2 weight tying via equivariant network** (more
+invasive, save for last).
+
+If E16 doesn't fully eliminate asymmetry, modify the network
+architecture so weights are explicitly shared between symmetric
+channels (e.g., D2-equivariant Conv2d kernels — Cohen & Welling
+style). Guarantees weight symmetry by construction.
+
+Requires retraining from scratch + architecture verification work.
+Defer unless E16 proves insufficient.
+
+### Recommended sequence for the residual-25% investigation
+
+1. **E11 (5 min)**: weight symmetry check. Quickest possible
+   disambiguation between H_W and H_M/H_N. *Do this today.*
+2. **E14 (15 min)**: pipeline integrity. Rules out a stupid bug
+   before we spend more compute.
+3. Conditional on E11 result:
+   - **E11 says symmetric weights** → run E12 (6h MPS) for sim sweep,
+     then E13 (12h MPS) if needed. Likely E13 + larger n resolves it.
+   - **E11 says asymmetric weights** → run E15 (30 min) to find why
+     training didn't symmetrize. Then E16 (30 LOC + retrain) to fix.
+4. **E17 only if E16 falls short.**
+
+### E11 + E14 results (2026-05-30 morning) — H_W confirmed, H_E ruled out
+
+**E14 — Augmenter pipeline integrity: PASSED.** State round-trip
+(transform→transform = identity since D2 transforms are involutions)
+bytewise-exact. Policy round-trip also bytewise-exact. **H_E ruled
+out** — no pipeline bug.
+
+**E11 — Weight symmetry check across 6 states (empty + 5 mid-game):**
+
+For each state, ran the network on all 4 D2-transformed versions,
+inverse-transformed the policy back to original action space, and
+compared against the identity prediction.
+
+| State | Value-head: 4 transforms | Value symmetric? | Policy top-1 stable across transforms? |
+|---|---|---|---|
+| Empty board | -0.0086 ×4 | **YES (exact)** | No (top-1 differs across 3 transforms) |
+| After move 2 | -0.016, -0.013, -0.016, -0.013 | 2-way pairing | No |
+| After move 4 | -0.027, -0.015, -0.027, -0.014 | Near-paired | 2 of 3 differ |
+| After move 6 | -0.045, -0.026, -0.037, -0.031 | All differ (1.7× range) | 2 of 3 differ |
+| After move 8 | -0.034, -0.012, -0.025, -0.027 | All differ (2.8× range) | 3 of 3 differ |
+
+**Two strong signals confirming H_W:**
+
+1. **Value head is exactly symmetric on the empty board** (all 4
+   transforms produce -0.008561 to 6-digit precision) but **becomes
+   increasingly asymmetric as the position fills up**. By move 8,
+   value varies 2.8× across orientations for *the same position*.
+2. **Policy top-1 changes between transforms** in 5 of 6 states. KL
+   divergences are small in absolute terms (~0.003-0.006 nats) but
+   enough to flip the argmax on a near-uniform distribution.
+
+**Mechanism:** the empty board is symmetric because the input has no
+spatial information — all rings/markers channels are zero; only
+uniform-broadcast channels (phase, sentinel) are nonzero, so
+asymmetric weights have nothing to act on differently. Once there's
+real game state, asymmetric weights produce different outputs for
+different D2 orientations. The asymmetry magnitude grows with the
+amount of spatial information.
+
+**Why training didn't symmetrize the weights:** D2 augmentation
+ensures the *training data* is symmetric but does not *constrain* the
+learned weights to be symmetric. Gradient noise across batches +
+non-symmetric initialization + per-orientation BatchNorm running
+stats can produce weights that nearly-but-not-quite respect D2
+symmetry.
+
+**Verdict on the residual 25%:** H_W (asymmetric weights) is the
+primary cause. E12/E13 (sim sweeps, larger n) are deferred — they
+were diagnostics for if H_W was false. E15 (training augmentation
+coverage audit) could be useful supporting evidence but isn't
+blocking. The fix is E16.
+
+### E16 prototype — symmetric weight regularizer for training loss
+
+> **✓ IMPLEMENTED 2026-05-31** in `trainer.py` (commit e1c6d55). This section is
+> the original 05-30 prototype design, kept for rationale. The as-built version
+> differs in two ways the top snapshot covers: the policy KL is **masked to the
+> valid-move support** (the unmasked full-softmax KL was ~100× inflated by
+> never-trained invalid-move logits), and `value_weight` was set from a
+> gradient-pressure + dynamic investigation (default 20, not the prototype's 0.5).
+
+Prototype in `scripts/prototype_e16_symmetric_loss.py` — runnable standalone for
+verification of the loss math.
+
+**Loss formulation:**
+```
+For each state s in batch:
+    Forward on s → policy_0, value_0
+    For tid in [1, 2, 3]:
+        s_tid = T_tid(s)
+        Forward → policy_tid_raw, value_tid_raw
+        policy_tid = T_tid(policy_tid_raw)   # inverse via involution
+    policy_sym = mean(policy_0, policy_1, policy_2, policy_3)
+    value_sym = mean(value_0, value_1, value_2, value_3)
+    loss_sym = KL(policy_0 || policy_sym) + α * mean((v_i - value_sym)^2)
+```
+
+**Prototype results on iter1_ema (validates math + measures penalty
+magnitude):**
+
+| State | KL policy asym | Value asym MSE | Value range | Total loss |
+|---|---|---|---|---|
+| Empty | 0.0020 | 0.000000 | (constant) | 0.0020 |
+| After move 2 | 0.0062 | 0.000000 | 0.003 | 0.0062 |
+| After move 4 | 0.0116 | 0.00004 | 0.013 | 0.0116 |
+| After move 6 | 0.0173 | 0.00005 | 0.019 | 0.0173 |
+| After move 8 | 0.0231 | 0.00006 | 0.022 | 0.0231 |
+
+Penalty grows ~12× from empty to move 8, mirroring the E11
+finding that asymmetry scales with game complexity. The regularizer
+is nonzero and well-behaved — meaningful gradient signal to push
+weights toward symmetric subspace.
+
+**Trainer integration sketch** (the original 05-30 plan; the as-built
+version landed 2026-05-31, commit e1c6d55 — masked KL + value_weight=20):
+
+```python
+# In yinsh_ml/training/trainer.py train_step / train_epoch:
+# Every K=10 batches, compute the symmetric regularizer.
+# For each sample in batch (small loop — only every K steps):
+#     sym_loss = symmetric_loss_term(self.network.network, state, ...)
+# Add to total loss with small weight (alpha=0.1):
+#     total_loss = policy_loss + value_loss + alpha * sym_loss_batch.mean()
+#     total_loss.backward()
+```
+
+**Compute cost:** 4× forward per regularized step. At K=10, that's
++0.3× total training time. Manageable on cloud.
+
+**Expected effect:** after a few thousand training steps with the
+regularizer active, the network's per-position output asymmetry
+(measured by re-running E11) should drop below the noise floor.
+Symmetric MCTS at inference should then produce orbit-symmetric
+visit distributions — fixing the residual 25%.
+
+### Updated production recipe (2026-05-30, post-E11/E14)
+
+| Layer | Status | Function |
+|---|---|---|
+| L1: Dropout(0) in policy head | ✓ Validated 2026-05-29 | Unblocks policy-head sharpening |
+| L2: Label smoothing ε=0.1 | ✓ Validated 2026-05-29 | Prevents overconfidence collapse |
+| **L3a: Symmetric MCTS at inference** | **✓ SHIPPED 2026-05-31 (commit 09a6d86), not yet deployed** | Breaks 75% of path-dependence; +6 to +22 pp WR bonus |
+| **L3d: Symmetric weight regularizer (E16)** | **✓ WIRED 2026-05-31 (commit e1c6d55)** | Fix residual 25% by pulling weights into D2-symmetric subspace |
+| L3b: iter1-corpus pretrain (E7) | Not yet tested | Better teacher quality for main-game |
+| L3c: Phase-aware exploration (E9) | Not yet tested | More diversity at placement |
+
+### Action items emerging from 2026-05-30
+
+1. **✓ DONE 2026-05-31 — Ship symmetric MCTS at inference** (commit 09a6d86;
+   `analysis_board/server.py::_symmetric_search_batch`, default-on + UI toggle).
+   Code-complete, not yet deployed (needs `git push` + `yinsh-redeploy`).
+2. **✓ DONE 2026-05-31 — Wire E16 into trainer.py** (commit e1c6d55; alpha=0.1,
+   K=10, value_weight=20 from investigation). L2 landed in
+   `run_supervised_pretraining.py`, not trainer.py (soft-target loss there).
+3. **De-prioritized**: E12/E13 (sim/sample sweeps) — H_W confirmed
+   means these would measure noise, not signal. Skip.
+4. **Optional supporting evidence (30 min)**: E15 audit of training
+   augmentation stats from a recent run, to confirm "D2 augmentation
+   was applied but didn't enforce weight symmetry" rather than "D2
+   augmentation was skipped a lot." Either result still points to
+   E16 as the fix; useful diagnostic, not blocking.
+
+### Updated production recipe (2026-05-30, with symmetric MCTS)
+
+| Layer | Status | Function |
+|---|---|---|
+| L1: Dropout(0) in policy head | ✓ Validated | Unblocks policy-head sharpening |
+| L2: Label smoothing ε=0.1 | ✓ Validated | Prevents overconfidence collapse |
+| **L3a: Symmetric MCTS at inference** | **✓ SHIPPED 2026-05-31 (09a6d86), not yet deployed** | Breaks 75% of path-dependence; +6 to +22 pp WR bonus |
+| L3b: iter1-corpus pretrain (E7) | Not yet tested | Better teacher quality for main-game |
+| L3c: Phase-aware exploration (E9) | Not yet tested | More diversity at placement |
+| L3d: Symmetric weight regularizer (E16) | ✓ WIRED 2026-05-31 (e1c6d55) | Fix residual 25% by pulling weights into D2-symmetric subspace |
+
+**Ship-immediately item:** wire E8 (symmetric MCTS) into deployed
+inference path. Pure win, no retraining. Users see better play +
+varied openings starting today.
+
+**Next training run recipe:** L1 + L2 architecturally + symmetric
+MCTS at search time + (depending on E11) E16 symmetric weight
+regularizer. L3b/L3c stack on top once foundation is solid.
+
+This thread should connect cleanly with the older B1B2B3 / D.2 / value-head
+investigation if the next training run pursues the production recipe above
+and finally breaks past the post-iter_1 plateau.
+
 ## Status snapshot (as of 2026-05-28 ~23:30 UTC)
 
 - **First measured win rate vs yngine landed — verdict STRONGER at both

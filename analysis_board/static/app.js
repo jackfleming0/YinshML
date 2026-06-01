@@ -634,8 +634,16 @@ const heuristicWeightEl = $("heuristic-weight");
 const heuristicWeightField = $("heuristic-weight-field");
 const cPuctEl = $("c-puct");
 const fpuReductionEl = $("fpu-reduction");
+const symmetricEl = $("symmetric-mcts");
 const ownerTokenEl = $("owner-token");
 const resetAdvancedBtn = $("reset-advanced");
+
+// Symmetric MCTS toggle — defaults on (matches the server's
+// SYMMETRIC_MCTS_DEFAULT). Sent on every eval payload; the server still has the
+// final say via YNS_SYMMETRIC_MCTS, but we send explicitly so play-mode engine
+// moves and Analyze share one source of truth and the async-routing math below
+// knows the effective (4x) budget.
+const symmetricEnabled = () => (symmetricEl ? symmetricEl.checked : true);
 
 // Owner token: persisted to localStorage so it survives reloads (the owner
 // pastes it once). Empty for every normal/public visitor. Sent with eval
@@ -671,6 +679,7 @@ const MCTS_DEFAULTS = {
   heuristic_weight: 0.5,
   c_puct: 1.0,
   fpu_reduction: 0.25,
+  symmetric: true,
 };
 
 function syncHeuristicWeightEnabled() {
@@ -688,6 +697,7 @@ resetAdvancedBtn.addEventListener("click", () => {
   heuristicWeightEl.value = MCTS_DEFAULTS.heuristic_weight;
   cPuctEl.value = MCTS_DEFAULTS.c_puct;
   fpuReductionEl.value = MCTS_DEFAULTS.fpu_reduction;
+  if (symmetricEl) symmetricEl.checked = MCTS_DEFAULTS.symmetric;
   syncHeuristicWeightEnabled();
 });
 syncHeuristicWeightEnabled();
@@ -888,6 +898,7 @@ function currentPayload() {
     heuristic_weight: parseFloat(heuristicWeightEl.value) || MCTS_DEFAULTS.heuristic_weight,
     c_puct: parseFloat(cPuctEl.value) || MCTS_DEFAULTS.c_puct,
     fpu_reduction: parseFloat(fpuReductionEl.value) || MCTS_DEFAULTS.fpu_reduction,
+    symmetric: symmetricEnabled(),
   };
 }
 
@@ -904,24 +915,9 @@ async function evaluate(opts = {}) {
   setStatus(sims > 0 ? `Running MCTS (${sims.toLocaleString()} sims)…` : "Asking the network…", "thinking");
   try {
     const payload = currentPayload();
-    if (sims > ASYNC_SIM_THRESHOLD) {
-      // Long search — run it as a background job so the HTTP request (and the
-      // proxy) doesn't time out waiting ~minutes for the result.
-      await runAsyncEvaluation(payload, sims);
-    } else {
-      const res = await fetch("/api/evaluate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!data.ok) {
-        setStatus((data.errors || ["evaluation failed"]).join(" · "), "error");
-        renderResult(null);
-        return;
-      }
-      applyEvalResult(data);
-    }
+    const data = await requestEvaluationData(payload, sims);
+    if (data) applyEvalResult(data);
+    else renderResult(null);
   } catch (e) {
     setStatus("Request failed: " + e.message, "error");
     renderResult(null);
@@ -951,17 +947,45 @@ function applyEvalResult(data) {
   const capNote = data.capped_from
     ? ` · ⚠ capped to ${data.num_sims} of ${data.capped_from} requested (public limit)`
     : "";
+  const engineLabel = data.mode === "mcts"
+    ? (data.symmetric ? "MCTS (symmetric)" : "MCTS")
+    : "Network policy";
   setStatus(
-    `${data.mode === "mcts" ? "MCTS" : "Network policy"} · ` +
+    `${engineLabel} · ` +
     `${data.side_to_move} to move${captureNote} · ${data.num_valid_moves} legal moves${capNote}`,
     data.capped_from ? "warning" : "success",
   );
   renderResult(data);
 }
 
+// Run one evaluation, choosing sync vs the async job endpoint by the EFFECTIVE
+// search budget. Symmetric MCTS runs 4 searches per eval, so its wall-clock is
+// ~4x the raw sim count — routing on raw sims would let a symmetric search blow
+// past the proxy's ~100s window on the sync path and 524. Returns the finished
+// result object, or null after surfacing an error to the status line. Callers
+// own rendering (so play-mode can read top_moves without a forced re-render).
+async function requestEvaluationData(payload, requestedSims) {
+  const effectiveSims = payload.symmetric ? requestedSims * 4 : requestedSims;
+  if (effectiveSims > ASYNC_SIM_THRESHOLD) {
+    return await runAsyncEvaluation(payload, requestedSims);
+  }
+  const res = await fetch("/api/evaluate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    setStatus((data.errors || ["evaluation failed"]).join(" · "), "error");
+    return null;
+  }
+  return data;
+}
+
 // Drive a long search via the async job endpoint: kick it off, then poll for
 // progress until it finishes. Keeps the UI responsive and dodges the proxy's
-// response timeout on multi-minute searches.
+// response timeout on multi-minute searches. Returns the result object on
+// success, or null after setting an error status.
 async function runAsyncEvaluation(payload, sims) {
   const startRes = await fetch("/api/evaluate_async", {
     method: "POST",
@@ -971,8 +995,7 @@ async function runAsyncEvaluation(payload, sims) {
   const start = await startRes.json();
   if (!start.ok) {
     setStatus((start.errors || ["evaluation failed"]).join(" · "), "error");
-    renderResult(null);
-    return;
+    return null;
   }
   const jobId = start.job_id;
   const t0 = Date.now();
@@ -989,17 +1012,14 @@ async function runAsyncEvaluation(payload, sims) {
     }
     if (!poll.ok) {
       setStatus((poll.errors || ["lost track of the search job"]).join(" · "), "error");
-      renderResult(null);
-      return;
+      return null;
     }
     if (poll.status === "error") {
       setStatus((poll.errors || ["search failed"]).join(" · "), "error");
-      renderResult(null);
-      return;
+      return null;
     }
     if (poll.status === "done") {
-      applyEvalResult(poll.result);
-      return;
+      return poll.result;
     }
     // running — update the progress readout.
     const done = (poll.progress && poll.progress.done) || 0;
@@ -1501,15 +1521,14 @@ async function computerMakeMove() {
       ...currentPositionPayload(),
       model_id: modelSel.value,
       num_sims: state.game.computerSims,
+      symmetric: symmetricEnabled(),
       top_k: 1,
     };
-    const res = await fetch("/api/evaluate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!data.ok || !data.top_moves || !data.top_moves.length) {
+    // Shared sync/async routing: a symmetric "Deep" (3200-sim) engine move is
+    // ~4x the wall-clock and would 524 on the sync path, so this auto-routes it
+    // through the async job endpoint on the effective budget.
+    const data = await requestEvaluationData(payload, state.game.computerSims);
+    if (!data || !data.top_moves || !data.top_moves.length) {
       setStatus("Engine couldn't find a move. Game may be stuck.", "error");
       return;
     }

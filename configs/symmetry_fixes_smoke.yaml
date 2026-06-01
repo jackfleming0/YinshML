@@ -1,0 +1,95 @@
+# symmetry_fixes_smoke.yaml — tiny end-to-end smoke of the symmetry-fixes
+# pipeline. Same SHAPE as symmetry_fixes_mcts200.yaml (so it exercises the same
+# config->mode_settings->trainer wiring, incl. the symmetric_reg block) but
+# shrunk to run in a few minutes on CPU/MPS. NOT for real training.
+
+version: 1
+device: auto
+num_iterations: 1
+save_dir: runs_symmetry_smoke
+
+encoding:
+  type: enhanced
+
+network:
+  value_head_type: spatial
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  num_simulations: 8
+  late_simulations: 8
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 80
+  use_batched_mcts: true
+  mcts_batch_size: 16
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 10
+  temp_clamp_fraction: 0.6
+  num_workers: 1
+  use_shared_evaluator: false
+  games_per_iteration: 2
+
+trainer:
+  batch_size: 16
+  l2_reg: 0.0
+  lr: 0.0001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0
+  epochs_per_iteration: 1
+  batches_per_epoch: 4
+  max_buffer_size: 2000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 0
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  # E2 placement value-grounding (same shape as the real config).
+  search_consistency:
+    enabled: true
+    placement_only: true
+    policy_weight: 0.0
+    value_weight: 1.0
+    every_k_steps: 1
+    long_sims: 8
+    warmup_iters: 0
+  # E16 ON, fire every step so the smoke definitely exercises it.
+  symmetric_reg:
+    enabled: true
+    weight: 0.1
+    value_weight: 20.0
+    every_k_steps: 1
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: false
+
+arena:
+  games_per_match: 2
+  promotion_threshold: 0.20
+  tournament_sliding_window: 2
+  eval_seed: 20260531
+  revert_self_play_on_gate_failure: false
+
+export:
+  export_every: 999
+
+anchor:
+  enabled: false
+  skip_first_n_iterations: 1

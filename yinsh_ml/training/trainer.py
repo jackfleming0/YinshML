@@ -19,6 +19,7 @@ from ..utils.enhanced_metrics import EnhancedMetricsCollector
 from ..utils.encoding import decode_phase_from_state
 from ..network.wrapper import NetworkWrapper
 from .ema import EMAShadow
+from . import symmetric_reg
 from yinsh_ml.utils.value_head_metrics import ValueHeadMetrics
 
 
@@ -509,6 +510,11 @@ class YinshTrainer:
                  search_consistency_long_sims: int = 64,
                  search_consistency_batch_size: int = 32,
                  search_consistency_warmup_iters: int = 3,
+                 search_consistency_placement_only: bool = False,
+                 enable_symmetric_reg: bool = False,
+                 symmetric_reg_weight: float = 0.1,
+                 symmetric_reg_value_weight: float = 20.0,
+                 symmetric_reg_every_k_steps: int = 10,
                  max_oversampling: Optional[float] = None):
         """
         Initialize the trainer.
@@ -592,6 +598,33 @@ class YinshTrainer:
                 until iteration N. Early iterations have a noisy network
                 whose long-search outputs are themselves unreliable
                 targets; warming up lets the policy stabilize first.
+            enable_symmetric_reg: E16 symmetric-weight regularizer. When True,
+                every `symmetric_reg_every_k_steps` batches the trainer forwards
+                the net on all 4 D2 board symmetries and adds a penalty pulling
+                the prediction toward the symmetric mean (policy KL + value
+                asymmetry MSE). Constrains weights to the D2-symmetric subspace,
+                which data augmentation alone does not. Default False.
+            symmetric_reg_weight: Outer multiplier α on the whole regularizer
+                term (added to policy+value loss). 0.1 keeps it a regularizer,
+                not a primary objective.
+            symmetric_reg_value_weight: Inner weight on the value-asymmetry MSE
+                relative to the policy-KL term. Default 20.0 from a static
+                gradient-pressure analysis + a dynamic probe
+                (scripts/investigate_e16_value_weight.py, investigate_e16_dynamic.py):
+                value_asym penalizes a SCALAR value in ~[-1,1] while policy-KL
+                lives on a probability simplex, so at the prototype's 0.5 the
+                value term exerted only ~1/20th the gradient pressure of the
+                policy term (value_asym grew 6.7x under task pressure). ~10
+                equalizes gradient pressure but only *slows* value drift; the
+                dynamic probe showed value-symmetry improving monotonically with
+                w (50 was the only weight to net-reduce value_asym, at modest +
+                largely-illusory policy cost). 20 holds value_asym ~flat with no
+                extra policy cost vs 10; push toward 50 if the per-K-step logs
+                show value_asym climbing.
+            symmetric_reg_every_k_steps: Apply the regularizer every K
+                `train_step` calls. Each regularized step costs ~3 extra
+                forwards (the 3 non-identity transforms; identity is reused).
+                K=10 ≈ +30% wall-clock on regularized steps only.
             max_oversampling: Optional cap on per-phase sampling weights
                 (T3.7). Default ``None`` preserves legacy behavior — config
                 must opt in (e.g. ``max_oversampling: 4.0``) to enable the
@@ -643,9 +676,29 @@ class YinshTrainer:
         self.search_consistency_long_sims = int(search_consistency_long_sims)
         self.search_consistency_batch_size = int(search_consistency_batch_size)
         self.search_consistency_warmup_iters = int(search_consistency_warmup_iters)
+        # E2: when True, the consistency probe distills deep-search VALUES into
+        # only RING_PLACEMENT positions — grounding the value head where it's
+        # otherwise blind (no markers → ~0 heuristic signal, terminal outcome
+        # ~60 plies away). Pair with search_consistency_weight=0 (value-only).
+        self.search_consistency_placement_only = bool(search_consistency_placement_only)
         self._sc_mcts = None  # lazy
         self._sc_step_counter = 0
         self._sc_loss_history: list = []  # rolling, capped
+        # E16 symmetric-weight regularizer (Task 2). Every K steps, forward the
+        # net on all 4 D2 board symmetries and penalize divergence between the
+        # symmetrized prediction and the identity one — pushing the WEIGHTS into
+        # the symmetric subspace (D2 *data* augmentation only symmetrizes the
+        # data, not the weights; see E11 — value head varies 2.8× across
+        # orientations by move 8). Off by default; armed via config for the
+        # symmetry-fix run. The transform tensors (spatial cell-gather + full
+        # 7433-move-index permutation per tid) are constant given the encoder,
+        # so they're built once, lazily, on first regularized step.
+        self.enable_symmetric_reg = bool(enable_symmetric_reg)
+        self.symmetric_reg_weight = float(symmetric_reg_weight)
+        self.symmetric_reg_value_weight = float(symmetric_reg_value_weight)
+        self.symmetric_reg_every_k_steps = max(1, int(symmetric_reg_every_k_steps))
+        self._symmetric_reg_tensors = None  # lazy: [(cell_src, policy_perm), ...]
+        self._symmetric_reg_step_counter = 0
         # LR schedule state. `_global_epoch` is incremented once per
         # `train_epoch()` and drives scheduler fast-forward on reinit.
         self.lr_schedule = lr_schedule
@@ -941,6 +994,30 @@ class YinshTrainer:
                 for _ in range(resume_epoch):
                     self.policy_scheduler.step()
                     self.value_scheduler.step()
+
+    def _build_symmetric_reg_tensors(self):
+        """Precompute the per-transform E16 tensors, once — delegates to
+        yinsh_ml/training/symmetric_reg.py::build_reg_tensors (shared with the
+        supervised pretrain path so both halves use identical geometry)."""
+        tensors = symmetric_reg.build_reg_tensors(self.state_encoder, self.device)
+        logger.info("E16 symmetric regularizer: built transform tensors for 3 D2 symmetries")
+        return tensors
+
+    def _symmetric_reg_term(self, states, pred_logits, pred_values, target_probs):
+        """E16 regularizer for one batch — delegates to the shared
+        yinsh_ml/training/symmetric_reg.py. The valid-move mask is the MCTS visit
+        support (``target_probs > 0``); the identity forward is reused from the
+        main pass, so this costs ~3 extra forwards. Returns ``(loss, diagnostics)``
+        with the outer α already applied."""
+        if self._symmetric_reg_tensors is None:
+            self._symmetric_reg_tensors = self._build_symmetric_reg_tensors()
+        mask = (target_probs > 0).float()  # [B, total_moves] — valid-move support
+        return symmetric_reg.symmetric_reg_term(
+            self.network.network, states, pred_logits, pred_values, mask,
+            self._symmetric_reg_tensors,
+            value_weight=self.symmetric_reg_value_weight,
+            weight=self.symmetric_reg_weight, autocast=self._autocast,
+        )
 
     def train_step(self,
                    batch_size: int,
@@ -1248,7 +1325,26 @@ class YinshTrainer:
             # no path through value_head) and is updated by SGD (via
             # `value_optimizer`). Per-head clip max_norms are preserved by
             # clipping the disjoint param sets independently before step().
+            # ---- E16 symmetric-weight regularizer (every K steps) ----
+            # Computed outside autocast on purpose: the term forwards the 3
+            # transforms in autocast internally but does its KL/log math in
+            # fp32. Adds to the joint loss so its gradient flows into the trunk
+            # (and both heads) through the same single backward.
+            sym_reg_loss = None
+            if self.enable_symmetric_reg:
+                self._symmetric_reg_step_counter += 1
+                if self._symmetric_reg_step_counter % self.symmetric_reg_every_k_steps == 0:
+                    sym_reg_loss, sym_diag = self._symmetric_reg_term(
+                        states, pred_logits, pred_values, target_probs,
+                    )
+                    logger.info(
+                        "E16 sym-reg: kl=%.5f value_asym=%.5f (alpha=%.2f)",
+                        sym_diag["sym_kl"], sym_diag["sym_value_asym"], self.symmetric_reg_weight,
+                    )
+
             total_loss = policy_loss + value_loss
+            if sym_reg_loss is not None:
+                total_loss = total_loss + sym_reg_loss
             total_loss.backward()
 
             policy_params = [p for n, p in self.network.network.named_parameters()
@@ -1406,7 +1502,18 @@ class YinshTrainer:
 
         n = self.experience.size()
         sample_size = min(self.search_consistency_batch_size, n)
-        indices = np.random.choice(n, size=sample_size, replace=False)
+        if self.search_consistency_placement_only:
+            # E2: restrict distillation to RING_PLACEMENT positions. Placement is
+            # the first 10 plies (5 rings/side), so move_number < 10 is an exact,
+            # decode-free filter using the buffer's move_numbers deque.
+            move_nos = np.fromiter(self.experience.move_numbers, dtype=np.int64, count=n)
+            placement_idx = np.nonzero(move_nos < 10)[0]
+            if placement_idx.size == 0:
+                return None  # no placement positions buffered yet
+            sample_size = min(sample_size, placement_idx.size)
+            indices = np.random.choice(placement_idx, size=sample_size, replace=False)
+        else:
+            indices = np.random.choice(n, size=sample_size, replace=False)
 
         # Force eval mode for the MCTS-distillation searches so the
         # subsequent training-mode forward (later in this method) is the

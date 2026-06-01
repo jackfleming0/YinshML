@@ -388,6 +388,36 @@ def main() -> None:
                 'warmup_iters', trainer_cfg.get('search_consistency_warmup_iters', 3)
             )
         ),
+        # E2: placement-only value distillation (grounds the value head where it's
+        # blind). Pair with policy_weight: 0.0 for value-only.
+        'search_consistency_placement_only': bool(
+            (trainer_cfg.get('search_consistency') or {}).get(
+                'placement_only', trainer_cfg.get('search_consistency_placement_only', False)
+            )
+        ),
+        # E16 symmetric-weight regularizer. Off by default. Reads from a nested
+        # `trainer.symmetric_reg:` block when present, with flat-key fallback.
+        # value_weight default 20.0 is measured (investigate_e16_value_weight.py).
+        'enable_symmetric_reg': bool(
+            (trainer_cfg.get('symmetric_reg') or {}).get(
+                'enabled', trainer_cfg.get('enable_symmetric_reg', False)
+            )
+        ),
+        'symmetric_reg_weight': float(
+            (trainer_cfg.get('symmetric_reg') or {}).get(
+                'weight', trainer_cfg.get('symmetric_reg_weight', 0.1)
+            )
+        ),
+        'symmetric_reg_value_weight': float(
+            (trainer_cfg.get('symmetric_reg') or {}).get(
+                'value_weight', trainer_cfg.get('symmetric_reg_value_weight', 20.0)
+            )
+        ),
+        'symmetric_reg_every_k_steps': int(
+            (trainer_cfg.get('symmetric_reg') or {}).get(
+                'every_k_steps', trainer_cfg.get('symmetric_reg_every_k_steps', 10)
+            )
+        ),
         # Cosine horizon = full training run in epochs. Scaled below when we
         # know num_iterations × epochs_per_iteration.
         # Augmentation settings (Phase 2 architectural improvements)

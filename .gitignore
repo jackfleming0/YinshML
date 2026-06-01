@@ -77,6 +77,11 @@ analysis_board/multiplayer/bga_imports/
 !OVERNIGHT_RESULTS.md
 !MODEL_PLAY_OBSERVATIONS.md
 !BITBOARD_PORT_PROMPT.md
+!META_OBJECTIVE_BEAT_ITER1.md
+
+# Profiling: the reusable scripts, NOT the data artifacts they generate
+!profiling/
+!profiling/cprof_selfplay.py
 !BITBOARD_FOLLOWUP_PLAN.md
 !POST_BITBOARD_TRAINING_BRIEF.md
 !INVESTIGATION_PLAN.md
@@ -100,6 +105,7 @@ analysis_board/multiplayer/bga_imports/
 !TECH_DEBT.md
 !D2_PREP.md
 !EXPERIMENT_BACKLOG.md
+!SYMMETRY_FIXES_RUNBOOK.md
 !docs/
 !docs/**
 !SESSION_2026-05-21_RECAP.md

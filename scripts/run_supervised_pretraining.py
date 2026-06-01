@@ -38,6 +38,7 @@ from yinsh_ml.network.model import YinshNetwork
 from yinsh_ml.data.converter import GameConverter
 from yinsh_ml.utils.encoding import StateEncoder
 from yinsh_ml.utils.enhanced_encoding import EnhancedStateEncoder
+from yinsh_ml.training import symmetric_reg
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,30 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
     num_value_classes = model.num_value_classes
     is_regression = (model.value_mode == 'regression')
 
+    # E16 symmetric-weight regularizer (shared with self-play trainer.py). Built
+    # once; applied every K steps. Off unless --enable-symmetric-reg.
+    sym_reg_tensors = None
+    sym_reg_encoder = None
+    sym_reg_step = 0
+    if args.enable_symmetric_reg:
+        sym_reg_encoder = EnhancedStateEncoder() if args.use_enhanced_encoding else StateEncoder()
+        sym_reg_tensors = symmetric_reg.build_reg_tensors(sym_reg_encoder, device)
+        logger.info(
+            f"E16 symmetric regularizer ON: weight={args.symmetric_reg_weight}, "
+            f"value_weight={args.symmetric_reg_value_weight}, "
+            f"every_k_steps={args.symmetric_reg_every_k_steps}"
+        )
+
+    # bf16 autocast — ~2x on the 5090's tensor cores. CE-family losses auto-promote
+    # to fp32 internally, so no GradScaler is needed (same pattern as trainer.py).
+    # CUDA only; falls back to a no-op elsewhere (older local torch can't even
+    # construct an mps autocast context).
+    import contextlib
+    def autocast_ctx():
+        if device.type == 'cuda':
+            return torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+        return contextlib.nullcontext()
+
     for epoch in range(start_epoch, args.epochs + 1):
         # --- Training ---
         model.train()
@@ -291,34 +316,56 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
 
             optimizer.zero_grad()
 
-            pred_logits, value_pred = model(states)
+            with autocast_ctx():
+                pred_logits, value_pred = model(states)
 
-            # Policy loss: cross-entropy against expert moves.
-            # Branch on target schema: 1-D int targets → integer-target CE;
-            # 2-D soft/one-hot targets → soft-target NLL.
-            if policies.dim() == 1:
-                expert_moves = policies.long()
-                policy_loss = F.cross_entropy(pred_logits, expert_moves)
-            else:
-                log_probs = F.log_softmax(pred_logits, dim=1)
-                policy_loss = -(policies * log_probs).sum(dim=1).mean()
-                expert_moves = policies.argmax(dim=1)
+                # Policy loss: cross-entropy against expert moves.
+                # Branch on target schema: 1-D int targets → integer-target CE;
+                # 2-D soft/one-hot targets → soft-target NLL.
+                if policies.dim() == 1:
+                    expert_moves = policies.long()
+                    policy_loss = F.cross_entropy(pred_logits, expert_moves, label_smoothing=args.label_smoothing)
+                else:
+                    log_probs = F.log_softmax(pred_logits, dim=1)
+                    policy_loss = -(policies * log_probs).sum(dim=1).mean()
+                    expert_moves = policies.argmax(dim=1)
 
-            # Value loss: branch on value_mode.
-            if is_regression:
-                # Scalar tanh head against raw value target. value_pred is
-                # already (B,) from YinshNetwork.forward in regression mode.
-                value_loss = F.mse_loss(value_pred, values.float())
-            else:
-                # Cross-entropy on discretized outcome classes. Mirrors
-                # yinsh_ml/training/trainer.py — same loss surface as self-play
-                # so the warm-start checkpoint isn't washed out on iter 1.
-                value_logits = model._value_logits  # populated in forward()
-                target_class = _value_targets_to_classes(values, num_value_classes)
-                value_loss = F.cross_entropy(value_logits, target_class)
+                # Value loss: branch on value_mode.
+                if is_regression:
+                    # Scalar tanh head against raw value target. value_pred is
+                    # already (B,) from YinshNetwork.forward in regression mode.
+                    value_loss = F.mse_loss(value_pred, values.float())
+                else:
+                    # Cross-entropy on discretized outcome classes. Mirrors
+                    # yinsh_ml/training/trainer.py — same loss surface as self-play
+                    # so the warm-start checkpoint isn't washed out on iter 1.
+                    value_logits = model._value_logits  # populated in forward()
+                    target_class = _value_targets_to_classes(values, num_value_classes)
+                    value_loss = F.cross_entropy(value_logits, target_class)
 
-            # Combined loss
-            loss = policy_loss + args.value_weight * value_loss
+                # Combined loss
+                loss = policy_loss + args.value_weight * value_loss
+
+            # E16: every K steps add the D2 symmetric-weight regularizer. Hard
+            # expert targets give no MCTS visit support, so the valid-move mask is
+            # decoded from the batch states (only on regularized steps). Reuses
+            # this step's forward (pred_logits/value_pred) as the identity.
+            if sym_reg_tensors is not None:
+                sym_reg_step += 1
+                if sym_reg_step % args.symmetric_reg_every_k_steps == 0:
+                    sym_mask = symmetric_reg.valid_move_mask(sym_reg_encoder, states)
+                    sym_loss, sym_diag = symmetric_reg.symmetric_reg_term(
+                        model, states, pred_logits, value_pred, sym_mask,
+                        sym_reg_tensors,
+                        value_weight=args.symmetric_reg_value_weight,
+                        weight=args.symmetric_reg_weight, autocast=autocast_ctx,
+                    )
+                    loss = loss + sym_loss
+                    if sym_reg_step % (args.symmetric_reg_every_k_steps * 10) == 0:
+                        logger.info(
+                            f"E16 sym-reg: kl={sym_diag['sym_kl']:.5f} "
+                            f"value_asym={sym_diag['sym_value_asym']:.5f}"
+                        )
             loss.backward()
 
             # Gradient clipping
@@ -368,7 +415,8 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
 
         # --- Validation ---
         val_policy, val_value, val_acc, val_value_acc = evaluate(
-            model, device, val_loader, num_value_classes
+            model, device, val_loader, num_value_classes,
+            label_smoothing=args.label_smoothing,
         )
 
         logger.info(
@@ -417,7 +465,7 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
     return save_path
 
 
-def evaluate(model, device, data_loader, num_value_classes) -> tuple:
+def evaluate(model, device, data_loader, num_value_classes, label_smoothing: float = 0.0) -> tuple:
     """Evaluate model on a dataset.
 
     Returns (policy_loss, value_loss, policy_top1_accuracy, value_accuracy).
@@ -442,7 +490,7 @@ def evaluate(model, device, data_loader, num_value_classes) -> tuple:
 
             if policies.dim() == 1:
                 expert_moves = policies.long()
-                policy_loss = F.cross_entropy(pred_logits, expert_moves)
+                policy_loss = F.cross_entropy(pred_logits, expert_moves, label_smoothing=label_smoothing)
             else:
                 log_probs = F.log_softmax(pred_logits, dim=1)
                 policy_loss = -(policies * log_probs).sum(dim=1).mean()
@@ -499,12 +547,34 @@ def main():
                        help='Number of training epochs (default: 30)')
     parser.add_argument('--batch-size', type=int, default=256,
                        help='Batch size (default: 256)')
+    parser.add_argument('--num-workers', type=int, default=2,
+                       help='DataLoader worker processes (default 2; raise on many-core boxes to keep the GPU fed)')
     parser.add_argument('--lr', type=float, default=0.001,
                        help='Initial learning rate (default: 0.001)')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                        help='Weight decay (default: 1e-4)')
     parser.add_argument('--value-weight', type=float, default=1.0,
                        help='Weight for value loss relative to policy (default: 1.0)')
+    parser.add_argument('--label-smoothing', type=float, default=0.1,
+                       help='L2: policy label smoothing for hard-target CE. Keeps '
+                            'entropy in the policy so training on sharp expert '
+                            'targets (under Dropout=0) does not over-concentrate '
+                            'to a single modal opening. Validated at 0.1; set 0 '
+                            'to disable. No-op for soft/distribution targets.')
+    parser.add_argument('--enable-symmetric-reg', action='store_true',
+                       help='E16: add the D2 symmetric-weight regularizer (shared '
+                            'with the self-play trainer). Recommended ON — the '
+                            'supervised pretrain is where most of the network '
+                            'representation (and its D2 asymmetry) is learned, so '
+                            'enforcing weight symmetry here keeps the self-play '
+                            'loop from inheriting an already-asymmetric net.')
+    parser.add_argument('--symmetric-reg-weight', type=float, default=0.1,
+                       help='E16 outer weight α (default 0.1).')
+    parser.add_argument('--symmetric-reg-value-weight', type=float, default=20.0,
+                       help='E16 value-asymmetry weight (default 20, measured — see '
+                            'scripts/investigate_e16_value_weight.py).')
+    parser.add_argument('--symmetric-reg-every-k-steps', type=int, default=10,
+                       help='E16 cadence: regularize every K batches (default 10).')
     parser.add_argument('--val-split', type=float, default=0.1,
                        help='Validation split fraction (default: 0.1)')
 
@@ -591,11 +661,13 @@ def main():
     logger.info(f"Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                              shuffle=True, num_workers=2, pin_memory=True,
-                              persistent_workers=True)
+                              shuffle=True, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=args.num_workers > 0,
+                              prefetch_factor=4 if args.num_workers > 0 else None)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
-                            shuffle=False, num_workers=2, pin_memory=True,
-                            persistent_workers=True)
+                            shuffle=False, num_workers=args.num_workers, pin_memory=True,
+                            persistent_workers=args.num_workers > 0,
+                            prefetch_factor=4 if args.num_workers > 0 else None)
 
     # Create model
     model, device, resume_bundle = create_model(args)
