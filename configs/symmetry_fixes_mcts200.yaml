@@ -71,7 +71,7 @@ self_play:
   final_temp: 0.1
   annealing_steps: 30
   temp_clamp_fraction: 0.6
-  num_workers: 4
+  num_workers: 16   # 192-core box — parallelize game generation (was 4, GPU-starved)
   use_shared_evaluator: false
   games_per_iteration: 100
 
