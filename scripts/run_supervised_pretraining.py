@@ -288,6 +288,16 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
             f"every_k_steps={args.symmetric_reg_every_k_steps}"
         )
 
+    # bf16 autocast — ~2x on the 5090's tensor cores. CE-family losses auto-promote
+    # to fp32 internally, so no GradScaler is needed (same pattern as trainer.py).
+    # CUDA only; falls back to a no-op elsewhere (older local torch can't even
+    # construct an mps autocast context).
+    import contextlib
+    def autocast_ctx():
+        if device.type == 'cuda':
+            return torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+        return contextlib.nullcontext()
+
     for epoch in range(start_epoch, args.epochs + 1):
         # --- Training ---
         model.train()
@@ -306,34 +316,35 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
 
             optimizer.zero_grad()
 
-            pred_logits, value_pred = model(states)
+            with autocast_ctx():
+                pred_logits, value_pred = model(states)
 
-            # Policy loss: cross-entropy against expert moves.
-            # Branch on target schema: 1-D int targets → integer-target CE;
-            # 2-D soft/one-hot targets → soft-target NLL.
-            if policies.dim() == 1:
-                expert_moves = policies.long()
-                policy_loss = F.cross_entropy(pred_logits, expert_moves, label_smoothing=args.label_smoothing)
-            else:
-                log_probs = F.log_softmax(pred_logits, dim=1)
-                policy_loss = -(policies * log_probs).sum(dim=1).mean()
-                expert_moves = policies.argmax(dim=1)
+                # Policy loss: cross-entropy against expert moves.
+                # Branch on target schema: 1-D int targets → integer-target CE;
+                # 2-D soft/one-hot targets → soft-target NLL.
+                if policies.dim() == 1:
+                    expert_moves = policies.long()
+                    policy_loss = F.cross_entropy(pred_logits, expert_moves, label_smoothing=args.label_smoothing)
+                else:
+                    log_probs = F.log_softmax(pred_logits, dim=1)
+                    policy_loss = -(policies * log_probs).sum(dim=1).mean()
+                    expert_moves = policies.argmax(dim=1)
 
-            # Value loss: branch on value_mode.
-            if is_regression:
-                # Scalar tanh head against raw value target. value_pred is
-                # already (B,) from YinshNetwork.forward in regression mode.
-                value_loss = F.mse_loss(value_pred, values.float())
-            else:
-                # Cross-entropy on discretized outcome classes. Mirrors
-                # yinsh_ml/training/trainer.py — same loss surface as self-play
-                # so the warm-start checkpoint isn't washed out on iter 1.
-                value_logits = model._value_logits  # populated in forward()
-                target_class = _value_targets_to_classes(values, num_value_classes)
-                value_loss = F.cross_entropy(value_logits, target_class)
+                # Value loss: branch on value_mode.
+                if is_regression:
+                    # Scalar tanh head against raw value target. value_pred is
+                    # already (B,) from YinshNetwork.forward in regression mode.
+                    value_loss = F.mse_loss(value_pred, values.float())
+                else:
+                    # Cross-entropy on discretized outcome classes. Mirrors
+                    # yinsh_ml/training/trainer.py — same loss surface as self-play
+                    # so the warm-start checkpoint isn't washed out on iter 1.
+                    value_logits = model._value_logits  # populated in forward()
+                    target_class = _value_targets_to_classes(values, num_value_classes)
+                    value_loss = F.cross_entropy(value_logits, target_class)
 
-            # Combined loss
-            loss = policy_loss + args.value_weight * value_loss
+                # Combined loss
+                loss = policy_loss + args.value_weight * value_loss
 
             # E16: every K steps add the D2 symmetric-weight regularizer. Hard
             # expert targets give no MCTS visit support, so the valid-move mask is
@@ -347,7 +358,7 @@ def train(model, device, train_loader, val_loader, args, resume_bundle=None):
                         model, states, pred_logits, value_pred, sym_mask,
                         sym_reg_tensors,
                         value_weight=args.symmetric_reg_value_weight,
-                        weight=args.symmetric_reg_weight,
+                        weight=args.symmetric_reg_weight, autocast=autocast_ctx,
                     )
                     loss = loss + sym_loss
                     if sym_reg_step % (args.symmetric_reg_every_k_steps * 10) == 0:
