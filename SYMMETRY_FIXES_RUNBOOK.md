@@ -207,3 +207,20 @@ the wrong representation.
 
 E16 + E2 run on MPS (gather, not `index_copy_`). The corpus build + a short from-
 scratch pretrain are feasible locally with `--device mps`; self-play wants the box.
+
+---
+
+## Model Registry
+
+**Naming convention** (so `best_supervised.pt` collisions stop): pull every
+checkpoint to the Mac as `symmetric-15ch-<stage>.pt`, where `<stage>` ∈
+`best-supervised` (pretrain), `iter<N>-ema` (each self-play iteration's EMA),
+`final`. Local home: `models/symmetry_run/`. Log each one here on pull.
+
+| Model | Stage | Encoding / head | Switches thrown | Early impressions |
+|---|---|---|---|---|
+| `symmetric-15ch-best-supervised` | from-scratch supervised pretrain (12 ep, bf16, batch 512) | 15ch enhanced / spatial classification (7-class) | **L1** Dropout=0 · **L2** label-smoothing 0.1 · **E16** value_weight 20, K=10 · **E10** corpus (human 5% / engine 45% / random 50% placement, full 11.6M engine main-game, 4× D2 aug, 13.0M total) | ✅ **Symmetry fixed** — first-move orbit CV 2.0% (vs old A5 72% / twins ~0%); `value_asym` flat ~0.003. ⚠️ Openings symmetric but **uniform** (peak 1.7%, over-flattened by 45% random). Main-game PAcc 0.324 / VAcc ~0.61. Strength TBD (self-play). |
+| `symmetric-15ch-iter<N>-ema` | self-play iteration N EMA | same | config `symmetry_fixes_mcts200.yaml` (E16 vw=20 + E2 placement value-grounding, MCTS-200, 100 games/iter, 16 workers) | _pending — fill per iteration: anchor WR, tournament Elo, value discrimination, opening sharpness/symmetry_ |
+
+> Provenance: branch `policy-symmetry-fixes`; full rationale for each switch in the
+> §"What this fixes" header above and `EXPERIMENT_BACKLOG.md`.
