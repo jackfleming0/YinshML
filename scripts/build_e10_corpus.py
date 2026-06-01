@@ -54,6 +54,8 @@ def parse_args():
                    help='target total placement positions BEFORE augmentation (default: as many as the mix allows)')
     p.add_argument('--ram-budget-gb', type=float, default=40.0,
                    help='refuse to build a corpus needing more than this in RAM (guards OOM; raise --max-main-game to fit)')
+    p.add_argument('--no-shuffle', action='store_true',
+                   help='skip the in-RAM shuffle (training shuffles anyway); halves peak RAM for big corpora')
     p.add_argument('--rm-input-after-load', action='store_true',
                    help='delete the engine corpus after loading it into RAM, before writing output '
                         '(disk-frugal: peak disk = max(input,output) not sum; the input is reproducible)')
@@ -221,11 +223,15 @@ def main():
         print(f'  removed input {eng} to free disk before write')
 
     # --- combine + shuffle ---
-    all_s = np.concatenate([place_s, main_s])
-    all_p = np.concatenate([place_p, main_p])
-    all_v = np.concatenate([place_v, main_v])
-    order = rng.permutation(all_s.shape[0])
-    all_s, all_p, all_v = all_s[order], all_p[order], all_v[order]
+    all_s = np.concatenate([place_s, main_s]); del place_s, main_s
+    all_p = np.concatenate([place_p, main_p]); del place_p, main_p
+    all_v = np.concatenate([place_v, main_v]); del place_v, main_v
+    if not args.no_shuffle:
+        # Skippable: run_supervised_pretraining does random_split + a shuffling
+        # DataLoader, so a pre-shuffle is redundant — and the in-RAM index copy
+        # doubles peak memory, which OOMs a full-corpus build. Use --no-shuffle.
+        order = rng.permutation(all_s.shape[0])
+        all_s, all_p, all_v = all_s[order], all_p[order], all_v[order]
 
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     np.save(out / 'states.npy', all_s)
