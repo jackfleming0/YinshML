@@ -2030,8 +2030,22 @@ def _run_game_loop_inner(
 
         valid_indices = [state_encoder.move_to_index(move) for move in valid_moves]
         valid_move_probs = move_probs[valid_indices]
-        prob_sum = valid_move_probs.sum()
-        if prob_sum < 1e-6:
+        # A non-finite search distribution (the net can emit NaN/inf priors for
+        # rare positions — see the prior guard above) must NEVER become a
+        # training target: the buffer's validation only checks shape, so a NaN
+        # policy poisons the gradient -> NaN weights -> the whole net dies. When
+        # it happens, keep the game going on a uniform move but DROP this
+        # position from the training data (store_target=False).
+        finite = bool(np.isfinite(valid_move_probs).all() and np.isfinite(move_probs).all())
+        prob_sum = float(valid_move_probs.sum()) if finite else 0.0
+        store_target = True
+        if (not finite) or prob_sum < 1e-6:
+            if not finite:
+                worker_logger.warning(
+                    f"Non-finite search policy at move {move_count}; "
+                    f"playing uniform and skipping this position's target."
+                )
+                store_target = False
             valid_move_probs = np.ones(len(valid_moves), dtype=np.float32) / len(valid_moves)
         else:
             valid_move_probs /= prob_sum
@@ -2049,10 +2063,11 @@ def _run_game_loop_inner(
 
         selected_move = valid_moves[selected_idx_in_valid]
 
-        encoded_state = state_encoder.encode_state(state).astype(np.float32)
-        states.append(encoded_state)
-        policies.append(move_probs)
-        players.append(state.current_player)
+        if store_target:
+            encoded_state = state_encoder.encode_state(state).astype(np.float32)
+            states.append(encoded_state)
+            policies.append(move_probs)
+            players.append(state.current_player)
 
         entropy = float(-np.sum(valid_move_probs * np.log(valid_move_probs + 1e-9)))
         temp_data['temperatures'].append(temp)
