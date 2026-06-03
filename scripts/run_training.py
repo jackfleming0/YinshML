@@ -315,6 +315,10 @@ def main() -> None:
         # engine. When true, the GameStatePool is bypassed because the
         # C++ State.clone() is faster than any pool reuse mechanism.
         'use_cpp_engine': bool(sp.get('use_cpp_engine', False)),
+        # E22 cross-teacher: path to a FIXED opponent model. When set, self-play
+        # is learner-vs-opponent (color-balanced) and only learner positions
+        # train. None / unset = ordinary mirror self-play.
+        'opponent_model_path': sp.get('opponent_model_path', None),
         'enable_subtree_reuse': bool(sp.get('enable_subtree_reuse', True)),
         'fpu_reduction': float(sp.get('fpu_reduction', 0.25)),
         'epsilon_mix_start': float(sp.get('epsilon_mix_start', 0.25)),

@@ -200,6 +200,91 @@ is a small change; trivial to prototype at inference on the analysis board.
 substrate lever, that reshapes what's worth ensembling/distilling. Cheap probe (mode b) is ~1h; the teacher
 (mode a) is a training run, gated like everything else on a real learning rate.
 
+### E22 — Cross-teacher self-play (sharpen the value head)  `[RAN 2026-06-03 — FAILED]`
+
+> **Result:** cross arm DEGRADES vs frozen iter1_ema (−4.5 pp/iter: 51.7→33.3) while mirror
+> treads water (+1.2). The decisive-game signal corrupted the POLICY (overfit to beating
+> sym15); the value head was unchanged. Follow-up value-head diagnostics (`scripts/value_head_calibration.py`,
+> `scripts/value_head_finetune_probe.py`) showed the value head is FROZEN by the self-play loop
+> AND near a data/arch ceiling (AUC ~0.74; supervised fine-tune overfits in 1 epoch). BUT this
+> only indicts the *cautious micro-loop* (lr 1e-5, ~1K games) — NOT self-play at scale, which we
+> never ran. Next direction = a real self-play campaign (real LR + scale + staged kill gates);
+> see memory `project_e18_e19.md` and the other session's E24 scope. Full detail in memory.
+
+**Chosen after the E19 verdict** (depth treads water; the limiter is the evaluator/value-head, NOT the
+policy head — Arm B's dropout-off head declined too). E19 evidence says the value head is *calibrated but
+not sharp* (P2 Brier 0.66, ~15% over baseline) and Arm B's different head still declined → the limiter is
+the value *target*, not head architecture. **Hypothesis:** mirror self-play between equals yields ~50/50
+noisy outcome labels, so the value head can't learn discrimination; pitting iter1_ema against a *different*
+model makes games decisive → informative outcome signal → the value head sharpens → strength climbs.
+
+**Dual-arm, ONE variable = the opponent** (both warm-start from iter1_ema (R2); both H2H'd vs a FROZEN
+iter1_ema each iteration; compare SLOPES):
+- **Arm A (control):** mirror — iter1_ema vs iter1_ema (`configs/e22_mirror.yaml`).
+- **Arm B (treatment):** cross — iter1_ema vs **sym15** (`symmetric-15ch-iter1-ema`, ~27% so iter1 wins
+  ~70-75% = decisive-not-saturated + decorrelated style) (`configs/e22_cross.yaml`).
+- Held constant: **200 sims** (E19: depth isn't the lever — keep cheap/constant to isolate the opponent),
+  5 iters, disc_weight 0, E16 off, gate 0.55, learner-only color-balanced data.
+
+**Decision gate:** Arm B climbs (slope up, ideally crossing >55% vs frozen iter1_ema) AND beats Arm A's
+slope → decisive-outcome signal is the lever → scale it / fold into the big run. Both flat → the value-head
+plateau isn't a *data-signal* problem → escalate to architecture (value-head redesign) or E21 ensemble-teacher
+(a manufactured better target). **Honest risk the H2H tests:** the value head may learn "I'm beating a
+*weaker* opponent" (distribution shift) rather than "good position" — wouldn't transfer to equal play.
+
+**Implementation (DONE, branch `e22-cross-teacher`, validated):** no two-model support existed —
+`self_play.py::play_game_worker` loaded one net for both sides. Added: an `opponent_model_path` knob
+(config → `run_training.py` mode_settings whitelist → supervisor → worker), a second net+MCTS per worker
+(own GameState pool), per-side routing in `_run_game_loop_inner`, and — the validity-critical part — ONLY
+the learner's positions stored, color-balanced by game parity. Backward-compatible (opponent unset = the
+old mirror path, byte-identical). Tests: `yinsh_ml/tests/test_cross_teacher.py` (3/3 — no opponent-position
+leakage, correct color, mirror unchanged); existing MCTS suite 35/35; real two-net smoke green (decisive
+games W1-B3, color-balanced WHITE/BLACK by parity, checkpoint NaN-clean). **A bug the smoke caught that the
+unit test couldn't:** `opponent_model_path` was missing from `run_training.py`'s mode_settings whitelist, so
+it silently ran as mirror — fixed. (Aside: `epsilon_mix_iteration_start/end` are also absent from that
+whitelist → ignored since forever, incl. E19; minor, out of scope here.) **Supersedes the old E7b stub.**
+
+**Launch:** re-rent a box (≥160 cores / 1×GPU≥16GB), `git checkout e22-cross-teacher`, scp seeds,
+`PY=/venv/main/bin/python bash scripts/e22_dualarm.sh`. ~200-sim/5-iter × 2 arms — cheaper than E19.
+
+### E23 — Gap-controlled opponent league (E22 scale-up)  `[DROPPED]`
+
+> **Dropped 2026-06-03:** gated on E22 *climbing*; E22 declined, so the league premise is moot.
+> (Also: the broader lesson is that loop-variant tweaks don't beat iter1_ema — see E22 result.)
+> NOTE: a parallel session independently scoped a "real self-play campaign" as **E23** too —
+> that one should be renumbered **E24** to avoid colliding with this (now-dropped) entry.
+
+Spun out of a 2026-06-02 discussion (Jack): if E22 cross-teacher works, can we keep replacing the
+opponent with progressively stronger models to compound performance? Yes — and it maps onto a known
+pattern (opponent pools / leagues / play-vs-past-versions, à la AlphaZero/AlphaStar). But the right
+framing is **NOT "upgrade to a stronger teacher to imitate"** (cross-teacher is not distillation; the
+opponent is weaker *on purpose*). The value comes from **decisive** games, and decisiveness has a
+**sweet spot in the strength GAP**:
+- opponent ≈ equal → ~50/50 → noise (the E22 problem);
+- opponent *much* weaker → learner wins ~100% → saturated → *also* no signal;
+- opponent moderately weaker (~25-30 pp gap, e.g. iter1_ema vs sym15) → a *range* of outcomes → max signal.
+
+So the ladder = **keep the gap in the decisive-but-not-saturated band as the learner climbs**: as the
+learner improves past iter1_ema, sym15 saturates, so swap in a stronger/gapped opponent (last rung's
+winner, or a deliberately-weakened past checkpoint). Naturally becomes a **pool/league** — a panel of
+opponents spanning a strength range gives a richer outcome distribution than any single one (a refinement
+of "iter1_ema AND the winner": mix several gaps).
+
+**Does it compound or just tread a treadmill?** Only compounds if the value head learns *transferable*
+position-evaluation ("good position") rather than the distribution-shift failure ("I'm beating a
+weakling") — and those look identical in self-play WR, diverging only under equal-strength eval. So
+**every rung must be gated on H2H vs the FIXED frozen iter1_ema (R1)**; a rung that beats its opponent but
+doesn't move the frozen-H2H is elaborate treading-water, not strength.
+
+**Honest context:** canonical AlphaZero bootstraps fine from pure mirror self-play, so cross-teacher +
+league is a **crutch** that injects the decisiveness our loop fails to generate on its own (because the
+value head is too blurry for MCTS amplification to produce variance — the E19 finding). A working crutch
+is still a win, but it's a symptom-treatment, which is *why* the external H2H gate is non-negotiable.
+
+**Gate / sequence (R9):** do NOT build until E22 rung 1 *climbs vs frozen iter1_ema*. E22 flat → no league;
+escalate to architecture (value-head redesign) or E21 ensemble-teacher instead. E22 climbs → build the
+gap-controlled league (opponent pool + per-rung frozen-H2H gate); this is the candidate plateau-break.
+
 ## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
 
 The 2026-05-29/30 work was recovered from a stash (it was never committed; the
