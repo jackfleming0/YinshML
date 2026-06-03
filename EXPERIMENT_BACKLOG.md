@@ -200,6 +200,78 @@ is a small change; trivial to prototype at inference on the analysis board.
 substrate lever, that reshapes what's worth ensembling/distilling. Cheap probe (mode b) is ~1h; the teacher
 (mode a) is a training run, gated like everything else on a real learning rate.
 
+### E23 — A REAL self-play campaign (the actually-untested axis)  `[the experiment we've been flinching from]`
+
+**The correction this entry exists to record (2026-06-03, Jack pushed, AI conceded).**
+We concluded "the self-play loop can't beat iter1_ema" — that was an **overclaim**.
+What we actually tested is a *cautious micro-continuation*: lr 1e-5, 3–5 iters,
+~200 games/iter (~1K games total), continuing from an over-converged EMA optimum,
+with LR deliberately pinned low to avoid degrading the warm start (the B1B2B3
+finding). AlphaZero-class self-play is millions of games, real LR schedules, from
+scratch. **We ran a rounding error of self-play and generalized to "self-play
+fails for YINSH."** Self-play works for Go/chess/shogi/Hex/Othello; there's no
+principled reason YINSH is the exception. The "frozen value head" is a consequence
+of *our* lr=1e-5 timidity, not a property of the game — a head that won't move
+under ~5e-5 effective LR over 1K games says nothing about its behavior under a
+real schedule over a million.
+
+**Hypothesis:** the plateau is an artifact of the cautious regime, not a ceiling.
+A properly-run campaign — real LR schedule that lets the value head move, far more
+games/iters, with degradation guards — has never been attempted, and the evidence
+points there.
+
+**The central tension (why this is a real experiment, not a knob-turn):** higher
+LR moves the value head (the binding constraint per the head-only/trunk probes:
+held-out AUC ceiling ~0.70–0.74, overfits in ~1 epoch) but *degrades the
+warm-start policy* (demonstrated B1B2B3 failure). The campaign must move value
+WITHOUT collapsing policy. **What exists as config:** cosine LR + warmup
+(`lr_schedule`, `warmup_epochs`), `value_head_lr_factor` (5.0),
+`discrimination_weight`, EMA, and the anchor-gate-revert guard
+(`arena.revert_self_play_on_gate_failure`). **What's a BUILD item:** (a) a
+KL/entropy anchor to the frozen reference (RLHF-style — absent today), and (b)
+replay-buffer composition (the buffer is pure FIFO, supervisor.py:190-191 — no
+mixing of engine-corpus/pretrain data to anchor the distribution).
+
+**Staged plan, each stage gated (caps the downside — no weeks-long upfront bet):**
+- **Stage 0 — seed choice.** iter1_ema is over-converged (EMA peak → low
+  plasticity). Run TWO arms: (A) iter1_ema, (B) an earlier *pre-over-convergence*
+  checkpoint (more plastic). Fresher seed is likelier to move.
+- **Stage 1 — regime-change probe (~1–2 days, ~$50–100).** Minimal real test:
+  ~10× LR (1e-4) with cosine+warmup, ~5K games over ~10 iters, **sims 400 not
+  800** (depth amplifies a *frozen* evaluator — useless until it moves; spend
+  budget on games, not depth). Anchor-gate-revert ON. Monitor each iter:
+  **engine-labeled** held-out value AUC/Brier (removes the human-label-noise
+  confound that inflated the 0.70 floor), H2H vs frozen iter1_ema
+  (`measure_h2h.py`), policy-KL drift from seed.
+  - **Kill gate:** value AUC rises on held-out AND H2H ≥ 45% → GREEN to Stage 2.
+    Value moves but H2H collapses → Stage 1.5. Value flat even at 10× LR over 5K
+    games → real evidence of an evaluability ceiling → bank iter1_ema+E8.
+- **Stage 1.5 (conditional) — degradation-control build (~2–3 days eng).** Only
+  if "value moves, policy collapses." Build the KL anchor + buffer composition,
+  re-run Stage 1 with guards.
+- **Stage 2 — scaled campaign (~4–7 days, ~$300–800).** Only if green. 20–50K
+  games / 30–50 iters, schedule across the campaign, sims 400→800 once value is
+  moving, tightened gate. North-star: positive H2H slope vs frozen iter1_ema.
+  - **Kill gate:** sustained slope crossing >55% → full campaign + E20 throughput;
+    re-plateau → diminishing returns, bank.
+- **Stage 3 — full AZ-class (weeks, $2–5K+).** Only on a proven Stage-2 slope.
+
+**The one honest YINSH-specific factor (cuts both ways):** 22% draw rate + value
+AUC ceiling ~0.74 off a *large engine corpus* = low value-signal density per game.
+This argues FOR more games (Jack's instinct — less signal/game ⇒ need more games
+for the same learning), but it may ALSO be a partial evaluability floor that caps
+any value head. Stage 1 is precisely the cheap disambiguator.
+
+**Reasons to not believe / watch:** "just raise the LR" needs genuine tuning —
+degradation is a demonstrated failure mode, so Stage 1.5 may be mandatory, not
+optional. Over-converged seed may be the wrong start (the arm-B fresh seed
+hedges). No promise it clears iter1_ema. **But "we proved the loop can't work"
+was false — we proved the cautious micro-version can't, a much weaker claim.**
+This is the lever the evidence actually points to and the one never pulled.
+
+**Discipline:** H2H vs the FIXED champion iter1_ema (R1); one regime change at a
+time; hard go/no-go at each stage gate.
+
 ## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
 
 The 2026-05-29/30 work was recovered from a stash (it was never committed; the
