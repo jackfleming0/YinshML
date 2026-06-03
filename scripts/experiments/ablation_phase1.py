@@ -66,6 +66,31 @@ def with_feature(base: dict, feature: str, weight: float) -> dict:
     return out
 
 
+def calibrate_abs_values(features, n_states=None):
+    """Mean |value| of each feature over a calibration set (the human game).
+
+    Used to convert a *contribution budget* into a fair per-feature weight:
+    weight = budget / mean|value|. Without this, a fixed raw weight makes a
+    large-magnitude feature (e.g. ring_mobility ~±8) dominate the tuned 6 while
+    a small one (e.g. near_completion ~±0.3) barely registers — a scaling
+    artifact that masquerades as "no signal".
+    """
+    from yinsh_ml.game.constants import Player
+    from yinsh_ml.heuristics.experimental_features import extract_experimental_features
+    from yinsh_ml.data.human_games import bga_862307561 as g
+
+    sums = {f: 0.0 for f in features}
+    n = 0
+    for _t, _m, state in g.iter_states():
+        ev = extract_experimental_features(state, Player.BLACK)
+        for f in features:
+            sums[f] += abs(ev.get(f, 0.0))
+        n += 1
+        if n_states and n >= n_states:
+            break
+    return {f: (sums[f] / n if n else 1.0) for f in features}
+
+
 def parse_arms(add_specs):
     """['feat:4,8', ...] -> [(feat, 4.0), (feat, 8.0), ...]."""
     arms = []
@@ -85,8 +110,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", required=True, help="baseline 6-feature weights JSON")
-    ap.add_argument("--add", action="append", default=[], metavar="FEATURE:w1,w2",
-                    help="palette feature to ablate at the given weight(s). Repeatable.")
+    ap.add_argument("--add", action="append", default=[], metavar="FEATURE:n1,n2",
+                    help="palette feature to ablate. The numbers are raw weights, "
+                         "or (with --normalize) target contribution budgets. Repeatable.")
+    ap.add_argument("--normalize", action="store_true",
+                    help="interpret --add numbers as average CONTRIBUTION budgets "
+                         "(weight = budget / mean|value|), so arms are fair across "
+                         "features regardless of their value magnitude. Recommended.")
     ap.add_argument("--depths", default="1,2")
     ap.add_argument("--games", type=int, default=60, help="games per arm per depth")
     ap.add_argument("--seed", type=int, default=0)
@@ -102,6 +132,16 @@ def main(argv=None):
     arms = parse_arms(args.add)
     depths = [int(d) for d in args.depths.split(",")]
 
+    # Optionally convert contribution budgets -> fair per-feature weights.
+    abs_vals = {}
+    if args.normalize:
+        feats = sorted({f for f, _ in arms})
+        abs_vals = calibrate_abs_values(feats)
+        print("Calibration (mean|value| over the human game):")
+        for f in feats:
+            print(f"  {f:32} |val|~{abs_vals[f]:.3f}")
+        print()
+
     tmp = Path(tempfile.mkdtemp(prefix="ablation_"))
     base_path = tmp / "base.json"
     base_path.write_text(json.dumps(base))
@@ -112,9 +152,16 @@ def main(argv=None):
           f"{'elo':>7} {'sig?':>5}")
     print("-" * 100)
 
-    for feat, w in arms:
-        arm_weights = with_feature(base, feat, w)
-        arm_path = tmp / f"{feat}_{w}.json"
+    for feat, n in arms:
+        # n is a raw weight, or (with --normalize) a contribution budget.
+        if args.normalize:
+            weight = n / max(abs_vals[feat], 1e-6)
+            label = f"base+{feat}(c={n:g},w={weight:.2f})"
+        else:
+            weight = n
+            label = f"base+{feat}@{n:g}"
+        arm_weights = with_feature(base, feat, weight)
+        arm_path = tmp / f"{feat}_{n}.json"
         arm_path.write_text(json.dumps(arm_weights))
         for depth in depths:
             res = vw.run_ab(str(arm_path), str(base_path),
@@ -122,13 +169,13 @@ def main(argv=None):
             decided = res["a_wins"] + res["b_wins"]
             lo, hi = wilson_ci(res["a_wins"], decided)
             sig = "yes" if (lo > 0.5 or hi < 0.5) else "no"
-            label = f"base+{feat}@{w:g}"
             print(f"{label:>40} {depth:>5} "
                   f"{res['a_wins']:>3}-{res['b_wins']:<3}-{res['draws']:<2} "
                   f"{res['a_win_rate']:>8.3f} [{lo:.2f},{hi:.2f}] "
                   f"{res['elo_delta_a_over_b']:>+7.0f} {sig:>5}")
             rows.append({
-                "feature": feat, "weight": w, "depth": depth,
+                "feature": feat, "budget_or_weight": n, "weight": weight,
+                "normalized": args.normalize, "depth": depth,
                 "arm_wins": res["a_wins"], "base_wins": res["b_wins"],
                 "draws": res["draws"], "win_rate": res["a_win_rate"],
                 "ci95": [lo, hi], "elo": res["elo_delta_a_over_b"],
