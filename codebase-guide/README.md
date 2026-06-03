@@ -27,6 +27,22 @@ data-flow diagrams, quizzes, and hover-glossary tooltips on the domain jargon:
 5. **Learning From Experience** — self-play data, the two-headed loss, Parquet storage
 6. **Orchestration, Evaluation & Finding Your Way** — the supervisor, ELO, and repo map
 
+## Portable single-file version
+
+`yinshml-guide-standalone.html` is the same course with `styles.css` and `main.js`
+inlined — a single file you can email, drop anywhere, or open without its siblings.
+Regenerate it after a rebuild with:
+
+```bash
+cd codebase-guide && python3 - <<'PY'
+h=open('index.html').read();c=open('styles.css').read();j=open('main.js').read()
+h=h.replace('<link rel="stylesheet" href="styles.css">','<style>\n'+c+'\n</style>')
+h=h.replace('\n  <script src="main.js" defer></script>','')
+h=h.replace('</body>','  <script>\n'+j+'\n  </script>\n</body>')
+open('yinshml-guide-standalone.html','w').write(h)
+PY
+```
+
 ## Rebuild
 
 The page is assembled from parts (so modules stay editable). To regenerate
