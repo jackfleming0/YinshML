@@ -203,49 +203,8 @@ body.line-mode .controls .actions { opacity: 0.45; pointer-events: none; }
 .game-setup-block {
   border-top: 1px solid var(--rule);
 }
-.game-setup-title {
-  margin: 0 0 4px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-/* Numbered-step layout: small chip on the left, field on the right.
-   Makes the sequence (model → strength → spoilers → side → start)
-   visually obvious. */
-.game-setup-step {
-  display: grid;
-  grid-template-columns: 24px 1fr;
-  gap: 10px;
-  align-items: start;
-  padding: 6px 0;
-}
-.game-setup-step .step-num {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: white;
-  font-size: 11px;
-  font-weight: 700;
-  margin-top: 18px;
-}
-.game-spoilers-field span {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.game-spoilers-field small {
-  display: block;
-  font-size: 11px;
-  color: var(--ink-faint);
-  margin-top: 4px;
-  line-height: 1.4;
-}
+/* (Numbered-step / .step-num / .game-setup-title styles removed — the launcher
+   Play step uses flat .setup-section/.setup-settings instead; see below.) */
 
 .game-status-block {
   border-top: 1px solid var(--rule);
@@ -1135,6 +1094,9 @@ button.secondary:hover { background: var(--surface-2); }
   margin-top: 6px;
 }
 .value-label { font-size: 12px; color: var(--ink-dim); }
+/* Search avg sits beneath the headline Eval — dimmer, smaller, a diagnostic. */
+.value-row.secondary { opacity: 0.7; margin-top: 3px; }
+.value-row.secondary .value-num { font-size: 11px; }
 .value-help {
   margin-top: 6px;
   padding: 8px 10px;
@@ -1254,6 +1216,176 @@ button.secondary:hover { background: var(--surface-2); }
 .top-moves .bmv.negative { color: var(--negative); background: rgba(217, 83, 79, 0.18); }
 .top-moves .bmv.neutral { color: var(--ink-faint); }
 .top-moves .bmv.unknown { color: var(--ink-faint); }
+
+/* "Order by" segmented toggle — mirrors .mode-btn so the two questions
+   (engine's pick vs. best for you) read as a deliberate choice. */
+.sort-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+.sort-toggle .sort-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.sort-btns {
+  display: inline-flex;
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 2px;
+}
+.sort-btn {
+  background: transparent;
+  border: none;
+  padding: 3px 10px;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.sort-btn.active { background: var(--accent); color: white; }
+.sort-btn:not(.active):hover { color: var(--ink); }
+
+/* Opponent play-style chooser — tappable cards (OptionCard pattern). */
+.playstyle-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.playstyle-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 9px 11px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 7px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 100ms ease, background 100ms ease;
+}
+.playstyle-card:hover { border-color: var(--accent-dim); }
+.playstyle-card.selected {
+  border-color: var(--accent);
+  background: rgba(42, 167, 192, 0.1);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.playstyle-card .ps-title { font-size: 13px; font-weight: 600; color: var(--ink); }
+.playstyle-card .ps-gloss { font-size: 11px; line-height: 1.45; color: var(--ink-dim); }
+.playstyle-card .ps-gloss strong { color: var(--ink); font-weight: 600; }
+
+/* ---- Launcher gate: pick a job + configure, then drop into the board ---- */
+.launcher {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+  overflow-y: auto;
+}
+body.launched .launcher { display: none; }
+.launcher-inner { width: 100%; max-width: 560px; margin: auto; }
+.launcher-head { text-align: center; margin-bottom: 28px; }
+.launcher-head h1 { font-size: 30px; font-weight: 700; letter-spacing: 0.05em; margin: 0; color: var(--ink); }
+.launcher-sub { margin: 8px 0 0; color: var(--ink-dim); font-size: 14px; }
+.job-cards { display: flex; flex-direction: column; gap: 12px; }
+.job-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 18px 20px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.09));
+  border-radius: 10px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, transform 80ms ease;
+}
+.job-card:hover { border-color: var(--accent); background: rgba(42, 167, 192, 0.08); }
+.job-card:active { transform: translateY(1px); }
+.job-card .job-title { font-size: 17px; font-weight: 600; color: var(--ink); }
+.job-card .job-desc { font-size: 13px; color: var(--ink-dim); line-height: 1.45; }
+.launcher-back {
+  background: none;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 0 0 12px;
+}
+.launcher-back:hover { color: var(--ink); }
+/* The relocated #game-setup-block sits inside the Play step — strip its
+   sidebar card chrome so it reads as part of the launcher. */
+#launcher-play .game-setup-block { background: transparent; padding: 0; border: none; }
+
+/* Play setup, restyled for the launcher: flat sections (no numbered-step
+   boxes), opponent cards as the primary decision, a tight subordinate
+   settings cluster, strong CTA. */
+.setup-section { margin-bottom: 22px; }
+.setup-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+/* The opponent prompt is the primary instruction — a touch more present. */
+.setup-section > .setup-label { display: block; margin-bottom: 10px; font-size: 12px; color: var(--ink-dim); }
+.setup-field > .setup-label { display: block; margin-bottom: 6px; }
+.setup-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+.setup-field { display: flex; flex-direction: column; }
+.setup-field select { width: 100%; }
+.setup-toggle {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 11px 13px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  cursor: pointer;
+  margin-bottom: 18px;
+}
+.setup-toggle input { margin-top: 2px; flex: none; }
+.setup-toggle > span { font-size: 13px; color: var(--ink); line-height: 1.45; }
+.setup-toggle small { display: block; color: var(--ink-dim); font-size: 11px; margin-top: 2px; }
+.setup-start { width: 100%; padding: 12px; font-size: 15px; font-weight: 600; }
+
+/* Gentle reveal of the settings once an opponent is chosen. */
+#game-setup-rest { animation: setupReveal 200ms ease both; }
+@keyframes setupReveal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { #game-setup-rest { animation: none; } }
+
+/* The subtitle is a landing-page flourish — drop it once you're in a sub-step. */
+#launcher:has(#launcher-jobs[hidden]) .launcher-sub { display: none; }
+
+/* Sidebar header row holding the New-session affordance. */
+.header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+
+/* The engine's committed move when the list is re-sorted "best for you". */
+.top-moves .engine-tag {
+  margin-left: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 4px;
+  vertical-align: middle;
+}
 /* Visually flag rows where the after-value sign disagrees with the
    headline search_avg sign — that's the "MCTS-confidently-wrong-at-root,
    accurate-one-ply-deeper" pattern worth surfacing. */

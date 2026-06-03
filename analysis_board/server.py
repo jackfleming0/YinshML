@@ -835,6 +835,15 @@ def _mcts_result_from_probs(mcts, probs, gs, valid_moves, model_id, top_k, num_s
                 if matched_move is None:
                     entry["principal_variation"] = []
                     continue
+                # Per-move backed-up Q — the search's deep value for the line that
+                # starts with this move (vs. best_move_value, a static 1-ply read).
+                # child.value() is in the perspective of the player who moved into
+                # the child = the root's side to move (mover) — the same POV as
+                # `value`/`best_move_value`; the frontend's toWhitePov handles the
+                # WHITE-POV display flip. Only trust it once the child has visits.
+                child = root.children.get(matched_move)
+                if child is not None and child.visit_count > 0:
+                    entry["q_value"] = float(child.value())
                 # depth=8, min_visits=4: explore deeper but cut off when search
                 # hasn't allocated enough budget to trust the best-child pick.
                 pv_steps = _extract_pv_for_move(root, matched_move, depth=8, min_visits=4)
@@ -944,7 +953,7 @@ def _evaluate_policy(ctx):
     return top, value, top_move
 
 
-def _finalize_eval_response(gs, valid_moves, *, mode, value, best_value, top, num_sims, capped_from, symmetric=False):
+def _finalize_eval_response(gs, valid_moves, *, mode, value, best_value, top, num_sims, capped_from, symmetric=False, pv_value=None):
     """Assemble the JSON body returned by both the sync route and async job."""
     return {
         "ok": True,
@@ -952,6 +961,12 @@ def _finalize_eval_response(gs, valid_moves, *, mode, value, best_value, top, nu
         # True when the D2-symmetric averaging actually ran (mcts mode only) —
         # lets the UI label the reading and explains the 4x search time.
         "symmetric": bool(symmetric),
+        # Headline eval = the backed-up Q of the engine's top move = the value of
+        # the principal variation (chess-style "eval of the best line"). Null in
+        # policy mode (no tree); the UI falls back to best_move_value there.
+        "pv_value": pv_value,
+        # root.Q — visit-weighted average over ALL searched lines. Regresses
+        # toward 0 with more sims; kept as a secondary "Search avg" diagnostic.
         "value": value,
         "best_move_value": best_value,
         "side_to_move": gs.current_player.name,
@@ -1020,10 +1035,11 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         mode = "policy"
 
     best_value = top[0].get("best_move_value") if top else None
+    pv_value = top[0].get("q_value") if top else None
     return jsonify(_finalize_eval_response(
         gs, valid_moves, mode=mode, value=value, best_value=best_value,
         top=top, num_sims=num_sims, capped_from=ctx["capped_from"],
-        symmetric=ctx["symmetric"] and num_sims > 0,
+        symmetric=ctx["symmetric"] and num_sims > 0, pv_value=pv_value,
     ))
 
 
@@ -1083,10 +1099,11 @@ def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
                 top, value, _ = _evaluate_policy(ctx)
                 mode = "policy"
         best_value = top[0].get("best_move_value") if top else None
+        pv_value = top[0].get("q_value") if top else None
         result = _finalize_eval_response(
             gs, valid_moves, mode=mode, value=value, best_value=best_value,
             top=top, num_sims=num_sims, capped_from=ctx["capped_from"],
-            symmetric=ctx["symmetric"] and num_sims > 0,
+            symmetric=ctx["symmetric"] and num_sims > 0, pv_value=pv_value,
         )
         elapsed = time.time() - started
         rate = (num_sims / elapsed) if elapsed > 0 else 0.0
@@ -1386,7 +1403,9 @@ def main() -> None:
     global _models  # noqa: PLW0603
     _models = discover_models()
     host = os.environ.get("YNS_HOST", "127.0.0.1")
-    port = int(os.environ.get("YNS_PORT", "5173"))
+    # Honor PORT (set by dev-server launchers / preview tooling) before falling
+    # back to YNS_PORT then the default 5173 — prod sets neither, so unchanged.
+    port = int(os.environ.get("PORT") or os.environ.get("YNS_PORT") or "5173")
     log.info("starting analysis board on http://%s:%d", host, port)
     app.run(host=host, port=port, debug=False, threaded=False)
 

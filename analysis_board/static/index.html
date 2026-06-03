@@ -15,6 +15,40 @@
   </script>
 </head>
 <body>
+  <!-- Launcher gate: pick a job + configure, THEN drop into the experience.
+       Shown by default; hidden once body.launched is set. The Play step
+       hosts #game-setup-block, relocated into it at runtime. -->
+  <div id="launcher" class="launcher">
+    <div class="launcher-inner">
+      <header class="launcher-head">
+        <h1>YINSH</h1>
+        <p class="launcher-sub">Play the network, analyze a position, or review a game.</p>
+      </header>
+
+      <div class="launcher-step" id="launcher-jobs">
+        <div class="job-cards">
+          <button type="button" class="job-card" data-job="play">
+            <span class="job-title">Play the engine</span>
+            <span class="job-desc">Pick an opponent style and play a full game.</span>
+          </button>
+          <button type="button" class="job-card" data-job="analyze">
+            <span class="job-title">Analyze a position</span>
+            <span class="job-desc">Compose a position and ask the network what it thinks.</span>
+          </button>
+          <button type="button" class="job-card" data-job="review">
+            <span class="job-title">Review a game</span>
+            <span class="job-desc">Load a Board Game Arena game and step through it with engine commentary.</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="launcher-step" id="launcher-play" hidden>
+        <button type="button" class="launcher-back" id="launcher-play-back">← back</button>
+        <!-- #game-setup-block is moved in here at runtime (see app.js init). -->
+      </div>
+    </div>
+  </div>
+
   <div class="app">
     <main class="board-area">
       <div class="mode-row">
@@ -70,7 +104,10 @@
 
     <aside class="controls">
       <header>
-        <h1>YINSH analysis</h1>
+        <div class="header-row">
+          <h1>YINSH analysis</h1>
+          <button type="button" id="new-session-btn" class="link-button" title="Back to the launcher to start over or switch what you're doing">↺ New session</button>
+        </div>
         <p class="subtitle" id="sidebar-subtitle">Compose a position, ask the network.</p>
       </header>
 
@@ -206,54 +243,55 @@
       </details>
 
       <section class="block game-setup-block" id="game-setup-block" hidden>
-        <h2 class="game-setup-title">New game</h2>
-
-        <div class="game-setup-step">
-          <span class="step-num">1</span>
-          <label class="field">
-            <span>Engine model</span>
-            <select id="game-model"></select>
-          </label>
+        <div class="setup-section">
+          <span class="setup-label">Choose your opponent</span>
+          <div class="playstyle-cards" id="playstyle-cards">
+            <button type="button" class="playstyle-card" data-style="tight">
+              <span class="ps-title">Tight, corner-focused</span>
+              <span class="ps-gloss">Builds a cluster in one corner and presses from there — sharp and committal. <strong>Strongest.</strong></span>
+            </button>
+            <button type="button" class="playstyle-card" data-style="spread">
+              <span class="ps-title">Spread, whole-board</span>
+              <span class="ps-gloss">Same engine, but opens across the whole board instead of locking a corner — balanced, harder to read.</span>
+            </button>
+            <button type="button" class="playstyle-card" data-style="even">
+              <span class="ps-title">Even, center-focused</span>
+              <span class="ps-gloss">Plays through the middle and spreads evenly — calmer and more forgiving. <strong>Gentlest.</strong></span>
+            </button>
+          </div>
+          <!-- Driven by the playstyle cards above; kept for startGame's model sync. -->
+          <select id="game-model" hidden></select>
         </div>
 
-        <div class="game-setup-step">
-          <span class="step-num">2</span>
-          <label class="field">
-            <span>Engine strength</span>
-            <select id="game-sims">
-              <option value="200">Quick — 200 sims (~1s/move)</option>
-              <option value="800" selected>Standard — 800 sims (~5s/move)</option>
-              <option value="1600">Strong — 1600 sims (~10s/move)</option>
-              <option value="3200">Deep — 3200 sims (~25s/move)</option>
-            </select>
-          </label>
-        </div>
+        <div id="game-setup-rest" hidden>
+          <div class="setup-settings">
+            <label class="setup-field">
+              <span class="setup-label">Strength</span>
+              <select id="game-sims">
+                <option value="200">Quick — 200 sims (~1s/move)</option>
+                <option value="800" selected>Standard — 800 sims (~5s/move)</option>
+                <option value="1600">Strong — 1600 sims (~10s/move)</option>
+                <option value="3200">Deep — 3200 sims (~25s/move)</option>
+              </select>
+            </label>
+            <label class="setup-field">
+              <span class="setup-label">Your side</span>
+              <select id="game-human-side">
+                <option value="WHITE" selected>White (first to move)</option>
+                <option value="BLACK">Black</option>
+                <option value="random">Random</option>
+              </select>
+            </label>
+          </div>
 
-        <div class="game-setup-step">
-          <span class="step-num">3</span>
-          <label class="field game-spoilers-field">
-            <span>
-              <input type="checkbox" id="game-spoilers" />
-              Show engine analysis during play
+          <label class="setup-toggle">
+            <input type="checkbox" id="game-spoilers" />
+            <span>Show engine analysis during play
+              <small>Off keeps the engine's picks hidden so they don't sway you — toggle anytime.</small>
             </span>
-            <small>Off (default) hides the top-moves panel + value bars so the engine's picks don't influence yours. Can be toggled mid-game. Capture choices (which row to remove) stay visible regardless — you need them to play.</small>
           </label>
-        </div>
 
-        <div class="game-setup-step">
-          <span class="step-num">4</span>
-          <label class="field">
-            <span>Your side</span>
-            <select id="game-human-side">
-              <option value="WHITE" selected>White (first to move)</option>
-              <option value="BLACK">Black</option>
-              <option value="random">Random</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="actions">
-          <button id="game-start" class="primary">Start game</button>
+          <button id="game-start" class="primary setup-start">Start game</button>
         </div>
       </section>
 
@@ -337,21 +375,28 @@
         <div class="status" id="status">Compose a position and click Analyze.</div>
 
         <div class="value-row" id="value-row" hidden>
-          <span class="value-label" id="value-label">Search avg</span>
+          <span class="value-label" id="value-label">Eval</span>
           <div class="value-bar"><div class="value-fill" id="value-fill"></div><div class="value-zero"></div></div>
           <span class="value-num" id="value-num">—</span>
         </div>
-        <div class="value-row" id="best-value-row" hidden>
-          <span class="value-label">Best move</span>
+        <div class="value-row secondary" id="best-value-row" hidden>
+          <span class="value-label" id="best-value-label">Search avg</span>
           <div class="value-bar"><div class="value-fill" id="best-value-fill"></div><div class="value-zero"></div></div>
           <span class="value-num" id="best-value-num">—</span>
         </div>
         <div class="value-help" id="value-help" hidden>
           Chess convention: <strong>+ means WHITE winning</strong>, <strong>− means BLACK winning</strong>, regardless of whose turn it is.
-          <strong>Search avg</strong>: visit-weighted average across all simulated lines (trends to 0 with more sims).
-          <strong>Best move</strong>: network value at the position after the top move — closer to "is this winning."
+          <strong>Eval</strong>: value of the engine's best line (the principal variation) assuming best play — the headline read on the position.
+          <strong>Search avg</strong>: visit-weighted average across <em>all</em> searched moves, weak ones included; it regresses toward 0 as sims climb and can read differently from Eval. A search diagnostic, not the position's verdict.
         </div>
 
+        <div class="sort-toggle" id="sort-toggle" hidden>
+          <span class="sort-label">Order by</span>
+          <div class="sort-btns">
+            <button type="button" class="sort-btn active" data-sort="visits" title="The order the engine would play — most-searched moves first.">Engine's pick</button>
+            <button type="button" class="sort-btn" data-sort="value" title="Best for the side to move — the move that most improves your position.">Best for you</button>
+          </div>
+        </div>
         <ol class="top-moves" id="top-moves"></ol>
       </section>
 

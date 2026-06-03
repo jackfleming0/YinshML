@@ -73,6 +73,8 @@ const state = {
   hoverPos: null,            // {col,row} or null — for drop preview
   hoverArrow: null,          // {from:{col,row}, to:{col,row}} | null — for top-move hover
   lastResult: null,          // last /api/evaluate response
+  sortMode: "visits",        // "visits" (engine's pick) | "value" (best for side to move)
+  selectedPlaystyle: null,   // chosen opponent style id (PLAYSTYLES key) in game setup
   models: [],
   mode: "play",              // "setup" | "play" — Play is the default landing
   opponent: "engine",        // "self" | "engine" — Engine is the default opponent
@@ -712,8 +714,10 @@ const valueLabel = $("value-label");
 const bestValueRow = $("best-value-row");
 const bestValueFill = $("best-value-fill");
 const bestValueNum = $("best-value-num");
+const bestValueLabel = $("best-value-label");
 const valueHelp = $("value-help");
 const topMovesEl = $("top-moves");
+const sortToggleEl = $("sort-toggle");
 const playControls = $("play-controls");
 const undoBtn = $("undo");
 const autoEvalEl = $("auto-eval");
@@ -735,6 +739,25 @@ const gameSimsEl = $("game-sims");
 const PLAY_MODE_MAX_SIMS = 3200;
 const gameModelEl = $("game-model");
 const gameSpoilersEl = $("game-spoilers");
+const playstyleCardsEl = $("playstyle-cards");
+const gameSetupRestEl = $("game-setup-rest");
+const launcherEl = $("launcher");
+const launcherJobsEl = $("launcher-jobs");
+const launcherPlayEl = $("launcher-play");
+const newSessionBtn = $("new-session-btn");
+
+// Named opponent play styles — each bundles a checkpoint + symmetry setting.
+// Grounded in the opening-style characterization (scripts/characterize_opening_style.py):
+// iter1_ema clusters its rings into a tight corner (greedy White spread 0.85);
+// turning symmetry OFF lets MCTS amplify that into a corner-locked opening, ON
+// spreads it across the board's D2 orbit. The symmetric-15ch model opens through
+// the center and spreads evenly (spread ~1.16), and is the weaker checkpoint.
+// model ids must match /api/models; symmetry feeds the live symmetric-mcts toggle.
+const PLAYSTYLES = {
+  tight:  { model: "iter1_ema_2026-05-27/iter1_ema.pt",                symmetric: false },
+  spread: { model: "iter1_ema_2026-05-27/iter1_ema.pt",                symmetric: true  },
+  even:   { model: "symmetry_run/symmetric-15ch-iter1-ema.pt",         symmetric: true  },
+};
 const gameSpoilersInlineEl = $("game-spoilers-inline");
 const gameStartBtn = $("game-start");
 const gameNewBtn = $("game-new");
@@ -1058,21 +1081,33 @@ function renderResult(data) {
   // clamp the bar render to [-1, 1] to keep the UI sane.
   const mode = (evalModeEl && evalModeEl.value) || "pure_neural";
   const heuristicMode = mode !== "pure_neural";
-  const v = data.value;
-  const vBar = Math.max(-1, Math.min(1, v));
-  valueRow.hidden = false;
   const modeTag = heuristicMode ? " · heuristic units" : "";
-  // Universal WHITE-POV convention — explicit in the label so a new user
-  // doesn't mistake "−0.5 with BLACK to move" for "BLACK losing."
-  valueLabel.textContent = `Search avg (WHITE POV)${modeTag}`;
-  valueNum.textContent = heuristicMode ? v.toFixed(2) : v.toFixed(3);
-  paintValueBar(valueFill, vBar);
+  const fmt = (x) => heuristicMode ? x.toFixed(2) : x.toFixed(3);
 
-  if (data.best_move_value !== null && data.best_move_value !== undefined) {
-    const bv = Math.max(-1, Math.min(1, data.best_move_value));
+  // PRIMARY — "Eval": the value of the engine's best line (PV) = the top move's
+  // backed-up Q. In policy mode (no search tree) there's no PV, so fall back to
+  // the 1-ply best_move_value. WHITE-POV is explicit in the label so a new user
+  // doesn't read "−0.5 with BLACK to move" as "BLACK losing."
+  const evalVal = (typeof data.pv_value === "number") ? data.pv_value
+                : (typeof data.best_move_value === "number") ? data.best_move_value : null;
+  if (evalVal !== null) {
+    valueRow.hidden = false;
+    valueLabel.textContent = (typeof data.pv_value === "number")
+      ? `Eval (WHITE POV)${modeTag}`
+      : `Eval · raw (WHITE POV)${modeTag}`;
+    valueNum.textContent = fmt(evalVal);
+    paintValueBar(valueFill, Math.max(-1, Math.min(1, evalVal)));
+  } else {
+    valueRow.hidden = true;
+  }
+
+  // SECONDARY — "Search avg": root.Q, the visit-weighted average over the whole
+  // tree. Only meaningful when a search actually ran (mcts mode).
+  if (data.mode === "mcts" && typeof data.value === "number") {
     bestValueRow.hidden = false;
-    bestValueNum.textContent = bv.toFixed(3);
-    paintValueBar(bestValueFill, bv);
+    if (bestValueLabel) bestValueLabel.textContent = `Search avg${modeTag}`;
+    bestValueNum.textContent = fmt(data.value);
+    paintValueBar(bestValueFill, Math.max(-1, Math.min(1, data.value)));
   } else {
     bestValueRow.hidden = true;
   }
@@ -1080,10 +1115,11 @@ function renderResult(data) {
 
   // Top moves
   topMovesEl.innerHTML = "";
-  // Sign of the headline search_avg — used to flag rows whose after-value
-  // disagrees. For heuristic modes, the headline is in heuristic units so
-  // sign is still comparable to the network's [-1, 1] best_move_value.
-  const headlineSign = Math.sign(data.value || 0);
+  // Per-row value = the move's backed-up Q (deep) when search produced one,
+  // else the 1-ply best_move_value (policy mode / unvisited-in-identity-tree).
+  const rowValue = (m) => (typeof m.q_value === "number") ? m.q_value : m.best_move_value;
+  // Sign of the headline Eval — used to flag rows whose value disagrees.
+  const headlineSign = Math.sign((typeof evalVal === "number" ? evalVal : data.value) || 0);
   // In Play+Engine with spoilers off + capture phase, resort the list by
   // canonical board position so the user picks blindly — the engine's
   // preferred row is no longer at position 1. The percentages / visits /
@@ -1097,18 +1133,35 @@ function renderResult(data) {
     if (mv.type === "REMOVE_MARKERS" && mv.markers && mv.markers.length) return mv.markers[0];
     return mv.source || "";
   };
-  const moves = inCaptureBlind
-    ? [...data.top_moves].sort((a, b) => moveCanonKey(a).localeCompare(moveCanonKey(b)))
-    : data.top_moves;
+  // "Best for you" re-sorts the (visit-filtered) top moves by how much they
+  // help the side to move. Values are WHITE-POV here (post toWhitePov), so for
+  // WHITE higher is better, for BLACK lower is better — fold both into a single
+  // "good for the mover" score and sort descending. Rows with no value sink.
+  const moverGood = (m) => {
+    const val = rowValue(m);
+    if (typeof val !== "number") return -Infinity;
+    return data.side_to_move === "BLACK" ? -val : val;
+  };
+  const valueSort = state.sortMode === "value" && !inCaptureBlind;
+  const enginePick = data.top_moves[0] || null;  // visit-rank #1 (server order)
+  let moves;
+  if (inCaptureBlind) {
+    moves = [...data.top_moves].sort((a, b) => moveCanonKey(a).localeCompare(moveCanonKey(b)));
+  } else if (valueSort) {
+    moves = [...data.top_moves].sort((a, b) => moverGood(b) - moverGood(a));
+  } else {
+    moves = data.top_moves;
+  }
+  if (sortToggleEl) sortToggleEl.hidden = inCaptureBlind || data.top_moves.length === 0;
   moves.forEach((mv, i) => {
     const li = document.createElement("li");
     if (i === 0) li.classList.add("top");
     li.dataset.idx = i;
-    // Per-row best_move_value cell — sign-colored, with a row-level
-    // "divergent" flag when the sign disagrees with the headline search_avg.
+    // Per-row value cell — the move's backed-up Q (or 1-ply fallback),
+    // sign-colored, with a "divergent" flag when its sign opposes the Eval.
     let bmvClass = "unknown";
     let bmvText = "—";
-    let bmv = mv.best_move_value;
+    let bmv = rowValue(mv);
     if (typeof bmv === "number") {
       bmvText = (bmv >= 0 ? "+" : "") + bmv.toFixed(2);
       if (Math.abs(bmv) < 0.05) bmvClass = "neutral";
@@ -1121,10 +1174,16 @@ function renderResult(data) {
         li.classList.add("divergent");
       }
     }
+    // In "Best for you" order, flag the move the engine would actually play
+    // (visit-rank #1) so both questions stay legible — what's best for you vs.
+    // what the engine commits to.
+    const engineTag = (valueSort && mv === enginePick)
+      ? `<span class="engine-tag" title="The move the engine would play (most MCTS visits)">engine</span>`
+      : "";
     li.innerHTML = `
       <span class="rank">${i + 1}.</span>
-      <span class="move-desc">${formatMove(mv)}</span>
-      <span class="bmv ${bmvClass}" title="best_move_value — network value at position after this move (side-to-move POV)">${bmvText}</span>
+      <span class="move-desc">${formatMove(mv)}${engineTag}</span>
+      <span class="bmv ${bmvClass}" title="This move's eval — the search's backed-up value for the line it starts (raw 1-ply value if unsearched). Chess convention: + WHITE / − BLACK.">${bmvText}</span>
       <span class="prob-cell">
         ${mv.visits !== undefined ? `<span class="visits">${mv.visits}v</span>` : ""}
         <span class="prob-bar"><span class="prob-fill" style="width:${(mv.prob * 100).toFixed(1)}%"></span></span>
@@ -1208,10 +1267,12 @@ function toWhitePov(data) {
   const out = { ...data };
   if (typeof out.value === "number") out.value = -out.value;
   if (typeof out.best_move_value === "number") out.best_move_value = -out.best_move_value;
+  if (typeof out.pv_value === "number") out.pv_value = -out.pv_value;
   if (Array.isArray(out.top_moves)) {
     out.top_moves = out.top_moves.map((m) => ({
       ...m,
       best_move_value: (typeof m.best_move_value === "number") ? -m.best_move_value : m.best_move_value,
+      q_value: (typeof m.q_value === "number") ? -m.q_value : m.q_value,
     }));
   }
   return out;
@@ -1261,6 +1322,16 @@ document.querySelectorAll(".mode-btn").forEach((btn) => {
 });
 document.querySelectorAll(".opp-btn").forEach((btn) => {
   btn.addEventListener("click", () => setOpponent(btn.dataset.opponent));
+});
+document.querySelectorAll(".sort-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.sortMode = btn.dataset.sort;
+    document.querySelectorAll(".sort-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    if (state.lastResult) renderResult(state.lastResult);  // re-render, no re-fetch
+  });
+});
+document.querySelectorAll(".playstyle-card").forEach((card) => {
+  card.addEventListener("click", () => selectPlaystyle(card.dataset.style));
 });
 
 function applyModeStyling(mode) {
@@ -1388,15 +1459,60 @@ async function setOpponent(opp) {
 
 // ---------- Game mode lifecycle ----------
 
+// Pick an opponent play style → set the underlying model + symmetry, then
+// progressively reveal the rest of the setup (strength / spoilers / side).
+function selectPlaystyle(styleId) {
+  const ps = PLAYSTYLES[styleId];
+  if (!ps) return;
+  if (playstyleCardsEl) {
+    playstyleCardsEl.querySelectorAll(".playstyle-card").forEach((c) =>
+      c.classList.toggle("selected", c.dataset.style === styleId));
+  }
+  // Drive the existing plumbing: startGame syncs gameModelEl → modelSel, and the
+  // engine's moves read the live symmetric-mcts toggle via symmetricEnabled().
+  if (gameModelEl) gameModelEl.value = ps.model;
+  if (symmetricEl) symmetricEl.checked = ps.symmetric;
+  state.selectedPlaystyle = styleId;
+  if (gameSetupRestEl) gameSetupRestEl.hidden = false;
+}
+
+function resetPlaystyleChoice() {
+  state.selectedPlaystyle = null;
+  if (playstyleCardsEl) {
+    playstyleCardsEl.querySelectorAll(".playstyle-card").forEach((c) => c.classList.remove("selected"));
+  }
+  if (gameSetupRestEl) gameSetupRestEl.hidden = true;
+}
+
+// --- Launcher gate -------------------------------------------------------
+// The launcher overlay is shown by default (body lacks `launched`). Picking a
+// job configures + drops the user into the experience by calling the existing
+// entry fns (startGame / setMode), then `leaveLauncher` reveals the board.
+function showLauncherStep(step) {
+  if (launcherJobsEl) launcherJobsEl.hidden = step !== "jobs";
+  if (launcherPlayEl) launcherPlayEl.hidden = step !== "play";
+}
+function enterLauncher(step = "jobs") {
+  document.body.classList.remove("launched");
+  showLauncherStep(step);
+}
+function leaveLauncher() {
+  document.body.classList.add("launched");
+}
+
 function enterGameSetup() {
+  // Game config lives in the launcher's Play step now (the relocated
+  // #game-setup-block) — open the launcher there rather than a sidebar block.
   state.game = { phase: "setup" };
+  resetPlaystyleChoice();
   gameSetupBlock.hidden = false;
   gameStatusBlock.hidden = true;
   gameResultEl.hidden = true;
   gameThinkingEl.hidden = true;
   document.body.classList.remove("game-playing", "game-ended", "spoilers-off");
   document.body.classList.add("game-setup");
-  boardHint.textContent = "Configure your game on the right, then click Start.";
+  enterLauncher("play");
+  boardHint.textContent = "Choose your opponent, then start.";
 }
 
 async function startGame() {
@@ -1442,6 +1558,7 @@ async function startGame() {
   // Sync the inline spoilers toggle with the setup choice.
   gameSpoilersInlineEl.checked = spoilersEnabled;
 
+  leaveLauncher();  // config committed — drop the user onto the board
   showGameUI();
   updateDerivedStats();
   updateTurnBadge("WHITE", "RING_PLACEMENT");
@@ -2136,9 +2253,39 @@ applyOpponentStyling(state.opponent);
 loadModels();
 updateDerivedStats();
 render();
-// Default landing = Play + vs Engine → land users straight in the New Game
-// stepper instead of an empty board with no obvious next action. Users who
-// want to compose a position click "Set up position" to escape into Setup.
-if (state.mode === "play" && state.opponent === "engine" && !state.game) {
-  enterGameSetup();
+// Relocate the game-config block into the launcher's Play step so ALL config
+// lives in the gate. ids are preserved by the move, so startGame's plumbing
+// (which reads #game-sims, #game-model, etc. by id) is untouched.
+if (launcherPlayEl && gameSetupBlock) {
+  gameSetupBlock.hidden = false;
+  launcherPlayEl.appendChild(gameSetupBlock);
 }
+
+// Launcher navigation: each job configures (or drops straight in) then reveals
+// the board via the existing entry fns.
+if (launcherEl) {
+  launcherEl.querySelectorAll(".job-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      const job = card.dataset.job;
+      if (job === "play") {
+        state.opponent = "engine";
+        applyOpponentStyling("engine");
+        if (state.mode !== "play") setMode("play");  // → enterGameSetup → launcher Play step
+        else enterGameSetup();
+      } else if (job === "analyze") {
+        leaveLauncher();
+        setMode("setup");
+      } else if (job === "review") {
+        leaveLauncher();
+        setMode("review");
+      }
+    });
+  });
+}
+const launcherPlayBackBtn = $("launcher-play-back");
+if (launcherPlayBackBtn) launcherPlayBackBtn.addEventListener("click", () => showLauncherStep("jobs"));
+if (newSessionBtn) newSessionBtn.addEventListener("click", () => enterLauncher("jobs"));
+
+// Landing = the launcher gate (pick a job → configure → drop into the board),
+// not a bare empty board.
+enterLauncher("jobs");
