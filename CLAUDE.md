@@ -226,6 +226,27 @@ Learned from 100K+ games analysis (see `QUICK_START_GUIDE.md` for details):
 
 Weights are **phase-specific** - different priorities for early/mid/late game.
 
+**Caveat — two of the top features are inert in real play** (found reviewing a
+strong human game, see `docs/game_reviews/bga_862307561_review.md`):
+- `completed_runs_differential` reads ~0 at every observable position because
+  completed rows are removed within the same turn (legitimate, not a bug).
+- `potential_runs_count` was a latent bug — it filtered `find_marker_rows()`
+  (length ≥5 only) for length-3/4 runs, an unsatisfiable condition, so it was
+  identically 0 everywhere. **Fixed** via `features.py::_maximal_marker_runs`;
+  its weight (0.171) was fit against the old constant and should be re-fit.
+
+Guard against silent re-death with
+`yinsh_ml/heuristics/feature_diagnostics.py::feature_liveness_report` (wired to
+the human game in `tests/test_feature_liveness.py`).
+
+**Experimental feature palette** (`yinsh_ml/heuristics/experimental_features.py`)
+— candidate strategic signals the production set can't express (ring
+optionality, immediate-completion pressure, a real *defensive* term, tempo).
+Deliberately **not wired into default weights**; an opt-in palette for
+weight-learning/ablation. Strong human games live in
+`yinsh_ml/data/human_games/` (engine regression fixtures + analysis material;
+replay via `scripts/review_human_game.py`).
+
 ### Transposition Table Integration
 - **Enabled by default** in `HeuristicAgent`
 - Uses Zobrist hashing for position encoding — `ZobristHasher.hash_state(state)` hashes the board **AND** side-to-move **AND** game phase. Two positions with identical piece layout but different `current_player` or `phase` now correctly hash to different values. O(1) `toggle_side_to_move` / `toggle_phase` helpers support incremental updates.
