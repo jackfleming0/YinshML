@@ -2108,6 +2108,44 @@ Conditioned on the D.2 SPRT outcome (currently pending):
 
 ---
 
+## Heuristic evaluation-form investigation (2026-06-03) — forward queue
+
+This thread started from a coaching review of a strong human game (BGA
+862307561, see `docs/game_reviews/bga_862307561_review.md`). It produced
+correctness fixes, a configurable-feature-set + experiment harness, and a
+**well-powered null** on adding hand-crafted features (see the Done entry
+below). The remaining options, ranked:
+
+**HF-1 — Cheap re-fit check (re-fit the original 6 weights).** *Status: queued,
+next.* Re-fit the 6 production weights on real game outcomes (now that
+`potential_runs_count` is live) and A/B vs baseline agent-vs-agent. Cost: low
+(CPU; needs a real game corpus + pyarrow). **Expected payoff: low** — the Phase 1
+mechanism finding says the bottleneck is the heuristic's *linear form*, not its
+weights, so re-weighting linear terms is unlikely to help much. Run it to close
+the loop and to have honest evidence either way, not because we expect a win.
+
+**HF-2 — Features as network inputs (the functional-form test).** *Status:
+queued, build-not-launch.* Add the strategic features (esp. `ring_mobility`,
+`defensive_disruption` — the ones carrying independent signal) as channels to the
+`EnhancedStateEncoder`, and let TRAINING weight them nonlinearly. This is the
+*direct* test of the Phase 1 conclusion ("information is real but a linear
+weight can't exploit it"). Cost: training run (GPU/cloud, hours+). **Expected
+payoff: medium** — it's the principled next step, but competes with the
+in-flight value-head work; build it ready-to-launch, don't fire while that runs.
+
+**HF-3 — Pivot to learned-value (AlphaZero direction).** *Status: parked,
+references `TRAINING_REFACTOR_PLAN.md`.* Demote the heuristic to a prior, trust
+the learned value head. Biggest effort; where the evidence points for real
+strength gains. Overlaps the current cloud value-head experiment — revisit once
+that lands.
+
+**Why this order:** HF-1 is cheap and closes the only untested heuristic-level
+axis; HF-2 is the real test of the mechanism finding but costs a training run;
+HF-3 is the strategic redirect. HF-1 and HF-2 are both buildable now; HF-2/HF-3
+launches gated on the in-flight value-head run.
+
+---
+
 ## Cross-references
 
 - `VOLUME_PRETRAIN_RESULTS.md` — chronological log of branch D sessions.
@@ -2170,6 +2208,56 @@ current state of the priors?" The verdict + crucial detail + confirmed
 findings answer that in ~30 seconds. The operational lessons section
 prevents the most common research-debt failure mode: rediscovering the
 same bug or pattern session after session.
+
+---
+
+### HF — Heuristic feature ablation (palette as linear terms) — **NULL / NOT_STRONGER** (2026-06-03)
+
+Reviewed a strong human game (BGA 862307561), fixed two dead heuristic features
+(`potential_runs_count` was identically 0 — a latent bug; `completed_runs_diff`
+legitimately ~0 due to same-turn row removal), built a configurable-feature-set
+evaluator + a contribution-normalized agent-ablation harness, and ran a
+well-powered depth-1 ablation of all 5 experimental palette features
+(`yinsh_ml/heuristics/experimental_features.py`) added one-at-a-time to the
+fixed baseline-6. CPU only (4 cores, parallel). Full writeup:
+`docs/experiments/phase1_feature_ablation_results.md`.
+
+**Result block:**
+- **NULL** — 300 games/cell, every arm 0.467–0.513 win-rate vs baseline, every
+  Wilson 95% CI brackets 0.5. Placebo (`@0`) = 0.483. No feature, at any fair
+  weight (budget 4 or 8), beats baseline agent-vs-agent at depth 1.
+- An earlier 80-game run showed `defensive_disruption` at 0.600; powering to 300
+  games collapsed it to 0.483 (flat dose curve). The lead was small-sample noise.
+- JSON: `docs/experiments/phase1_depth1_results.json`.
+
+**The crucial detail:** `ring_mobility_differential` carries genuinely
+independent information (R²=0.25 when regressed on the 6 production features) and
+is **still null** — so the cause is NOT redundancy, and (separately) features
+decide 95% of evals so it's NOT tactical override. The bottleneck is the
+heuristic's **linear/differential functional form**, not its feature set.
+
+**Confirmed/falsified findings:**
+- ❌ "New strategic features fix the evaluator" (as linear heuristic terms) —
+  falsified at the agent level, well-powered.
+- ✅ The dead-feature bug was real and is fixed (guarded by `test_feature_liveness`).
+- 🟡 Features as *network inputs* (nonlinear) — untested (HF-2).
+- 🟡 Re-fitting the 6 weights — untested (HF-1).
+
+**Operational lessons logged:**
+- Raw weights are not comparable across features: `ring_mobility` (raw ~±7.8) at
+  weight 4 contributed ~31 to the eval, dominating the tuned 6 — a scaling
+  artifact that first read as "hurts". Fixed with contribution-budget
+  normalization (`--normalize`). Always normalize feature magnitudes in ablation.
+- Small-N agent A/B is dangerously noisy: an 80-game 0.60 evaporated to 0.483 at
+  300 games. Power up before believing a single-cell lead.
+- Depth cost on this box: depth1 ~6s/game, depth2 ~112s, depth3 >400s. Powered
+  multi-depth sweeps need the parallel `match_runner.py` (≈3.4× on 4 cores) and
+  staged scoping. Staging let us *not* run a ~13h depth-2/3 fade test once depth-1
+  came back null (no effect to fade).
+
+**Next experiments per sequencing matrix:** HF-1 (cheap re-fit check) next, then
+HF-2 (features-as-network-inputs, build-not-launch — gated on the in-flight
+value-head run). See the forward queue above.
 
 ---
 
