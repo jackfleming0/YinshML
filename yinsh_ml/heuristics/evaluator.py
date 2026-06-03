@@ -13,6 +13,9 @@ from ..game.zobrist import ZobristHasher
 from .phase_detection import detect_phase, get_phase_weights, GamePhaseCategory
 from .phase_config import PhaseConfig, DEFAULT_PHASE_CONFIG
 from .features import extract_all_features
+from .feature_registry import (
+    PRODUCTION_FEATURES, EXTRA_FEATURE_FNS, KNOWN_FEATURES, order_feature_set,
+)
 from .weight_manager import WeightManager
 from .terminal_detection import detect_terminal_position
 from .tactical_patterns import detect_immediate_tactical_patterns
@@ -48,6 +51,7 @@ class YinshHeuristics:
         weight_config_file: Optional[str] = None,
         enable_forced_sequence_detection: bool = True,
         eval_cache_size: int = 100_000,
+        feature_set: Optional[List[str]] = None,
     ):
         """Initialize the YinshHeuristics evaluator.
 
@@ -118,16 +122,27 @@ class YinshHeuristics:
         self._transition_window = self.phase_config.transition_window
         self._interpolation_method = self.phase_config.interpolation_method
         
-        # Pre-compute feature name list for efficient iteration
-        self._feature_names = [
-            'completed_runs_differential',
-            'potential_runs_count',
-            'connected_marker_chains',
-            'ring_positioning',
-            'ring_spread',
-            'board_control',
-        ]
-        
+        # Resolve the ACTIVE feature set (configurable; defaults to the 6
+        # production features). Precedence:
+        #   1. explicit `feature_set` arg,
+        #   2. else infer from the loaded/given weights' keys (so a weights JSON
+        #      that includes a palette feature self-activates it),
+        #   3. else the production six.
+        # Palette features beyond the six are computed on demand in
+        # _extract_features; production six come from extract_all_features.
+        if feature_set is not None:
+            active = order_feature_set(feature_set)
+        elif weight_config_file or weights is not None:
+            active = self._infer_feature_set(self.weights)
+        else:
+            active = list(PRODUCTION_FEATURES)
+        self._feature_names = active
+        # Palette extractors to run in addition to the optimized production six.
+        self._extra_feature_fns = {
+            name: EXTRA_FEATURE_FNS[name]
+            for name in active if name in EXTRA_FEATURE_FNS
+        }
+
         # Pre-extract weight dictionaries for faster access
         self._update_cached_weights()
         
@@ -255,7 +270,7 @@ class YinshHeuristics:
         )
 
         # 2. Extract all features
-        features = extract_all_features(game_state, player)
+        features = self._extract_features(game_state, player)
 
         # 3. Apply phase-specific weights and calculate score (optimized)
         score = self._apply_phase_weights_fast(features, phase_transition_weights)
@@ -414,7 +429,7 @@ class YinshHeuristics:
                 continue
             
             # Extract features for non-terminal positions
-            features = extract_all_features(game_state, player)
+            features = self._extract_features(game_state, player)
             features_list.append((i, features))
         
         # Process non-terminal positions with vectorized operations
@@ -722,6 +737,27 @@ class YinshHeuristics:
         # This method is a placeholder for future optimizations
         pass
     
+    @staticmethod
+    def _infer_feature_set(weights: Dict[str, Any]) -> List[str]:
+        """Active feature set = the union of weight keys across phases, kept to
+        known features and ordered production-first. The 6 production features
+        are always included (required by WeightManager); palette features are
+        activated iff they appear in the weights.
+        """
+        keys = set(PRODUCTION_FEATURES)
+        for phase_weights in (weights or {}).values():
+            if isinstance(phase_weights, dict):
+                keys.update(k for k in phase_weights if k in KNOWN_FEATURES)
+        return order_feature_set(keys)
+
+    def _extract_features(self, game_state: GameState, player: Player) -> Dict[str, float]:
+        """Feature dict for the ACTIVE feature set: the optimized production six
+        plus any opted-in palette features."""
+        features = extract_all_features(game_state, player)
+        for name, fn in self._extra_feature_fns.items():
+            features[name] = float(fn(game_state, player))
+        return features
+
     def _update_cached_weights(self) -> None:
         """Update cached weight dictionaries after weight changes.
         

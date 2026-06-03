@@ -432,6 +432,9 @@ class TrainingSupervisor:
         # Extract evaluation mode parameters
         evaluation_mode = self.mode_settings.get('evaluation_mode', 'hybrid')
         heuristic_weight = self.mode_settings.get('heuristic_weight', 0.7)
+        # Optional path to a re-fit heuristic weights JSON (WeightManager
+        # format). None => YinshHeuristics uses its hardcoded default weights.
+        heuristic_weight_config_file = self.mode_settings.get('heuristic_weight_config_file', None)
 
         # Heuristic-weight curriculum (linear anneal start → end over N iterations,
         # held at end afterwards). Defaults make this a no-op (start == end == current).
@@ -493,6 +496,7 @@ class TrainingSupervisor:
         _mcts_config_for_init = { # Use temporary name to avoid confusion
             'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
             'heuristic_weight': heuristic_weight,  # NEW: Heuristic weight
+            'heuristic_weight_config_file': heuristic_weight_config_file,  # re-fit weights JSON (or None)
             'num_simulations': mcts_simulations, # Early sims from direct arg
             'late_simulations': late_simulations,
             'simulation_switch_ply': simulation_switch_ply,

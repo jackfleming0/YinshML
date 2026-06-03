@@ -285,6 +285,88 @@ is still a win, but it's a symptom-treatment, which is *why* the external H2H ga
 escalate to architecture (value-head redesign) or E21 ensemble-teacher instead. E22 climbs → build the
 gap-controlled league (opponent pool + per-rung frozen-H2H gate); this is the candidate plateau-break.
 
+### E24 — A REAL self-play campaign (the actually-untested axis)  `[the experiment we've been flinching from]`
+
+> **Provenance:** consolidates two independent session scopes — the parallel
+> session's LR-sweep-first ladder + gate-confound insight (the spine), and this
+> session's seed-hedge + engine-labeled-eval amendments. Renumbered from a draft
+> "E23" to avoid colliding with main's E23 (opponent league, DROPPED above).
+> main's E22 result note already points here ("the other session's E24 scope").
+
+**The correction this entry records (2026-06-03, Jack pushed, AI conceded).**
+We concluded "the self-play loop can't beat iter1_ema" — an **overclaim**. What we
+actually tested is a *cautious micro-continuation*: lr 1e-5, 3-5 iters, ~200
+games/iter (~1K total), from an over-converged EMA optimum, LR pinned low to avoid
+degrading the warm start. AlphaZero-class self-play is millions of games, real LR
+schedules, from scratch. **We ran a rounding error of self-play and generalized to
+"self-play fails for YINSH."** It works for Go/chess/shogi/Hex/Othello; nothing
+makes YINSH the exception. The "frozen value head" is a consequence of *our* lr=1e-5
+timidity, not a property of the game.
+
+**The two tangled failure modes (the key reframe — credit: parallel session).**
+History conflates two things we never separated:
+- **Too-low LR (1e-5) → value head frozen** (measured).
+- **Too-high LR (1e-4) → degradation** — BUT those runs *also* ran a loose 0.20
+  promotion gate that enshrined degraded models, so the spiral compounded. So
+  "1e-4 degrades" is confounded with "bad gating let it compound." With a tight
+  0.55 Wilson gate + `revert_self_play_on_gate_failure` (rollback so degradation
+  can't compound), high LR may be survivable *without* an anti-forgetting build.
+  **Untested.**
+
+**Hypothesis:** the plateau is an artifact of the cautious regime (low LR + loose
+gate + tiny scale + over-converged seed), not a ceiling.
+
+**Config vs build.** EXISTS as config: cosine LR + warmup (`lr_schedule`,
+`warmup_epochs`), `value_head_lr_factor` (5.0), `discrimination_weight`, EMA, tight
+gate + `revert_self_play_on_gate_failure`, `measure_h2h.py`, NaN guards. BUILD
+items (Phase 2 only): KL/entropy anchor to the frozen reference (absent), and
+replay-buffer composition (buffer is pure FIFO, supervisor.py:190-191).
+
+**Cheap-first ladder, each rung gated:**
+- **Phase 1a — LR sweep, CONFIG-ONLY, no build (~1 day, ~$30-50).** Warm-start
+  iter1_ema. Three short runs: lr ∈ {3e-5, 1e-4, 3e-4}, cosine+warmup, ~3 iters
+  each, 400 games/iter, tight 0.55 gate + revert. Q: does *any* LR move the value
+  head and trend H2H up, vs freeze (low) / degrade (high)?
+  - **Primary signal = per-iter ENGINE-LABELED held-out value AUC/Brier** (NOT
+    human labels — that noise inflated the ~0.70 AUC floor). H2H vs frozen
+    iter1_ema is *confirmatory* and thin at 3 iters (~1 point/arm — catches binary
+    degrade-and-revert, not a slow climb), so weight AUC-trend over H2H here.
+  - **Seed hedge (amendment):** iter1_ema is over-converged (EMA peak → low
+    plasticity). If the sweep is flat across *all* LRs, re-run the best LR from a
+    fresher *pre-over-convergence* checkpoint before calling it "stuck" — otherwise
+    "game stuck" and "this seed won't move" are indistinguishable.
+- **Phase 1b — extend the winner (~2-3 days, ~$80-150).** Best LR, 15-20 iters,
+  400-1000 games/iter, same guards. North-star: positive H2H slope vs frozen
+  iter1_ema crossing >55%.
+- **Phase 2 — conditional anti-forgetting BUILD (~2-3 days eng), ONLY if Phase 1
+  degrades-and-reverts every iter** (forgetting confirmed as the blocker).
+  Buffer-mixing (~30-50% engine/supervised positions into the FIFO buffer) and/or
+  KL-to-anchor (penalize policy divergence from frozen iter1_ema; the
+  search-consistency distillation scaffold is a starting point). Re-run Phase 1b at
+  the LR that previously forgot.
+- **Phase 3 — full scale / AZ-class (weeks, $$$).** Only on a proven 1b/2 slope;
+  fold in E20 throughput (R9: prove the lever first).
+
+**Decision logic:** gate-passing improvement → path found, scale. Degrade-and-revert
+every iter → forgetting is the blocker → Phase 2. Flat (AND fresher seed also flat)
+→ genuinely stuck → bank iter1_ema+E8.
+
+**The one honest YINSH-specific factor (cuts both ways):** 22% draws + value AUC
+ceiling ~0.74 off a *large engine corpus* = low value-signal density per game.
+Argues FOR more games (less signal/game ⇒ need more), but may ALSO be a partial
+evaluability floor. Phase 1a is the cheap disambiguator.
+
+**Reasons to not believe / watch:** the gate-confound reframe is a *hypothesis*,
+not a guarantee — high LR may degrade even with tight gating, in which case Phase 2
+is mandatory. Over-converged seed hedged by the fresher arm. No promise it clears
+iter1_ema. **But "we proved the loop can't work" was false — we proved the cautious
+micro-version can't, a much weaker claim.** This is the lever the evidence points to
+and the one never pulled.
+
+**Discipline:** H2H vs the FIXED champion iter1_ema (R1); one regime change at a
+time; hard go/no-go at each rung. **Recommended next action: Phase 1a — it's a day,
+no code, and decisive either way.**
+
 ## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
 
 The 2026-05-29/30 work was recovered from a stash (it was never committed; the
@@ -2193,6 +2275,72 @@ Conditioned on the D.2 SPRT outcome (currently pending):
 
 ---
 
+## Heuristic evaluation-form investigation (2026-06-03) — forward queue
+
+This thread started from a coaching review of a strong human game (BGA
+862307561, see `docs/game_reviews/bga_862307561_review.md`). It produced
+correctness fixes, a configurable-feature-set + experiment harness, and a
+**well-powered null** on adding hand-crafted features (see the Done entry
+below). The remaining options, ranked:
+
+**HF-1 — Cheap re-fit check (re-fit the original 6 weights).** *Status: DONE —
+WORSE (2026-06-03).* Re-fit on 300 self-generated games (no parquet in
+container), rescaled to baseline's per-phase L1 budget (pure reallocation), A/B
+vs baseline: **62-238, win-rate 0.207, -234 Elo, significant.** Re-fitting
+*hurts*. Lesson: outcome-correlation ≠ good move-selection weight — in self-play
+data the winner accumulates everything by the endgame, so the fit learns
+reverse-causation and over-optimizes winner's-end-state correlates. The
+hand-tuned baseline (validated for play) beats raw outcome-fits decisively.
+Full writeup: `docs/experiments/hf1_refit_results.md`. Closes the heuristic-
+*weight* axis negative, complementing Phase 1's heuristic-*feature* negative.
+
+**HF-2 — Features as network inputs (the functional-form test).** *Status:
+queued, build-not-launch — RESCOPED after reading the encoder + D.2.* The
+direct test of the Phase 1 conclusion ("info is real but a linear heuristic
+weight can't exploit it; let the net weight it nonlinearly"). **Crucial
+discovery: most of this is already built.** `EnhancedStateEncoder` (15-ch,
+`use_enhanced_encoding`) already feeds the network: ring mobility (ch 8),
+partial rows (ch 6/7), row threats (ch 4/5), ring influence, center distance,
+turn/score. So `ring_mobility` / `near_completion` / `potential_runs` as
+*network inputs* are ALREADY tested — Branch D.2 (15-ch) came back
+**NOT_STRONGER** (Done entry 2026-05-25), though confounded by the since-fixed
+`decode_phase` reading-wrong-channel bug, so it's "inconclusive-leaning-null",
+not a clean refutation. Recent symmetry runs (`sym15-*`) are 15-ch, so the path
+is in active use.
+- **The genuinely NEW thing** HF-2 could add is **`defensive_disruption` as a
+  new channel** — the defensive term that is NOT in the enhanced encoder and is
+  the one palette feature with both independent signal (R²=0.47) and a clear
+  strategic story (denying opponent runs).
+- **Build cost / risk:** adding a channel is a *breaking* change (15→16,
+  NetworkWrapper hard-fails on channel mismatch → requires fresh pretrain).
+  Untestable in a torch-free container. So: do NOT commit untested encoder
+  surgery blind. The right "build" is (a) this scoping, (b) a clean post-bugfix
+  15-ch vs 6-ch A/B to get an *unconfounded* read on the already-built channels
+  before adding a 16th, (c) only then the defensive_disruption channel.
+- **Recommended first move (cheap-ish, cloud):** re-run the *existing* 15-ch vs
+  6-ch comparison now that the phase bug is fixed — it answers "do strategic
+  features as network inputs help?" without any new code. If that's still null,
+  adding one more channel is unlikely to change the verdict and HF-2 closes.
+- **No new code to build.** The matched pair already exists: a `basic`/6-ch
+  config vs `configs/branchD2_enhanced_mcts200.yaml` (= branchC config but
+  `encoding.type: enhanced`). The `encoding.type: basic|enhanced` flag is fully
+  plumbed (`run_training.py:264-281` → `use_enhanced_encoding`). So "build HF-2"
+  = pick the 6-ch baseline config + the enhanced config, launch both post-bugfix,
+  H2H the finals. Gated on the in-flight value-head run; nothing to write here.
+
+**HF-3 — Pivot to learned-value (AlphaZero direction).** *Status: parked,
+references `TRAINING_REFACTOR_PLAN.md`.* Demote the heuristic to a prior, trust
+the learned value head. Biggest effort; where the evidence points for real
+strength gains. Overlaps the current cloud value-head experiment — revisit once
+that lands.
+
+**Why this order:** HF-1 is cheap and closes the only untested heuristic-level
+axis; HF-2 is the real test of the mechanism finding but costs a training run;
+HF-3 is the strategic redirect. HF-1 and HF-2 are both buildable now; HF-2/HF-3
+launches gated on the in-flight value-head run.
+
+---
+
 ## Cross-references
 
 - `VOLUME_PRETRAIN_RESULTS.md` — chronological log of branch D sessions.
@@ -2255,6 +2403,56 @@ current state of the priors?" The verdict + crucial detail + confirmed
 findings answer that in ~30 seconds. The operational lessons section
 prevents the most common research-debt failure mode: rediscovering the
 same bug or pattern session after session.
+
+---
+
+### HF — Heuristic feature ablation (palette as linear terms) — **NULL / NOT_STRONGER** (2026-06-03)
+
+Reviewed a strong human game (BGA 862307561), fixed two dead heuristic features
+(`potential_runs_count` was identically 0 — a latent bug; `completed_runs_diff`
+legitimately ~0 due to same-turn row removal), built a configurable-feature-set
+evaluator + a contribution-normalized agent-ablation harness, and ran a
+well-powered depth-1 ablation of all 5 experimental palette features
+(`yinsh_ml/heuristics/experimental_features.py`) added one-at-a-time to the
+fixed baseline-6. CPU only (4 cores, parallel). Full writeup:
+`docs/experiments/phase1_feature_ablation_results.md`.
+
+**Result block:**
+- **NULL** — 300 games/cell, every arm 0.467–0.513 win-rate vs baseline, every
+  Wilson 95% CI brackets 0.5. Placebo (`@0`) = 0.483. No feature, at any fair
+  weight (budget 4 or 8), beats baseline agent-vs-agent at depth 1.
+- An earlier 80-game run showed `defensive_disruption` at 0.600; powering to 300
+  games collapsed it to 0.483 (flat dose curve). The lead was small-sample noise.
+- JSON: `docs/experiments/phase1_depth1_results.json`.
+
+**The crucial detail:** `ring_mobility_differential` carries genuinely
+independent information (R²=0.25 when regressed on the 6 production features) and
+is **still null** — so the cause is NOT redundancy, and (separately) features
+decide 95% of evals so it's NOT tactical override. The bottleneck is the
+heuristic's **linear/differential functional form**, not its feature set.
+
+**Confirmed/falsified findings:**
+- ❌ "New strategic features fix the evaluator" (as linear heuristic terms) —
+  falsified at the agent level, well-powered.
+- ✅ The dead-feature bug was real and is fixed (guarded by `test_feature_liveness`).
+- 🟡 Features as *network inputs* (nonlinear) — untested (HF-2).
+- 🟡 Re-fitting the 6 weights — untested (HF-1).
+
+**Operational lessons logged:**
+- Raw weights are not comparable across features: `ring_mobility` (raw ~±7.8) at
+  weight 4 contributed ~31 to the eval, dominating the tuned 6 — a scaling
+  artifact that first read as "hurts". Fixed with contribution-budget
+  normalization (`--normalize`). Always normalize feature magnitudes in ablation.
+- Small-N agent A/B is dangerously noisy: an 80-game 0.60 evaporated to 0.483 at
+  300 games. Power up before believing a single-cell lead.
+- Depth cost on this box: depth1 ~6s/game, depth2 ~112s, depth3 >400s. Powered
+  multi-depth sweeps need the parallel `match_runner.py` (≈3.4× on 4 cores) and
+  staged scoping. Staging let us *not* run a ~13h depth-2/3 fade test once depth-1
+  came back null (no effect to fade).
+
+**Next experiments per sequencing matrix:** HF-1 (cheap re-fit check) next, then
+HF-2 (features-as-network-inputs, build-not-launch — gated on the in-flight
+value-head run). See the forward queue above.
 
 ---
 

@@ -31,6 +31,7 @@ class WeightManager:
     """
     
     # Valid feature names
+    # REQUIRED features: every weights file must define these for every phase.
     VALID_FEATURES = [
         'completed_runs_differential',
         'potential_runs_count',
@@ -39,10 +40,24 @@ class WeightManager:
         'ring_spread',
         'board_control',
     ]
-    
+
+    # OPTIONAL experimental-palette features. A weights file MAY include any of
+    # these (they then self-activate in the evaluator); they are not required.
+    # Keep in sync with yinsh_ml/heuristics/experimental_features.py.
+    OPTIONAL_FEATURES = [
+        'ring_mobility_differential',
+        'ring_confinement_pressure',
+        'near_completion_threats',
+        'defensive_disruption',
+        'marker_tempo_differential',
+    ]
+
+    # Every feature name the manager will accept (required + optional).
+    ALL_FEATURES = VALID_FEATURES + OPTIONAL_FEATURES
+
     # Valid phase names
     VALID_PHASES = ['early', 'mid', 'late']
-    
+
     # Default weight constraints (min, max)
     DEFAULT_CONSTRAINTS = {
         'completed_runs_differential': (0.0, 50.0),
@@ -51,6 +66,11 @@ class WeightManager:
         'ring_positioning': (0.0, 50.0),
         'ring_spread': (0.0, 50.0),
         'board_control': (0.0, 50.0),
+        'ring_mobility_differential': (0.0, 50.0),
+        'ring_confinement_pressure': (0.0, 50.0),
+        'near_completion_threats': (0.0, 50.0),
+        'defensive_disruption': (0.0, 50.0),
+        'marker_tempo_differential': (0.0, 50.0),
     }
     
     def __init__(
@@ -161,9 +181,9 @@ class WeightManager:
                 f"Invalid phase '{phase}'. Must be one of {self.VALID_PHASES}"
             )
         
-        if feature not in self.VALID_FEATURES:
+        if feature not in self.ALL_FEATURES:
             raise ValueError(
-                f"Invalid feature '{feature}'. Must be one of {self.VALID_FEATURES}"
+                f"Invalid feature '{feature}'. Must be one of {self.ALL_FEATURES}"
             )
         
         # Validate constraint
@@ -203,9 +223,9 @@ class WeightManager:
         
         # Validate all weights before updating
         for feature, value in weights.items():
-            if feature not in self.VALID_FEATURES:
+            if feature not in self.ALL_FEATURES:
                 raise ValueError(
-                    f"Invalid feature '{feature}'. Must be one of {self.VALID_FEATURES}"
+                    f"Invalid feature '{feature}'. Must be one of {self.ALL_FEATURES}"
                 )
             
             if feature in self.constraints:
@@ -288,7 +308,21 @@ class WeightManager:
                         f"Weight value for '{phase}.{feature}' must be numeric, "
                         f"got {type(value)}"
                     )
-    
+
+            # Reject unknown keys (typos / stale names) — but allow any of the
+            # optional palette features.
+            for feature, value in weights[phase].items():
+                if feature not in self.ALL_FEATURES:
+                    raise ValueError(
+                        f"Unknown feature '{feature}' in phase '{phase}'. "
+                        f"Must be one of {self.ALL_FEATURES}"
+                    )
+                if not isinstance(value, (int, float)):
+                    raise ValueError(
+                        f"Weight value for '{phase}.{feature}' must be numeric, "
+                        f"got {type(value)}"
+                    )
+
     def _validate_weight_constraints(self, weights: Dict[str, Any]) -> None:
         """Validate weight values against constraints.
         

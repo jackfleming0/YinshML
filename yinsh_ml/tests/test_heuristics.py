@@ -130,49 +130,37 @@ class TestFeatureExtraction(unittest.TestCase):
     
     def test_potential_runs_count_with_potential_runs(self):
         """Test potential runs count with near-complete rows.
-        
-        NOTE: Currently this test may fail because potential_runs_count uses
-        find_marker_rows() which only returns completed rows (>=5 markers).
-        The function should be fixed to use _find_near_complete_rows() instead.
-        For now, we test the current behavior.
+
+        potential_runs_count counts maximal runs of length 3-4 (see
+        features._maximal_marker_runs). It previously read from
+        find_marker_rows() (length >=5 only), making it identically 0 — that
+        bug is fixed; these assert the corrected behavior.
         """
         # Place 3 white markers (potential run) - use B column
         self._place_markers(['B1', 'B2', 'B3'], PieceType.WHITE_MARKER)
         # Place 4 black markers (potential run) - use A column
         self._place_markers(['A2', 'A3', 'A4', 'A5'], PieceType.BLACK_MARKER)
-        
+
         result = potential_runs_count(self.game_state, Player.WHITE)
-        # NOTE: Current implementation returns 0 because find_marker_rows doesn't find incomplete rows
-        # This is a known bug - the function should use _find_near_complete_rows() instead
-        # When fixed, expected: White has 1 potential (3 markers), black has 1 potential (4 markers)
-        # Differential: 1 - 1 = 0
-        # For now, test current behavior:
-        self.assertEqual(result, 0)  # Current buggy behavior
-        
+        # White has 1 potential (3-run), black has 1 potential (4-run): 1 - 1 = 0.
+        self.assertEqual(result, 0)
+
         # Add another white potential run - use I column
         self._place_markers(['I4', 'I5', 'I6'], PieceType.WHITE_MARKER)
         result = potential_runs_count(self.game_state, Player.WHITE)
-        # When fixed, expected: 2 - 1 = 1
-        # For now, test current behavior:
-        self.assertEqual(result, 0)  # Current buggy behavior
-    
+        # White now has 2 potentials, black 1: 2 - 1 = 1.
+        self.assertEqual(result, 1)
+
     def test_potential_runs_count_excludes_completed_runs(self):
-        """Test that completed runs are not counted as potential runs.
-        
-        NOTE: Currently this test may fail because potential_runs_count uses
-        find_marker_rows() which only returns completed rows (>=5 markers).
-        The function should be fixed to use _find_near_complete_rows() instead.
-        """
-        # Place 5 markers (completed run) - should not be counted - use B column
+        """Test that completed runs (length >=5) are not counted as potential."""
+        # Place 5 markers (completed run) - should NOT be counted - use B column
         self._place_markers(['B1', 'B2', 'B3', 'B4', 'B5'], PieceType.WHITE_MARKER)
         # Place 3 markers (potential run) - should be counted - use A column
         self._place_markers(['A2', 'A3', 'A4'], PieceType.WHITE_MARKER)
-        
+
         result = potential_runs_count(self.game_state, Player.WHITE)
-        # When fixed, should only count the 3-marker row, not the 5-marker row
-        # Expected: 1
-        # For now, test current behavior (buggy - returns 0 because incomplete rows aren't found):
-        self.assertEqual(result, 0)  # Current buggy behavior
+        # Only the 3-marker run counts, not the completed 5-run: 1 - 0 = 1.
+        self.assertEqual(result, 1)
     
     def test_potential_runs_count_input_validation(self):
         """Test input validation for potential_runs_count."""

@@ -226,6 +226,49 @@ Learned from 100K+ games analysis (see `QUICK_START_GUIDE.md` for details):
 
 Weights are **phase-specific** - different priorities for early/mid/late game.
 
+**Caveat — two of the top features are inert in real play** (found reviewing a
+strong human game, see `docs/game_reviews/bga_862307561_review.md`):
+- `completed_runs_differential` reads ~0 at every observable position because
+  completed rows are removed within the same turn (legitimate, not a bug).
+- `potential_runs_count` was a latent bug — it filtered `find_marker_rows()`
+  (length ≥5 only) for length-3/4 runs, an unsatisfiable condition, so it was
+  identically 0 everywhere. **Fixed** via `features.py::_maximal_marker_runs`;
+  its weight (0.171) was fit against the old constant and should be re-fit.
+
+Guard against silent re-death with
+`yinsh_ml/heuristics/feature_diagnostics.py::feature_liveness_report` (wired to
+the human game in `tests/test_feature_liveness.py`).
+
+**Experimental feature palette** (`yinsh_ml/heuristics/experimental_features.py`)
+— candidate strategic signals the production set can't express (ring
+optionality, immediate-completion pressure, a real *defensive* term, tempo).
+Deliberately **not wired into default weights**; an opt-in palette for
+weight-learning/ablation. Strong human games live in
+`yinsh_ml/data/human_games/` (engine regression fixtures + analysis material;
+replay via `scripts/review_human_game.py`).
+
+**Config-driven heuristic weights**: training reads
+`self_play.heuristic_weight_config_file` (a WeightManager-format JSON; null ⇒
+hardcoded defaults). The key threads `run_training.py → supervisor → SelfPlay →
+YinshHeuristics(weight_config_file=…)`. Re-fit weights from game outcomes with
+`yinsh_ml/heuristics/weight_fitting.py` (numpy logreg/correlation core) +
+`scripts/experiments/fit_heuristic_weights.py`. The full A/B experiment harness
+(re-fit → offline HeuristicAgent A/B gate → parallel arm training → tournament
+vs champion) lives in `scripts/experiments/` — see its README.
+
+**Configurable feature set**: the evaluator runs on a configurable active
+feature set (`YinshHeuristics(feature_set=…)`, default = the 6 production
+features). It's the single source of truth in
+`yinsh_ml/heuristics/feature_registry.py` (`PRODUCTION_FEATURES` +
+`EXPERIMENTAL_FEATURES`). A weights JSON that includes a palette feature
+**self-activates** it — the evaluator infers the active set from the weights'
+keys, so palette features are testable in training with **zero code/config
+changes** beyond pointing `heuristic_weight_config_file` at an extended weights
+JSON (emit one with `fit_heuristic_weights.py --with-experimental`).
+`WeightManager` requires the 6 production features and accepts the palette
+(`OPTIONAL_FEATURES`); unknown keys are rejected. Caveat: palette extractors use
+the Python `Board` API — verify under `use_cpp_engine: true` before enabling.
+
 ### Transposition Table Integration
 - **Enabled by default** in `HeuristicAgent`
 - Uses Zobrist hashing for position encoding — `ZobristHasher.hash_state(state)` hashes the board **AND** side-to-move **AND** game phase. Two positions with identical piece layout but different `current_player` or `phase` now correctly hash to different values. O(1) `toggle_side_to_move` / `toggle_phase` helpers support incremental updates.

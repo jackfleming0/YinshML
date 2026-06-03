@@ -295,6 +295,10 @@ def main() -> None:
         'heuristic_weight_start': float(sp.get('heuristic_weight_start', sp.get('heuristic_weight', 0.7))),
         'heuristic_weight_end': float(sp.get('heuristic_weight_end', sp.get('heuristic_weight', 0.7))),
         'heuristic_weight_anneal_iterations': int(sp.get('heuristic_weight_anneal_iterations', 0)),
+        # Optional: path to a re-fit heuristic weights JSON (WeightManager
+        # format). Omit / null => hardcoded default weights. Accepts either
+        # `weight_config_file` or the more explicit `heuristic_weight_config_file`.
+        'heuristic_weight_config_file': sp.get('heuristic_weight_config_file', sp.get('weight_config_file')),
         'num_workers': sp.get('num_workers', 'auto'),
         'late_simulations': sp.get('late_simulations'),
         'simulation_switch_ply': sp.get('simulation_switch_ply', 20),

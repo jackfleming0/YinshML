@@ -21,7 +21,54 @@ with weights for position evaluation.
 
 from typing import Dict, List, Tuple, Set
 from ..game.game_state import GameState
-from ..game.constants import Player, PieceType, MARKERS_FOR_ROW
+from ..game.constants import (
+    Player, PieceType, Position, MARKERS_FOR_ROW, DIRECTIONS, is_valid_position,
+)
+
+
+def _maximal_marker_runs(board, marker_type: PieceType) -> Set[Tuple]:
+    """Return all maximal same-color marker runs along the 3 hex axes, with
+    **no minimum-length cutoff**, as a set of sorted (column, row) tuples.
+
+    This mirrors ``Board.find_marker_rows``' maximal-run walk but keeps runs of
+    every length (>=2), so callers can bucket them: potential runs (length
+    3-4) vs completed runs (length >=5).
+
+    Why this exists: ``find_marker_rows`` only returns runs of length >= 5
+    (``MARKERS_FOR_ROW``). ``potential_runs_count`` is defined over runs of
+    length 3-4, so reading it from ``find_marker_rows`` makes the condition
+    ``3 <= length < 5`` unsatisfiable — the feature was silently 0 everywhere
+    until this helper was added.
+    """
+    runs: Set[Tuple] = set()
+    positions = [pos for pos, piece in board.pieces.items() if piece == marker_type]
+    positions.sort(key=lambda p: (p.column, p.row))
+
+    for start_pos in positions:
+        for dx, dy in DIRECTIONS:
+            # Only start a run at its lower end along this axis, so each
+            # maximal run is emitted once.
+            prev_col_idx = ord(start_pos.column) - ord('A') - dx
+            prev_row = start_pos.row - dy
+            if 0 <= prev_col_idx < 11:
+                prev_pos = Position(chr(ord('A') + prev_col_idx), prev_row)
+                if is_valid_position(prev_pos) and board.get_piece(prev_pos) == marker_type:
+                    continue
+
+            run = [start_pos]
+            current = start_pos
+            while True:
+                col_idx = ord(current.column) - ord('A')
+                next_pos = Position(chr(ord('A') + col_idx + dx), current.row + dy)
+                if not is_valid_position(next_pos) or board.get_piece(next_pos) != marker_type:
+                    break
+                run.append(next_pos)
+                current = next_pos
+
+            if len(run) >= 2:  # singletons are not "runs"
+                runs.add(tuple(sorted((p.column, p.row) for p in run)))
+
+    return runs
 
 
 def completed_runs_differential(game_state: GameState, player: Player) -> int:
@@ -97,22 +144,20 @@ def potential_runs_count(game_state: GameState, player: Player) -> int:
     # Get marker types for both players
     my_marker = PieceType.WHITE_MARKER if player == Player.WHITE else PieceType.BLACK_MARKER
     opponent_marker = PieceType.BLACK_MARKER if player == Player.WHITE else PieceType.WHITE_MARKER
-    
-    # Find all marker rows for both players
-    my_rows = game_state.board.find_marker_rows(my_marker)
-    opponent_rows = game_state.board.find_marker_rows(opponent_marker)
-    
-    # Count potential runs (rows with 3 or 4 markers, but not yet completed)
+
+    # Count potential runs (maximal runs of 3-4 markers, not yet completed).
+    # NB: must use the no-cutoff scanner, NOT find_marker_rows (which is
+    # length>=5 only and would make this identically zero).
     min_potential = 3
     my_potential = sum(
-        1 for row in my_rows 
-        if min_potential <= row.length < MARKERS_FOR_ROW
+        1 for run in _maximal_marker_runs(game_state.board, my_marker)
+        if min_potential <= len(run) < MARKERS_FOR_ROW
     )
     opponent_potential = sum(
-        1 for row in opponent_rows 
-        if min_potential <= row.length < MARKERS_FOR_ROW
+        1 for run in _maximal_marker_runs(game_state.board, opponent_marker)
+        if min_potential <= len(run) < MARKERS_FOR_ROW
     )
-    
+
     # Return differential
     return my_potential - opponent_potential
 
@@ -540,9 +585,19 @@ def extract_all_features(game_state: GameState, player: Player) -> Dict[str, flo
     opponent_completed_runs = sum(1 for row in opponent_rows if row.length >= MARKERS_FOR_ROW)
     completed_runs_diff = my_completed_runs - opponent_completed_runs
     
+    # Potential runs are maximal runs of length 3-4. They must be scanned
+    # WITHOUT the >=5 cutoff that find_marker_rows applies (my_rows above),
+    # otherwise the 3<=len<5 filter is unsatisfiable and the feature is
+    # always 0. See _maximal_marker_runs.
     min_potential = 3
-    my_potential = sum(1 for row in my_rows if min_potential <= row.length < MARKERS_FOR_ROW)
-    opponent_potential = sum(1 for row in opponent_rows if min_potential <= row.length < MARKERS_FOR_ROW)
+    my_potential = sum(
+        1 for run in _maximal_marker_runs(game_state.board, my_marker)
+        if min_potential <= len(run) < MARKERS_FOR_ROW
+    )
+    opponent_potential = sum(
+        1 for run in _maximal_marker_runs(game_state.board, opponent_marker)
+        if min_potential <= len(run) < MARKERS_FOR_ROW
+    )
     potential_runs_diff = my_potential - opponent_potential
     
     return {

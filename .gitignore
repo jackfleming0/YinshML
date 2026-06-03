@@ -9,6 +9,11 @@
 !configs/
 !configs/*.yaml
 !configs/panel_calibration.json
+# Heuristic weight artifacts (WeightManager JSON). Version-controlled so the
+# baseline + any promoted re-fit weights are reproducible references. Generated
+# per-experiment arm configs under configs/experiments/ stay ignored.
+!configs/heuristic_weights/
+!configs/heuristic_weights/**
 configs/local/
 !experiments/
 !experiments/**

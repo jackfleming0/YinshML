@@ -1477,6 +1477,7 @@ class SelfPlay:
                  # --- Evaluation Mode ---
                  evaluation_mode: str = "pure_neural",
                  heuristic_weight: float = 0.5,
+                 heuristic_weight_config_file: Optional[str] = None,
                  # --- MCTS Params (to be passed to MCTS instance) ---
                  num_simulations: int = 100, # Early game sims
                  late_simulations: Optional[int] = None,
@@ -1553,17 +1554,23 @@ class SelfPlay:
         # Initialize heuristic evaluator
         self.evaluation_mode = evaluation_mode
         self.heuristic_weight = heuristic_weight
+        self.heuristic_weight_config_file = heuristic_weight_config_file
         if evaluation_mode in ["pure_heuristic", "hybrid"]:
             # See yinsh_ml/search/mcts.py for the rationale: MCTS already
             # does multi-ply lookahead via simulation; the heuristic's own
             # forced-sequence detector duplicates that and dominates wall-
             # clock. Disable it for MCTS-side use.
+            # weight_config_file=None falls back to the hardcoded default
+            # weights in YinshHeuristics; a JSON path lets an experiment swap
+            # in re-fit weights without code changes.
             self.heuristic_evaluator = YinshHeuristics(
+                weight_config_file=heuristic_weight_config_file,
                 enable_forced_sequence_detection=False,
             )
             self.logger.info(
                 f"Initialized YinshHeuristics evaluator for {evaluation_mode} mode "
-                f"(forced-sequence detection disabled)"
+                f"(forced-sequence detection disabled; "
+                f"weights={'default' if not heuristic_weight_config_file else heuristic_weight_config_file})"
             )
         else:
             self.heuristic_evaluator = None
