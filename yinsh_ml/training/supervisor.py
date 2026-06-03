@@ -488,6 +488,10 @@ class TrainingSupervisor:
         root_policy_temp = float(self.mode_settings.get('root_policy_temp', 1.0))
         # C++ bitboard engine. Default off until per-config validation lands.
         use_cpp_engine = bool(self.mode_settings.get('use_cpp_engine', False))
+        # E22 cross-teacher: path to a FIXED opponent model. When set, the
+        # learner plays that opponent (color-balanced) instead of mirror
+        # self-play, and only the learner's positions train. None = mirror.
+        opponent_model_path = self.mode_settings.get('opponent_model_path', None)
 
         _mcts_config_for_init = { # Use temporary name to avoid confusion
             'evaluation_mode': evaluation_mode,  # NEW: Evaluation mode
@@ -520,6 +524,7 @@ class TrainingSupervisor:
             'epsilon_mix_iteration_end': epsilon_mix_iteration_end,
             'root_policy_temp': root_policy_temp,
             'use_cpp_engine': use_cpp_engine,
+            'opponent_model_path': opponent_model_path,
         }
 
         self.self_play = SelfPlay(

@@ -200,77 +200,172 @@ is a small change; trivial to prototype at inference on the analysis board.
 substrate lever, that reshapes what's worth ensembling/distilling. Cheap probe (mode b) is ~1h; the teacher
 (mode a) is a training run, gated like everything else on a real learning rate.
 
-### E23 — A REAL self-play campaign (the actually-untested axis)  `[the experiment we've been flinching from]`
+### E22 — Cross-teacher self-play (sharpen the value head)  `[RAN 2026-06-03 — FAILED]`
 
-**The correction this entry exists to record (2026-06-03, Jack pushed, AI conceded).**
-We concluded "the self-play loop can't beat iter1_ema" — that was an **overclaim**.
-What we actually tested is a *cautious micro-continuation*: lr 1e-5, 3–5 iters,
-~200 games/iter (~1K games total), continuing from an over-converged EMA optimum,
-with LR deliberately pinned low to avoid degrading the warm start (the B1B2B3
-finding). AlphaZero-class self-play is millions of games, real LR schedules, from
-scratch. **We ran a rounding error of self-play and generalized to "self-play
-fails for YINSH."** Self-play works for Go/chess/shogi/Hex/Othello; there's no
-principled reason YINSH is the exception. The "frozen value head" is a consequence
-of *our* lr=1e-5 timidity, not a property of the game — a head that won't move
-under ~5e-5 effective LR over 1K games says nothing about its behavior under a
-real schedule over a million.
+> **Result:** cross arm DEGRADES vs frozen iter1_ema (−4.5 pp/iter: 51.7→33.3) while mirror
+> treads water (+1.2). The decisive-game signal corrupted the POLICY (overfit to beating
+> sym15); the value head was unchanged. Follow-up value-head diagnostics (`scripts/value_head_calibration.py`,
+> `scripts/value_head_finetune_probe.py`) showed the value head is FROZEN by the self-play loop
+> AND near a data/arch ceiling (AUC ~0.74; supervised fine-tune overfits in 1 epoch). BUT this
+> only indicts the *cautious micro-loop* (lr 1e-5, ~1K games) — NOT self-play at scale, which we
+> never ran. Next direction = a real self-play campaign (real LR + scale + staged kill gates);
+> see memory `project_e18_e19.md` and the other session's E24 scope. Full detail in memory.
 
-**Hypothesis:** the plateau is an artifact of the cautious regime, not a ceiling.
-A properly-run campaign — real LR schedule that lets the value head move, far more
-games/iters, with degradation guards — has never been attempted, and the evidence
-points there.
+**Chosen after the E19 verdict** (depth treads water; the limiter is the evaluator/value-head, NOT the
+policy head — Arm B's dropout-off head declined too). E19 evidence says the value head is *calibrated but
+not sharp* (P2 Brier 0.66, ~15% over baseline) and Arm B's different head still declined → the limiter is
+the value *target*, not head architecture. **Hypothesis:** mirror self-play between equals yields ~50/50
+noisy outcome labels, so the value head can't learn discrimination; pitting iter1_ema against a *different*
+model makes games decisive → informative outcome signal → the value head sharpens → strength climbs.
 
-**The central tension (why this is a real experiment, not a knob-turn):** higher
-LR moves the value head (the binding constraint per the head-only/trunk probes:
-held-out AUC ceiling ~0.70–0.74, overfits in ~1 epoch) but *degrades the
-warm-start policy* (demonstrated B1B2B3 failure). The campaign must move value
-WITHOUT collapsing policy. **What exists as config:** cosine LR + warmup
-(`lr_schedule`, `warmup_epochs`), `value_head_lr_factor` (5.0),
-`discrimination_weight`, EMA, and the anchor-gate-revert guard
-(`arena.revert_self_play_on_gate_failure`). **What's a BUILD item:** (a) a
-KL/entropy anchor to the frozen reference (RLHF-style — absent today), and (b)
-replay-buffer composition (the buffer is pure FIFO, supervisor.py:190-191 — no
-mixing of engine-corpus/pretrain data to anchor the distribution).
+**Dual-arm, ONE variable = the opponent** (both warm-start from iter1_ema (R2); both H2H'd vs a FROZEN
+iter1_ema each iteration; compare SLOPES):
+- **Arm A (control):** mirror — iter1_ema vs iter1_ema (`configs/e22_mirror.yaml`).
+- **Arm B (treatment):** cross — iter1_ema vs **sym15** (`symmetric-15ch-iter1-ema`, ~27% so iter1 wins
+  ~70-75% = decisive-not-saturated + decorrelated style) (`configs/e22_cross.yaml`).
+- Held constant: **200 sims** (E19: depth isn't the lever — keep cheap/constant to isolate the opponent),
+  5 iters, disc_weight 0, E16 off, gate 0.55, learner-only color-balanced data.
 
-**Staged plan, each stage gated (caps the downside — no weeks-long upfront bet):**
-- **Stage 0 — seed choice.** iter1_ema is over-converged (EMA peak → low
-  plasticity). Run TWO arms: (A) iter1_ema, (B) an earlier *pre-over-convergence*
-  checkpoint (more plastic). Fresher seed is likelier to move.
-- **Stage 1 — regime-change probe (~1–2 days, ~$50–100).** Minimal real test:
-  ~10× LR (1e-4) with cosine+warmup, ~5K games over ~10 iters, **sims 400 not
-  800** (depth amplifies a *frozen* evaluator — useless until it moves; spend
-  budget on games, not depth). Anchor-gate-revert ON. Monitor each iter:
-  **engine-labeled** held-out value AUC/Brier (removes the human-label-noise
-  confound that inflated the 0.70 floor), H2H vs frozen iter1_ema
-  (`measure_h2h.py`), policy-KL drift from seed.
-  - **Kill gate:** value AUC rises on held-out AND H2H ≥ 45% → GREEN to Stage 2.
-    Value moves but H2H collapses → Stage 1.5. Value flat even at 10× LR over 5K
-    games → real evidence of an evaluability ceiling → bank iter1_ema+E8.
-- **Stage 1.5 (conditional) — degradation-control build (~2–3 days eng).** Only
-  if "value moves, policy collapses." Build the KL anchor + buffer composition,
-  re-run Stage 1 with guards.
-- **Stage 2 — scaled campaign (~4–7 days, ~$300–800).** Only if green. 20–50K
-  games / 30–50 iters, schedule across the campaign, sims 400→800 once value is
-  moving, tightened gate. North-star: positive H2H slope vs frozen iter1_ema.
-  - **Kill gate:** sustained slope crossing >55% → full campaign + E20 throughput;
-    re-plateau → diminishing returns, bank.
-- **Stage 3 — full AZ-class (weeks, $2–5K+).** Only on a proven Stage-2 slope.
+**Decision gate:** Arm B climbs (slope up, ideally crossing >55% vs frozen iter1_ema) AND beats Arm A's
+slope → decisive-outcome signal is the lever → scale it / fold into the big run. Both flat → the value-head
+plateau isn't a *data-signal* problem → escalate to architecture (value-head redesign) or E21 ensemble-teacher
+(a manufactured better target). **Honest risk the H2H tests:** the value head may learn "I'm beating a
+*weaker* opponent" (distribution shift) rather than "good position" — wouldn't transfer to equal play.
 
-**The one honest YINSH-specific factor (cuts both ways):** 22% draw rate + value
-AUC ceiling ~0.74 off a *large engine corpus* = low value-signal density per game.
-This argues FOR more games (Jack's instinct — less signal/game ⇒ need more games
-for the same learning), but it may ALSO be a partial evaluability floor that caps
-any value head. Stage 1 is precisely the cheap disambiguator.
+**Implementation (DONE, branch `e22-cross-teacher`, validated):** no two-model support existed —
+`self_play.py::play_game_worker` loaded one net for both sides. Added: an `opponent_model_path` knob
+(config → `run_training.py` mode_settings whitelist → supervisor → worker), a second net+MCTS per worker
+(own GameState pool), per-side routing in `_run_game_loop_inner`, and — the validity-critical part — ONLY
+the learner's positions stored, color-balanced by game parity. Backward-compatible (opponent unset = the
+old mirror path, byte-identical). Tests: `yinsh_ml/tests/test_cross_teacher.py` (3/3 — no opponent-position
+leakage, correct color, mirror unchanged); existing MCTS suite 35/35; real two-net smoke green (decisive
+games W1-B3, color-balanced WHITE/BLACK by parity, checkpoint NaN-clean). **A bug the smoke caught that the
+unit test couldn't:** `opponent_model_path` was missing from `run_training.py`'s mode_settings whitelist, so
+it silently ran as mirror — fixed. (Aside: `epsilon_mix_iteration_start/end` are also absent from that
+whitelist → ignored since forever, incl. E19; minor, out of scope here.) **Supersedes the old E7b stub.**
 
-**Reasons to not believe / watch:** "just raise the LR" needs genuine tuning —
-degradation is a demonstrated failure mode, so Stage 1.5 may be mandatory, not
-optional. Over-converged seed may be the wrong start (the arm-B fresh seed
-hedges). No promise it clears iter1_ema. **But "we proved the loop can't work"
-was false — we proved the cautious micro-version can't, a much weaker claim.**
-This is the lever the evidence actually points to and the one never pulled.
+**Launch:** re-rent a box (≥160 cores / 1×GPU≥16GB), `git checkout e22-cross-teacher`, scp seeds,
+`PY=/venv/main/bin/python bash scripts/e22_dualarm.sh`. ~200-sim/5-iter × 2 arms — cheaper than E19.
+
+### E23 — Gap-controlled opponent league (E22 scale-up)  `[DROPPED]`
+
+> **Dropped 2026-06-03:** gated on E22 *climbing*; E22 declined, so the league premise is moot.
+> (Also: the broader lesson is that loop-variant tweaks don't beat iter1_ema — see E22 result.)
+> NOTE: a parallel session independently scoped a "real self-play campaign" as **E23** too —
+> that one should be renumbered **E24** to avoid colliding with this (now-dropped) entry.
+
+Spun out of a 2026-06-02 discussion (Jack): if E22 cross-teacher works, can we keep replacing the
+opponent with progressively stronger models to compound performance? Yes — and it maps onto a known
+pattern (opponent pools / leagues / play-vs-past-versions, à la AlphaZero/AlphaStar). But the right
+framing is **NOT "upgrade to a stronger teacher to imitate"** (cross-teacher is not distillation; the
+opponent is weaker *on purpose*). The value comes from **decisive** games, and decisiveness has a
+**sweet spot in the strength GAP**:
+- opponent ≈ equal → ~50/50 → noise (the E22 problem);
+- opponent *much* weaker → learner wins ~100% → saturated → *also* no signal;
+- opponent moderately weaker (~25-30 pp gap, e.g. iter1_ema vs sym15) → a *range* of outcomes → max signal.
+
+So the ladder = **keep the gap in the decisive-but-not-saturated band as the learner climbs**: as the
+learner improves past iter1_ema, sym15 saturates, so swap in a stronger/gapped opponent (last rung's
+winner, or a deliberately-weakened past checkpoint). Naturally becomes a **pool/league** — a panel of
+opponents spanning a strength range gives a richer outcome distribution than any single one (a refinement
+of "iter1_ema AND the winner": mix several gaps).
+
+**Does it compound or just tread a treadmill?** Only compounds if the value head learns *transferable*
+position-evaluation ("good position") rather than the distribution-shift failure ("I'm beating a
+weakling") — and those look identical in self-play WR, diverging only under equal-strength eval. So
+**every rung must be gated on H2H vs the FIXED frozen iter1_ema (R1)**; a rung that beats its opponent but
+doesn't move the frozen-H2H is elaborate treading-water, not strength.
+
+**Honest context:** canonical AlphaZero bootstraps fine from pure mirror self-play, so cross-teacher +
+league is a **crutch** that injects the decisiveness our loop fails to generate on its own (because the
+value head is too blurry for MCTS amplification to produce variance — the E19 finding). A working crutch
+is still a win, but it's a symptom-treatment, which is *why* the external H2H gate is non-negotiable.
+
+**Gate / sequence (R9):** do NOT build until E22 rung 1 *climbs vs frozen iter1_ema*. E22 flat → no league;
+escalate to architecture (value-head redesign) or E21 ensemble-teacher instead. E22 climbs → build the
+gap-controlled league (opponent pool + per-rung frozen-H2H gate); this is the candidate plateau-break.
+
+### E24 — A REAL self-play campaign (the actually-untested axis)  `[the experiment we've been flinching from]`
+
+> **Provenance:** consolidates two independent session scopes — the parallel
+> session's LR-sweep-first ladder + gate-confound insight (the spine), and this
+> session's seed-hedge + engine-labeled-eval amendments. Renumbered from a draft
+> "E23" to avoid colliding with main's E23 (opponent league, DROPPED above).
+> main's E22 result note already points here ("the other session's E24 scope").
+
+**The correction this entry records (2026-06-03, Jack pushed, AI conceded).**
+We concluded "the self-play loop can't beat iter1_ema" — an **overclaim**. What we
+actually tested is a *cautious micro-continuation*: lr 1e-5, 3-5 iters, ~200
+games/iter (~1K total), from an over-converged EMA optimum, LR pinned low to avoid
+degrading the warm start. AlphaZero-class self-play is millions of games, real LR
+schedules, from scratch. **We ran a rounding error of self-play and generalized to
+"self-play fails for YINSH."** It works for Go/chess/shogi/Hex/Othello; nothing
+makes YINSH the exception. The "frozen value head" is a consequence of *our* lr=1e-5
+timidity, not a property of the game.
+
+**The two tangled failure modes (the key reframe — credit: parallel session).**
+History conflates two things we never separated:
+- **Too-low LR (1e-5) → value head frozen** (measured).
+- **Too-high LR (1e-4) → degradation** — BUT those runs *also* ran a loose 0.20
+  promotion gate that enshrined degraded models, so the spiral compounded. So
+  "1e-4 degrades" is confounded with "bad gating let it compound." With a tight
+  0.55 Wilson gate + `revert_self_play_on_gate_failure` (rollback so degradation
+  can't compound), high LR may be survivable *without* an anti-forgetting build.
+  **Untested.**
+
+**Hypothesis:** the plateau is an artifact of the cautious regime (low LR + loose
+gate + tiny scale + over-converged seed), not a ceiling.
+
+**Config vs build.** EXISTS as config: cosine LR + warmup (`lr_schedule`,
+`warmup_epochs`), `value_head_lr_factor` (5.0), `discrimination_weight`, EMA, tight
+gate + `revert_self_play_on_gate_failure`, `measure_h2h.py`, NaN guards. BUILD
+items (Phase 2 only): KL/entropy anchor to the frozen reference (absent), and
+replay-buffer composition (buffer is pure FIFO, supervisor.py:190-191).
+
+**Cheap-first ladder, each rung gated:**
+- **Phase 1a — LR sweep, CONFIG-ONLY, no build (~1 day, ~$30-50).** Warm-start
+  iter1_ema. Three short runs: lr ∈ {3e-5, 1e-4, 3e-4}, cosine+warmup, ~3 iters
+  each, 400 games/iter, tight 0.55 gate + revert. Q: does *any* LR move the value
+  head and trend H2H up, vs freeze (low) / degrade (high)?
+  - **Primary signal = per-iter ENGINE-LABELED held-out value AUC/Brier** (NOT
+    human labels — that noise inflated the ~0.70 AUC floor). H2H vs frozen
+    iter1_ema is *confirmatory* and thin at 3 iters (~1 point/arm — catches binary
+    degrade-and-revert, not a slow climb), so weight AUC-trend over H2H here.
+  - **Seed hedge (amendment):** iter1_ema is over-converged (EMA peak → low
+    plasticity). If the sweep is flat across *all* LRs, re-run the best LR from a
+    fresher *pre-over-convergence* checkpoint before calling it "stuck" — otherwise
+    "game stuck" and "this seed won't move" are indistinguishable.
+- **Phase 1b — extend the winner (~2-3 days, ~$80-150).** Best LR, 15-20 iters,
+  400-1000 games/iter, same guards. North-star: positive H2H slope vs frozen
+  iter1_ema crossing >55%.
+- **Phase 2 — conditional anti-forgetting BUILD (~2-3 days eng), ONLY if Phase 1
+  degrades-and-reverts every iter** (forgetting confirmed as the blocker).
+  Buffer-mixing (~30-50% engine/supervised positions into the FIFO buffer) and/or
+  KL-to-anchor (penalize policy divergence from frozen iter1_ema; the
+  search-consistency distillation scaffold is a starting point). Re-run Phase 1b at
+  the LR that previously forgot.
+- **Phase 3 — full scale / AZ-class (weeks, $$$).** Only on a proven 1b/2 slope;
+  fold in E20 throughput (R9: prove the lever first).
+
+**Decision logic:** gate-passing improvement → path found, scale. Degrade-and-revert
+every iter → forgetting is the blocker → Phase 2. Flat (AND fresher seed also flat)
+→ genuinely stuck → bank iter1_ema+E8.
+
+**The one honest YINSH-specific factor (cuts both ways):** 22% draws + value AUC
+ceiling ~0.74 off a *large engine corpus* = low value-signal density per game.
+Argues FOR more games (less signal/game ⇒ need more), but may ALSO be a partial
+evaluability floor. Phase 1a is the cheap disambiguator.
+
+**Reasons to not believe / watch:** the gate-confound reframe is a *hypothesis*,
+not a guarantee — high LR may degrade even with tight gating, in which case Phase 2
+is mandatory. Over-converged seed hedged by the fresher arm. No promise it clears
+iter1_ema. **But "we proved the loop can't work" was false — we proved the cautious
+micro-version can't, a much weaker claim.** This is the lever the evidence points to
+and the one never pulled.
 
 **Discipline:** H2H vs the FIXED champion iter1_ema (R1); one regime change at a
-time; hard go/no-go at each stage gate.
+time; hard go/no-go at each rung. **Recommended next action: Phase 1a — it's a day,
+no code, and decisive either way.**
 
 ## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
 

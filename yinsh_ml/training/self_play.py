@@ -1523,6 +1523,11 @@ class SelfPlay:
                  root_policy_temp: float = 1.0,
                  # --- C++ bitboard engine ---
                  use_cpp_engine: bool = False,
+                 # --- E22 cross-teacher ---
+                 # Path to a FIXED opponent model. When set, self-play games are
+                 # learner-vs-opponent (color-balanced by game parity) and only
+                 # the learner's positions are stored. None = mirror self-play.
+                 opponent_model_path: Optional[str] = None,
                  # --- Shared evaluator (PR #12, Phase 2) ---
                  # When true and num_workers > 0, generate_games uses
                  # a single parent-side BatchedEvaluator that owns the
@@ -1622,6 +1627,7 @@ class SelfPlay:
             'iteration_progress': None,
             'root_policy_temp': root_policy_temp,  # Reshape root prior; >1 flattens, <1 sharpens
             'use_cpp_engine': use_cpp_engine,  # Opt-in to game_cpp engine in workers
+            'opponent_model_path': opponent_model_path,  # E22: fixed cross-teacher opponent (None = mirror)
         }
         # Store optional metrics instances
         self.mcts_metrics = mcts_metrics # Store the instance
@@ -1634,7 +1640,8 @@ class SelfPlay:
         # that don't belong in MCTS.__init__()
         mcts_init_config = {k: v for k, v in self.mcts_config.items()
                            if k not in ['use_batched_mcts', 'mcts_batch_size',
-                                        'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type']}
+                                        'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type',
+                                        'opponent_model_path']}
 
         self.mcts = MCTS(
             network=self.network,
@@ -1945,6 +1952,8 @@ def _run_game_loop(
         worker_logger: logging.Logger,
         use_batched_mcts: bool,
         mcts_batch_size: int,
+        opponent_mcts: "MCTS" = None,
+        learner_color=None,
 ):
     """Inner per-game loop shared by `play_game_worker` and
     `play_game_thread`.
@@ -1984,6 +1993,8 @@ def _run_game_loop(
             worker_logger=worker_logger,
             use_batched_mcts=use_batched_mcts,
             mcts_batch_size=mcts_batch_size,
+            opponent_mcts=opponent_mcts,
+            learner_color=learner_color,
         )
     finally:
         # CppGameState path has no pool — those states fall out of scope
@@ -2006,11 +2017,22 @@ def _run_game_loop_inner(
         worker_logger: logging.Logger,
         use_batched_mcts: bool,
         mcts_batch_size: int,
+        opponent_mcts: "MCTS" = None,
+        learner_color=None,
 ):
     """Body of the per-game loop. Split from `_run_game_loop` so the
     GameState-return-to-pool finally block in the outer function has a
     single ownership boundary regardless of how the loop exits.
+
+    Cross-teacher mode (E22): when ``opponent_mcts`` is provided, the LEARNER
+    (``mcts``) plays only the ``learner_color`` side and the opponent plays the
+    other side. ONLY the learner's positions are stored as training data — the
+    opponent's moves advance the game but never become targets — so the value
+    head trains on decisive games vs a *different* model instead of ~50/50
+    mirror-match noise. When ``opponent_mcts is None`` this is ordinary
+    single-model self-play (every move stored) — byte-for-byte the old path.
     """
+    cross_teacher = opponent_mcts is not None
     states: List[np.ndarray] = []
     policies: List[np.ndarray] = []
     players = []
@@ -2021,14 +2043,21 @@ def _run_game_loop_inner(
     max_game_moves = 300
 
     while not state.is_terminal() and move_count < max_game_moves:
+        # Cross-teacher: the learner plays its own color; the opponent plays the
+        # other side. is_learner_turn gates BOTH which net searches AND whether
+        # this position becomes a training target. Single-model mode (no
+        # opponent) → always the learner's turn → unchanged behavior.
+        is_learner_turn = (not cross_teacher) or (state.current_player == learner_color)
+        active_mcts = mcts if is_learner_turn else opponent_mcts
+
         search_start = time.time()
         if use_batched_mcts:
-            move_probs = mcts.search_batch(state, move_count, batch_size=mcts_batch_size)
+            move_probs = active_mcts.search_batch(state, move_count, batch_size=mcts_batch_size)
         else:
-            move_probs = mcts.search(state, move_count)
+            move_probs = active_mcts.search(state, move_count)
         temp_data['search_times'].append(time.time() - search_start)
 
-        temp = mcts.get_temperature(move_count)
+        temp = active_mcts.get_temperature(move_count)
         valid_moves = state.get_valid_moves()
 
         if not valid_moves:
@@ -2070,7 +2099,7 @@ def _run_game_loop_inner(
 
         selected_move = valid_moves[selected_idx_in_valid]
 
-        if store_target:
+        if store_target and is_learner_turn:
             encoded_state = state_encoder.encode_state(state).astype(np.float32)
             states.append(encoded_state)
             policies.append(move_probs)
@@ -2088,21 +2117,28 @@ def _run_game_loop_inner(
             })
 
         state.make_move(selected_move)
+        # Advance BOTH trees so each stays in sync with the full game line
+        # (preserves subtree reuse for both searchers in cross-teacher mode).
         mcts.advance_root(selected_move)
+        if cross_teacher:
+            opponent_mcts.advance_root(selected_move)
         move_count += 1
 
         if state.is_terminal():
             worker_logger.debug(f"Terminal state reached after {move_count} moves")
             break
 
-    # Final state
-    final_encoded_state = state_encoder.encode_state(state).astype(np.float32)
-    states.append(final_encoded_state)
-    dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(
-        state_encoder.total_moves, dtype=np.float32
-    )
-    policies.append(dummy_policy)
-    players.append(state.current_player)
+    # Final state (zero-policy; trains only the value head on the terminal
+    # position). In cross-teacher mode skip it unless it's the learner's turn,
+    # so an opponent-POV terminal value never enters the learner's buffer.
+    if (not cross_teacher) or (state.current_player == learner_color):
+        final_encoded_state = state_encoder.encode_state(state).astype(np.float32)
+        states.append(final_encoded_state)
+        dummy_policy = np.zeros_like(policies[0]) if policies else np.zeros(
+            state_encoder.total_moves, dtype=np.float32
+        )
+        policies.append(dummy_policy)
+        players.append(state.current_player)
     game_history.append({
         'move_number': move_count,
         'final_state': True,
@@ -2230,7 +2266,8 @@ def play_game_worker(
         # Remove these from mcts_config before passing to MCTS __init__
         mcts_init_config = {k: v for k, v in mcts_config.items()
                            if k not in ['use_batched_mcts', 'mcts_batch_size',
-                                        'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type']}
+                                        'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type',
+                                        'opponent_model_path']}
 
         # W2 B1: only the in-process (sequential) caller can pass a logger
         # safely; process-pool callers pass None to avoid a pickling error.
@@ -2240,6 +2277,42 @@ def play_game_worker(
             metrics_logger=metrics_logger,
             **mcts_init_config,
         )
+
+        # E22 cross-teacher: if an opponent model is configured, build a second
+        # net + MCTS (its OWN GameState pool to avoid subtree-reuse aliasing with
+        # the learner's pool — the two never search concurrently, but their trees
+        # both hold pool states across turns). The learner plays one color,
+        # alternating by game parity for color balance; only learner positions
+        # are stored as training data (enforced in the game loop).
+        opponent_model_path = mcts_config.get('opponent_model_path')
+        opponent_mcts = None
+        learner_color = None
+        opp_network = None
+        if opponent_model_path:
+            from ..game.types import Player
+            learner_color = Player.WHITE if (game_id % 2 == 0) else Player.BLACK
+            opp_network = NetworkWrapper(device=device, tensor_pool=local_tensor_pool,
+                                         use_enhanced_encoding=use_enhanced_encoding,
+                                         value_head_type=value_head_type)
+            opp_network.load_model(opponent_model_path)
+            opp_network.network.eval()
+            if use_cpp_engine:
+                opp_pool = None
+            else:
+                from ..memory import GameStatePool, GameStatePoolConfig
+                from ..game import GameState
+                opp_pool = GameStatePool(GameStatePoolConfig(
+                    initial_size=50, enable_statistics=False, factory_func=GameState))
+            opponent_mcts = MCTS(
+                network=opp_network,
+                game_state_pool=opp_pool,
+                metrics_logger=None,
+                **mcts_init_config,
+            )
+            worker_logger.info(
+                f"Game {game_id}: cross-teacher vs {opponent_model_path} "
+                f"(learner plays {learner_color})"
+            )
 
         # Run the shared game loop. _run_game_loop owns the GameState
         # lifecycle; this function still owns `network` and `mcts` and
@@ -2253,14 +2326,21 @@ def play_game_worker(
             worker_logger=worker_logger,
             use_batched_mcts=use_batched_mcts,
             mcts_batch_size=mcts_batch_size,
+            opponent_mcts=opponent_mcts,
+            learner_color=learner_color,
         )
         states, policies, values, temp_data, game_history = result
 
-        # Free the per-process model copy + MCTS tree before returning.
+        # Free the per-process model copies + MCTS trees before returning.
         mcts.reset_tree()
         del network
         del mcts.network
         del mcts
+        if opponent_mcts is not None:
+            opponent_mcts.reset_tree()
+            del opp_network
+            del opponent_mcts.network
+            del opponent_mcts
         return states, policies, values, temp_data, game_history
 
     except Exception as e:

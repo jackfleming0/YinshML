@@ -1,0 +1,112 @@
+# e22_mirror.yaml — E22 CONTROL arm: mirror self-play (iter1_ema vs iter1_ema).
+#
+# E22 tests whether the value head's plateau is caused by mirror self-play
+# producing ~50/50 noisy outcome labels. Dual-arm, ONE variable = the opponent:
+#   - mirror (THIS file): iter1_ema vs itself                  -> control
+#   - cross  (e22_cross): iter1_ema vs a fixed different model -> treatment
+# Both arms warm-start from iter1_ema (--init-checkpoint) and are H2H'd vs a
+# FROZEN iter1_ema each iteration; we compare slopes. If cross climbs and mirror
+# doesn't, decisive-outcome signal was the lever.
+#
+# Recipe = the champion's loop (branchB1B2B3) held constant. Depth is held LOW
+# (200 sims) on purpose — E19 proved depth is NOT the lever, so keep it cheap and
+# constant to isolate the opponent variable. discrimination_weight stays 0
+# (champion status quo) and E16 stays off (R7: symmetry is inference-time).
+#
+# Launch (control arm):
+#   python scripts/run_training.py -c configs/e22_mirror.yaml \
+#       --init-checkpoint models/iter1_ema_2026-05-27/iter1_ema.pt \
+#       --save-dir runs_e22/armA
+
+version: 1
+device: auto
+num_iterations: 5
+save_dir: runs_e22
+
+encoding:
+  type: enhanced   # 15-ch — matches iter1_ema (and the cross opponent sym15)
+
+network:
+  value_head_type: spatial
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 200          # depth held low+constant (E19: not the lever)
+  late_simulations: 100
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 16
+  use_shared_evaluator: false   # process-pool path (required for cross-teacher)
+  games_per_iteration: 200
+  # opponent_model_path: (unset) -> mirror self-play. The cross arm sets it.
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.00001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0    # champion status quo (NOT the variable)
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true               # general form, as in iter1_ema's recipe
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 200
+  promotion_threshold: 0.55     # R10
+  tournament_sliding_window: 3
+  eval_seed: 20260602
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 10
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
