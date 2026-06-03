@@ -367,6 +367,12 @@ and the one never pulled.
 time; hard go/no-go at each rung. **Recommended next action: Phase 1a — it's a day,
 no code, and decisive either way.**
 
+**Phase 1a artifacts (BUILT, ready to launch):** `configs/e24_phase1a_lr_{3e-5,1e-4,3e-4}.yaml`
+(champion recipe, one variable = `trainer.lr`), driver `scripts/e24_phase1a_sweep.sh`,
+runbook `docs/experiments/e24_phase1a.md`. The value-head AUC reuses the existing
+`scripts/value_head_calibration.py` (no build); the one prerequisite is an
+engine-labeled held-out `.npz` corpus (small data-gen, not code).
+
 ## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
 
 The 2026-05-29/30 work was recovered from a stash (it was never committed; the
