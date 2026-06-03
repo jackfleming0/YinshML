@@ -128,51 +128,52 @@ def main(argv=None):
     ap.add_argument("--mid-max", type=int, default=35)
     ap.add_argument("--min-samples-per-phase", type=int, default=50)
     ap.add_argument("--limit-games", type=int, default=0)
-    ap.add_argument("--include-experimental", action="store_true",
-                    help="also fit/report experimental palette coefficients "
-                         "(informational; not loaded by the production evaluator)")
+    ap.add_argument("--with-experimental", action="store_true",
+                    help="fit the 6 production features PLUS the experimental "
+                         "palette into the output JSON. The evaluator auto-"
+                         "activates any palette feature present in the weights.")
+    ap.add_argument("--features", default=None,
+                    help="comma-separated explicit feature set to fit "
+                         "(overrides --with-experimental). Must include the 6 "
+                         "production features so the JSON is loadable.")
     args = ap.parse_args(argv)
 
     if args.dump_baseline:
         _dump_baseline(args.out)
         return 0
 
+    # Resolve the feature set to fit (the JSON's keys = the active set).
+    if args.features:
+        feature_set = [f.strip() for f in args.features.split(",") if f.strip()]
+    else:
+        feature_set = wf.default_feature_set(with_experimental=args.with_experimental)
+    missing = set(wf.PRODUCTION_FEATURES) - set(feature_set)
+    if missing:
+        print(f"feature set must include the production features; missing {sorted(missing)}",
+              file=sys.stderr)
+        return 1
+    needs_experimental = any(f in wf.EXPERIMENTAL_FEATURES for f in feature_set)
+
     if args.demo:
-        samples = _collect_demo(args.early_max, args.mid_max, args.include_experimental)
+        samples = _collect_demo(args.early_max, args.mid_max, needs_experimental)
     else:
         samples = _collect_parquet(args.games_dir, args.limit_games,
-                                   args.early_max, args.mid_max, args.include_experimental)
+                                   args.early_max, args.mid_max, needs_experimental)
 
     if not samples:
         print("no samples collected", file=sys.stderr)
         return 1
 
-    # Fit production weights (the loadable artifact).
     weights = wf.fit_weights_from_samples(
-        samples, method=args.method, features=wf.PRODUCTION_FEATURES,
+        samples, method=args.method, features=feature_set,
         scale=args.scale, l2=args.l2,
         min_samples_per_phase=args.min_samples_per_phase,
     )
     _write_and_validate(weights, args.out)
-    print(f"wrote re-fit weights ({args.method}) -> {args.out}")
+    print(f"wrote re-fit weights ({args.method}, {len(feature_set)} features) -> {args.out}")
     for phase in wf.PHASES:
         print(f"  {phase}: " + ", ".join(
-            f"{f}={weights[phase][f]:.2f}" for f in wf.PRODUCTION_FEATURES))
-
-    # Informational: experimental coefficients, if requested.
-    if args.include_experimental:
-        exp_names = sorted(set().union(*[set(fd) for _p, fd, _l in samples])
-                           - set(wf.PRODUCTION_FEATURES))
-        if exp_names:
-            exp_w = wf.fit_weights_from_samples(
-                samples, method=args.method, features=exp_names,
-                scale=args.scale, l2=args.l2,
-                min_samples_per_phase=args.min_samples_per_phase,
-            )
-            print("\nexperimental-feature coefficients (informational):")
-            for phase in wf.PHASES:
-                print(f"  {phase}: " + ", ".join(
-                    f"{f}={exp_w[phase][f]:.2f}" for f in exp_names))
+            f"{f}={weights[phase][f]:.2f}" for f in feature_set))
     return 0
 
 

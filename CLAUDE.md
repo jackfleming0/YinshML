@@ -254,10 +254,20 @@ YinshHeuristics(weight_config_file=…)`. Re-fit weights from game outcomes with
 `yinsh_ml/heuristics/weight_fitting.py` (numpy logreg/correlation core) +
 `scripts/experiments/fit_heuristic_weights.py`. The full A/B experiment harness
 (re-fit → offline HeuristicAgent A/B gate → parallel arm training → tournament
-vs champion) lives in `scripts/experiments/` — see its README. NB the fit only
-covers the 6 `WeightManager.VALID_FEATURES`; using an experimental feature in
-the eval requires extending `extract_all_features` + `evaluator._feature_names`
-+ `VALID_FEATURES`.
+vs champion) lives in `scripts/experiments/` — see its README.
+
+**Configurable feature set**: the evaluator runs on a configurable active
+feature set (`YinshHeuristics(feature_set=…)`, default = the 6 production
+features). It's the single source of truth in
+`yinsh_ml/heuristics/feature_registry.py` (`PRODUCTION_FEATURES` +
+`EXPERIMENTAL_FEATURES`). A weights JSON that includes a palette feature
+**self-activates** it — the evaluator infers the active set from the weights'
+keys, so palette features are testable in training with **zero code/config
+changes** beyond pointing `heuristic_weight_config_file` at an extended weights
+JSON (emit one with `fit_heuristic_weights.py --with-experimental`).
+`WeightManager` requires the 6 production features and accepts the palette
+(`OPTIONAL_FEATURES`); unknown keys are rejected. Caveat: palette extractors use
+the Python `Board` API — verify under `use_cpp_engine: true` before enabling.
 
 ### Transposition Table Integration
 - **Enabled by default** in `HeuristicAgent`

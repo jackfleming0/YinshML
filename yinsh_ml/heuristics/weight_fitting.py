@@ -23,18 +23,18 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# The 6 weighted production features, in a fixed order (matches
-# WeightManager.VALID_FEATURES and evaluator._feature_names).
-PRODUCTION_FEATURES: Tuple[str, ...] = (
-    "completed_runs_differential",
-    "potential_runs_count",
-    "connected_marker_chains",
-    "ring_positioning",
-    "ring_spread",
-    "board_control",
-)
+# Canonical feature lists (single source of truth).
+from .feature_registry import PRODUCTION_FEATURES, EXPERIMENTAL_FEATURES
 
 PHASES: Tuple[str, ...] = ("early", "mid", "late")
+
+
+def default_feature_set(with_experimental: bool = False) -> List[str]:
+    """The feature set to fit: the production six, optionally plus the palette."""
+    feats = list(PRODUCTION_FEATURES)
+    if with_experimental:
+        feats += list(EXPERIMENTAL_FEATURES)
+    return feats
 
 WEIGHT_MIN, WEIGHT_MAX = 0.0, 50.0
 

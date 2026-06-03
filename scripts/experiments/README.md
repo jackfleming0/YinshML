@@ -28,23 +28,40 @@ and the evaluator object (with its weights) is pickled to the self-play workers.
 python scripts/experiments/fit_heuristic_weights.py --dump-baseline \
     --out configs/heuristic_weights/baseline.json
 
-# re-fit on real games (cloud; needs pandas/pyarrow)
+# re-fit the 6 production features on real games (cloud; needs pandas/pyarrow)
 python scripts/experiments/fit_heuristic_weights.py \
     --games-dir large_scale_selfplay_data/parquet_data \
     --method logreg --scale 10 \
-    --include-experimental \
     --out configs/heuristic_weights/refit_logreg.json
+
+# re-fit production + the experimental palette into a LOADABLE extended JSON
+python scripts/experiments/fit_heuristic_weights.py \
+    --games-dir large_scale_selfplay_data/parquet_data \
+    --method logreg --with-experimental \
+    --out configs/heuristic_weights/refit_palette.json
 ```
 
-`--include-experimental` additionally *reports* fitted coefficients for the
-experimental palette (`yinsh_ml/heuristics/experimental_features.py`). Those are
-**not** written into the loadable JSON — the production evaluator only consumes
-the 6 features in `WeightManager.VALID_FEATURES`. Wiring an experimental feature
-into the eval (extend `extract_all_features` + `evaluator._feature_names` +
-`WeightManager.VALID_FEATURES`) is a deliberate, separate experiment arm.
+### Testing the experimental palette features
 
-Weights are clamped to `[0, 50]` (WeightManager constraint); a fitted negative
-coefficient clamps to 0, i.e. the feature is dropped.
+The evaluator runs on a **configurable feature set**. A weights JSON that
+includes a palette feature (e.g. `defensive_disruption`) **self-activates** it:
+the evaluator reads the active set from the weights' keys, so no code change and
+no extra config are needed — the existing `heuristic_weight_config_file` plumbing
+carries it into self-play. `--with-experimental` (or `--features a,b,c`) emits
+such a JSON. Per-arm ablation is then just "which features does this arm's
+weights JSON contain".
+
+`WeightManager` requires the 6 production features in every file and accepts any
+of the palette features (`OPTIONAL_FEATURES`); unknown keys are rejected.
+Weights are clamped to `[0, 50]`; a fitted negative coefficient clamps to 0
+(the feature is dropped).
+
+> Runtime caveat: the palette extractors use the Python `Board` API
+> (`valid_move_positions`, `board.pieces`). Verify a palette arm under your
+> training engine setting — if you run `use_cpp_engine: true`, confirm the C++
+> game-state exposes those methods to the heuristic, or run palette arms with
+> `use_cpp_engine: false`. The palette is also heavier than the 6, so it adds
+> self-play leaf-eval cost.
 
 ## 2. Offline A/B gate (do this before spending GPU)
 
