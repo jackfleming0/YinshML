@@ -42,6 +42,7 @@ from pathlib import Path
 # Reuse the (torch-free) match runner.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_weights as vw  # noqa: E402
+import match_runner as mr  # noqa: E402
 
 from yinsh_ml.heuristics.feature_registry import EXPERIMENTAL_FEATURES, PRODUCTION_FEATURES
 
@@ -120,7 +121,11 @@ def main(argv=None):
     ap.add_argument("--depths", default="1,2")
     ap.add_argument("--games", type=int, default=60, help="games per arm per depth")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default=None)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel game workers (games are independent)")
+    ap.add_argument("--out", default=None,
+                    help="results JSON; written incrementally after each cell so "
+                         "long runs never lose progress")
     args = ap.parse_args(argv)
 
     base = json.loads(Path(args.base).read_text())
@@ -164,8 +169,13 @@ def main(argv=None):
         arm_path = tmp / f"{feat}_{n}.json"
         arm_path.write_text(json.dumps(arm_weights))
         for depth in depths:
-            res = vw.run_ab(str(arm_path), str(base_path),
-                            games=args.games, depth=depth, seed=args.seed)
+            if args.workers > 1:
+                res = mr.run_ab_parallel(str(arm_path), str(base_path),
+                                         games=args.games, depth=depth,
+                                         seed=args.seed, workers=args.workers)
+            else:
+                res = vw.run_ab(str(arm_path), str(base_path),
+                                games=args.games, depth=depth, seed=args.seed)
             decided = res["a_wins"] + res["b_wins"]
             lo, hi = wilson_ci(res["a_wins"], decided)
             sig = "yes" if (lo > 0.5 or hi < 0.5) else "no"
@@ -181,6 +191,9 @@ def main(argv=None):
                 "ci95": [lo, hi], "elo": res["elo_delta_a_over_b"],
                 "significant": sig == "yes",
             })
+            # Incremental write so a multi-hour/day run never loses progress.
+            if args.out:
+                Path(args.out).write_text(json.dumps(rows, indent=2))
 
     print("-" * 100)
     print("Reading: win-rate > 0.5 with CI excluding 0.5 => that feature adds "
