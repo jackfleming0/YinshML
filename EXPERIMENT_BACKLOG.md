@@ -200,7 +200,16 @@ is a small change; trivial to prototype at inference on the analysis board.
 substrate lever, that reshapes what's worth ensembling/distilling. Cheap probe (mode b) is ~1h; the teacher
 (mode a) is a training run, gated like everything else on a real learning rate.
 
-### E22 — Cross-teacher self-play (sharpen the value head)  `[BUILT + validated; ready to launch]`
+### E22 — Cross-teacher self-play (sharpen the value head)  `[RAN 2026-06-03 — FAILED]`
+
+> **Result:** cross arm DEGRADES vs frozen iter1_ema (−4.5 pp/iter: 51.7→33.3) while mirror
+> treads water (+1.2). The decisive-game signal corrupted the POLICY (overfit to beating
+> sym15); the value head was unchanged. Follow-up value-head diagnostics (`scripts/value_head_calibration.py`,
+> `scripts/value_head_finetune_probe.py`) showed the value head is FROZEN by the self-play loop
+> AND near a data/arch ceiling (AUC ~0.74; supervised fine-tune overfits in 1 epoch). BUT this
+> only indicts the *cautious micro-loop* (lr 1e-5, ~1K games) — NOT self-play at scale, which we
+> never ran. Next direction = a real self-play campaign (real LR + scale + staged kill gates);
+> see memory `project_e18_e19.md` and the other session's E24 scope. Full detail in memory.
 
 **Chosen after the E19 verdict** (depth treads water; the limiter is the evaluator/value-head, NOT the
 policy head — Arm B's dropout-off head declined too). E19 evidence says the value head is *calibrated but
@@ -238,7 +247,12 @@ whitelist → ignored since forever, incl. E19; minor, out of scope here.) **Sup
 **Launch:** re-rent a box (≥160 cores / 1×GPU≥16GB), `git checkout e22-cross-teacher`, scp seeds,
 `PY=/venv/main/bin/python bash scripts/e22_dualarm.sh`. ~200-sim/5-iter × 2 arms — cheaper than E19.
 
-### E23 — Gap-controlled opponent league (E22 scale-up)  `[parked behind E22 verdict]`
+### E23 — Gap-controlled opponent league (E22 scale-up)  `[DROPPED]`
+
+> **Dropped 2026-06-03:** gated on E22 *climbing*; E22 declined, so the league premise is moot.
+> (Also: the broader lesson is that loop-variant tweaks don't beat iter1_ema — see E22 result.)
+> NOTE: a parallel session independently scoped a "real self-play campaign" as **E23** too —
+> that one should be renumbered **E24** to avoid colliding with this (now-dropped) entry.
 
 Spun out of a 2026-06-02 discussion (Jack): if E22 cross-teacher works, can we keep replacing the
 opponent with progressively stronger models to compound performance? Yes — and it maps onto a known
