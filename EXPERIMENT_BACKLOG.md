@@ -2125,13 +2125,32 @@ weights, so re-weighting linear terms is unlikely to help much. Run it to close
 the loop and to have honest evidence either way, not because we expect a win.
 
 **HF-2 — Features as network inputs (the functional-form test).** *Status:
-queued, build-not-launch.* Add the strategic features (esp. `ring_mobility`,
-`defensive_disruption` — the ones carrying independent signal) as channels to the
-`EnhancedStateEncoder`, and let TRAINING weight them nonlinearly. This is the
-*direct* test of the Phase 1 conclusion ("information is real but a linear
-weight can't exploit it"). Cost: training run (GPU/cloud, hours+). **Expected
-payoff: medium** — it's the principled next step, but competes with the
-in-flight value-head work; build it ready-to-launch, don't fire while that runs.
+queued, build-not-launch — RESCOPED after reading the encoder + D.2.* The
+direct test of the Phase 1 conclusion ("info is real but a linear heuristic
+weight can't exploit it; let the net weight it nonlinearly"). **Crucial
+discovery: most of this is already built.** `EnhancedStateEncoder` (15-ch,
+`use_enhanced_encoding`) already feeds the network: ring mobility (ch 8),
+partial rows (ch 6/7), row threats (ch 4/5), ring influence, center distance,
+turn/score. So `ring_mobility` / `near_completion` / `potential_runs` as
+*network inputs* are ALREADY tested — Branch D.2 (15-ch) came back
+**NOT_STRONGER** (Done entry 2026-05-25), though confounded by the since-fixed
+`decode_phase` reading-wrong-channel bug, so it's "inconclusive-leaning-null",
+not a clean refutation. Recent symmetry runs (`sym15-*`) are 15-ch, so the path
+is in active use.
+- **The genuinely NEW thing** HF-2 could add is **`defensive_disruption` as a
+  new channel** — the defensive term that is NOT in the enhanced encoder and is
+  the one palette feature with both independent signal (R²=0.47) and a clear
+  strategic story (denying opponent runs).
+- **Build cost / risk:** adding a channel is a *breaking* change (15→16,
+  NetworkWrapper hard-fails on channel mismatch → requires fresh pretrain).
+  Untestable in a torch-free container. So: do NOT commit untested encoder
+  surgery blind. The right "build" is (a) this scoping, (b) a clean post-bugfix
+  15-ch vs 6-ch A/B to get an *unconfounded* read on the already-built channels
+  before adding a 16th, (c) only then the defensive_disruption channel.
+- **Recommended first move (cheap-ish, cloud):** re-run the *existing* 15-ch vs
+  6-ch comparison now that the phase bug is fixed — it answers "do strategic
+  features as network inputs help?" without any new code. If that's still null,
+  adding one more channel is unlikely to change the verdict and HF-2 closes.
 
 **HF-3 — Pivot to learned-value (AlphaZero direction).** *Status: parked,
 references `TRAINING_REFACTOR_PLAN.md`.* Demote the heuristic to a prior, trust
