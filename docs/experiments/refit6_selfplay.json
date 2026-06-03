@@ -1,0 +1,26 @@
+{
+  "early": {
+    "completed_runs_differential": 0.0,
+    "potential_runs_count": 0.0,
+    "connected_marker_chains": 8.414021395902747,
+    "ring_positioning": 28.619605068466928,
+    "ring_spread": 4.096373535630326,
+    "board_control": 0.0
+  },
+  "mid": {
+    "completed_runs_differential": 0.0,
+    "potential_runs_count": 27.146365327296984,
+    "connected_marker_chains": 0.0,
+    "ring_positioning": 0.0,
+    "ring_spread": 12.218370402001907,
+    "board_control": 5.4252642707011125
+  },
+  "late": {
+    "completed_runs_differential": 0.0,
+    "potential_runs_count": 21.929226117669238,
+    "connected_marker_chains": 0.0,
+    "ring_positioning": 0.0,
+    "ring_spread": 29.360773882330765,
+    "board_control": 0.0
+  }
+}

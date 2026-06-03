@@ -2116,13 +2116,16 @@ correctness fixes, a configurable-feature-set + experiment harness, and a
 **well-powered null** on adding hand-crafted features (see the Done entry
 below). The remaining options, ranked:
 
-**HF-1 — Cheap re-fit check (re-fit the original 6 weights).** *Status: queued,
-next.* Re-fit the 6 production weights on real game outcomes (now that
-`potential_runs_count` is live) and A/B vs baseline agent-vs-agent. Cost: low
-(CPU; needs a real game corpus + pyarrow). **Expected payoff: low** — the Phase 1
-mechanism finding says the bottleneck is the heuristic's *linear form*, not its
-weights, so re-weighting linear terms is unlikely to help much. Run it to close
-the loop and to have honest evidence either way, not because we expect a win.
+**HF-1 — Cheap re-fit check (re-fit the original 6 weights).** *Status: DONE —
+WORSE (2026-06-03).* Re-fit on 300 self-generated games (no parquet in
+container), rescaled to baseline's per-phase L1 budget (pure reallocation), A/B
+vs baseline: **62-238, win-rate 0.207, -234 Elo, significant.** Re-fitting
+*hurts*. Lesson: outcome-correlation ≠ good move-selection weight — in self-play
+data the winner accumulates everything by the endgame, so the fit learns
+reverse-causation and over-optimizes winner's-end-state correlates. The
+hand-tuned baseline (validated for play) beats raw outcome-fits decisively.
+Full writeup: `docs/experiments/hf1_refit_results.md`. Closes the heuristic-
+*weight* axis negative, complementing Phase 1's heuristic-*feature* negative.
 
 **HF-2 — Features as network inputs (the functional-form test).** *Status:
 queued, build-not-launch — RESCOPED after reading the encoder + D.2.* The
