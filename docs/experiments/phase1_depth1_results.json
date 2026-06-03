@@ -1,0 +1,206 @@
+[
+  {
+    "feature": "defensive_disruption",
+    "budget_or_weight": 0.0,
+    "weight": 0.0,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 145,
+    "base_wins": 155,
+    "draws": 0,
+    "win_rate": 0.48333333333333334,
+    "ci95": [
+      0.4273534010031743,
+      0.5397347133300835
+    ],
+    "elo": -11.585478374126659,
+    "significant": false
+  },
+  {
+    "feature": "defensive_disruption",
+    "budget_or_weight": 4.0,
+    "weight": 5.853658536585366,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 145,
+    "base_wins": 155,
+    "draws": 0,
+    "win_rate": 0.48333333333333334,
+    "ci95": [
+      0.4273534010031743,
+      0.5397347133300835
+    ],
+    "elo": -11.585478374126659,
+    "significant": false
+  },
+  {
+    "feature": "defensive_disruption",
+    "budget_or_weight": 6.0,
+    "weight": 8.78048780487805,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 148,
+    "base_wins": 152,
+    "draws": 0,
+    "win_rate": 0.49333333333333335,
+    "ci95": [
+      0.4372010534770382,
+      0.549634192256265
+    ],
+    "elo": -4.632749019926092,
+    "significant": false
+  },
+  {
+    "feature": "defensive_disruption",
+    "budget_or_weight": 8.0,
+    "weight": 11.707317073170731,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 142,
+    "base_wins": 158,
+    "draws": 0,
+    "win_rate": 0.47333333333333333,
+    "ci95": [
+      0.41752799159808596,
+      0.5298129913351266
+    ],
+    "elo": -18.547497028546434,
+    "significant": false
+  },
+  {
+    "feature": "ring_mobility_differential",
+    "budget_or_weight": 4.0,
+    "weight": 0.5139186295503212,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 154,
+    "base_wins": 146,
+    "draws": 0,
+    "win_rate": 0.5133333333333333,
+    "ci95": [
+      0.4569629909718754,
+      0.5693665175615182
+    ],
+    "elo": 9.267146020810351,
+    "significant": false
+  },
+  {
+    "feature": "ring_mobility_differential",
+    "budget_or_weight": 8.0,
+    "weight": 1.0278372591006424,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 149,
+    "base_wins": 151,
+    "draws": 0,
+    "win_rate": 0.49666666666666665,
+    "ci95": [
+      0.440488541129282,
+      0.5529290817373694
+    ],
+    "elo": -2.3162715523581943,
+    "significant": false
+  },
+  {
+    "feature": "ring_confinement_pressure",
+    "budget_or_weight": 4.0,
+    "weight": 7.5,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 146,
+    "base_wins": 154,
+    "draws": 0,
+    "win_rate": 0.4866666666666667,
+    "ci95": [
+      0.43063348243848176,
+      0.5430370090281246
+    ],
+    "elo": -9.267146020810351,
+    "significant": false
+  },
+  {
+    "feature": "ring_confinement_pressure",
+    "budget_or_weight": 8.0,
+    "weight": 15.0,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 147,
+    "base_wins": 153,
+    "draws": 0,
+    "win_rate": 0.49,
+    "ci95": [
+      0.43391603364256914,
+      0.5463368349573855
+    ],
+    "elo": -6.94963842776909,
+    "significant": false
+  },
+  {
+    "feature": "near_completion_threats",
+    "budget_or_weight": 4.0,
+    "weight": 13.333333333333334,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 144,
+    "base_wins": 156,
+    "draws": 0,
+    "win_rate": 0.48,
+    "ci95": [
+      0.4240757908015887,
+      0.5364299463983206
+    ],
+    "elo": -13.904842503684801,
+    "significant": false
+  },
+  {
+    "feature": "near_completion_threats",
+    "budget_or_weight": 8.0,
+    "weight": 26.666666666666668,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 140,
+    "base_wins": 160,
+    "draws": 0,
+    "win_rate": 0.4666666666666667,
+    "ci95": [
+      0.41099010312059053,
+      0.5231861255459253
+    ],
+    "elo": -23.196778791074692,
+    "significant": false
+  },
+  {
+    "feature": "marker_tempo_differential",
+    "budget_or_weight": 4.0,
+    "weight": 0.9876543209876544,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 145,
+    "base_wins": 155,
+    "draws": 0,
+    "win_rate": 0.48333333333333334,
+    "ci95": [
+      0.4273534010031743,
+      0.5397347133300835
+    ],
+    "elo": -11.585478374126659,
+    "significant": false
+  },
+  {
+    "feature": "marker_tempo_differential",
+    "budget_or_weight": 8.0,
+    "weight": 1.9753086419753088,
+    "normalized": true,
+    "depth": 1,
+    "arm_wins": 142,
+    "base_wins": 158,
+    "draws": 0,
+    "win_rate": 0.47333333333333333,
+    "ci95": [
+      0.41752799159808596,
+      0.5298129913351266
+    ],
+    "elo": -18.547497028546434,
+    "significant": false
+  }
+]
