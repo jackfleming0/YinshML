@@ -36,13 +36,21 @@ regime artifact, not a ceiling — and we never needed the anti-forgetting build
    60). Thin at 3 iters (~1 point/arm) — it reliably catches *binary*
    degrade-and-revert, but not a slow climb. **Weight the AUC trend over H2H here.**
 
-### ⚠️ Prerequisite (the one non-config item)
+### Prerequisite (one quick data-gen, BUILT)
 An **engine-labeled** held-out corpus: `expert_games/engine_labeled_15ch.npz`
-(15ch states + engine-determined outcomes). This is a *small data-gen step*, not a
-code build — `value_head_calibration.py` already consumes a `--data *.npz`. If it's
-absent the driver falls back to the human corpus with a loud warning; the rung
-still runs but the AUC signal keeps the human-noise confound. Generate it before
-launch if at all possible.
+(15ch states + engine-determined outcomes). Generator is built —
+`scripts/gen_engine_labeled_corpus.py` plays consistent, model-INDEPENDENT
+`HeuristicAgent` self-play (no circularity with the value head) and labels each
+main-game position by the game outcome, removing the human-blunder noise that
+inflates the ~0.70 AUC floor. Run once on the box before the sweep:
+```bash
+python scripts/gen_engine_labeled_corpus.py \
+    --out expert_games/engine_labeled_15ch.npz \
+    --games 300 --depth 2 --epsilon 0.12 --workers 80 --max-positions 12000
+```
+(~minutes on a many-core box; `--depth 3` for stronger/cleaner labels, slower.)
+If absent, the driver falls back to the human corpus with a loud warning — the
+rung still runs, but the AUC signal keeps the human-noise confound.
 
 ## Launch
 ```bash
