@@ -56,6 +56,31 @@ Every arm clusters on the placebo (~0.48–0.51); every CI brackets 0.5.
   heuristic-feature-tuning has low headroom; leverage is likely in the
   learned-value / network-input direction.
 
+## Why the null? (mechanism diagnostics)
+
+Three cheap diagnostics over real positions, to avoid concluding a null without
+understanding it:
+
+1. **Not tactical override.** Of evaluated positions, only ~5% are decided by
+   the terminal/tactical detectors; **95% are decided by the weighted
+   features.** So the features have full opportunity to act — the null isn't
+   "tactics drown them out".
+2. **Redundancy is only partial.** R² of each palette feature linearly predicted
+   by the 6 production features: near_completion 0.61 (largely redundant),
+   marker_tempo 0.57, ring_confinement 0.58, defensive_disruption 0.47,
+   **ring_mobility 0.25 (mostly independent).**
+3. **The decisive case:** `ring_mobility_differential` carries genuinely new
+   information (R²=0.25) and **still doesn't help.** So "redundancy" can't be the
+   whole story.
+
+**Conclusion — it's the functional form, not the feature set.** The information
+is real and largely available, but a single *linear, differential, single-
+position* weight can't exploit signal whose value is contextual/nonlinear
+(mobility helps in some positions, hurts in others; one scalar weight can't say
+that). The bottleneck is that the heuristic is linear, not that it's missing
+features. This is a direct argument for nonlinear/learned weighting (features as
+network inputs; learned value head) over more hand-crafted linear terms.
+
 ## Decisions this drove
 
 - **Did NOT run the depth-2/3 fade test.** Depth 1 is where shallow-search
