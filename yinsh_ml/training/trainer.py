@@ -1053,6 +1053,13 @@ class YinshTrainer:
         states = states.to(self.device)
         target_probs = target_probs.to(self.device)
         target_values = target_values.to(self.device)
+        # Defense-in-depth against NaN-poisoned targets: a single non-finite
+        # value in target_probs makes policy_loss NaN, which clip_grad_norm
+        # propagates into every weight. Self-play now drops non-finite policies
+        # at the source, but sanitize here too — a zeroed row contributes 0 to
+        # the CE sum and 0 gradient, i.e. that sample's policy target is ignored.
+        target_probs = torch.nan_to_num(target_probs, nan=0.0, posinf=0.0, neginf=0.0)
+        target_values = torch.nan_to_num(target_values, nan=0.0, posinf=0.0, neginf=0.0)
         target_values_flat = target_values.view(-1)
 
         # Debug print every 20 iterations (debug level)

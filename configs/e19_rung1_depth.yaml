@@ -1,0 +1,130 @@
+# e19_rung1_depth.yaml — E19 Rung 1: DEPTH-ONLY ablation off the champion recipe.
+#
+# This is a faithful clone of branchB1B2B3_mcts200.yaml (the exact self-play loop
+# that produced the reigning champion iter1_ema_2026-05-27). Per META rule R3
+# ("one variable per experiment") the ONLY substantive lever changed vs that
+# recipe is SEARCH DEPTH:
+#
+#     self_play.num_simulations:  200 -> 800   (the rung-1 lever, R6: depth before volume)
+#     self_play.late_simulations: 100 -> 400   (same 4x scaling; keep early/late structure)
+#
+# Everything else is held at the champion's status quo ON PURPOSE:
+#   - discrimination_weight: 0.0   -- this is iter1_ema's OWN setting, not the
+#       symmetry-run confound. Keeping it = matching the known-good base. Turning
+#       it on is reserved for RUNG 3 (would be a second variable here -> R3 violation).
+#   - E16 symmetric_reg: OFF (absent) -- R7: symmetry is an inference-time property
+#       (E8, already deployed); do not spend training on it.
+#   - search_consistency.enabled: true (GENERAL form, as in iter1_ema's recipe).
+#       The placement-only value-grounding variant (E2) is also a RUNG 3 item.
+#   - lr 1e-5, games_per_iteration 200, 15ch enhanced encoding, spatial value head,
+#       value_head_lr_factor 5.0, ema_decay 0.999 -- all identical to the champion.
+#
+# Meta-discipline knobs (NOT the experimental variable; same for both arms):
+#   - num_iterations: 5 -> 3        (R9: small-scale prove-the-lever diagnostic)
+#   - arena.promotion_threshold: 0.50 -> 0.55  (R10: tighten the in-loop gate)
+#   - self_play.num_workers: 4 -> 16   (>=160-core box; 4 was GPU/CPU-starved)
+#
+# DUAL-ARM PROTOCOL (E19 dual-arm extension — measure SLOPE not level):
+#   This SAME config drives BOTH arms. The only difference is the seed model:
+#     Arm A: --init-checkpoint models/iter1_ema_2026-05-27/iter1_ema.pt   --save-dir runs_e19/armA
+#     Arm B: --init-checkpoint models/symmetry_run/symmetric-15ch-iter1-ema.pt --save-dir runs_e19/armB
+#   Run sequentially on one >=160-core single-GPU box (4090 is plenty; GPU tier
+#   barely matters, cores bind). After EACH iteration, H2H both arms vs a FROZEN
+#   copy of iter1_ema (scripts/measure_h2h.py, color-balanced ~60 games: two runs
+#   with --white/--black swapped). Compare slopes: A starts ~50% vs frozen-self,
+#   B at ~27%. Steeper B-slope => the symmetric/15ch architecture is the better
+#   substrate and the big run pivots to it.
+#
+# Launch the box with --cap-add SYS_PTRACE (py-spy); interpreter /venv/main/bin/python.
+
+version: 1
+device: auto
+num_iterations: 3              # R9: small-scale diagnostic (was 5)
+save_dir: runs_e19            # overridden per-arm via --save-dir
+
+encoding:
+  type: enhanced   # 15-ch — matches both seed checkpoints
+
+network:
+  value_head_type: spatial   # matches both seeds (spatial head)
+
+self_play:
+  evaluation_mode: hybrid
+  heuristic_weight: 0.3
+  heuristic_weight_start: 0.5
+  heuristic_weight_end: 0.0
+  heuristic_weight_anneal_iterations: 5
+  num_simulations: 800          # RUNG-1 LEVER: was 200
+  late_simulations: 400         # RUNG-1 LEVER: was 100 (same 4x scaling)
+  simulation_switch_ply: 20
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  value_weight: 1.0
+  max_depth: 150
+  use_batched_mcts: true
+  mcts_batch_size: 64
+  enable_subtree_reuse: true
+  fpu_reduction: 0.25
+  epsilon_mix_start: 0.25
+  epsilon_mix_end: 0.0
+  epsilon_mix_taper_moves: 20
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_iteration_end: 0.3
+  initial_temp: 1.0
+  final_temp: 0.1
+  annealing_steps: 30
+  temp_clamp_fraction: 0.6
+  num_workers: 16               # >=160-core box (was 4)
+  use_shared_evaluator: false
+  games_per_iteration: 200
+
+trainer:
+  batch_size: 256
+  l2_reg: 0.0
+  lr: 0.00001
+  value_head_lr_factor: 5.0
+  value_loss_weights: [0.5, 0.5]
+  discrimination_weight: 0.0    # champion status quo (NOT the variable — see header)
+  epochs_per_iteration: 1
+  batches_per_epoch: auto
+  max_buffer_size: 100000
+  ema_decay: 0.999
+  use_ema_for_eval: true
+  lr_schedule: cosine
+  warmup_epochs: 1
+  enable_autocast: true
+  soft_value_target_sigma: 0.5
+  search_consistency:
+    enabled: true               # general form, as in iter1_ema's recipe
+  max_oversampling: 4.0
+
+phase_weights:
+  RING_PLACEMENT: 1.0
+  MAIN_GAME: 2.0
+  RING_REMOVAL: 0.5
+
+augmentation:
+  enabled: true
+  max_augmentations: 4
+
+arena:
+  games_per_match: 200
+  promotion_threshold: 0.55     # R10: tightened (was 0.50)
+  tournament_sliding_window: 3
+  eval_seed: 20260601
+  revert_self_play_on_gate_failure: true
+  gate_revert_on_mtime_mismatch: fail
+  eval_report_both_modes: true
+  raw_policy_temperature: 0.5
+
+export:
+  export_every: 5
+  coreml_dir: models/coreml
+
+anchor:
+  enabled: true
+  num_games: 40
+  depth: 1
+  seed: 1337
+  max_moves_per_game: 150
+  skip_first_n_iterations: 1
