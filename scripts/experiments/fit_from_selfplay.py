@@ -80,6 +80,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
+    base = json.loads(Path(args.base).read_text())  # baseline weights (fallback + rescale ref)
+
     tasks = [(args.base, args.gen_depth, args.epsilon, args.seed + i)
              for i in range(args.games)]
     print(f"generating {args.games} epsilon-greedy games (eps={args.epsilon}, "
