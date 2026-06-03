@@ -1,0 +1,26 @@
+{
+  "early": {
+    "completed_runs_differential": 8.12,
+    "potential_runs_count": 8.72,
+    "connected_marker_chains": 6.39,
+    "ring_positioning": 6.5,
+    "ring_spread": 4.8,
+    "board_control": 6.6000000000000005
+  },
+  "mid": {
+    "completed_runs_differential": 11.6,
+    "potential_runs_count": 11.990000000000002,
+    "connected_marker_chains": 7.1,
+    "ring_positioning": 4.5,
+    "ring_spread": 3.6,
+    "board_control": 6.0
+  },
+  "late": {
+    "completed_runs_differential": 17.4,
+    "potential_runs_count": 14.170000000000002,
+    "connected_marker_chains": 8.52,
+    "ring_positioning": 3.0,
+    "ring_spread": 2.8,
+    "board_control": 5.4
+  }
+}

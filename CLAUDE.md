@@ -247,6 +247,18 @@ weight-learning/ablation. Strong human games live in
 `yinsh_ml/data/human_games/` (engine regression fixtures + analysis material;
 replay via `scripts/review_human_game.py`).
 
+**Config-driven heuristic weights**: training reads
+`self_play.heuristic_weight_config_file` (a WeightManager-format JSON; null ⇒
+hardcoded defaults). The key threads `run_training.py → supervisor → SelfPlay →
+YinshHeuristics(weight_config_file=…)`. Re-fit weights from game outcomes with
+`yinsh_ml/heuristics/weight_fitting.py` (numpy logreg/correlation core) +
+`scripts/experiments/fit_heuristic_weights.py`. The full A/B experiment harness
+(re-fit → offline HeuristicAgent A/B gate → parallel arm training → tournament
+vs champion) lives in `scripts/experiments/` — see its README. NB the fit only
+covers the 6 `WeightManager.VALID_FEATURES`; using an experimental feature in
+the eval requires extending `extract_all_features` + `evaluator._feature_names`
++ `VALID_FEATURES`.
+
 ### Transposition Table Integration
 - **Enabled by default** in `HeuristicAgent`
 - Uses Zobrist hashing for position encoding — `ZobristHasher.hash_state(state)` hashes the board **AND** side-to-move **AND** game phase. Two positions with identical piece layout but different `current_player` or `phase` now correctly hash to different values. O(1) `toggle_side_to_move` / `toggle_phase` helpers support incremental updates.
