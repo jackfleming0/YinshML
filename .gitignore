@@ -26,6 +26,9 @@ experiments/**/*.npz
 !pyproject.toml
 !requirements.txt
 !setup.py
+# Interactive HTML guided tour of the codebase (self-contained learning guide)
+!codebase-guide/
+!codebase-guide/**
 # Analysis board (position composer + alignment loop scripts). Source is
 # allowlisted; generated run outputs (positions, measurements, reports,
 # charts) live under loop/runs/<timestamp>/ and stay ignored.

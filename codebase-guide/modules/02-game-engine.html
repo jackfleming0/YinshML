@@ -1,0 +1,303 @@
+<section class="module" id="module-2">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">02</span>
+      <h2 class="module-title">The Board and the Rules</h2>
+      <p class="module-subtitle">How a hexagonal board game becomes clean, testable Python — pieces, phases, and the one bug that hid in plain sight.</p>
+    </div>
+
+    <!-- SCREEN 1: Mental model of the board -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Picture the board first</h3>
+
+      <p>Before a single line of code makes sense, you need the mental picture. YINSH is played on a
+        <span class="term" data-definition="A board made of hexagons (six-sided cells) packed together. Unlike a square chessboard where you move up/down/left/right, a hex grid gives you three natural straight-line directions instead of four.">hexagonal grid</span>
+        — not a square chessboard. The code models it as an 11&times;11 coordinate space, but the playing
+        surface is a diamond cut out of that square: only <strong>85 of the 121 cells are real</strong>. The
+        corners are empty.</p>
+
+      <p>Each column (lettered <code>A</code> through <code>K</code>) holds a different number of valid
+        rows, and those counts form the diamond shape: <code>[4, 7, 8, 9, 10, 9, 10, 9, 8, 7, 4]</code>.
+        Column <code>A</code> only has rows 2&ndash;5; the fat middle columns reach all the way across.
+        This is why you'll constantly see <code>is_valid_position()</code> guarding the code — most of the
+        coordinate plane simply isn't on the board.</p>
+
+      <p>Two players, <span class="term" data-definition="One of the two players. In code Player.WHITE is the integer 1 and Player.BLACK is -1, so flipping sides is as cheap as multiplying by -1.">WHITE and BLACK</span>,
+        share the board. Each owns two kinds of pieces: <span class="term" data-definition="A ring is a player's movable piece. You start with 5. Rings slide in straight lines and are how you actually make moves — markers can't move on their own.">rings</span>
+        (the things you actually move) and <span class="term" data-definition="A marker is a small token that gets dropped onto the board when a ring leaves a square. Markers flip color when a ring jumps over them, and lining up five of your color is how you score.">markers</span>
+        (tokens that get left behind and flip color). Hold those two ideas — rings move, markers accumulate —
+        and the rest of the engine falls into place.</p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">Why integers for players?</strong>
+          <p><code>Player.WHITE = 1</code> and <code>Player.BLACK = -1</code> isn't arbitrary. Encoding the
+          two sides as <code>+1 / -1</code> means "the other player" is just multiplication by &minus;1, and a
+          board can be flipped to the current player's perspective by sign math instead of branching. This
+          tiny choice ripples all the way up into how the neural network sees positions in Module 3.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: The files -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Six files, one game engine</h3>
+
+      <p>Everything about the rules lives in <code>yinsh_ml/game/</code>. There's no AI here yet — this is the
+        pure, deterministic referee that the search algorithms and neural network sit on top of. Each file
+        has a single, sharp job:</p>
+
+      <div class="file-tree">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/game/</span>
+          <span class="ft-desc">The rules of YINSH, as plain Python — no machine learning</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">constants.py</span>
+              <span class="ft-desc">Board geometry &amp; rule numbers: the 85 valid positions, the hex directions, 5 rings per player, 5 markers per row, 3 rows to win</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">types.py</span>
+              <span class="ft-desc">The vocabulary: Move, MoveType, GamePhase enums — small, frozen dataclasses everything else passes around</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">board.py</span>
+              <span class="ft-desc">Where the pieces actually are. Places/moves pieces, flips markers when a ring jumps them, finds completed rows</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">game_state.py</span>
+              <span class="ft-desc">The referee: whose turn it is, the current phase, move history, win/stalemate detection, applying a move</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">moves.py</span>
+              <span class="ft-desc">Move generation — given a state, enumerate every legal move a player could make right now</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">zobrist.py</span>
+              <span class="ft-desc">A fast fingerprint of a position (a single integer hash) so the search can recognize "seen this before" instantly</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p>A useful way to read the dependency arrow: <code>constants</code> and <code>types</code> define the
+        nouns and numbers, <code>board</code> holds the physical state, <code>game_state</code> is the rules
+        engine that orchestrates everything, and <code>moves</code> + <code>zobrist</code> are services the
+        higher layers (search, training) lean on heavily.</p>
+    </div>
+
+    <!-- SCREEN 3: The phases -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">A game in three acts</h3>
+
+      <p>YINSH unfolds in distinct <span class="term" data-definition="A game phase is a named stage of the game with its own legal moves. YINSH cycles through placing rings, normal play, and removing a ring after you score — the engine tracks which phase you're in so it knows what moves are even allowed.">phases</span>,
+        and the engine encodes them as a <code>GamePhase</code> enum. The phase decides which moves are legal,
+        so almost every method in <code>game_state.py</code> branches on it. Here is the whole arc:</p>
+
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="flow-step-num">1</div>
+          <p><strong>RING_PLACEMENT</strong><br>Players alternate dropping their 5 rings onto empty cells. When all 10 are down, the phase flips automatically.</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">2</div>
+          <p><strong>MAIN_GAME</strong><br>Move a ring in a straight line. It leaves a marker behind and flips any markers it jumps over. The real game.</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">3</div>
+          <p><strong>RING_REMOVAL</strong><br>Made a <span class="term" data-definition="A run is five (or more) of your own markers in an unbroken straight line along a hex axis. Completing one lets you remove the five markers and one of your rings — and scores a point.">run</span> of 5? Remove those markers and lift one of your own rings off the board to score.</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">🏆</div>
+          <p><strong>Win</strong><br>Removing 3 rings (<code>POINTS_TO_WIN = 3</code>) ends the game. Steps 2&ndash;3 loop until someone gets there.</p>
+        </div>
+      </div>
+
+      <p>The counterintuitive bit: removing your <em>own</em> ring is how you win. Every score costs you a piece,
+        so each point makes you slightly weaker — the late game is a tense balance of attack and self-sacrifice.
+        The enum also has <code>ROW_COMPLETION</code> and <code>GAME_OVER</code> states for the in-between
+        bookkeeping moments.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">🔁</div>
+        <div class="callout-content">
+          <strong class="callout-title">Markers flip — that's the whole strategy</strong>
+          <p>When a ring slides over a line of markers, every marker it passes flips to the opposite color
+          (<code>board.move_ring</code>: <em>"Move a ring... flipping markers in between"</em>). A single move
+          can turn your opponent's near-complete row into yours, or shatter it entirely. This flip mechanic is
+          why a position can swing wildly from one move — and why the search has to look ahead carefully.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 4: Code translation - directions + the bug -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Three directions, not four — and the bug that proved it</h3>
+
+      <p>On a square grid, a straight line runs in 4 axes. On a hex grid there are only <strong>3</strong>. The
+        engine pins this down in <code>constants.py</code> as the single source of truth for "what counts as a
+        straight line." Here's the forward-only set used to scan for runs:</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># constants.py — the 3 hex axes (forward only)</span></span>
+<span class="code-line">DIRECTIONS = [</span>
+<span class="code-line">    (<span class="code-property">0</span>, <span class="code-property">1</span>),  <span class="code-comment"># Vertical</span></span>
+<span class="code-line">    (<span class="code-property">1</span>, <span class="code-property">0</span>),  <span class="code-comment"># Horizontal</span></span>
+<span class="code-line">    (<span class="code-property">1</span>, <span class="code-property">1</span>),  <span class="code-comment"># Diagonal (matching-sign)</span></span>
+<span class="code-line">]</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># The OTHER diagonal (1, -1) is a PSEUDO-diagonal:</span></span>
+<span class="code-line"><span class="code-comment"># it is NOT a real line on the YINSH board.</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">A straight line on this board can run in exactly three ways.</p>
+            <p class="tl">Straight up the column.</p>
+            <p class="tl">Straight across the row.</p>
+            <p class="tl">Diagonally — but only the diagonal where both numbers move the <em>same</em> way (both up, or both down).</p>
+            <p class="tl">The "opposite-sign" diagonal (across one, down the other) <em>looks</em> like a line on a square grid, but in this hex coordinate system it connects cells that aren't actually neighbors.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>For the full set of 6 directions (both ways along each axis), the engine has <code>HEX_DIRECTIONS</code>
+        and the membership set <code>HEX_LINE_AXES</code>. Ring movement uses those; run detection uses the
+        3 forward <code>DIRECTIONS</code> so it walks each axis only once.</p>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">🐛</div>
+        <div class="callout-content">
+          <strong class="callout-title">The pseudo-diagonal bug</strong>
+          <p>An earlier version of <code>find_marker_rows</code> hard-coded the <code>(-1, 1)</code> direction
+          into its scan. On a real hex board that's not a line at all, so the engine "found" rows that didn't
+          exist — phantom wins. The fix (April 2026) deleted the inline list and made <code>DIRECTIONS</code>
+          the one place straight-lines are defined. The lesson is universal: when the same geometric truth is
+          re-typed in multiple files, one copy <em>will</em> drift. Centralize it.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: Win/stalemate + atomic removal, then quiz -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Who won? And what about the edge cases?</h3>
+
+      <p>The referee's verdict lives in <code>game_state.py</code>. It's mostly a score check, but it also
+        handles a subtle case: a player who has <em>no legal moves</em> loses, even without anyone reaching 3
+        points. That's a <span class="term" data-definition="A stalemate is when the player whose turn it is has no legal move at all. In this engine that player loses (their opponent wins), rather than the game being a draw.">stalemate</span>.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">get_winner</span>(self):</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.white_score &gt;= <span class="code-property">3</span>:</span>
+<span class="code-line">        <span class="code-keyword">return</span> Player.WHITE</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.black_score &gt;= <span class="code-property">3</span>:</span>
+<span class="code-line">        <span class="code-keyword">return</span> Player.BLACK</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.<span class="code-function">is_stalemate</span>():</span>
+<span class="code-line">        <span class="code-keyword">return</span> self.current_player.opponent</span>
+<span class="code-line">    <span class="code-keyword">return</span> <span class="code-keyword">None</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">First, the simple case: did White remove 3 rings? They win.</p>
+            <p class="tl">Same check for Black.</p>
+            <p class="tl">Nobody at 3 yet — but is the player to move completely stuck?</p>
+            <p class="tl">If so, they lose: the <em>opponent</em> is the winner.</p>
+            <p class="tl">Otherwise the game is still going — return None (no winner yet).</p>
+          </div>
+        </div>
+      </div>
+
+      <p>Note the performance seam: <code>is_terminal()</code> is kept O(1) (just "are we in GAME_OVER?") because
+        MCTS calls it on <em>every</em> node, while the expensive <code>is_stalemate()</code> — which enumerates
+        all legal moves — is only called once per turn at game-ending time. Another careful detail:
+        <code>_handle_marker_removal</code> is <strong>atomic</strong>. It validates all five target markers
+        first, then removes them, so a malformed move can never leave the board half-updated.</p>
+
+      <div class="quiz-container" id="quiz-module2">
+        <div class="quiz-question-block"
+             data-correct="option-c"
+             data-explanation-right="Right. The board is a diamond carved out of an 11x11 grid, and the column counts [4,7,8,9,10,9,10,9,8,7,4] add up to 85 valid cells. is_valid_position() exists precisely because the other 36 cells aren't on the board."
+             data-explanation-wrong="Not quite. The grid is 11x11 = 121 cells, but the playing surface is a diamond — only the cells listed in VALID_POSITIONS count. Add up [4,7,8,9,10,9,10,9,8,7,4].">
+          <h3 class="quiz-question">How many valid playing positions are there on the YINSH board?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>121 — it's an 11&times;11 grid</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>64 — like a chessboard</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>85 — a diamond cut out of the 11&times;11 grid</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-b"
+             data-explanation-right="Exactly. A hex grid has 3 straight-line axes (vertical, horizontal, matching-sign diagonal). DIRECTIONS holds these three; the opposite-sign diagonal is a pseudo-diagonal that isn't a real line."
+             data-explanation-wrong="Think hexagons, not squares. A square grid has 4 line axes, but a hex grid has only 3 — that's exactly why DIRECTIONS lists three entries and why the (1,-1) pseudo-diagonal caused a bug.">
+          <h3 class="quiz-question">Why does <code>DIRECTIONS</code> in constants.py contain only three entries?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>To save memory — more would be wasteful</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>A hex grid has only 3 straight-line axes, not 4</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>One for each game phase</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-a"
+             data-explanation-right="Correct — and that's the twist. You score by removing one of your OWN rings (POINTS_TO_WIN = 3), so every point costs you a piece. Completing a run lets you remove the markers and lift a ring."
+             data-explanation-wrong="Re-read the win condition. You don't capture the opponent's rings — you complete runs of YOUR markers and then remove your OWN rings to score. First to 3 removed rings wins.">
+          <h3 class="quiz-question">In YINSH, how do you score a point?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Complete a run of 5 markers, then remove one of your own rings</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Capture three of the opponent's rings</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Place all 5 of your rings first</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module2')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module2')">Try Again</button>
+      </div>
+
+      <p>You now have the full referee: a hex diamond of 85 cells, two players as <code>+1 / -1</code>, three
+        phases, three line directions, and a win at 3 self-removed rings. <strong>Next up in Module 3:</strong>
+        a board is great for humans, but a neural network only speaks numbers. We'll see how
+        <code>StateEncoder</code> turns this living board into a stack of grids the network can actually read.</p>
+    </div>
+
+  </div>
+</section>

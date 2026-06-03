@@ -1,0 +1,261 @@
+<section class="module" id="module-3">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">03</span>
+      <h2 class="module-title">Teaching the Computer to See the Board</h2>
+      <p class="module-subtitle">How a YINSH position becomes numbers, and how the neural network turns those numbers into "where to play" and "who's winning."</p>
+    </div>
+
+    <!-- SCREEN 1: motivation + the tensor idea -->
+    <div class="screen animate-in">
+      <h3>A neural net only eats numbers</h3>
+
+      <p>The neural network at the heart of this project doesn't know what a ring or a marker is. It doesn't see a hexagonal board. It does exactly one thing: take a big grid of numbers in, and push a different set of numbers out. So before the network can have an opinion about a position, we have to hand it the board <em>as numbers</em>.</p>
+
+      <p>The translation happens in <code>yinsh_ml/utils/encoding.py</code>, in a class called <code>StateEncoder</code>. Its <code>encode_state</code> method takes a live <code>GameState</code> and produces a
+        <span class="term" data-definition="A tensor is just a multi-dimensional array of numbers — like a spreadsheet, but it can have more than two dimensions. Here it's a stack of 11x11 grids.">tensor</span>
+        of shape <code>(6, 11, 11)</code>: six stacked 11&times;11 grids, one number in every cell.</p>
+
+      <p>Why 11&times;11? The YINSH board is an 11&times;11 hex grid (85 real playing positions live inside it). And why six grids? Because a single grid can only say one thing per cell — "is there <em>something</em> here?" — but we need to track several different things at once. That's what
+        <span class="term" data-definition="A channel is one of the stacked grids in a tensor. Each channel records a different fact about every board cell — like separate transparency sheets laid on top of each other.">channels</span>
+        are for: each of the six grids is a separate "layer" recording one specific fact about every cell.</p>
+
+      <div class="callout callout-info animate-in">
+        <div class="callout-icon">🎛️</div>
+        <div class="callout-content">
+          <strong class="callout-title">Two encoders, one flag</strong>
+          <p>Six channels is the <em>basic</em> encoding. There's also a 15-channel <em>enhanced</em> encoder (<code>EnhancedStateEncoder</code>) that adds pre-computed hints like row threats, ring mobility and score differential. Which one you get is chosen by a single flag — <code>use_enhanced_encoding</code> on the <code>NetworkWrapper</code> — that plumbs all the way down to <code>input_channels=6</code> or <code>15</code> on the network. This module sticks to the 6-channel basic encoding.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: the 6 channels -->
+    <div class="screen animate-in">
+      <h3>What lives in each of the six channels</h3>
+
+      <p>Here's the whole encoding, channel by channel. Notice the first four are about pieces, the fifth is about which moves are even legal, and the sixth quietly smuggles in two extra facts (the phase, and whose turn it is).</p>
+
+      <div class="icon-rows animate-in">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">0</div>
+          <div>
+            <strong>Current player's rings</strong>
+            <p>A 1.0 wherever the side-to-move has a ring, 0.0 everywhere else.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">1</div>
+          <div>
+            <strong>Opponent's rings</strong>
+            <p>Same idea, but for the other player's rings.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">2</div>
+          <div>
+            <strong>Current player's markers</strong>
+            <p>Markers (the flippable pieces) belonging to the side-to-move.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">3</div>
+          <div>
+            <strong>Opponent's markers</strong>
+            <p>The other player's markers.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">4</div>
+          <div>
+            <strong>Valid-moves mask</strong>
+            <p>A 1.0 on every cell that is a legal <em>source</em> to move/place from right now — a cheat-sheet of where action is possible.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-4)">5</div>
+          <div>
+            <strong>Game phase (broadcast) + side-to-move sentinel</strong>
+            <p>The same phase number (0.0 / 0.5 / 1.0) written across the whole grid, with one off-board cell — A1 — overwritten with a 0/1 flag for whose turn it is.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>The clever bit is channels 0&ndash;3. They are <strong>side-normalized</strong>: channel 0 is <em>always</em> "the player to move," whether that's White or Black. The network never has to learn "am I White or Black today?" — it always sees the world from the mover's point of view. That's the same trick chess engines use to halve what they need to learn.</p>
+
+      <div class="callout callout-accent animate-in">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">The A1 sentinel: a smuggled bit</strong>
+          <p>Because channels 0&ndash;3 hide the real colors, the decoder needs a way to remember whose turn it actually is. The encoder stashes that one bit at cell <strong>A1</strong> on channel 5. A1 is <em>off</em> the real board (column A only has rows 2&ndash;5), so it never collides with a real piece — a free hiding spot for metadata. <code>decode_state</code> reads it back to un-normalize the colors.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 3: the code translation -->
+    <div class="screen animate-in">
+      <h3>The encoder, line by line</h3>
+
+      <p>Here's the real heart of <code>encode_state</code>. On the left is the actual code; on the right is what each piece is really doing.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">state = np.zeros((<span class="code-string">6</span>, <span class="code-string">11</span>, <span class="code-string">11</span>))</span>
+<span class="code-line">is_white = (current_player == WHITE)</span>
+<span class="code-line"></span>
+<span class="code-line">current_rings = white_rings <span class="code-keyword">if</span> is_white</span>
+<span class="code-line">                <span class="code-keyword">else</span> black_rings</span>
+<span class="code-line"><span class="code-keyword">for</span> pos <span class="code-keyword">in</span> current_rings:</span>
+<span class="code-line">    state[<span class="code-string">0</span>, row, col] = <span class="code-string">1.0</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">for</span> move <span class="code-keyword">in</span> get_valid_moves():</span>
+<span class="code-line">    state[<span class="code-string">4</span>, src_row, src_col] = <span class="code-string">1.0</span></span>
+<span class="code-line"></span>
+<span class="code-line">phase = phase.value / (len(GamePhase)-<span class="code-string">1</span>)</span>
+<span class="code-line">state[<span class="code-string">5</span>] = phase</span>
+<span class="code-line">state[<span class="code-string">5</span>, <span class="code-string">0</span>, <span class="code-string">0</span>] = <span class="code-string">0.0</span> <span class="code-keyword">if</span> is_white <span class="code-keyword">else</span> <span class="code-string">1.0</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Start with six empty 11&times;11 grids, all zeros.</p>
+            <p class="tl">Figure out who's to move so we can normalize by side.</p>
+            <p class="tl">"Current player's rings" means White's rings if White is to move, otherwise Black's — the network always sees the mover first.</p>
+            <p class="tl">Stamp a 1.0 into channel 0 at each of those ring positions.</p>
+            <p class="tl">Ask the game for every legal move, and light up channel 4 at every cell you could move <em>from</em> — a built-in legality hint.</p>
+            <p class="tl">Squash the phase (placement / main / removal) into 0.0, 0.5 or 1.0 and paint it across all of channel 5.</p>
+            <p class="tl">Finally, overwrite the off-board A1 cell with a single bit recording whose turn it is — the metadata smuggled in earlier.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>(Channels 1, 2 and 3 are filled exactly like channel 0 — opponent rings, current markers, opponent markers — just omitted above to keep it readable.)</p>
+    </div>
+
+    <!-- SCREEN 4: the network + two heads -->
+    <div class="screen animate-in">
+      <h3>From a stack of grids to two answers</h3>
+
+      <p>That 6&times;11&times;11 tensor goes into <code>YinshNetwork</code> (in <code>yinsh_ml/network/model.py</code>). It's a
+        <span class="term" data-definition="A convolutional neural network (CNN) is a network designed for grid-shaped data. It slides small filters across the grid to detect local patterns — perfect for a board where what matters is which pieces sit near each other.">CNN</span>
+        in the AlphaZero style. First a stack of
+        <span class="term" data-definition="A residual block is two convolution layers whose output is added back to its own input. That 'add the input back' shortcut lets very deep networks train without the signal fading — you stack many of them safely.">residual blocks</span>
+        and
+        <span class="term" data-definition="Attention lets the network learn which parts of the board to focus on. Here a spatial-attention block produces a per-cell weight map and emphasizes the cells that matter for the current decision.">attention</span>
+        blocks chew on the board, each
+        <span class="term" data-definition="A convolution slides a small window (a filter) over the grid and computes a weighted sum at each spot. Stacking many of them lets the network recognize bigger and bigger patterns — runs, threats, ring formations.">convolution</span>
+        learning richer patterns — runs forming, rings boxed in, threats building.</p>
+
+      <p>Then the network splits into <strong>two heads</strong> — two separate small sub-networks reading from the same shared body. One predicts <em>what to do</em>, the other predicts <em>how it's going</em>.</p>
+
+      <div class="pattern-cards animate-in">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎯</div>
+          <h4 class="pattern-title">Policy head</h4>
+          <p class="pattern-desc">Outputs <strong>7433 numbers</strong> — one
+            <span class="term" data-definition="The policy head is the part of the network that scores possible moves. It produces one number per move slot; higher means 'this move looks more promising.'">"score per move slot"</span>
+            across every move the game could ever express. After softmax these become a probability distribution: "I'd play here 40% of the time, there 12%..." It's the network's gut instinct about good moves. Raw, pre-softmax outputs are called
+            <span class="term" data-definition="Logits are the raw, unbounded scores a network produces before they're squashed into probabilities by softmax. Big logit = strong preference.">logits</span>.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">⚖️</div>
+          <h4 class="pattern-title">Value head</h4>
+          <p class="pattern-desc">Outputs <strong>a single number</strong> between &minus;1 and +1: who's winning from here.
+            <span class="term" data-definition="The value head estimates the eventual outcome of the game from the current position, as one number from the mover's point of view: +1 = winning, -1 = losing, 0 = even.">+1 means the side-to-move is winning</span>,
+            &minus;1 means losing, 0 is a dead heat. The final squashing uses
+            <span class="term" data-definition="tanh is a math function that smoothly squashes any number into the range -1 to +1, which is exactly the range we want for 'who's winning.'">tanh</span>
+            (or a softmax over outcome classes), so the answer always stays in range.</p>
+        </div>
+      </div>
+
+      <p>Why 7433? It's not a round number someone picked — it's computed: 85 ring-placement slots + 7140 ring-move slots + 85 ring-removal slots + 123 marker-removal lines. The single source of truth is <code>StateEncoder().total_moves</code>, and the network reads <em>that</em> value rather than hardcoding it.</p>
+
+      <div class="callout callout-warning animate-in">
+        <div class="callout-icon">⚠️</div>
+        <div class="callout-content">
+          <strong class="callout-title">7433 is a hard contract</strong>
+          <p>A saved model's policy head is exactly 7433 wide, and the slot-to-move mapping is baked in. If you load a checkpoint whose policy size doesn't match the current encoder, <code>NetworkWrapper.load_model</code> <strong>hard-fails with an error</strong> — it refuses to silently load a mismatched head and play garbage. (Older checkpoints used 8390 slots before a move-encoding fix; those are simply not load-compatible.)</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: quiz -->
+    <div class="screen animate-in">
+      <h3>Check your understanding</h3>
+
+      <div class="quiz-container" id="quiz-module3">
+        <div class="quiz-question-block"
+             data-correct="opt-norm"
+             data-explanation-right="Right. Channels 0-3 always put the side-to-move first, so the network learns one consistent 'me vs them' view instead of separately learning to play as White and as Black."
+             data-explanation-wrong="Not quite — it isn't about saving memory or board size. The point of side-normalization is that the network always sees the position from the mover's perspective, so it only has to learn the game once.">
+          <h3 class="quiz-question">Why are channels 0&ndash;3 "side-normalized" (current player always first)?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-mem" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>To use less memory by storing fewer grids</span>
+            </button>
+            <button class="quiz-option" data-value="opt-norm" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>So the network always sees the position from the mover's point of view and only learns the game once</span>
+            </button>
+            <button class="quiz-option" data-value="opt-board" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Because the board is bigger for the current player</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-value"
+             data-explanation-right="Exactly. The value head outputs one number in -1..+1 estimating who's winning from the side-to-move's perspective."
+             data-explanation-wrong="That's the policy head's job. The value head outputs a single number — an estimate of who's winning, between -1 and +1.">
+          <h3 class="quiz-question">What does the value head predict?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-moves" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>A probability for every possible move</span>
+            </button>
+            <button class="quiz-option" data-value="opt-value" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>A single number from &minus;1 to +1 estimating who's winning</span>
+            </button>
+            <button class="quiz-option" data-value="opt-phase" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>The current game phase</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-sum"
+             data-explanation-right="Correct. 85 placements + 7140 ring moves + 85 ring removals + 123 marker-removal lines = 7433, and it comes from StateEncoder().total_moves, not a hardcoded constant."
+             data-explanation-wrong="Not quite. 7433 isn't a guess or a power of two — it's the exact count of all distinct move slots (placements + ring moves + ring removals + marker-removal lines), computed by StateEncoder().total_moves.">
+          <h3 class="quiz-question">Where does the policy head's size of 7433 come from?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-round" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It's a power of two chosen for GPU efficiency</span>
+            </button>
+            <button class="quiz-option" data-value="opt-sum" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It's the total count of all distinct move slots, from <code>StateEncoder().total_moves</code></span>
+            </button>
+            <button class="quiz-option" data-value="opt-cells" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It's the number of cells on the 11&times;11 board</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module3')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module3')">Try Again</button>
+      </div>
+
+      <p>So now the network can look at any position and instantly offer two opinions: a ranked list of moves, and a guess at who's ahead. But a single gut reaction isn't enough to play well — strong play comes from <em>thinking ahead</em>, trying moves, and seeing where they lead. In <strong>Module 4</strong> we'll see how the AI uses this network inside a search that actually reasons about the future.</p>
+    </div>
+
+  </div>
+</section>
