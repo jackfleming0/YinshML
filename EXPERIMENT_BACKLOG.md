@@ -2154,6 +2154,12 @@ is in active use.
   6-ch comparison now that the phase bug is fixed — it answers "do strategic
   features as network inputs help?" without any new code. If that's still null,
   adding one more channel is unlikely to change the verdict and HF-2 closes.
+- **No new code to build.** The matched pair already exists: a `basic`/6-ch
+  config vs `configs/branchD2_enhanced_mcts200.yaml` (= branchC config but
+  `encoding.type: enhanced`). The `encoding.type: basic|enhanced` flag is fully
+  plumbed (`run_training.py:264-281` → `use_enhanced_encoding`). So "build HF-2"
+  = pick the 6-ch baseline config + the enhanced config, launch both post-bugfix,
+  H2H the finals. Gated on the in-flight value-head run; nothing to write here.
 
 **HF-3 — Pivot to learned-value (AlphaZero direction).** *Status: parked,
 references `TRAINING_REFACTOR_PLAN.md`.* Demote the heuristic to a prior, trust
