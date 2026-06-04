@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""E19 dual-arm slope summary.
+"""E19/E24 H2H slope summary.
 
-Reads the color-balanced H2H JSONs written by e19_dualarm.sh (pairs of
-<tag>_as_white.json / <tag>_as_black.json) and reports, per arm, the
-challenger's combined win-rate vs the FROZEN iter1_ema yardstick at each
-iteration — plus a least-squares slope across iterations.
+Reads the color-balanced H2H JSONs written by e19_dualarm.sh and
+e24_phase1a_sweep.sh (pairs of <arm>_iter<N>_as_white.json /
+<arm>_iter<N>_as_black.json) and reports, per arm, the challenger's combined
+win-rate vs the FROZEN iter1_ema yardstick at each iteration — plus a
+least-squares slope across iterations.
 
 The decision metric (E19): compare the SLOPES. Arm A (seed=iter1_ema) starts
 near 50% vs frozen-self; Arm B (seed=sym15-iter1-ema) near 27%. A steeper
 B-slope => the symmetric/15ch architecture is the better substrate.
 
-Usage: python scripts/e19_summarize.py h2h_e19
+E24 arms are named `lr3e-5`, `lr1e-4`, `lr3e-4` (etc.) and produce
+`lr<rate>_iter<N>_as_<color>.json`. The arm pattern is widened below to
+match both naming schemes so the same script works for both experiments.
+
+Usage: python scripts/e19_summarize.py <h2h_dir>
 """
 import sys, json, re, glob, os
 from collections import defaultdict
@@ -43,7 +48,10 @@ def linfit_slope(xs, ys):
 
 
 def main(d):
-    pat = re.compile(r'(arm[AB])_iter(\d+)_as_(white|black)\.json$')
+    # Match E19 (`armA`, `armB`) AND E24 (`lr3e-5`, `lr1e-4`, `lr_smoke`, etc.)
+    # arm tags. Anything before `_iter<N>_as_<color>.json` is the arm name,
+    # as long as it's not itself the literal `iter<N>` marker.
+    pat = re.compile(r'^([A-Za-z][\w.\-]*?)_iter(\d+)_as_(white|black)\.json$')
     # arm -> iter -> {'white': data, 'black': data}
     data = defaultdict(lambda: defaultdict(dict))
     for f in glob.glob(os.path.join(d, '*.json')):
