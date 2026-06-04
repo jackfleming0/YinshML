@@ -22,10 +22,14 @@ set -euo pipefail
 PY="${PY:-/venv/main/bin/python}"
 SEED="${SEED:-models/iter1_ema_2026-05-27/iter1_ema.pt}"  # warm-start (override for fresher-seed fallback)
 FROZEN="models/frozen_iter1_ema.pt"                        # fixed H2H yardstick (always the canonical champion)
-# Engine-labeled held-out corpus for the value-head AUC (PREREQUISITE — see runbook).
-# Falls back to the human corpus with a LOUD warning if absent (the ~0.70 AUC floor
-# is then partly human-label noise — generate an engine-labeled .npz to remove it).
-VAL_DATA="${VAL_DATA:-expert_games/engine_labeled_15ch.npz}"
+# Value-head AUC yardstick. The HUMAN corpus is the representative set: iter1_ema
+# reproduces its known AUC 0.737 / Brier 0.67 on it. NOTE (2026-06-04): the
+# HeuristicAgent-generated "engine-labeled" corpus proved OUT-OF-DISTRIBUTION for
+# iter1_ema's value head (baseline AUC 0.575 / Brier 1.086 — worse than blind),
+# because the POSITIONS come from myopic heuristic play the net never trained on.
+# Do NOT use it. A better engine corpus = relabel REPRESENTATIVE positions (self-
+# play / human) with strong-engine outcomes — TODO, not yet built.
+VAL_DATA="${VAL_DATA:-expert_games/hvh_full_game_15ch.npz}"
 H2H_GAMES="${H2H_GAMES:-30}"                                # per color; 30+30 = 60
 LR="${LR:-3e-5 1e-4 3e-4}"                                  # which arms to run
 TAGSUFFIX="${TAGSUFFIX:-}"
@@ -33,10 +37,8 @@ TAGSUFFIX="${TAGSUFFIX:-}"
 mkdir -p logs runs_e24 h2h_e24 auc_e24
 [ -f "$FROZEN" ] || cp "$SEED" "$FROZEN"   # NB: for the fresher-seed fallback, keep FROZEN = canonical iter1_ema
 if [ ! -f "$VAL_DATA" ]; then
-  echo "!!! WARNING: engine-labeled corpus $VAL_DATA not found — falling back to the human corpus."
-  echo "!!! The value-AUC floor will then include human-label noise (the confound E24 wants removed)."
-  echo "!!! Generate an engine-labeled holdout (.npz of 15ch states + engine outcomes) and set VAL_DATA."
-  VAL_DATA="expert_games/hvh_full_game_15ch.npz"
+  echo "!!! ERROR: value corpus $VAL_DATA not found. Set VAL_DATA to the human-corpus .npz."
+  exit 1
 fi
 
 run_arm() {

@@ -1,6 +1,14 @@
 #!/usr/bin/env python
 """Generate an ENGINE-labeled held-out value corpus for E24 Phase 1a.
 
+⚠️ KNOWN FLAW (2026-06-04): this generates POSITIONS from HeuristicAgent play,
+which are out-of-distribution for a self-play-trained value head — iter1_ema
+scored AUC 0.575 / Brier 1.086 on the output (vs its real 0.737 on the human
+corpus). Making the *labeler* model-independent was right, but the *positions*
+must be representative. A correct version relabels representative (self-play /
+human) positions with strong-engine outcomes. Until then, use the human corpus
+as the value yardstick. Kept for reference / future rework.
+
 Plays HeuristicAgent (negamax) self-play — a CONSISTENT, model-INDEPENDENT
 labeler — encodes each main-game position to 15ch, and labels it by the game's
 final outcome from the side-to-move POV (z in {-1, 0, +1}). Saves a

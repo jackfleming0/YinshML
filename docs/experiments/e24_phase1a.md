@@ -36,21 +36,20 @@ regime artifact, not a ceiling — and we never needed the anti-forgetting build
    60). Thin at 3 iters (~1 point/arm) — it reliably catches *binary*
    degrade-and-revert, but not a slow climb. **Weight the AUC trend over H2H here.**
 
-### Prerequisite (one quick data-gen, BUILT)
-An **engine-labeled** held-out corpus: `expert_games/engine_labeled_15ch.npz`
-(15ch states + engine-determined outcomes). Generator is built —
-`scripts/gen_engine_labeled_corpus.py` plays consistent, model-INDEPENDENT
-`HeuristicAgent` self-play (no circularity with the value head) and labels each
-main-game position by the game outcome, removing the human-blunder noise that
-inflates the ~0.70 AUC floor. Run once on the box before the sweep:
-```bash
-python scripts/gen_engine_labeled_corpus.py \
-    --out expert_games/engine_labeled_15ch.npz \
-    --games 300 --depth 2 --epsilon 0.12 --workers 80 --max-positions 12000
-```
-(~minutes on a many-core box; `--depth 3` for stronger/cleaner labels, slower.)
-If absent, the driver falls back to the human corpus with a loud warning — the
-rung still runs, but the AUC signal keeps the human-noise confound.
+### Value yardstick — use the HUMAN corpus (`expert_games/hvh_full_game_15ch.npz`)
+iter1_ema reproduces its known **AUC 0.737 / Brier 0.67** on it, so it's the
+representative, reproducible yardstick. Track the per-iter AUC *trend* on it.
+
+> **Resolved 2026-06-04 — the engine-labeled corpus idea backfired.**
+> `scripts/gen_engine_labeled_corpus.py` (HeuristicAgent self-play) was meant to
+> remove human-label noise, but it gave baseline iter1_ema **AUC 0.575 / Brier
+> 1.086 (worse than blind)** — because the *positions* come from myopic heuristic
+> play the net never trained on (out-of-distribution), not because the value head
+> is bad. The flaw: I made the *labeler* independent but also let it generate the
+> *positions*. **Don't use that corpus.** A correct engine corpus would relabel
+> *representative* positions (self-play / human) with strong-engine outcomes —
+> TODO, not yet built. For now the human corpus is the right call; its label noise
+> is a known, bounded limitation, not a showstopper.
 
 ## Launch
 ```bash
