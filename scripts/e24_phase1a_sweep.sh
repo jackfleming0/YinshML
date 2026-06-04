@@ -15,8 +15,12 @@
 #
 # USAGE (inside tmux/nohup on the box):
 #   PY=/venv/main/bin/python bash scripts/e24_phase1a_sweep.sh
-#   # single arm:           LR=1e-4 bash scripts/e24_phase1a_sweep.sh
+#   # single arm:            LR=1e-4 bash scripts/e24_phase1a_sweep.sh
 #   # fresher-seed fallback: SEED=models/<fresher_preEMA>.pt TAGSUFFIX=_fresh bash ... (only if all 3 flat)
+#   # wiring smoke:          CFG_OVERRIDE=configs/e24_phase1a_smoke.yaml LR=smoke H2H_GAMES=4 \
+#   #                        VAL_DATA=/tmp/smoke.npz PY=/venv/main/bin/python bash scripts/e24_phase1a_sweep.sh
+#   # CFG_OVERRIDE forces a single config across whatever tags LR names (handy for a tiny smoke
+#   # before the real sweep — pairs with configs/e24_phase1a_smoke.yaml).
 set -euo pipefail
 
 PY="${PY:-/venv/main/bin/python}"
@@ -40,7 +44,7 @@ if [ ! -f "$VAL_DATA" ]; then
 fi
 
 run_arm() {
-  local tag="$1"; local cfg="configs/e24_phase1a_lr_${tag}.yaml"
+  local tag="$1"; local cfg="${CFG_OVERRIDE:-configs/e24_phase1a_lr_${tag}.yaml}"
   local savedir="runs_e24/lr_${tag}${TAGSUFFIX}"
   echo "==================================================================="
   echo "ARM lr=${tag}${TAGSUFFIX} ($cfg): seed=${SEED} -> ${savedir}   $(date -u +%H:%M:%SZ)"
