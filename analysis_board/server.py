@@ -147,6 +147,41 @@ BGA_COOKIES_PATH = os.environ.get(
 )
 
 
+def _is_mps_oom(exc: Exception) -> bool:
+    """True for the 'MPS backend out of memory' RuntimeError (and CUDA OOM)."""
+    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
+def _release_device_memory() -> None:
+    """Return the GPU allocator's cached blocks to the OS after an eval.
+
+    The board is a single long-lived process doing continuous inference on
+    Apple-Silicon MPS. PyTorch's MPS caching allocator keeps freed blocks for
+    reuse and never hands them back on its own; with the board's mix of
+    allocation sizes (symmetric search's 4×batch leaf evals, the 1-wide
+    best_move_value probes, PV rollouts) the cache fragments and creeps upward
+    request after request until an allocation hits the MPS high-watermark and
+    dies with "MPS backend out of memory". That wedges every subsequent eval,
+    because the error is caught by the JSON error handler (see
+    _json_api_errors) and never crashes the process — so launchd's KeepAlive
+    can't auto-restart it. Emptying the cache after each top-level eval keeps
+    the resident footprint flat. Called once per request (never per
+    simulation), so the synchronize cost is noise next to the search itself.
+    Safe no-op on CPU-only hosts. Always call this while holding _mcts_lock so
+    it can't race a concurrent thread's inference.
+    """
+    try:
+        import torch  # already imported by the time any eval runs
+        if torch.backends.mps.is_available():
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except Exception as e:  # noqa: BLE001
+        log.debug("device-memory release skipped: %s", e)
+
+
 def _log_move_event(
     payload: Dict[str, Any], move_spec: Optional[Dict[str, Any]], response: Dict[str, Any],
 ) -> None:
@@ -1023,7 +1058,21 @@ def api_evaluate():  # type: ignore[no-untyped-def]
             top, value, _ = _mcts_result_from_probs(
                 mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
             )
+        except RuntimeError as e:
+            if _is_mps_oom(e):
+                log.warning(
+                    "MPS out-of-memory during MCTS eval (sims=%d, batch=%d) — "
+                    "clearing the device cache so the next request recovers "
+                    "without a server restart", num_sims, ctx["batch_size"],
+                )
+            raise
         finally:
+            # Return the allocator's cached blocks to the OS after every eval,
+            # under the lock (no concurrent inference) and before release. This
+            # is what keeps the long-lived server from creeping to the MPS
+            # high-watermark over thousands of requests; the OOM-recovery path
+            # above relies on it running even when the search raised.
+            _release_device_memory()
             _mcts_lock.release()
         mode = "mcts"
     else:
@@ -1031,7 +1080,10 @@ def api_evaluate():  # type: ignore[no-untyped-def]
         # serialize it on _mcts_lock too (an async job's background search may
         # be doing inference concurrently).
         with _mcts_lock:
-            top, value, _ = _evaluate_policy(ctx)
+            try:
+                top, value, _ = _evaluate_policy(ctx)
+            finally:
+                _release_device_memory()
         mode = "policy"
 
     best_value = top[0].get("best_move_value") if top else None
@@ -1076,28 +1128,35 @@ def _run_eval_job(job_id: str, ctx: Dict[str, Any]) -> None:
         # reported via _progress (guarded by the separate _jobs_lock), so the
         # poller keeps updating even while this lock is held.
         with _mcts_lock:
-            if num_sims > 0:
-                mcts = _construct_mcts(
-                    ctx["model_id"], num_sims,
-                    c_puct=ctx["c_puct"],
-                    fpu_reduction=ctx["fpu_reduction"],
-                    evaluation_mode=ctx["evaluation_mode"],
-                    heuristic_weight=ctx["heuristic_weight"],
-                )
-                if ctx["symmetric"]:
-                    probs = _symmetric_search_batch(mcts, ctx, progress_callback=_progress)
-                else:
-                    probs = mcts.search_batch(
-                        gs, move_number=1, batch_size=ctx["batch_size"],
-                        progress_callback=_progress,
+            try:
+                if num_sims > 0:
+                    mcts = _construct_mcts(
+                        ctx["model_id"], num_sims,
+                        c_puct=ctx["c_puct"],
+                        fpu_reduction=ctx["fpu_reduction"],
+                        evaluation_mode=ctx["evaluation_mode"],
+                        heuristic_weight=ctx["heuristic_weight"],
                     )
-                top, value, _ = _mcts_result_from_probs(
-                    mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
-                )
-                mode = "mcts"
-            else:
-                top, value, _ = _evaluate_policy(ctx)
-                mode = "policy"
+                    if ctx["symmetric"]:
+                        probs = _symmetric_search_batch(mcts, ctx, progress_callback=_progress)
+                    else:
+                        probs = mcts.search_batch(
+                            gs, move_number=1, batch_size=ctx["batch_size"],
+                            progress_callback=_progress,
+                        )
+                    top, value, _ = _mcts_result_from_probs(
+                        mcts, probs, gs, valid_moves, ctx["model_id"], ctx["top_k"], num_sims,
+                    )
+                    mode = "mcts"
+                else:
+                    top, value, _ = _evaluate_policy(ctx)
+                    mode = "policy"
+            finally:
+                # Free the allocator cache after the (possibly very large) async
+                # search, under the lock. Without this a long owner search's
+                # activations stay cached and the next eval can tip the process
+                # over the MPS high-watermark.
+                _release_device_memory()
         best_value = top[0].get("best_move_value") if top else None
         pv_value = top[0].get("q_value") if top else None
         result = _finalize_eval_response(
