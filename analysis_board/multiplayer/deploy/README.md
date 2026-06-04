@@ -462,6 +462,35 @@ Common causes:
   belongs to a different user.
 - DNS not pointed at the tunnel yet (re-run `cloudflared tunnel route dns ...`).
 
+### `RuntimeError: MPS backend out of memory` in the logs
+
+Symptom: the site loads but every **Analyze** (and engine move) fails; the
+error banner shows `RuntimeError: MPS backend out of memory (MPS allocated:
+~27 GB ...)`. The server process is still alive — the error is caught and
+returned as JSON, so it never crashes and launchd's `KeepAlive` does **not**
+restart it. It stays wedged until you restart it by hand.
+
+Cause: PyTorch's MPS caching allocator holds freed GPU blocks for reuse and
+never returns them to the OS on its own. Over thousands of evals on the
+long-lived server the cache fragments and creeps up to the MPS high-watermark.
+
+Fix is shipped in `server.py`: `_release_device_memory()` empties the MPS
+cache after every eval (and the OOM path logs + clears so the server
+self-recovers without a restart). If you're seeing this on a host that
+predates that fix, **restart the server** to clear the 27 GB immediately:
+
+```bash
+# Needs a shell on the mini (SSH / Screen Sharing / Tailscale) — the public
+# cloudflared URL is HTTP-only and can't restart the process.
+launchctl kickstart -k gui/$(id -u)/com.jackfleming.yinsh-server
+# (or the unload/load pair under "Restart the server only" above)
+```
+
+then `git pull` + `yinsh-redeploy` to deploy the cache-clearing fix so it
+doesn't recur. As a last resort you can disable the MPS upper limit with
+`PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` in the server plist, but that lets a
+runaway allocation take down the whole machine — prefer the cache fix.
+
 ### Server runs but moves don't apply
 
 Check `yinsh-server.err.log` for tracebacks. The most common cause is a
