@@ -29,6 +29,9 @@ experiments/**/*.npz
 # Interactive HTML guided tour of the codebase (self-contained learning guide)
 !codebase-guide/
 !codebase-guide/**
+# Internal architecture atlas (systems/contracts reference)
+!architecture-atlas/
+!architecture-atlas/**
 # Analysis board (position composer + alignment loop scripts). Source is
 # allowlisted; generated run outputs (positions, measurements, reports,
 # charts) live under loop/runs/<timestamp>/ and stay ignored.

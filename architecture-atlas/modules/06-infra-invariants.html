@@ -1,0 +1,401 @@
+<section class="module" id="module-6">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">06</span>
+      <h2 class="module-title">Cross-Cutting Infrastructure &amp; Invariants</h2>
+      <p class="module-subtitle">Shared plumbing, and the contracts that break the build if you touch one side.</p>
+    </div>
+
+    <!-- ===================== SCREEN 1: Shared memory infra ===================== -->
+    <div class="screen animate-in">
+      <h3>Shared memory infrastructure</h3>
+      <p>
+        Three packages under <code>yinsh_ml/memory/</code> exist purely to reduce allocation
+        churn during self-play and training. None of them own behavior — they are
+        <span class="term" data-definition="An object that is constructed once and handed to other components, rather than each component allocating its own. The receiver uses it but does not own its lifecycle.">injected dependencies</span>:
+        the consumer accepts a pool through a constructor argument and threads it down. Know the
+        argument name and you know how to wire (or unwire) it.
+      </p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">🗃️</div>
+          <div>
+            <strong>GameStatePool &mdash; <code>yinsh_ml/memory/game_state_pool.py:199</code></strong>
+            <p>
+              Reuses <code>GameState</code> objects to cut GC pressure during deep search. Threaded
+              into the MCTS engine via the <code>game_state_pool=</code> arg
+              (<code>self_play.py:171</code> and <code>:1504</code>); when present,
+              <code>get()</code> / <code>return_game_state()</code> replace fresh allocations.
+              Also passed by the self-play game runner. <strong>Bypassed entirely</strong> when
+              <code>self_play.use_cpp_engine: true</code> &mdash; the C++ <code>State.clone()</code>
+              beats any pool reuse (<code>scripts/run_training.py:317</code>).
+            </p>
+          </div>
+        </div>
+
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">🧮</div>
+          <div>
+            <strong>TensorPool &mdash; <code>yinsh_ml/memory/tensor_pool.py:114</code></strong>
+            <p>
+              Reuses inference tensors for batched NN evaluation. Passed to the network via
+              <code>NetworkWrapper(tensor_pool=...)</code> (<code>wrapper.py:27</code>); the
+              wrapper draws policy/value buffers of shape <code>(batch, _policy_size)</code> from it
+              instead of calling <code>torch.zeros</code> each batch (<code>wrapper.py:239</code>).
+              Configured via <code>TensorPoolConfig</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">📈</div>
+          <div>
+            <strong>AdaptivePoolSizer &mdash; <code>yinsh_ml/memory/adaptive.py:197</code></strong>
+            <p>
+              Resizes pools at runtime from hit-rate/utilization windows
+              (<code>create_adaptive_pool_sizer()</code>, <code>adaptive.py:372</code>). Wraps a pool
+              rather than replacing it &mdash; the consumer still sees a plain
+              <code>GameStatePool</code>/<code>TensorPool</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-4)">⚡</div>
+          <div>
+            <strong>ZeroCopyTensorFactory &mdash; <code>yinsh_ml/memory/zero_copy.py:81</code></strong>
+            <p>
+              Builds pinned/shared-storage tensors for zero-copy host&rarr;GPU transfer, plus
+              <code>InPlaceOperations</code> (<code>zero_copy.py:255</code>) for buffer-reusing math.
+              A throughput optimization on the batched-inference path; not on the correctness path.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">🔌</div>
+        <div class="callout-content">
+          <strong class="callout-title">Pools are optional and default-None</strong>
+          <p>
+            Every consumer treats its pool arg as <code>Optional[...] = None</code> and guards with a
+            <code>_pool_enabled = pool is not None</code> flag (<code>self_play.py:278</code>). Code
+            paths must stay correct with the pool absent &mdash; the pool only changes
+            <em>where memory comes from</em>, never <em>what the result is</em>. A pool that returns
+            a stale, un-reset object is a silent correctness bug, not a performance one.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 2: Change-one-change-all invariants ===================== -->
+    <div class="screen animate-in">
+      <h3>Change-one-change-all invariants</h3>
+      <p>
+        These are the highest-risk edits in the codebase: a single constant or convention duplicated
+        across multiple files, where changing one side silently (or loudly) corrupts the other. Each
+        card names the invariant, the files on <strong>both</strong> sides, and the failure mode. The
+        canonical source for most of these is the <em>Foundational Rule Fixes</em> section of
+        <code>CLAUDE.md</code>.
+      </p>
+
+      <div class="step-cards">
+        <div class="step-card">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <strong>Policy size = 7433 = <code>StateEncoder().total_moves</code></strong>
+            <p>
+              <code>total_moves = 85 + 7140 + 85 + 123 = 7433</code>
+              (<code>utils/encoding.py:146</code>) defines the policy-head width in
+              <code>YinshNetwork</code> (<code>network/model.py</code>). On load,
+              <code>NetworkWrapper.load_model</code> compares the checkpoint's
+              <code>policy_head.7.weight</code> rows against the live encoder and
+              <strong>hard-fails</strong> on mismatch (<code>wrapper.py:473&ndash;503</code>).
+              <em>Failure mode:</em> old <code>8390</code>-slot checkpoints (pre-April-2026 REMOVE_MARKERS
+              fix) are not load-compatible &mdash; a clear <code>RuntimeError</code>, not a silent
+              wrong-move map.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <strong>Channel count: 6 (basic) vs 15 (enhanced) must agree across encoder &harr; model &harr; checkpoint</strong>
+            <p>
+              <code>StateEncoder</code> (6-ch, <code>encoding.py</code>) or
+              <code>EnhancedStateEncoder</code> (15-ch, <code>enhanced_encoding.py</code>) must match
+              <code>YinshNetwork(input_channels=...)</code> and the saved
+              <code>conv_block.0.weight</code> dim-1. The wrapper auto-detects channels from the
+              checkpoint (<code>wrapper.py:82&ndash;88</code>) and hard-fails on encoder mismatch
+              (<code>wrapper.py:428&ndash;443</code>). <em>Failure mode:</em> switching channel counts
+              requires <strong>regenerating supervised data + retraining</strong> &mdash; there is no
+              silent channel filtering.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <strong>Zobrist hash MUST include board + side-to-move + game phase</strong>
+            <p>
+              <code>ZobristHasher.hash_state</code> XORs in a <code>side_to_move_key</code> and a
+              per-phase key (<code>game/zobrist.py:114&ndash;119,178&ndash;185</code>), with O(1)
+              <code>toggle_side_to_move</code> / <code>toggle_phase</code> helpers.
+              <em>Failure mode:</em> drop either component and the transposition table
+              (<code>search/transposition_table.py</code>) returns <strong>wrong-position hits</strong>
+              &mdash; identical piece layouts with a different mover or phase collide and the cached
+              eval is silently wrong.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <strong>Channels 0&ndash;3 are side-normalized; recover the mover from the A1 sentinel on channel 5</strong>
+            <p>
+              The encoder writes pieces as &ldquo;current player first&rdquo; (channels 0&ndash;3),
+              then stamps a 0/1 side-to-move sentinel at off-board cell <strong>A1</strong>
+              (<code>row=0,col=0</code>) on channel 5 (<code>encoding.py:384&ndash;391</code>).
+              <code>decode_state</code> reads the mover from that sentinel
+              (<code>encoding.py:589&ndash;596</code>). <em>Failure mode:</em> any code that
+              re-flips colors by <code>current_player</code> double-inverts the board; A1 is off the
+              hex grid (column A only spans rows 2&ndash;5) so it never collides with real state and
+              survives D2 augmentation.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">5</div>
+          <div class="step-body">
+            <strong><code>DIRECTIONS</code> / <code>HEX_LINE_AXES</code> are the single source of truth for hex lines</strong>
+            <p>
+              <code>constants.py:96</code> (<code>DIRECTIONS</code>, 3 forward axes) and
+              <code>constants.py:127</code> (<code>HEX_LINE_AXES</code>, 6 signed) define every legal
+              line. The opposite-sign pseudo-diagonal <code>(1,&nbsp;-1)</code> / <code>(-1,&nbsp;1)</code>
+              is <strong>NOT</strong> a board line (<code>constants.py:84&ndash;87</code>).
+              <em>Failure mode:</em> reintroducing it (in <code>find_marker_rows</code> /
+              <code>is_valid_marker_sequence</code>) revives the pseudo-diagonal row bug &mdash; phantom
+              rows, illegal captures, and a policy-space size drift.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">6</div>
+          <div class="step-body">
+            <strong><code>value_mode</code> + <code>num_value_classes</code> must agree across wrapper, value head, and trainer loss</strong>
+            <p>
+              <code>NetworkWrapper(value_mode='classification'|'regression', num_value_classes=7)</code>
+              (<code>wrapper.py:28</code>) selects the value-head shape and the trainer's loss
+              (cross-entropy vs MSE). <code>load_model</code> hard-fails on a mode mismatch
+              (<code>wrapper.py:445&ndash;458</code>) and on a class-count mismatch
+              (<code>wrapper.py:465&ndash;472</code>). <em>Failure mode:</em> a regression checkpoint
+              loaded into a classification wrapper (or a class-count drift) &mdash; rejected with a
+              <code>RuntimeError</code> telling you to re-instantiate with the matching mode.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">⚠️</div>
+        <div class="callout-content">
+          <strong class="callout-title">All six are guarded, but only some loudly</strong>
+          <p>
+            Invariants 1, 2, and 6 throw at <code>load_model</code> time &mdash; you find out
+            immediately. Invariants 3, 4, and 5 fail <em>silently</em>: the program runs, produces
+            plausible numbers, and quietly trains on a corrupted target. Treat any edit to
+            <code>zobrist.py</code>, the encoder sentinel, or <code>constants.py</code> hex axes as a
+            full-test-suite change.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 3: Config → component map ===================== -->
+    <div class="screen animate-in">
+      <h3>Config sections &rarr; who reads them</h3>
+      <p>
+        Training is driven by a single <code>configs/*.yaml</code> parsed in
+        <code>scripts/run_training.py</code>. Top-level sections are read into <code>mode_settings</code>
+        and handed to <code>TrainingSupervisor</code>. The mapping below is the real key set
+        (line refs into <code>run_training.py</code>).
+      </p>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">encoding.type</code>
+          <span class="badge-desc">
+            <code>basic</code> (6-ch) or <code>enhanced</code> (15-ch); picks the encoder and the
+            network's <code>input_channels</code> &mdash; see invariant&nbsp;2. <code>:264&ndash;281</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">network</code>
+          <span class="badge-desc">
+            <code>value_head_type</code> = <code>spatial</code>|<code>gap</code>|<code>gap_v2</code>;
+            channel/block capacity is auto-detected from an init checkpoint. <code>:266,274</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">self_play</code>
+          <span class="badge-desc">
+            MCTS knobs: <code>evaluation_mode</code>, <code>num_simulations</code>, <code>c_puct</code>,
+            <code>mcts_batch_size</code>, <code>use_cpp_engine</code>, subtree reuse, temperature. <code>:258,293+</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">trainer</code>
+          <span class="badge-desc">
+            <code>batch_size</code>, <code>lr</code>, <code>epochs_per_iteration</code>,
+            <code>value_loss_weights</code>, EMA, augmentation, search-consistency. <code>:259,335+</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">arena</code>
+          <span class="badge-desc">
+            Gating / promotion: <code>promotion_threshold</code> (0.55),
+            <code>tournament_sliding_window</code>, <code>games_per_match</code>, gate-revert. <code>:260,437+</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">anchor</code>
+          <span class="badge-desc">
+            Fixed-strength eval: <code>enabled</code>, <code>num_games</code>, <code>depth</code>,
+            <code>mcts_enabled</code> &mdash; the primary strength metric. <code>:449&ndash;461</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">augmentation</code>
+          <span class="badge-desc">
+            <code>enabled</code> + <code>max_augmentations</code> (D2 dihedral expansion); falls back
+            to <code>trainer.*</code> keys. <code>:265,269&ndash;270</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">export</code>
+          <span class="badge-desc">
+            <code>export_every</code> + <code>coreml_dir</code> for periodic CoreML
+            <code>.mlpackage</code> emission. <code>:253&ndash;255</code>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 4: File tree ===================== -->
+    <div class="screen animate-in">
+      <h3>Cross-cutting packages &mdash; the shared object each provides</h3>
+      <p>
+        Where the shared plumbing lives. Each entry names the one object other modules reach for.
+      </p>
+
+      <div class="file-tree">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/memory/</span>
+          <span class="ft-desc">Allocation reuse; all consumers inject these as optional args</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">game_state_pool.py</span>
+              <span class="ft-desc">GameStatePool &rarr; MCTS game_state_pool= arg</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">tensor_pool.py</span>
+              <span class="ft-desc">TensorPool &rarr; NetworkWrapper(tensor_pool=)</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">adaptive.py</span>
+              <span class="ft-desc">AdaptivePoolSizer &mdash; runtime pool resizing</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">zero_copy.py</span>
+              <span class="ft-desc">ZeroCopyTensorFactory / InPlaceOperations</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/utils/</span>
+          <span class="ft-desc">Encoding + measurement shared by training and eval</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">encoding.py</span>
+              <span class="ft-desc">StateEncoder &mdash; total_moves=7433, A1 sentinel</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">enhanced_encoding.py</span>
+              <span class="ft-desc">EnhancedStateEncoder &mdash; 15-channel variant</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">metrics_logger.py</span>
+              <span class="ft-desc">MetricsLogger &mdash; training metrics sink</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">tournament.py</span>
+              <span class="ft-desc">Tournament harness for arena gating</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">elo_manager.py</span>
+              <span class="ft-desc">ELO ratings across checkpoint history</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/search/</span>
+          <span class="ft-desc">Search support (the MCTS engine itself lives in training/self_play.py)</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">transposition_table.py</span>
+              <span class="ft-desc">Zobrist-keyed position cache, depth-preferred</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">node_type.py</span>
+              <span class="ft-desc">EXACT / LOWER_BOUND / UPPER_BOUND bounds</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">README.md</span>
+              <span class="ft-desc">Authoritative Zobrist + TT documentation</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">📚</div>
+        <div class="callout-content">
+          <strong class="callout-title">Where the authoritative docs live</strong>
+          <p>
+            Start with <code>CLAUDE.md</code> &mdash; its <em>Foundational Rule Fixes</em> section is
+            the source of truth for invariants 1&ndash;6 and the 8390&rarr;7433 break. For the search
+            system, <code>yinsh_ml/search/README.md</code> covers Zobrist hashing and the
+            transposition table. <code>TECH_DEBT.md</code> records why the old
+            <code>search/mcts.py</code> engine was excised (one engine now). For the training direction,
+            <code>TRAINING_REFACTOR_PLAN.md</code>.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">🧭</div>
+        <div class="callout-content">
+          <strong class="callout-title">You&rsquo;ve reached the end &mdash; and the riskiest surface</strong>
+          <p>
+            Nice work walking the whole atlas. Remember the one thing this closing section exists to
+            burn in: the invariants above are duplicated truths spread across files. They are the
+            highest-risk edit surface in the repo &mdash; the policy size, channel count, Zobrist
+            composition, encoder sentinel, hex axes, and value-mode triple. When you touch one side,
+            grep for the other before you commit, and run the full suite. For everything else, three
+            files answer most questions: <code>CLAUDE.md</code>,
+            <code>scripts/run_training.py</code>, and <code>yinsh_ml/network/wrapper.py</code>.
+          </p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>

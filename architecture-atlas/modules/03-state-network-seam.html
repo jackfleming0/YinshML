@@ -1,0 +1,303 @@
+<section class="module" id="module-3">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">03</span>
+      <h2 class="module-title">The State &harr; Network Seam</h2>
+      <p class="module-subtitle">How a GameState becomes a tensor becomes a policy + value becomes a Move.</p>
+    </div>
+
+    <!-- ===================== SCREEN 1: THE FORWARD PATH ===================== -->
+    <div class="screen">
+      <p>
+        Three objects meet at this seam: a
+        <span class="term" data-definition="The mutable Python object holding the board, side-to-move, game phase, and move history. Defined in yinsh_ml/game/game_state.py.">GameState</span>,
+        the <span class="term" data-definition="StateEncoder converts a GameState to/from the numeric tensors the network reads, and owns the move-index layout. Defined in yinsh_ml/utils/encoding.py.">StateEncoder</span>,
+        and the <span class="term" data-definition="NetworkWrapper wraps the torch YinshNetwork: it owns the encoder, the device, masking, and temperature. Defined in yinsh_ml/network/wrapper.py.">NetworkWrapper</span>
+        (which itself owns a <code>YinshNetwork</code>). The contract is purely shape- and index-driven: a
+        <code>(6, 11, 11)</code> float array goes in, a flat <code>move_probs[7433]</code> distribution plus a scalar <code>value</code> come out, and the encoder's
+        move-index table is the only thing that maps a policy slot back to a concrete <code>Move</code>.
+      </p>
+
+      <div class="flow-animation animate-in" id="flow-state-net" data-steps='[
+        {"highlight":"flow-actor-1","label":"A GameState carries the board, side-to-move, and game phase for the position to evaluate"},
+        {"highlight":"flow-actor-2","label":"StateEncoder.encode_state walks the board and writes a (6,11,11) float32 array","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-3","label":"NetworkWrapper.predict receives the state tensor plus an optional boolean move_mask","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-4","label":"YinshNetwork.forward returns policy logits of length 7433 and a scalar value head output","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-3","label":"predict masks invalid slots with -inf then softmaxes to move_probs plus the already-tanhd value","packet":true,"from":"actor-4","to":"actor-3"},
+        {"highlight":"flow-actor-2","label":"select_move or decode_move reads move_probs at each valid moves index to pick a slot","packet":true,"from":"actor-3","to":"actor-2"},
+        {"highlight":"flow-actor-1","label":"The chosen slot resolves back to a concrete Move applied to the GameState","packet":true,"from":"actor-2","to":"actor-1"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">GS</div>
+            <span>GameState</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">EN</div>
+            <span>StateEncoder</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">NW</div>
+            <span>NetworkWrapper</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">NN</div>
+            <span>YinshNetwork</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to trace the forward path</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="flow-step-num">1</div>
+          <p>GameState &rarr; <code>(6,11,11)</code> tensor</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">2</div>
+          <p>predict &rarr; mask + softmax</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">3</div>
+          <p><code>move_probs[7433]</code> + value</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">4</div>
+          <p>select_move &rarr; Move</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 2: ENCODE + PREDICT SIGNATURES ===================== -->
+    <div class="screen">
+      <h3>Encode: GameState &rarr; <code>(6,11,11)</code></h3>
+      <p>
+        <code>encoding.py:323</code>. The encoder is <em>side-normalized</em>: channels 0/2 are always the current player's rings/markers,
+        1/3 the opponent's. Channel 4 is the valid-moves mask written from each move's <code>source</code> cell; channel 5 broadcasts
+        the phase and overrides the off-board <span class="term" data-definition="Column A only spans rows 2-5, so cell A1 (row_idx 0, col_idx 0) is never a real board position. It safely stores the side-to-move sentinel and survives D2 augmentation.">A1</span>
+        cell with a side-to-move sentinel.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">encode_state</span>(self, game_state: GameState) -&gt; np.ndarray:</span>
+<span class="code-line">    state = np.<span class="code-function">zeros</span>((<span class="code-property">6</span>, <span class="code-property">11</span>, <span class="code-property">11</span>), dtype=np.float32)</span>
+<span class="code-line">    is_white = (game_state.current_player == Player.WHITE)</span>
+<span class="code-line">    <span class="code-comment"># ch 0/1 rings, ch 2/3 markers: current-first</span></span>
+<span class="code-line">    state[<span class="code-property">0</span>, r, c] = <span class="code-property">1.0</span>   <span class="code-comment"># current rings</span></span>
+<span class="code-line">    <span class="code-comment"># ch 4: valid-move sources</span></span>
+<span class="code-line">    <span class="code-keyword">for</span> move <span class="code-keyword">in</span> game_state.<span class="code-function">get_valid_moves</span>():</span>
+<span class="code-line">        state[<span class="code-property">4</span>, src_row, src_col] = <span class="code-property">1.0</span></span>
+<span class="code-line">    <span class="code-comment"># ch 5: phase broadcast + A1 sentinel</span></span>
+<span class="code-line">    state[<span class="code-property">5</span>] = phase_value</span>
+<span class="code-line">    state[<span class="code-property">5</span>, <span class="code-property">0</span>, <span class="code-property">0</span>] = WHITE_SENTINEL <span class="code-keyword">if</span> is_white <span class="code-keyword">else</span> BLACK_SENTINEL</span>
+<span class="code-line">    <span class="code-keyword">return</span> state</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Returns</strong> a dense numpy array, not a torch tensor. The wrapper does the <code>from_numpy().float()</code> conversion and device move.</p>
+            <p class="tl">Side-to-move decides which color lands in the "current" channels, so the network never sees raw white-vs-black.</p>
+            <p class="tl">Channels 0-3 are the four piece planes. Coordinates are <code>(row-1, col-'A')</code>, clamped to the 11x11 grid.</p>
+            <p class="tl">Channel 4 is the move-source mask: one hot cell per ring that can legally move this turn. This is the only "valid moves" signal baked into the tensor.</p>
+            <p class="tl">Channel 5 carries phase everywhere, then stamps the off-board A1 cell with a 0/1 sentinel so <code>decode_state</code> can recover side-to-move without flipping colors.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Predict: tensor &rarr; <code>(move_probs, value)</code></h3>
+      <p>
+        <code>wrapper.py:273</code>. The single-position path. It runs <code>self.network(state_tensor)</code>, masks invalid slots with <code>-inf</code>
+        <em>before</em> softmax, scales by <code>temperature</code>, and returns probabilities plus the value. The value is <strong>not</strong> re-tanh'd here &mdash;
+        the network already bounds it (<code>model.py:139</code> region / classification expectation), so a second tanh would over-compress.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">predict</span>(self, state_tensor,</span>
+<span class="code-line">            move_mask=<span class="code-property">None</span>, temperature=<span class="code-property">1.0</span>):</span>
+<span class="code-line">    self.network.<span class="code-function">eval</span>()</span>
+<span class="code-line">    <span class="code-keyword">with</span> torch.<span class="code-function">no_grad</span>():</span>
+<span class="code-line">        move_logits, value = self.<span class="code-function">network</span>(state_tensor)</span>
+<span class="code-line">        <span class="code-comment"># value already tanh'd by net - NO re-tanh</span></span>
+<span class="code-line">        <span class="code-keyword">if</span> move_mask <span class="code-keyword">is not</span> <span class="code-property">None</span>:</span>
+<span class="code-line">            move_logits = move_logits.<span class="code-function">masked_fill</span>(</span>
+<span class="code-line">                ~move_mask, <span class="code-function">float</span>(<span class="code-string">'-inf'</span>))</span>
+<span class="code-line">        scaled = move_logits / temperature</span>
+<span class="code-line">        probs = F.<span class="code-function">softmax</span>(scaled, dim=<span class="code-property">1</span>)</span>
+<span class="code-line">        <span class="code-keyword">return</span> probs, value</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Args:</strong> a <code>(6,11,11)</code> (or batched) tensor, an optional boolean mask, and a temperature.</p>
+            <p class="tl">Eval mode + no-grad: this is pure inference, no autograd graph built.</p>
+            <p class="tl">One forward call yields raw policy logits of length 7433 and the value head output.</p>
+            <p class="tl">The commented-out <code>torch.tanh(value)</code> is the load-bearing absence: the value is bounded once, inside the net.</p>
+            <p class="tl">Masking sets illegal slots to <code>-inf</code> so softmax drives them to exactly zero probability.</p>
+            <p class="tl"><strong>Returns</strong> a normalized distribution over all 7433 slots and the scalar value.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 3: BATCH PATH + FORWARD HEADS ===================== -->
+    <div class="screen">
+      <h3>The batched path MCTS actually calls</h3>
+      <p>
+        <code>wrapper.py:617</code>. <code>predict_batch</code> takes a <em>list of GameStates</em>, encodes each into one pooled batch tensor, runs a
+        single forward pass, and returns <strong>raw logits</strong> (not softmaxed, not masked). This is deliberate: the caller &mdash; batched MCTS &mdash;
+        applies its own masking and softmax per leaf. Temperature is folded into the logits when it is not <code>1.0</code>.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">predict_batch</span>(self, game_states, temperature=<span class="code-property">1.0</span>):</span>
+<span class="code-line">    batch_tensor = self.<span class="code-function">_acquire_input_tensor</span>(<span class="code-function">len</span>(game_states))</span>
+<span class="code-line">    <span class="code-keyword">for</span> i, gs <span class="code-keyword">in</span> <span class="code-function">enumerate</span>(game_states):</span>
+<span class="code-line">        arr = self.state_encoder.<span class="code-function">encode_state</span>(gs)</span>
+<span class="code-line">        batch_tensor[i] = torch.<span class="code-function">from_numpy</span>(arr).<span class="code-function">float</span>()</span>
+<span class="code-line">    <span class="code-keyword">with</span> torch.<span class="code-function">no_grad</span>():</span>
+<span class="code-line">        policy_logits, values = self.<span class="code-function">network</span>(batch_tensor)</span>
+<span class="code-line">        <span class="code-keyword">if</span> temperature != <span class="code-property">1.0</span>:</span>
+<span class="code-line">            policy_logits = policy_logits / temperature</span>
+<span class="code-line">        <span class="code-keyword">return</span> policy_logits, values  <span class="code-comment"># raw, caller masks</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Args:</strong> a list of GameState objects (one per MCTS leaf) and a temperature.</p>
+            <p class="tl">The batch input tensor comes from the <span class="term" data-definition="A reuse pool of pre-allocated torch tensors that cuts allocation churn and GC pressure during high-throughput batched inference. Lives in yinsh_ml/memory.">TensorPool</span>, sized <code>(batch, 6, 11, 11)</code>, and is released in a finally block.</p>
+            <p class="tl">Each state is encoded and copied into its batch row &mdash; same <code>encode_state</code> as the singleton path.</p>
+            <p class="tl">One forward pass over the whole batch is the throughput win over per-leaf calls.</p>
+            <p class="tl"><strong>Returns</strong> <code>(batch_size, 7433)</code> logits and <code>(batch_size, 1)</code> values, both unmasked &mdash; masking and softmax are the search layer's job.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Inside the net: two heads, one trunk</h3>
+      <p>
+        <code>model.py:377</code>. <code>forward</code> runs the shared conv trunk, then splits. The policy head is
+        <code>Conv2d(c,64,1) &rarr; Flatten &rarr; Linear(64&middot;11&middot;11, 1024) &rarr; Linear(1024, total_moves)</code> emitting raw logits
+        (<code>model.py:148</code>). In classification value mode the value head's logits are softmaxed and dotted with <code>outcome_values</code>
+        to yield an expectation already in <code>[-1, 1]</code> &mdash; that is the single tanh-equivalent bounding referenced by <code>predict</code>.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">forward</span>(self, x) -&gt; Tuple[Tensor, Tensor]:</span>
+<span class="code-line">    x = self.<span class="code-function">conv_block</span>(x)            <span class="code-comment"># shared trunk</span></span>
+<span class="code-line">    <span class="code-keyword">for</span> block <span class="code-keyword">in</span> self.main_blocks: x = <span class="code-function">block</span>(x)</span>
+<span class="code-line">    policy = self.<span class="code-function">policy_head</span>(x)     <span class="code-comment"># (B, 7433) logits</span></span>
+<span class="code-line">    value_output = self.<span class="code-function">value_head</span>(x)</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.value_mode == <span class="code-string">'classification'</span>:</span>
+<span class="code-line">        probs = F.<span class="code-function">softmax</span>(value_output, dim=-<span class="code-property">1</span>)</span>
+<span class="code-line">        value = (probs * self.outcome_values).<span class="code-function">sum</span>(-<span class="code-property">1</span>)</span>
+<span class="code-line">        self._value_logits = value_output  <span class="code-comment"># for CE loss</span></span>
+<span class="code-line">    <span class="code-keyword">else</span>:</span>
+<span class="code-line">        value = value_output.<span class="code-function">squeeze</span>(-<span class="code-property">1</span>)  <span class="code-comment"># tanh'd scalar</span></span>
+<span class="code-line">    <span class="code-keyword">return</span> policy, value</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Args:</strong> <code>(batch, input_channels, 11, 11)</code> &mdash; 6 channels basic, 15 enhanced.</p>
+            <p class="tl">Trunk: an entry conv block then a stack of residual/attention blocks, shared by both heads.</p>
+            <p class="tl">Policy head ends in a bare <code>Linear(..., total_moves)</code> &mdash; raw logits, no activation, so masking and temperature happen downstream.</p>
+            <p class="tl">Classification value mode turns class logits into a probability-weighted expectation over the discrete outcome centers; the result is already in <code>[-1,1]</code>.</p>
+            <p class="tl">The raw class logits are stashed on <code>_value_logits</code> so the trainer can run cross-entropy without changing this interface.</p>
+            <p class="tl"><strong>Returns</strong> <code>(policy_logits, value)</code> &mdash; the exact pair every predict path consumes.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 4: CONTRACTS + ENCODING PLUMBING ===================== -->
+    <div class="screen">
+      <h3>Hard contracts at the seam</h3>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Policy length and channel count are load-bearing invariants</strong>
+          <p>
+            The policy head length must equal <code>StateEncoder().total_moves == 7433</code>
+            (<code>85 + 7140 + 85 + 123</code>, <code>encoding.py:146</code>). This number <em>is</em> the move-index layout: slot &harr; move meaning is fixed by it.
+            <code>NetworkWrapper.load_model</code> (<code>wrapper.py:423</code>) <strong>hard-fails</strong> on three mismatches rather than silently filtering &mdash;
+            input-channel count (<code>wrapper.py:434</code>), value-head mode/classes (<code>wrapper.py:450</code>), and policy-head size (<code>wrapper.py:492</code>).
+            Silent filtering would leave the offending layer randomly initialized and play garbage. Known past policy sizes: <code>7395</code> (pre-rework),
+            <code>8390</code> (collision-prone REMOVE_MARKERS), <code>7433</code> (current). Switching sizes means retrain or explicit migration &mdash; old checkpoints will not load.
+          </p>
+        </div>
+      </div>
+
+      <h3>The <code>use_enhanced_encoding</code> plumbing</h3>
+      <p>
+        A single boolean threads channel count from the wrapper constructor down to both the encoder choice and the network's input conv.
+        <code>load_model</code> can also <em>flip</em> this flag to match a checkpoint's conv-in dimension (<code>wrapper.py:78</code>), so the encoder
+        instantiated at <code>wrapper.py:200</code> always agrees with the loaded weights.
+      </p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">1</div>
+          <div>
+            <strong><code>NetworkWrapper(use_enhanced_encoding=..., num_channels=..., num_blocks=..., value_mode='classification', num_value_classes=7, value_head_type=...)</code></strong>
+            <p><code>wrapper.py:26</code>. The flag sets <code>input_channels = 15 if use_enhanced_encoding else 6</code>. When a <code>model_path</code> is given, channel count, block count, value mode, and head type are auto-detected from the state_dict and can override the flag.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">2</div>
+          <div>
+            <strong>Encoder selection &mdash; <code>wrapper.py:200</code></strong>
+            <p><code>self.use_enhanced_encoding</code> (post-autodetect) picks <code>EnhancedStateEncoder()</code> (15-ch) or <code>StateEncoder()</code> (6-ch). Reading the post-detect flag, not the constructor arg, is what prevents an encoder/weights mismatch that would yield 0-move games.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">3</div>
+          <div>
+            <strong><code>YinshNetwork(input_channels=6 or 15, ...)</code></strong>
+            <p><code>wrapper.py:161</code> &rarr; <code>model.py:82</code>. The same channel count sizes the entry <code>Conv2d(input_channels, num_channels, 3, padding=1)</code>. Both sides of the seam read one source of truth, so the conv-in dimension and the encoder's output channels can never silently drift.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">total_moves = 7433</code>
+          <span class="badge-desc">85 ring placements + 7140 ring moves + 85 marker removals + 123 REMOVE_MARKERS lines (encoding.py:146).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">input_channels = 6 | 15</code>
+          <span class="badge-desc">Basic vs enhanced encoder; the only thing that changes the trunk's first conv.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">value_mode = classification</code>
+          <span class="badge-desc">Expectation over 7 outcome classes in [-1,1]; load_model hard-fails on a mode mismatch.</span>
+        </div>
+      </div>
+
+      <p>
+        Downstream, <code>predict_batch</code> is the hot path: batched MCTS collects many leaf GameStates, hands them to this seam in one shot, and applies
+        its own masking and priors to the returned logits. That consumer &mdash; where evaluation meets search &mdash; is
+        <strong>Section 4: the Search &harr; Evaluation seam</strong>.
+      </p>
+    </div>
+  </div>
+</section>

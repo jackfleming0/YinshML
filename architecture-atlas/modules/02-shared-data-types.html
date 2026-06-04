@@ -1,0 +1,306 @@
+<section class="module" id="module-2">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">02</span>
+      <h2 class="module-title">The Shared Currency: Core Data Types</h2>
+      <p class="module-subtitle">The exact objects, fields, and shapes passed across module boundaries.</p>
+    </div>
+
+    <!-- ===================== SCREEN 1: quick-reference cards ===================== -->
+    <div class="screen">
+      <p>Every module in YinshML speaks in a small set of shared types. A type produced in one file is consumed verbatim in another &mdash; the <span class="term" data-definition="A Python dataclass auto-generates __init__, __repr__, and field storage from typed class attributes. 'frozen=True' makes instances immutable and hashable.">dataclass</span> contract <em>is</em> the API. These are the objects that travel the seams.</p>
+
+      <div class="pattern-cards animate-in">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">P</div>
+          <h4 class="pattern-title">Position</h4>
+          <p class="pattern-desc"><code>game/constants.py:42</code> &mdash; frozen <code>(column:str, row:int)</code>. The atom of board geometry; algebraic cell like <code>E5</code>.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">M</div>
+          <h4 class="pattern-title">Move</h4>
+          <p class="pattern-desc"><code>game/types.py:21</code> &mdash; frozen, hashable. The unit of action; produced by the move generator, consumed by <code>GameState.make_move</code> and the encoder.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">G</div>
+          <h4 class="pattern-title">GameState</h4>
+          <p class="pattern-desc"><code>game/game_state.py:106</code> &mdash; the mutable source of truth: board, phase, player, scores, history.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">T</div>
+          <h4 class="pattern-title">State Tensor</h4>
+          <p class="pattern-desc"><code>utils/encoding.py:330</code> &mdash; <code>np.float32[6,11,11]</code> (or 15-ch enhanced). The bridge from game logic into the network.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">N</div>
+          <h4 class="pattern-title">Network I/O</h4>
+          <p class="pattern-desc"><code>network/wrapper.py:273</code> &mdash; tensor in, <code>(move_probs[7433], value)</code> out. The inference contract.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">E</div>
+          <h4 class="pattern-title">Experience / Record</h4>
+          <p class="pattern-desc"><code>training/self_play.py:2029</code> &mdash; the <code>(state, policy, value)</code> triple; persisted as <code>GameRecord</code> (<code>self_play/game_recorder.py:31</code>).</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 2: Position / Move / enums ===================== -->
+    <div class="screen">
+      <h3>Position, Move, and the three enums</h3>
+      <p>The lowest layer. <code>Player</code> is a signed enum (<code>WHITE=1</code>, <code>BLACK=-1</code>) so its value doubles as a sign multiplier in differential heuristics.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">class</span> <span class="code-function">Player</span>(Enum):</span>
+<span class="code-line">    WHITE = <span class="code-string">1</span></span>
+<span class="code-line">    BLACK = -<span class="code-string">1</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">MoveType</span>(Enum):</span>
+<span class="code-line">    PLACE_RING = <span class="code-string">"PLACE_RING"</span></span>
+<span class="code-line">    MOVE_RING = <span class="code-string">"MOVE_RING"</span></span>
+<span class="code-line">    REMOVE_MARKERS = <span class="code-string">"REMOVE_MARKERS"</span></span>
+<span class="code-line">    REMOVE_RING = <span class="code-string">"REMOVE_RING"</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GamePhase</span>(Enum):</span>
+<span class="code-line">    RING_PLACEMENT = <span class="code-string">0</span></span>
+<span class="code-line">    MAIN_GAME = <span class="code-string">1</span></span>
+<span class="code-line">    ROW_COMPLETION = <span class="code-string">2</span></span>
+<span class="code-line">    RING_REMOVAL = <span class="code-string">3</span></span>
+<span class="code-line">    GAME_OVER = <span class="code-string">4</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Player</strong> (<code>constants.py:11</code>): two members, ints <code>+1 / -1</code>. <em>Produced</em> everywhere a side is named; <em>consumed</em> by heuristics as a literal sign. <code>.opponent</code> flips it.</p>
+            <p class="tl"><strong>MoveType</strong> (<code>types.py:8</code>): the four legal action kinds. Drives the policy-slot layout in the encoder &mdash; each kind owns a contiguous index range.</p>
+            <p class="tl"><strong>GamePhase</strong> (<code>types.py:14</code>): the five lifecycle states. Note <code>ROW_COMPLETION=2</code> sits between MAIN_GAME and RING_REMOVAL. <em>Consumed</em> by encoder channel 5 (normalized by <code>len(GamePhase)-1 = 4</code>) and by phase-specific heuristic weights.</p>
+            <p class="tl"><strong>Invariant:</strong> these enums are the single source of truth &mdash; integer values are persisted and channel-normalized, so renumbering is a breaking change.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">@dataclass</span>(frozen=<span class="code-keyword">True</span>)</span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">Position</span>:</span>
+<span class="code-line">    column: <span class="code-keyword">str</span>  <span class="code-comment"># A-K</span></span>
+<span class="code-line">    row: <span class="code-keyword">int</span>     <span class="code-comment"># 1-11</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">@dataclass</span>(frozen=<span class="code-keyword">True</span>)</span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">Move</span>:</span>
+<span class="code-line">    type: MoveType</span>
+<span class="code-line">    player: Player</span>
+<span class="code-line">    source: Optional[Position] = <span class="code-keyword">None</span></span>
+<span class="code-line">    destination: Optional[Position] = <span class="code-keyword">None</span></span>
+<span class="code-line">    markers: Optional[Tuple[Position, ...]] = <span class="code-keyword">None</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Position</strong> (<code>constants.py:42</code>): immutable <code>(column, row)</code>. <code>str(pos)</code> &rarr; <code>"E5"</code>; <code>from_string("E5")</code> inverts it. Only the 85 cells in <code>VALID_POSITIONS</code> (<code>constants.py:63</code>) are on-board.</p>
+            <p class="tl"><strong>Move</strong> (<code>types.py:21</code>): <code>frozen=True</code> &rarr; immutable &amp; hashable. <code>__post_init__</code> coerces a <code>markers</code> list into a tuple so equality/hash stay stable.</p>
+            <p class="tl"><code>source</code>/<code>destination</code>/<code>markers</code> are <em>optional</em>: a <code>PLACE_RING</code> uses only <code>source</code>; <code>MOVE_RING</code> uses both endpoints; <code>REMOVE_MARKERS</code> uses the <code>markers</code> tuple.</p>
+            <p class="tl"><em>Produced</em> by <code>MoveGenerator</code>; <em>consumed</em> by <code>make_move</code>, MCTS dict keys, and the encoder's <code>move_to_index</code>. <code>__hash__</code> is memoized but stripped on pickle (per-process <code>PYTHONHASHSEED</code>).</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 3: GameState ===================== -->
+    <div class="screen">
+      <h3>GameState: the mutable source of truth</h3>
+      <p>Everything else is derived from this object. It is mutated in place (<code>make_move</code>) and copied for search (<code>copy_from</code> for pool reuse, avoiding <code>deepcopy</code>).</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">@dataclass</span></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GameState</span>:</span>
+<span class="code-line">    board: Board</span>
+<span class="code-line">    current_player: Player</span>
+<span class="code-line">    phase: GamePhase</span>
+<span class="code-line">    white_score: <span class="code-keyword">int</span></span>
+<span class="code-line">    black_score: <span class="code-keyword">int</span></span>
+<span class="code-line">    rings_placed: Dict[Player, <span class="code-keyword">int</span>]</span>
+<span class="code-line">    move_history: List[Move]</span>
+<span class="code-line"></span>
+<span class="code-line">    <span class="code-comment"># row-completion bookkeeping (None when inactive)</span></span>
+<span class="code-line">    _move_maker: Optional[Player] = <span class="code-keyword">None</span></span>
+<span class="code-line">    _prev_player: Optional[Player] = <span class="code-keyword">None</span></span>
+<span class="code-line">    _last_regular_player: Optional[Player] = <span class="code-keyword">None</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>board</strong> &mdash; a <code>Board</code> holding piece placement; <code>to_numpy_array()</code> feeds channels 0&ndash;3 of the encoder.</p>
+            <p class="tl"><strong>current_player</strong> &mdash; whose turn; starts <code>WHITE</code>. Drives side-normalization in <code>encode_state</code> and recovery from the A1 sentinel in <code>decode_state</code>.</p>
+            <p class="tl"><strong>phase</strong> &mdash; current <code>GamePhase</code>; starts <code>RING_PLACEMENT</code>. Gates which moves are legal and which heuristic weights apply.</p>
+            <p class="tl"><strong>white_score / black_score</strong> &mdash; completed rows (rings removed). <code>POINTS_TO_WIN=3</code> ends the game.</p>
+            <p class="tl"><strong>rings_placed</strong> &mdash; per-player count during placement; complete at <code>RINGS_PER_PLAYER=5</code> each.</p>
+            <p class="tl"><strong>move_history</strong> &mdash; ordered <code>List[Move]</code>; replayed by the viz layer and Parquet reconstruction.</p>
+            <p class="tl"><strong>Invariant:</strong> the <code>_*</code> bookkeeping fields are <em>always present</em> (<code>None</code> when inactive) so pool reuse never inherits stale row-completion markers (<code>game_state.py:127</code>).</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 4: encoded tensor + network I/O ===================== -->
+    <div class="screen">
+      <h3>The encoded state tensor &amp; network I/O</h3>
+      <p>This is the seam where game logic becomes math. <code>encode_state</code> turns a <code>GameState</code> into a fixed <code>(6,11,11)</code> tensor; the network maps it to a policy vector and a scalar value.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">encode_state</span>(self, game_state) -&gt; np.ndarray:</span>
+<span class="code-line">    state = np.zeros((<span class="code-string">6</span>, <span class="code-string">11</span>, <span class="code-string">11</span>), dtype=np.float32)</span>
+<span class="code-line">    <span class="code-comment"># 0: current rings   1: opponent rings</span></span>
+<span class="code-line">    <span class="code-comment"># 2: current markers 3: opponent markers</span></span>
+<span class="code-line">    <span class="code-comment"># 4: valid-move sources mask</span></span>
+<span class="code-line">    phase_value = game_state.phase.value / (len(GamePhase)-<span class="code-string">1</span>)</span>
+<span class="code-line">    state[<span class="code-string">5</span>] = phase_value          <span class="code-comment"># ch 5 broadcast</span></span>
+<span class="code-line">    state[<span class="code-string">5</span>, <span class="code-string">0</span>, <span class="code-string">0</span>] = sentinel   <span class="code-comment"># A1: side-to-move</span></span>
+<span class="code-line">    <span class="code-keyword">return</span> state</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Shape</strong> <code>(6,11,11) float32</code> (<code>encoding.py:330</code>). 6 channels over the 11&times;11 grid; only 85 cells are real, the rest are structural padding.</p>
+            <p class="tl"><strong>Channels 0&ndash;3</strong> are <em>side-normalized</em>: index 0/2 are always the <em>current</em> player's rings/markers, 1/3 the opponent's &mdash; not white/black. The network never sees raw color.</p>
+            <p class="tl"><strong>Channel 4</strong> is the valid-move source mask; <strong>channel 5</strong> broadcasts the phase value, then overwrites off-board cell A1 with a 0/1 side-to-move sentinel.</p>
+            <p class="tl"><strong>Enhanced (15-ch)</strong>: <code>EnhancedStateEncoder</code> (<code>enhanced_encoding.py:55</code>) keeps 0&ndash;3, adds row threats (4&ndash;5), partial rows (6&ndash;7), ring mobility (8), center distance (9), ring influence (10), valid dests (11), phase (12), turn number (13), score diff (14).</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Shape invariant: side recovery lives in channel 5, not color</strong>
+          <p>Because channels 0&ndash;3 are "current player first," <code>decode_state</code> cannot tell white from black by channel. It reads side-to-move from the A1 sentinel (<code>row_idx=0, col_idx=0</code>) on channel 5, and the phase from on-board cell F6 (<code>row 5, col 5</code>). A1 is off the hex board (column A only has rows 2&ndash;5), so the sentinel never collides with real state and survives D2 augmentation. In the 15-ch encoder the phase/sentinel move to channel <code>CH_GAME_PHASE = 12</code> &mdash; magic-indexing channel 5 there reads opponent row-threats and silently breaks.</p>
+        </div>
+      </div>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">predict</span>(self, state_tensor, move_mask=<span class="code-keyword">None</span>,</span>
+<span class="code-line">            temperature=<span class="code-string">1.0</span>) -&gt; Tuple[Tensor, Tensor]:</span>
+<span class="code-line">    <span class="code-comment"># state_tensor: (6, 11, 11)</span></span>
+<span class="code-line">    move_logits, value = self.network(state_tensor)</span>
+<span class="code-line">    <span class="code-keyword">if</span> move_mask <span class="code-keyword">is not</span> <span class="code-keyword">None</span>:</span>
+<span class="code-line">        move_logits = move_logits.masked_fill(~move_mask, -inf)</span>
+<span class="code-line">    move_probabilities = F.softmax(move_logits/temperature)</span>
+<span class="code-line">    <span class="code-keyword">return</span> move_probabilities, value</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Input</strong>: a <code>(6,11,11)</code> tensor (<code>wrapper.py:273</code>). <code>forward()</code> (<code>model.py:377</code>) runs conv trunk &rarr; two heads.</p>
+            <p class="tl"><strong>Policy head</strong> (<code>model.py:148</code>): <code>Linear(..., total_moves)</code> &rarr; raw logits of length <strong>7433</strong>. <code>predict</code> masks illegal slots to <code>-inf</code>, then softmaxes to probabilities.</p>
+            <p class="tl"><strong>Value head</strong>: a scalar &mdash; <code>(batch,)</code> in classification mode, <code>(batch,1)</code> in regression. Already tanh'd inside the model; do <em>not</em> tanh again.</p>
+            <p class="tl"><em>Produced</em> by the network; <em>consumed</em> by MCTS as priors + leaf value. <code>load_model</code> hard-fails on any policy-size mismatch &mdash; no silent slot filtering.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 5: experience / stored record + badges ===================== -->
+    <div class="screen">
+      <h3>Training experience &amp; the stored record</h3>
+      <p>Self-play emits parallel lists, zipped into the <code>(state, policy, value)</code> tuples the trainer learns from. The value is assigned per stored position from the final game outcome (signed by the position's player).</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">states:   List[np.ndarray] = []   <span class="code-comment"># (6,11,11) f32</span></span>
+<span class="code-line">policies: List[np.ndarray] = []   <span class="code-comment"># (7433,)  f32</span></span>
+<span class="code-line">players = []                      <span class="code-comment"># Player per position</span></span>
+<span class="code-line">...</span>
+<span class="code-line"><span class="code-keyword">if</span> store_target <span class="code-keyword">and</span> is_learner_turn:</span>
+<span class="code-line">    encoded_state = state_encoder.encode_state(state)</span>
+<span class="code-line">    states.append(encoded_state.astype(np.float32))</span>
+<span class="code-line">    policies.append(move_probs)</span>
+<span class="code-line">    players.append(state.current_player)</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>states</strong> &mdash; one encoded <code>(6,11,11)</code> tensor per stored turn (<code>self_play.py:2029</code>).</p>
+            <p class="tl"><strong>policies</strong> &mdash; the full MCTS visit distribution, length <code>total_moves = 7433</code>. This is <code>move_probs</code> over <em>all</em> slots, not just legal ones &mdash; the training target for the policy head.</p>
+            <p class="tl"><strong>players</strong> &mdash; the side at each position; later combined with the game outcome to produce the per-position value label.</p>
+            <p class="tl"><strong>Terminal position</strong> (<code>self_play.py:2128</code>): appended with a zero policy so it trains <em>only</em> the value head.</p>
+            <p class="tl"><em>Produced</em> by self-play; <em>consumed</em> by <code>YinshTrainer</code> (policy = cross-entropy, value = MSE/classification).</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">@dataclass</span></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GameRecord</span>:</span>
+<span class="code-line">    game_id: <span class="code-keyword">str</span></span>
+<span class="code-line">    start_time: <span class="code-keyword">float</span></span>
+<span class="code-line">    end_time: <span class="code-keyword">float</span></span>
+<span class="code-line">    duration: <span class="code-keyword">float</span></span>
+<span class="code-line">    total_turns: <span class="code-keyword">int</span></span>
+<span class="code-line">    winner: Optional[<span class="code-keyword">str</span>]</span>
+<span class="code-line">    final_score: Dict[<span class="code-keyword">str</span>, <span class="code-keyword">int</span>]</span>
+<span class="code-line">    turns: List[GameTurn]</span>
+<span class="code-line">    metadata: Dict[<span class="code-keyword">str</span>, Any]</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>GameRecord</strong> (<code>self_play/game_recorder.py:31</code>): the on-disk unit, serialized to Parquet via <code>data_storage.py</code> (~3KB/game vs ~1.5MB JSON).</p>
+            <p class="tl"><strong>turns</strong> &mdash; <code>List[GameTurn]</code> (<code>game_recorder.py:17</code>): each turn holds <code>turn_number</code>, <code>current_player</code>, a serialized <code>move</code> dict, a <code>features</code> dict, and a timestamp.</p>
+            <p class="tl"><strong>winner / final_score</strong> &mdash; outcome fields; <code>final_score</code> keyed by side. The replay/viz layer reconstructs <code>Board</code> snapshots by replaying serialized moves through <code>GameState</code>.</p>
+            <p class="tl"><strong>Invariant:</strong> the move serialization in each <code>GameTurn</code> must round-trip back through <code>GameState.make_move</code> &mdash; the viz and analysis layers depend on faithful replay.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Magic constants that pin these shapes</h3>
+      <div class="badge-list animate-in">
+        <div class="badge-item">
+          <code class="badge-code">total_moves = 7433</code>
+          <span class="badge-desc">Policy-vector length. Computed as <code>85 + 7140 + 85 + 123</code> in <code>StateEncoder.__init__</code> (<code>utils/encoding.py:146</code>); use <code>StateEncoder().total_moves</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">channels = 6 | 15</code>
+          <span class="badge-desc"><code>NUM_CHANNELS = 6</code> basic (<code>encoding.py:103</code>) / <code>15</code> enhanced (<code>enhanced_encoding.py:83</code>). Selected by <code>use_enhanced_encoding</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">board = 11&times;11 / 85</code>
+          <span class="badge-desc">Grid is 11&times;11; only 85 cells are valid (<code>VALID_POSITIONS</code>, <code>constants.py:63</code>; column counts <code>[4,7,8,9,10,9,10,9,8,7,4]</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">RINGS_PER_PLAYER = 5</code>
+          <span class="badge-desc">Rings placed before MAIN_GAME (<code>constants.py:103</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">POINTS_TO_WIN = 3</code>
+          <span class="badge-desc">Completed rows to win (<code>constants.py:105</code>; blitz variant <code>= 1</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">num_value_classes = 7</code>
+          <span class="badge-desc">Discrete outcome buckets for classification value head; default in <code>NetworkWrapper.__init__</code> (<code>network/wrapper.py:28</code>).</span>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Shape invariant: policy length MUST equal total_moves</strong>
+          <p>Every policy vector &mdash; network output, MCTS target, stored Parquet row &mdash; is length <strong>7433</strong>. The slot layout is contiguous and collision-free: placement <code>[0,85)</code>, ring movement <code>[85,7225)</code> (<code>src&middot;84 + adjusted_dst</code>), ring removal <code>[7225,7310)</code>, marker removal <code>[7310,7433)</code> (123 enumerated 5-in-a-row lines). Changing <code>_enumerate_remove_markers_lines()</code> reshuffles slots and <em>breaks every saved checkpoint</em>; <code>NetworkWrapper.load_model</code> hard-fails on size mismatch rather than silently filtering. The pre-fix legacy size was 8390 &mdash; not load-compatible.</p>
+        </div>
+      </div>
+
+      <p class="module-closing">These types are produced and consumed at one critical seam: the <code>GameState</code> &rlarr; Network boundary, where <code>encode_state</code> serializes a position and <code>predict</code> returns policy + value. <strong>Section 3</strong> walks that seam end to end &mdash; how a live <code>GameState</code> becomes a tensor, crosses into the network, and returns as a move distribution the search layer can act on.</p>
+    </div>
+
+  </div>
+</section>

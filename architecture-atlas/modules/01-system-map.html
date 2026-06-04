@@ -1,0 +1,266 @@
+<section class="module" id="module-1">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">01</span>
+      <h2 class="module-title">The System Map</h2>
+      <p class="module-subtitle">Subsystem boundaries and the objects that cross them.</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The four zones</h3>
+      <p>
+        YinshML is an AlphaZero-style loop. Strip away the telemetry and memory pooling and
+        the dependency graph collapses into four zones: a <strong>Game Core</strong> that owns the
+        only mutable truth (<span class="term" data-definition="The single canonical game object: board, ring/marker placement, current player, phase, move history, scores. Every other subsystem reads it; only the engine mutates it.">GameState</span>),
+        a <strong>Search</strong> zone that turns one position into a move distribution, a
+        <strong>Learning</strong> zone that turns positions into tensors and tensors into weights,
+        and an <strong>Orchestration</strong> zone that runs the whole self-play&rarr;train&rarr;eval cycle.
+        Every arrow in the diagram is a concrete Python object; the seams are where those objects
+        change representation (GameState &rarr; tensor &rarr; logits &rarr; visit counts &rarr; weights).
+      </p>
+      <p>
+        Click any component below to see the key object it produces or consumes and the file it
+        lives in. The two entrypoints at the top &mdash;
+        <code>TrainingSupervisor.train_iteration()</code> and <code>run_large_scale_selfplay.py</code>
+        &mdash; are the only things you ever invoke directly; everything else is wired beneath them.
+      </p>
+
+      <div class="arch-diagram">
+        <div class="arch-zone arch-zone-orchestration">
+          <h4 class="arch-zone-label">Orchestration</h4>
+          <div class="arch-component"
+               data-desc="TrainingSupervisor (yinsh_ml/training/supervisor.py). Owns train_iteration(): wires SelfPlay, YinshTrainer, and ModelTournament; manages best_model.pt, the replay buffer path, the heuristic-weight curriculum, and Dirichlet-noise tapering. Reads config from mode_settings."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9881;</div>
+            <span>TrainingSupervisor</span>
+          </div>
+          <div class="arch-component"
+               data-desc="SelfPlayRunner (yinsh_ml/self_play/game_runner.py). The data-only path used by run_large_scale_selfplay.py. Drives a configurable Policy (random/heuristic/MCTS/adaptive), records GameRecord objects, and persists them via SelfPlayDataManager. No training, no weight updates."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9654;</div>
+            <span>SelfPlayRunner</span>
+          </div>
+        </div>
+
+        <div class="arch-zone arch-zone-learning">
+          <h4 class="arch-zone-label">Learning</h4>
+          <div class="arch-component"
+               data-desc="StateEncoder (yinsh_ml/utils/encoding.py). encode_state(GameState) -> np.float32 (6,11,11); side-normalized channels 0-3 + valid moves + phase/side sentinel at off-board A1. decode_state recovers side-to-move from that sentinel. total_moves = 7433 (the policy-head width), source of truth for both encoders."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9636;</div>
+            <span>StateEncoder</span>
+          </div>
+          <div class="arch-component"
+               data-desc="YinshNetwork + NetworkWrapper (yinsh_ml/network/). ResNet w/ attention: input (6 or 15,11,11) -> policy logits[7433] + tanh'd value. wrapper.predict(tensor) -> (move_probs softmax, value). load_model HARD-FAILS on policy-size mismatch (8390 vs 7433) and on channel mismatch."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9650;</div>
+            <span>YinshNetwork + Wrapper</span>
+          </div>
+          <div class="arch-component"
+               data-desc="YinshTrainer (yinsh_ml/training/trainer.py). Consumes (state, policy, value) experiences into a replay buffer; trains policy head (cross-entropy vs visit-count target) + value head (MSE/soft-CE). Emits updated weights back into the shared NetworkWrapper. Optional EMA shadow checkpoint for eval."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9874;</div>
+            <span>YinshTrainer</span>
+          </div>
+          <div class="arch-component"
+               data-desc="ParquetDataStorage / SelfPlayDataManager (yinsh_ml/self_play/data_storage.py). Persists GameRecord rows (state, policy, value, metadata) to Parquet (~3KB/game vs ~1.5MB JSON). Fast parallel load via PyArrow; the bulk data path's sink and the analysis corpus source."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9638;</div>
+            <span>ParquetDataStorage</span>
+          </div>
+        </div>
+
+        <div class="arch-zone arch-zone-search">
+          <h4 class="arch-zone-label">Search</h4>
+          <div class="arch-component"
+               data-desc="MCTS (yinsh_ml/training/self_play.py::MCTS). THE single engine: search_batch() (batched leaf eval, training path) + search() (singleton). Consumes (move_probs, value) priors from the network and/or heuristic value; emits a visit-count policy np.ndarray over 7433 slots. Subtree reuse across moves."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9906;</div>
+            <span>MCTS</span>
+          </div>
+          <div class="arch-component"
+               data-desc="Heuristic Evaluator (yinsh_ml/heuristics/evaluator.py + features.py). 7 phase-weighted, all-differential attack features -> a scalar value estimate for a GameState. Used as MCTS leaf value in pure_heuristic/hybrid modes and standalone by HeuristicAgent's negamax."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9874;</div>
+            <span>Heuristic Evaluator</span>
+          </div>
+          <div class="arch-component"
+               data-desc="Transposition Table + Zobrist (yinsh_ml/search/transposition_table.py, yinsh_ml/game/zobrist.py). ZobristHasher.hash_state(state) hashes board AND side-to-move AND phase. Depth-preferred replacement, 2^20 entries default. Caches evaluated positions for negamax/MCTS; 60-80% hit rates."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9783;</div>
+            <span>Transposition + Zobrist</span>
+          </div>
+        </div>
+
+        <div class="arch-zone arch-zone-gamecore">
+          <h4 class="arch-zone-label">Game Core</h4>
+          <div class="arch-component"
+               data-desc="Game Engine (yinsh_ml/game/). board.py + game_state.py + moves.py + constants.py + types.py. The ONLY mutable source of truth. Produces GameState (board, phase, current_player, history, scores) and legal Move lists; enforces rules, captures, stalemate, and ring removal."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9818;</div>
+            <span>Game Engine</span>
+          </div>
+        </div>
+
+        <div class="arch-description" id="arch-desc">Click any component to see the object it emits/consumes and the file it lives in.</div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Package layout &mdash; who owns what</h3>
+      <p>
+        Each package under <code>yinsh_ml/</code> is the source of truth for exactly one object.
+        When you need to change how that object looks, this is the directory you edit &mdash; and
+        the seam you have to re-validate downstream.
+      </p>
+
+      <div class="file-tree">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/</span>
+          <span class="ft-desc">The framework package</span>
+          <div class="ft-children">
+            <div class="ft-folder">
+              <span class="ft-name">game/</span>
+              <span class="ft-desc">Owns GameState, Board, Move, Player/GamePhase enums, and ZobristHasher. The rules engine.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">utils/</span>
+              <span class="ft-desc">Owns StateEncoder (encoding.py) + EnhancedStateEncoder. GameState &harr; np.float32 tensor; defines total_moves = 7433. Also tournament + elo_manager + metrics_logger.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">network/</span>
+              <span class="ft-desc">Owns YinshNetwork (model.py) + NetworkWrapper (wrapper.py). Tensor -> (move_probs[7433], value). Hard-fails on policy/channel mismatch.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">training/</span>
+              <span class="ft-desc">Owns MCTS (self_play.py), YinshTrainer (trainer.py), TrainingSupervisor (supervisor.py). The search engine, the optimizer loop, and the orchestrator.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">search/</span>
+              <span class="ft-desc">Owns TranspositionTable + NodeType enums. Position cache (Zobrist-keyed, depth-preferred). NB: search/mcts.py was excised 2026-05-21 (dead duplicate).</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">heuristics/</span>
+              <span class="ft-desc">Owns YinshHeuristics evaluator + the 7 learned, phase-weighted features + phase detection. GameState -> scalar value.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">agents/</span>
+              <span class="ft-desc">Owns HeuristicAgent: pure negamax + alpha-beta over the heuristic evaluator, with built-in transposition table.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">self_play/</span>
+              <span class="ft-desc">Owns SelfPlayRunner (game_runner.py), Policy classes (policies.py), GameRecord, and ParquetDataStorage (data_storage.py). The data-only generation + persistence path.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">memory/</span>
+              <span class="ft-desc">Owns GameStatePool + TensorPool + adaptive sizing. Object reuse to cut GC pressure; injected into SelfPlay/MCTS by the supervisor.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">viz/</span>
+              <span class="ft-desc">Owns the live game viewer: board_render.py (hex Figure) + game_replay.py (Parquet -> reconstructed Board/GameState).</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The objects that cross the seams</h3>
+      <p>
+        Six principal objects move between subsystems. Each is tagged
+        <em>producer &rarr; consumer</em>; the shape is load-bearing, so the exact type is given.
+        Section&nbsp;02 dissects each of these in detail.
+      </p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#9818;</div>
+          <div>
+            <strong>GameState <span style="opacity:.6">&mdash; Game Engine &rarr; everyone</span></strong>
+            <p>The mutable truth: board, phase, current_player, move history, scores. Read by encoder, MCTS, heuristics, and the runner; mutated only inside <code>yinsh_ml/game/</code>.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#9636;</div>
+          <div>
+            <strong>encoded tensor <code>np.float32 (6 or 15, 11, 11)</code> <span style="opacity:.6">&mdash; StateEncoder &rarr; Network</span></strong>
+            <p><code>encode_state(GameState)</code> at <code>yinsh_ml/utils/encoding.py:323</code>. Side-normalized channels 0&ndash;3, valid-moves channel, phase+side sentinel at off-board A1. 15-ch in enhanced mode.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#9650;</div>
+          <div>
+            <strong><code>(move_probs[7433], value)</code> <span style="opacity:.6">&mdash; Network &rarr; MCTS / agent</span></strong>
+            <p><code>NetworkWrapper.predict(tensor)</code> at <code>yinsh_ml/network/wrapper.py:273</code>. Softmaxed policy over all 7433 move slots + a single tanh'd scalar value. The prior MCTS expands against.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#9906;</div>
+          <div>
+            <strong>visit-count policy <code>np.ndarray</code> <span style="opacity:.6">&mdash; MCTS &rarr; training</span></strong>
+            <p>Normalized root visit distribution over 7433 slots from <code>MCTS.search_batch()</code> (<code>yinsh_ml/training/self_play.py</code>). This &mdash; not the raw network policy &mdash; is the cross-entropy target.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#9638;</div>
+          <div>
+            <strong>GameRecord / experience <span style="opacity:.6">&mdash; self-play &rarr; storage &rarr; trainer</span></strong>
+            <p><code>(state, policy, value, metadata)</code> tuples. Streamed to Parquet by <code>SelfPlayDataManager</code> (data path) or fed straight into <code>YinshTrainer</code>'s replay buffer (in-loop path).</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#9874;</div>
+          <div>
+            <strong>updated weights <span style="opacity:.6">&mdash; Trainer &rarr; NetworkWrapper</span></strong>
+            <p><code>YinshTrainer</code> mutates the <em>shared</em> <code>NetworkWrapper</code> in place, so the next self-play iteration plays with the freshest weights (the supervisor re-points <code>self.self_play.network</code> each iteration).</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The two entrypoints</h3>
+      <p>
+        Everything above is reachable from exactly two top-level drivers. Know which one you are in
+        before you touch anything: one closes the learning loop, the other only opens the data spigot.
+      </p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">&#9881;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Full loop &mdash; TrainingSupervisor.train_iteration()</strong>
+          <p>
+            One <em>self-play &rarr; train &rarr; eval &rarr; select</em> cycle
+            (<code>yinsh_ml/training/supervisor.py:1003</code>). It re-points
+            <code>self.self_play.network</code> at the current weights, applies the heuristic-weight
+            curriculum and iteration-aware Dirichlet taper, generates <code>num_games</code> in
+            batches of 10, folds each game's experiences into the trainer's replay buffer, trains,
+            then runs the tournament + anchor eval and updates <code>best_model.pt</code>. Weights are
+            <strong>never reverted</strong> by default (AlphaZero-style continuous training); the gate
+            is opt-in via <code>revert_self_play_on_gate_failure</code>.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#9654;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Data-only path &mdash; run_large_scale_selfplay.py</strong>
+          <p>
+            Drives <code>SelfPlayRunner</code> (<code>yinsh_ml/self_play/game_runner.py</code>) with a
+            chosen policy to emit <code>GameRecord</code>s into Parquet. No network training, no weight
+            updates, no tournament &mdash; this is the corpus generator behind the 100K-game analysis,
+            not the learning loop. Use it when you want <em>data</em>, not a <em>better model</em>.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        Next: <strong>Section 02 &mdash; The Shared Data Types</strong> drills into each object above
+        &mdash; the exact channel layout of the encoded tensor, the 7433-slot move indexing, the
+        GameRecord schema, and the visit-count policy normalization that ties MCTS to training.
+      </p>
+    </div>
+
+  </div>
+</section>

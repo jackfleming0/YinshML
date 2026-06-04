@@ -1,0 +1,373 @@
+<section class="module" id="module-5">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">05</span>
+      <h2 class="module-title">The Self-Play &harr; Storage &harr; Training Seam</h2>
+      <p class="module-subtitle">From a finished game to a gradient step, and the supervisor that drives it.</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 1: The iteration loop -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <p>
+        Every training iteration is one turn of the same crank:
+        <code class="badge-code">TrainingSupervisor.train_iteration()</code>
+        (<code>yinsh_ml/training/supervisor.py:1003</code>) generates self-play games,
+        folds the resulting
+        <span class="term" data-definition="One training sample: the board encoded as a tensor, the MCTS-derived move distribution at that position, and the value target for the side to move.">(state, policy, value)</span>
+        tuples into the replay buffer, trains the network for N epochs, then runs a
+        tournament and either promotes or discards the new weights. The seam has two
+        distinct sides &mdash; an <strong>in-memory replay buffer</strong> (the AlphaZero training path
+        the supervisor actually drives) and a <strong>Parquet archive</strong> (the analysis/audit
+        path through <code>game_runner.py</code>). Both are documented below; do not
+        confuse them.
+      </p>
+
+      <div class="flow-animation" id="flow-train-iter" data-steps='[
+        {"highlight":"flow-actor-1","label":"Supervisor begins an iteration. It points SelfPlay at the latest network weights (always-latest, AlphaZero style)."},
+        {"highlight":"flow-actor-1","label":"Self-play workers run games. Each move is chosen by MCTS guided by the network policy plus value or heuristic.","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"Per learner position MCTS emits a visit-count distribution as the policy target. Final score gives the value target signed per side to move."},
+        {"highlight":"flow-actor-2","label":"add_game_experience folds states policies and values into the in-memory replay buffer. Games over 100 moves are subsampled first.","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"YinshTrainer samples mixed batches from the buffer across many past games to break correlation.","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-4","label":"Loss = policy cross-entropy against the visit distribution plus value loss (classification CE or regression MSE)."},
+        {"highlight":"flow-actor-4","label":"Two optimizers step: policy head and value head plus shared trunk. NetworkWrapper.network weights are updated in place."},
+        {"highlight":"flow-actor-4","label":"Candidate weights face the previous best in a tournament; ELO and a Wilson lower-bound gate decide the outcome.","packet":true,"from":"actor-4","to":"actor-5"},
+        {"highlight":"flow-actor-5","label":"Promote if the Wilson lower bound clears promotion_threshold; otherwise keep the latest weights and continue (no hard revert)."}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">SP</div>
+            <span>SelfPlay driver</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">M</div>
+            <span>MCTS workers</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">B</div>
+            <span>Replay buffer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">T</div>
+            <span>YinshTrainer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-5">
+            <div class="flow-actor-icon">E</div>
+            <span>Tournament + ELO</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to walk one train_iteration()</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 2: The producer side -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>Producer: how a game becomes experiences</h3>
+      <p>
+        The training-path producer is the per-game worker in
+        <code>yinsh_ml/training/self_play.py</code> (not <code>game_runner.py</code>, which
+        feeds the Parquet archive). At each learner position it appends three parallel lists.
+        The <strong>policy</strong> is the MCTS visit-count distribution over all
+        <code>total_moves</code> slots; the <strong>value</strong> is the final game outcome,
+        signed for the side that was to move.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># self_play.py:2095 — store target only on the learner's turn</span></span>
+<span class="code-line"><span class="code-keyword">if</span> store_target <span class="code-keyword">and</span> is_learner_turn:</span>
+<span class="code-line">    encoded_state = state_encoder.encode_state(state).astype(np.float32)</span>
+<span class="code-line">    states.append(encoded_state)</span>
+<span class="code-line">    policies.append(move_probs)      <span class="code-comment"># MCTS visit dist</span></span>
+<span class="code-line">    players.append(state.current_player)</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># self_play.py:2142 — outcome from final score, clipped to [-1, 1]</span></span>
+<span class="code-line">score_diff   = state.white_score - state.black_score</span>
+<span class="code-line">outcome_white = float(np.clip(score_diff / <span class="code-number">3.0</span>, -<span class="code-number">1.0</span>, <span class="code-number">1.0</span>))</span>
+<span class="code-line">values = [outcome_white <span class="code-keyword">if</span> p == Player.WHITE</span>
+<span class="code-line">         <span class="code-keyword">else</span> -outcome_white <span class="code-keyword">for</span> p <span class="code-keyword">in</span> players]</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Only record a sample when it is the learner's turn (cross-teacher games skip the opponent's positions).</p>
+            <p class="tl">Encode the board to its 6- or 15-channel tensor &mdash; the network input.</p>
+            <p class="tl">The policy target is <code>move_probs</code>, MCTS's normalized visit counts over every move slot. Visited-more = trained-toward-more.</p>
+            <p class="tl">Remember whose turn it was so the value sign can be assigned later.</p>
+            <p class="tl">The whole game shares one outcome: white's score minus black's, divided by 3 (a win is 3 rows) and clamped to [-1, 1].</p>
+            <p class="tl">Flip the sign for black-to-move positions, so every value is "did the side to move end up winning?"</p>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        The terminal position is appended with a <strong>zero policy</strong>
+        (<code>self_play.py:2130</code>) so it trains only the value head. These three lists
+        flow straight into <code>trainer.add_game_experience(states, policies, values, &hellip;)</code>
+        (<code>trainer.py:116</code>) &mdash; note the buffer stores the <em>position-specific MCTS
+        root value</em> as the value target, not a re-derived margin.
+      </p>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Long games are subsampled before storage</strong>
+          <p>
+            In <code>GameExperience.add_game_experience()</code> at
+            <code>trainer.py:152</code>, any game with <code>len(states) &gt; 100</code> is thinned:
+            keep the first 20 and last 20 positions, then randomly sample up to 30 of the
+            middle ones (<code>trainer.py:154-172</code>). States, policies, values, and
+            move-numbers are all sliced by the same <code>keep_indices</code>, so they stay
+            aligned. This caps redundancy from long, low-information midgames before they
+            bloat the buffer. Toggle with the <code>subsample_long_games</code> constructor
+            flag.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 3: The two storage shapes -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>Storage: replay buffer vs. Parquet archive</h3>
+      <p>
+        The <strong>training path</strong> keeps experiences in RAM in
+        <code>GameExperience</code> (parallel lists <code>states / move_probs / values /
+        phases / move_numbers</code>, <code>trainer.py</code>); policies are downcast to
+        <code>float16</code> to halve buffer memory (<code>trainer.py:206</code>). The
+        <strong>analysis/audit path</strong> serializes full games to Parquet through
+        <code>ParquetDataStorage</code> (<code>self_play/data_storage.py:50</code>), batched
+        one file per <code>StorageConfig.batch_size</code> games (default 100).
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># game_recorder.py:17 — the per-turn stored record</span></span>
+<span class="code-line"><span class="code-keyword">@dataclass</span></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GameTurn</span>:</span>
+<span class="code-line">    turn_number: int</span>
+<span class="code-line">    current_player: str</span>
+<span class="code-line">    move: Dict[str, Any]       <span class="code-comment"># serialized move</span></span>
+<span class="code-line">    features: Dict[str, Any]   <span class="code-comment"># heuristic feature dict</span></span>
+<span class="code-line">    timestamp: float</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># data_storage.py:77 — batch then flush to one parquet file</span></span>
+<span class="code-line"><span class="code-keyword">def</span> <span class="code-function">store_game_record</span>(self, game_record: GameRecord) -> <span class="code-keyword">None</span>:</span>
+<span class="code-line">    self.current_batch.append(game_record)</span>
+<span class="code-line">    <span class="code-keyword">if</span> len(self.current_batch) >= self.config.batch_size:</span>
+<span class="code-line">        self._write_batch()   <span class="code-comment"># df.to_parquet(...)</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">The Parquet schema is turn-grained: each <code>GameTurn</code> carries the move, the player, and the 7-feature heuristic dict for that position.</p>
+            <p class="tl">Note this archive stores <em>moves and features</em> for replay/analysis &mdash; not the (state-tensor, policy, value) training triples. Those live only in the in-RAM buffer.</p>
+            <p class="tl">Games accumulate in <code>current_batch</code>...</p>
+            <p class="tl">...and once <code>batch_size</code> (default 100) games are queued, the whole batch is flattened to a DataFrame and written as one Snappy-compressed Parquet file.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>_batch_to_dataframe()</code> (<code>data_storage.py:138</code>) flattens game-level
+        metadata onto every turn row and spreads <code>turn.features</code> into columns;
+        <code>flush()</code> (<code>data_storage.py:185</code>) writes any partial trailing batch.
+        If PyArrow/fastparquet are missing, the writer silently falls back to JSON
+        (<code>data_storage.py:105</code>).
+      </p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128190;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Parquet vs. JSON: ~500&times; smaller</strong>
+          <p>
+            Columnar Snappy-compressed Parquet stores a game in roughly <strong>~3&nbsp;KB</strong>
+            versus <strong>~1.5&nbsp;MB</strong> for the equivalent JSON &mdash; about a 500&times;
+            reduction, plus fast parallel loads via PyArrow. The 100K-game corpus is
+            ~344&nbsp;MB of Parquet. Always store training/analysis data as Parquet; JSON is the
+            degraded fallback only.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 4: The trainer loss -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>Consumer: the loss the trainer actually computes</h3>
+      <p>
+        <code>YinshTrainer</code> samples mixed batches and computes two losses with two
+        optimizers (the policy head and the value-head-plus-trunk are stepped separately so
+        the trunk gets both signals). The policy loss is a
+        <span class="term" data-definition="Cross-entropy between two probability distributions: penalizes the predicted move distribution for diverging from the MCTS visit-count target. Equivalent to -sum(target * log(predicted)).">cross-entropy</span>
+        against the MCTS visit distribution.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># trainer.py:1120 — POLICY LOSS: cross-entropy vs MCTS target</span></span>
+<span class="code-line">scaled_logits = pred_logits / self.temperature</span>
+<span class="code-line">log_probs     = F.log_softmax(scaled_logits, dim=<span class="code-number">1</span>)</span>
+<span class="code-line">policy_loss   = -(target_probs * log_probs).sum(dim=<span class="code-number">1</span>).mean()</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># trainer.py:1170 — VALUE LOSS: classification mode</span></span>
+<span class="code-line"><span class="code-keyword">if</span> self.network.network.value_mode == <span class="code-string">'classification'</span>:</span>
+<span class="code-line">    ce_loss    = F.cross_entropy(value_logits_fp32, target_class)</span>
+<span class="code-line">    value_loss = ce_loss + discrimination_loss</span>
+<span class="code-line"><span class="code-comment"># trainer.py:1288 — VALUE LOSS: legacy regression mode</span></span>
+<span class="code-line"><span class="code-keyword">else</span>:</span>
+<span class="code-line">    value_loss_mse = F.mse_loss(pred_values.view(-<span class="code-number">1</span>), target_values_flat)</span>
+<span class="code-line">    value_loss     = value_loss_mse + variance_penalty</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># trainer.py:1352</span></span>
+<span class="code-line">total_loss = policy_loss + value_loss</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Temperature-scale the policy logits, then log-softmax across all 7433 move slots.</p>
+            <p class="tl">Cross-entropy: <code>-(target * log_pred)</code> summed over moves, averaged over the batch. <code>target_probs</code> is the MCTS visit distribution; only valid moves carry mass.</p>
+            <p class="tl">Value head is mode-switched. In <code>'classification'</code> mode the scalar outcome is bucketed into 7 ordinal classes (score-diff -3..+3) and trained with cross-entropy.</p>
+            <p class="tl">In legacy <code>'regression'</code> mode the value head instead predicts a scalar directly and is trained with MSE plus a variance penalty that discourages collapse.</p>
+            <p class="tl">The reported total is just the sum; in practice each head is back-propped through its own optimizer (see <code>trainer.py:1115-1331</code>).</p>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>value_mode</code> lives on the network (<code>YinshNetwork</code>) and is read at
+        <code>trainer.py:1170</code>; classification additionally maps the soft target with an
+        optional Gaussian spread (<code>soft_value_target_sigma</code>,
+        <code>trainer.py:1189</code>) to encode ordinal structure. Epoch-level accumulation and
+        the entropy-collapse watch run in <code>train_epoch</code>.
+      </p>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 5: Policies + config plumbing -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>The four move-selection policies</h3>
+      <p>
+        Self-play move choice is pluggable via <code>yinsh_ml/self_play/policies.py</code>
+        (<code>PolicyFactory.create_policy</code>, <code>policies.py:948</code>). Note that the
+        supervisor's high-throughput training path drives the batched
+        <code>self_play.py::MCTS</code> engine directly; these policy classes are the
+        configurable <code>SelfPlayRunner</code> / analysis path.
+      </p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">R</div>
+          <h4 class="pattern-title">RandomMovePolicy</h4>
+          <p class="pattern-desc">
+            Uniform baseline (<code>policies.py:26</code>) with a small
+            <code>rule_based_probability</code> of phase-aware nudges (prefer center on
+            placement, push toward the opponent). Used to seed exploration / sanity baselines.
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">H</div>
+          <h4 class="pattern-title">HeuristicPolicy</h4>
+          <p class="pattern-desc">
+            Wraps <code>HeuristicAgent</code> negamax + alpha-beta (<code>policies.py:305</code>).
+            Epsilon-greedy plus temperature softmax over scored moves; a fast mode skips search
+            for &lt;100&nbsp;ms/move. Decays exploration over games.
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">M</div>
+          <h4 class="pattern-title">MCTSPolicy</h4>
+          <p class="pattern-desc">
+            Neural-guided MCTS wrapper (<code>policies.py:598</code>) &mdash; now
+            <strong>removed/raises</strong>: it bound the dead <code>search/mcts.py</code> engine.
+            Production MCTS self-play goes through <code>self_play.py::MCTS.search_batch</code>.
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">A</div>
+          <h4 class="pattern-title">AdaptivePolicy</h4>
+          <p class="pattern-desc">
+            Transitions heuristic &rarr; neural by training progress
+            (<code>policies.py:720</code>): linear/exponential/step schedule over
+            <code>transition_steps</code>, gated by a neural-quality check before switching.
+          </p>
+        </div>
+      </div>
+
+      <h3>Config plumbing: YAML key &rarr; component</h3>
+      <p>
+        <code>scripts/run_training.py</code> loads one YAML (<code>load_config</code>,
+        <code>run_training.py:22</code>) and reads these keys into the supervisor / trainer:
+      </p>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">self_play.games_per_iteration</code>
+          <span class="badge-desc">Games generated per iteration &rarr; <code>train_iteration(num_games=&hellip;)</code> (<code>run_training.py:469,527</code>). Default 50.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">self_play.num_simulations</code>
+          <span class="badge-desc">MCTS sim budget per move &rarr; <code>mcts_simulations</code> on the supervisor (<code>run_training.py:499</code>). Default 96.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">self_play.mcts_batch_size</code>
+          <span class="badge-desc">Leaf-eval batch size for <code>search_batch</code> (<code>run_training.py:309</code>). Default 32.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">trainer.epochs_per_iteration</code>
+          <span class="badge-desc">Training epochs per iteration &rarr; <code>train_iteration(epochs=&hellip;)</code> (<code>run_training.py:470,527</code>). Default 40.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">trainer.batch_size</code>
+          <span class="badge-desc">Minibatch size for buffer sampling (<code>run_training.py:335</code>). Default 256.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">arena.promotion_threshold</code>
+          <span class="badge-desc">Wilson lower-bound win-rate the candidate must clear to promote (<code>run_training.py:437</code>, used by <code>_should_promote</code>, <code>supervisor.py:3012</code>). Default 0.55.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">num_iterations</code>
+          <span class="badge-desc">Outer loop length (<code>run_training.py:216,525</code>). Default 50; overridable with <code>-n</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">anchor.mcts_simulations</code>
+          <span class="badge-desc">Sims for the fixed pure-neural anchor eval (<code>run_training.py:461</code>). Default 64.</span>
+        </div>
+      </div>
+
+      <p>
+        The promotion decision is not a bare win-rate: <code>_should_promote</code>
+        (<code>supervisor.py:3012</code>) computes a Wilson 95% lower bound on the head-to-head
+        wins and promotes only if it exceeds <code>promotion_threshold</code>. A failed gate
+        does <em>not</em> hard-revert &mdash; the loop continues on the latest weights
+        (AlphaZero-style), optionally reloading <code>best_model.pt</code> for the next
+        self-play round.
+      </p>
+
+      <p class="module-closing">
+        That closes the producer&ndash;storage&ndash;consumer loop. <strong>Section 6</strong> covers
+        the cross-cutting infrastructure this seam leans on &mdash; memory pools, Zobrist/transposition
+        caching, encoder channel invariants, and the policy-size hard-fail contract that keeps a
+        stale checkpoint from silently corrupting training.
+      </p>
+    </div>
+
+  </div>
+</section>

@@ -1,0 +1,3662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YinshML — Internal Architecture Atlas</title>
+
+  <!-- Google Fonts: Bricolage Grotesque · DM Sans · JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700;12..96,800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400;1,9..40,500&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+/* =============================================================
+   CODEBASE-TO-COURSE — COMPLETE DESIGN SYSTEM
+   Copy this file verbatim into the course output directory.
+   Never regenerate it — customize only via :root overrides
+   in _base.html (accent color only).
+   ============================================================= */
+
+/* ── GOOGLE FONTS (loaded via _base.html <head>) ───────────────
+   Bricolage Grotesque · DM Sans · JetBrains Mono
+   ──────────────────────────────────────────────────────────── */
+
+/* ── DESIGN TOKENS ─────────────────────────────────────────── */
+:root {
+  /* BACKGROUNDS */
+  --color-bg:             #FAF7F2;
+  --color-bg-warm:        #F5F0E8;
+  --color-bg-code:        #1E1E2E;
+  --color-text:           #2C2A28;
+  --color-text-secondary: #6B6560;
+  --color-text-muted:     #9E9790;
+  --color-border:         #E5DFD6;
+  --color-border-light:   #EEEBE5;
+  --color-surface:        #FFFFFF;
+  --color-surface-warm:   #FDF9F3;
+
+  /* ACCENT — overridden per course in _base.html */
+  --color-accent:         #D94F30;
+  --color-accent-hover:   #C4432A;
+  --color-accent-light:   #FDEEE9;
+  --color-accent-muted:   #E8836C;
+
+  /* SEMANTIC */
+  --color-success:        #2D8B55;
+  --color-success-light:  #E8F5EE;
+  --color-error:          #C93B3B;
+  --color-error-light:    #FDE8E8;
+  --color-info:           #2A7B9B;
+  --color-info-light:     #E4F2F7;
+
+  /* ACTOR COLORS */
+  --color-actor-1:        #D94F30;
+  --color-actor-2:        #2A7B9B;
+  --color-actor-3:        #7B6DAA;
+  --color-actor-4:        #D4A843;
+  --color-actor-5:        #2D8B55;
+
+  /* FONTS */
+  --font-display: 'Bricolage Grotesque', Georgia, serif;
+  --font-body:    'DM Sans', -apple-system, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+
+  /* TYPE SCALE */
+  --text-xs:   0.75rem;
+  --text-sm:   0.875rem;
+  --text-base: 1rem;
+  --text-lg:   1.125rem;
+  --text-xl:   1.25rem;
+  --text-2xl:  1.5rem;
+  --text-3xl:  1.875rem;
+  --text-4xl:  2.25rem;
+  --text-5xl:  3rem;
+  --text-6xl:  3.75rem;
+
+  /* LINE HEIGHTS */
+  --leading-tight:  1.15;
+  --leading-snug:   1.3;
+  --leading-normal: 1.6;
+  --leading-loose:  1.8;
+
+  /* SPACING */
+  --space-1:  0.25rem;
+  --space-2:  0.5rem;
+  --space-3:  0.75rem;
+  --space-4:  1rem;
+  --space-5:  1.25rem;
+  --space-6:  1.5rem;
+  --space-8:  2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+  --space-24: 6rem;
+
+  /* LAYOUT */
+  --content-width:      800px;
+  --content-width-wide: 1000px;
+  --nav-height:         50px;
+
+  /* RADII */
+  --radius-sm:   8px;
+  --radius-md:   12px;
+  --radius-lg:   16px;
+  --radius-full: 9999px;
+
+  /* SHADOWS (warm-tinted, never pure black) */
+  --shadow-sm: 0 1px 2px rgba(44,42,40,0.05);
+  --shadow-md: 0 4px 12px rgba(44,42,40,0.08);
+  --shadow-lg: 0 8px 24px rgba(44,42,40,0.10);
+  --shadow-xl: 0 16px 48px rgba(44,42,40,0.12);
+
+  /* EASING */
+  --ease-out:    cubic-bezier(0.16,1,0.3,1);
+  --ease-in-out: cubic-bezier(0.65,0,0.35,1);
+
+  /* DURATIONS */
+  --duration-fast:   150ms;
+  --duration-normal: 300ms;
+  --duration-slow:   500ms;
+  --stagger-delay:   120ms;
+}
+
+/* ── RESET & BASE ───────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  scroll-snap-type: y proximity;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  color: var(--color-text);
+  line-height: var(--leading-normal);
+  background: var(--color-bg);
+  background-image: radial-gradient(
+    ellipse at 20% 50%,
+    rgba(217,79,48,0.03) 0%,
+    transparent 50%
+  );
+}
+
+/* ── SCROLLBAR ──────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+}
+
+/* ── CODE GLOBALS ───────────────────────────────────────────── */
+pre, code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: hidden;
+}
+.translation-code::-webkit-scrollbar,
+pre::-webkit-scrollbar { display: none; }
+
+/* Catppuccin-inspired syntax highlighting */
+.code-keyword  { color: #CBA6F7; }
+.code-string   { color: #A6E3A1; }
+.code-function { color: #89B4FA; }
+.code-comment  { color: #6C7086; }
+.code-number   { color: #FAB387; }
+.code-property { color: #F9E2AF; }
+.code-operator { color: #94E2D5; }
+.code-tag      { color: #F38BA8; }
+.code-attr     { color: #F9E2AF; }
+.code-value    { color: #A6E3A1; }
+.code-line     { display: block; }
+
+/* ── NAV ────────────────────────────────────────────────────── */
+.nav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--nav-height);
+  z-index: 1000;
+  background: rgba(250,247,242,0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.progress-bar {
+  position: absolute;
+  bottom: 0; left: 0;
+  height: 2px;
+  width: 0%;
+  background: var(--color-accent);
+  transition: width 100ms linear;
+}
+
+.nav-inner {
+  max-width: var(--content-width-wide);
+  margin: 0 auto;
+  padding: 0 var(--space-6);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.nav-title {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+.nav-dots {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.nav-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--color-text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+  position: relative;
+}
+.nav-dot::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-bg-code);
+  color: #CDD6F4;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--duration-fast);
+}
+.nav-dot:hover::after { opacity: 1; }
+.nav-dot.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-light);
+}
+.nav-dot.visited {
+  border-color: var(--color-accent-muted);
+  background: var(--color-accent-muted);
+}
+
+/* ── MODULE STRUCTURE ───────────────────────────────────────── */
+.module {
+  min-height: 100dvh;
+  min-height: 100vh;
+  scroll-snap-align: start;
+  padding: var(--space-16) var(--space-6);
+  padding-top: calc(var(--nav-height) + var(--space-12));
+}
+
+.module-content {
+  max-width: var(--content-width);
+  margin: 0 auto;
+}
+
+.module-header { margin-bottom: var(--space-12); }
+
+.module-number {
+  display: block;
+  font-family: var(--font-display);
+  font-size: var(--text-6xl);
+  font-weight: 800;
+  color: var(--color-accent);
+  opacity: 0.15;
+  line-height: 1;
+  margin-bottom: var(--space-2);
+}
+
+.module-title {
+  font-family: var(--font-display);
+  font-size: var(--text-4xl);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+}
+
+.module-subtitle {
+  margin-top: var(--space-3);
+  font-size: var(--text-lg);
+  color: var(--color-text-secondary);
+  line-height: var(--leading-snug);
+}
+
+.screen {
+  margin-bottom: var(--space-16);
+}
+
+.screen-heading {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: var(--space-6);
+  line-height: var(--leading-snug);
+}
+
+p { margin-bottom: var(--space-4); }
+p:last-child { margin-bottom: 0; }
+
+/* ── SCROLL ANIMATIONS ──────────────────────────────────────── */
+.animate-in {
+  opacity: 0;
+  transform: translateY(20px);
+  transition:
+    opacity var(--duration-slow) var(--ease-out),
+    transform var(--duration-slow) var(--ease-out);
+}
+.animate-in.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.stagger-children > .animate-in {
+  transition-delay: calc(var(--stagger-index, 0) * var(--stagger-delay));
+}
+
+/* ── TRANSLATION BLOCKS ─────────────────────────────────────── */
+.translation-block {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-md);
+  margin: var(--space-8) 0;
+}
+
+.translation-code {
+  background: var(--color-bg-code);
+  color: #CDD6F4;
+  padding: var(--space-6);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  position: relative;
+  overflow-x: hidden;
+}
+
+.translation-english {
+  background: var(--color-surface-warm);
+  padding: var(--space-6);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  border-left: 3px solid var(--color-accent);
+}
+
+.translation-label {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  opacity: 0.5;
+}
+.translation-english .translation-label {
+  position: static;
+  display: block;
+  margin-bottom: var(--space-3);
+  color: var(--color-text-muted);
+}
+
+.translation-lines .tl {
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--color-border-light);
+  color: var(--color-text-secondary);
+}
+.translation-lines .tl:last-child { border-bottom: none; }
+
+/* ── QUIZ ───────────────────────────────────────────────────── */
+.quiz-container {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-8);
+  box-shadow: var(--shadow-md);
+  margin: var(--space-8) 0;
+}
+
+.quiz-question-block { margin-bottom: var(--space-8); }
+.quiz-question-block:last-of-type { margin-bottom: 0; }
+
+.quiz-question {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-4);
+  line-height: var(--leading-snug);
+}
+
+.quiz-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.quiz-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  transition: border-color var(--duration-fast), background var(--duration-fast);
+}
+.quiz-option:hover:not(:disabled) { border-color: var(--color-accent-muted); }
+.quiz-option.selected { border-color: var(--color-accent); background: var(--color-accent-light); }
+.quiz-option.correct  { border-color: var(--color-success); background: var(--color-success-light); }
+.quiz-option.incorrect{ border-color: var(--color-error);   background: var(--color-error-light); }
+.quiz-option:disabled { cursor: default; }
+
+.quiz-option-radio {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  flex-shrink: 0;
+  transition: all var(--duration-fast);
+}
+.quiz-option.selected .quiz-option-radio {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  box-shadow: inset 0 0 0 3px white;
+}
+.quiz-option.correct .quiz-option-radio  { border-color: var(--color-success); background: var(--color-success); box-shadow: inset 0 0 0 3px white; }
+.quiz-option.incorrect .quiz-option-radio{ border-color: var(--color-error);   background: var(--color-error);   box-shadow: inset 0 0 0 3px white; }
+
+.quiz-feedback {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height var(--duration-normal), opacity var(--duration-normal);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+}
+.quiz-feedback.show {
+  max-height: 200px;
+  opacity: 1;
+  padding: var(--space-3);
+  margin-top: var(--space-2);
+}
+.quiz-feedback.success { background: var(--color-success-light); color: var(--color-success); }
+.quiz-feedback.error   { background: var(--color-error-light);   color: var(--color-error); }
+.quiz-feedback.warning { background: var(--color-info-light);    color: var(--color-info); }
+
+.quiz-check-btn, .quiz-reset-btn {
+  margin-top: var(--space-6);
+  padding: var(--space-3) var(--space-6);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: background var(--duration-fast), transform var(--duration-fast);
+}
+.quiz-check-btn {
+  background: var(--color-accent);
+  color: white;
+  margin-right: var(--space-3);
+}
+.quiz-check-btn:hover { background: var(--color-accent-hover); transform: translateY(-1px); }
+.quiz-reset-btn {
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+.quiz-reset-btn:hover { border-color: var(--color-accent-muted); }
+
+/* Scenario block */
+.scenario-block { margin-bottom: var(--space-6); }
+.scenario-context {
+  background: var(--color-info-light);
+  border-left: 3px solid var(--color-info);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.scenario-label {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-info);
+  margin-bottom: var(--space-2);
+}
+
+/* ── DRAG AND DROP ──────────────────────────────────────────── */
+.dnd-container { margin: var(--space-8) 0; }
+.dnd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+.dnd-chip {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-accent);
+  color: white;
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: grab;
+  user-select: none;
+  transition: opacity var(--duration-fast), transform var(--duration-fast);
+}
+.dnd-chip:active { cursor: grabbing; transform: scale(1.05); }
+.dnd-chip.dragging { opacity: 0.4; }
+.dnd-chip.placed { opacity: 0.3; pointer-events: none; }
+
+.dnd-zones { display: flex; flex-direction: column; gap: var(--space-4); }
+.dnd-zone {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: var(--color-surface);
+}
+.dnd-zone-label { font-size: var(--text-sm); color: var(--color-text-secondary); margin-bottom: var(--space-3); }
+.dnd-zone-target {
+  min-height: 40px;
+  border: 2px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  transition: border-color var(--duration-fast), background var(--duration-fast);
+}
+.dnd-zone-target.drag-over { border-color: var(--color-accent); background: var(--color-accent-light); }
+.dnd-zone-target.correct-placed { border-color: var(--color-success); background: var(--color-success-light); color: var(--color-success); font-weight: 600; }
+.dnd-zone-target.incorrect-placed{ border-color: var(--color-error); background: var(--color-error-light); }
+.touch-ghost {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-accent);
+  color: white;
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* ── GROUP CHAT ─────────────────────────────────────────────── */
+.chat-window {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  margin: var(--space-8) 0;
+}
+
+.chat-messages {
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 200px;
+}
+
+.chat-message {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  animation: fadeSlideUp 0.3s var(--ease-out);
+}
+
+.chat-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: white;
+  flex-shrink: 0;
+}
+
+.chat-bubble {
+  max-width: 75%;
+  background: var(--color-bg-warm);
+  border-radius: var(--radius-md) var(--radius-md) var(--radius-md) 4px;
+  padding: var(--space-3) var(--space-4);
+}
+
+.chat-sender {
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  margin-bottom: var(--space-1);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.chat-bubble p {
+  font-size: var(--text-sm);
+  margin: 0;
+  line-height: var(--leading-normal);
+}
+
+.chat-typing {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-6) var(--space-4);
+}
+
+.chat-typing-dots {
+  display: flex;
+  gap: var(--space-1);
+  background: var(--color-bg-warm);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+}
+
+.typing-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  animation: typingBounce 1.4s infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+.chat-controls {
+  padding: var(--space-4) var(--space-6);
+  border-top: 1px solid var(--color-border-light);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  background: var(--color-surface-warm);
+}
+.chat-progress {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+}
+
+/* ── FLOW / DATA FLOW ANIMATION ─────────────────────────────── */
+.flow-animation {
+  position: relative;
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-8);
+  box-shadow: var(--shadow-md);
+  margin: var(--space-8) 0;
+}
+
+.flow-actors {
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-8);
+  flex-wrap: wrap;
+}
+
+.flow-actor {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  transition: all var(--duration-normal) var(--ease-out);
+}
+
+.flow-actor-icon {
+  width: 56px; height: 56px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-warm);
+  border: 2px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  transition: all var(--duration-normal) var(--ease-out);
+}
+
+.flow-actor span {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  text-align: center;
+}
+
+.flow-actor.active .flow-actor-icon {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+  box-shadow: 0 0 0 3px var(--color-accent-light), 0 0 20px rgba(217,79,48,0.15);
+  transform: scale(1.1);
+}
+
+.flow-packet {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  position: absolute;
+  pointer-events: none;
+  display: none;
+  box-shadow: 0 0 8px rgba(217,79,48,0.5);
+}
+
+.flow-step-label {
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  min-height: 2.5em;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg-warm);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-6);
+  line-height: var(--leading-normal);
+}
+
+.flow-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.flow-progress {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+}
+
+/* ── ARCHITECTURE DIAGRAM ───────────────────────────────────── */
+.arch-diagram {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-8);
+  box-shadow: var(--shadow-md);
+  margin: var(--space-8) 0;
+}
+.arch-zone {
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-6);
+  margin-bottom: var(--space-4);
+}
+.arch-zone-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-4);
+}
+.arch-component {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--color-surface-warm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  margin: var(--space-2);
+  transition: all var(--duration-fast);
+  font-size: var(--text-sm);
+}
+.arch-component:hover, .arch-component.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
+}
+.arch-icon { font-size: 1.5rem; }
+.arch-description {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  background: var(--color-bg-warm);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  min-height: 2.5em;
+}
+
+/* ── LAYER TOGGLE ───────────────────────────────────────────── */
+.layer-demo { margin: var(--space-8) 0; }
+.layer-tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+.layer-tab {
+  padding: var(--space-2) var(--space-5);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+.layer-tab.active {
+  background: var(--color-accent);
+  color: white;
+  border-color: var(--color-accent);
+}
+.layer-viewport {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+}
+.layer-description {
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* ── BUG CHALLENGE ──────────────────────────────────────────── */
+.bug-challenge {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-8);
+  box-shadow: var(--shadow-md);
+  margin: var(--space-8) 0;
+}
+.bug-challenge h3 {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-4);
+}
+.bug-code {
+  background: var(--color-bg-code);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  margin-bottom: var(--space-4);
+}
+.bug-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  transition: background var(--duration-fast);
+}
+.bug-line:hover { background: rgba(255,255,255,0.05); }
+.bug-line.correct  { background: rgba(45,139,85,0.2); }
+.bug-line.incorrect{ background: rgba(201,59,59,0.2); }
+.line-num {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: #6C7086;
+  min-width: 1.5em;
+  text-align: right;
+  user-select: none;
+}
+.bug-line code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: #CDD6F4;
+}
+.bug-feedback {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height var(--duration-normal), opacity var(--duration-normal);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+}
+.bug-feedback.show {
+  max-height: 200px;
+  opacity: 1;
+  padding: var(--space-3);
+}
+.bug-feedback.success { background: var(--color-success-light); color: var(--color-success); }
+.bug-feedback.error   { background: var(--color-error-light);   color: var(--color-error); }
+
+/* ── CALLOUT BOXES ──────────────────────────────────────────── */
+.callout {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  margin: var(--space-6) 0;
+  border-left: 4px solid;
+}
+.callout-accent  { background: var(--color-accent-light);  border-color: var(--color-accent); }
+.callout-info    { background: var(--color-info-light);    border-color: var(--color-info); }
+.callout-warning { background: var(--color-error-light);   border-color: var(--color-error); }
+
+.callout-icon { font-size: 1.25rem; flex-shrink: 0; margin-top: 2px; }
+.callout-title { display: block; font-weight: 700; margin-bottom: var(--space-1); }
+.callout-content p { font-size: var(--text-sm); margin: 0; color: var(--color-text-secondary); }
+
+/* ── PATTERN / FEATURE CARDS ────────────────────────────────── */
+.pattern-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+  margin: var(--space-6) 0;
+}
+.pattern-card {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-6);
+  box-shadow: var(--shadow-sm);
+  border-top: 3px solid var(--color-accent);
+  transition: transform var(--duration-normal) var(--ease-out), box-shadow var(--duration-normal);
+}
+.pattern-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-md); }
+.pattern-icon {
+  width: 40px; height: 40px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  margin-bottom: var(--space-3);
+}
+.pattern-title {
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+}
+.pattern-desc {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  line-height: var(--leading-normal);
+  margin: 0;
+}
+
+/* ── FLOW DIAGRAMS (static) ─────────────────────────────────── */
+.flow-steps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin: var(--space-6) 0;
+}
+.flow-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  text-align: center;
+}
+.flow-step-num {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: white;
+  font-family: var(--font-display);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.flow-step p { font-size: var(--text-sm); color: var(--color-text-secondary); max-width: 120px; margin: 0; }
+.flow-arrow {
+  font-size: var(--text-xl);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+/* ── BADGE / CONFIG LIST ────────────────────────────────────── */
+.badge-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-6) 0;
+}
+.badge-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  transition: border-color var(--duration-fast);
+}
+.badge-item:hover { border-color: var(--color-accent-muted); }
+.badge-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--color-bg-code);
+  color: #CBA6F7;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.badge-desc {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* ── GLOSSARY TOOLTIPS ──────────────────────────────────────── */
+.term {
+  border-bottom: 1.5px dashed var(--color-accent-muted);
+  cursor: pointer;
+}
+.term:hover, .term.active {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.term-tooltip {
+  position: fixed;
+  background: var(--color-bg-code);
+  color: #CDD6F4;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: var(--font-body);
+  line-height: var(--leading-normal);
+  width: max(200px, min(320px, 80vw));
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--duration-fast);
+  z-index: 10000;
+}
+.term-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--color-bg-code);
+}
+.term-tooltip.visible { opacity: 1; }
+.term-tooltip.flip::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: var(--color-bg-code);
+}
+
+/* ── VISUAL FILE TREE ───────────────────────────────────────── */
+.file-tree {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  margin: var(--space-6) 0;
+}
+.ft-folder, .ft-file {
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--color-border-light);
+  margin-left: var(--space-4);
+}
+.ft-folder > .ft-name { color: var(--color-accent); font-weight: 600; }
+.ft-folder > .ft-name::before { content: '📁 '; }
+.ft-file > .ft-name::before { content: '📄 '; }
+.ft-desc {
+  color: var(--color-text-secondary);
+  font-family: var(--font-body);
+  margin-left: var(--space-2);
+  font-size: var(--text-xs);
+}
+.ft-children { margin-left: var(--space-4); }
+
+/* ── ICON-LABEL ROWS ────────────────────────────────────────── */
+.icon-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: var(--space-6) 0;
+}
+.icon-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+.icon-row strong { display: block; font-weight: 600; }
+.icon-row p { margin: var(--space-1) 0 0; color: var(--color-text-secondary); font-size: var(--text-sm); }
+.icon-circle {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+/* ── NUMBERED STEP CARDS ────────────────────────────────────── */
+.step-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-6) 0;
+}
+.step-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--color-accent);
+  box-shadow: var(--shadow-sm);
+}
+.step-num {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: white;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  flex-shrink: 0;
+}
+.step-body strong { display: block; font-weight: 600; margin-bottom: var(--space-1); }
+.step-body p { margin: 0; color: var(--color-text-secondary); font-size: var(--text-sm); }
+
+/* ── SHARED BUTTON STYLE ────────────────────────────────────── */
+.btn {
+  padding: var(--space-2) var(--space-5);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+  color: var(--color-text-secondary);
+}
+.btn:hover { border-color: var(--color-accent-muted); color: var(--color-accent); }
+.btn-primary {
+  background: var(--color-accent);
+  color: white;
+  border-color: var(--color-accent);
+}
+.btn-primary:hover { background: var(--color-accent-hover); border-color: var(--color-accent-hover); color: white; }
+
+/* ── RESPONSIVE ─────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  :root {
+    --text-4xl: 1.875rem;
+    --text-5xl: 2.25rem;
+    --text-6xl: 3rem;
+  }
+  .translation-block { grid-template-columns: 1fr; }
+  .translation-english { border-left: none; border-top: 3px solid var(--color-accent); }
+  .pattern-cards { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 480px) {
+  :root {
+    --text-4xl: 1.5rem;
+    --text-5xl: 1.875rem;
+    --text-6xl: 2.25rem;
+  }
+  .module { padding: var(--space-8) var(--space-4); }
+  .pattern-cards { grid-template-columns: 1fr; }
+  .flow-steps { flex-direction: column; }
+  .flow-arrow { transform: rotate(90deg); }
+  .nav-title { max-width: 140px; }
+}
+
+/* ── KEYFRAMES ──────────────────────────────────────────────── */
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30%           { transform: translateY(-6px); }
+}
+
+@keyframes packetMove {
+  from { left: var(--packet-from-x); top: var(--packet-from-y); opacity: 0; }
+  20%  { opacity: 1; }
+  80%  { opacity: 1; }
+  to   { left: var(--packet-to-x);   top: var(--packet-to-y);   opacity: 0; }
+}
+
+</style>
+
+  <style>
+    :root {
+      --color-accent:       #2D8B55;
+      --color-accent-hover: #226B41;
+      --color-accent-light: #E8F5EE;
+      --color-accent-muted: #5AAD7A;
+    }
+  </style>
+
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="progress-bar" id="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+    <div class="nav-inner">
+      <span class="nav-title">YinshML · Architecture Atlas</span>
+      <div class="nav-dots" id="nav-dots" role="tablist">
+        <button class="nav-dot" data-target="module-1" data-tooltip="System Map: boundaries &amp; edges" role="tab" aria-label="Section 1: System Map"></button>
+        <button class="nav-dot" data-target="module-2" data-tooltip="Shared Data Types" role="tab" aria-label="Section 2: Shared Data Types"></button>
+        <button class="nav-dot" data-target="module-3" data-tooltip="State &harr; Network seam" role="tab" aria-label="Section 3: State and Network seam"></button>
+        <button class="nav-dot" data-target="module-4" data-tooltip="Search &harr; Evaluation seam" role="tab" aria-label="Section 4: Search and Evaluation seam"></button>
+        <button class="nav-dot" data-target="module-5" data-tooltip="Self-Play &harr; Training seam" role="tab" aria-label="Section 5: Self-Play and Training seam"></button>
+        <button class="nav-dot" data-target="module-6" data-tooltip="Cross-cutting Infra &amp; Invariants" role="tab" aria-label="Section 6: Infrastructure and Invariants"></button>
+      </div>
+    </div>
+  </nav>
+
+  <main id="main">
+    <!-- modules/*.html content is assembled here by build.sh -->
+<section class="module" id="module-1">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">01</span>
+      <h2 class="module-title">The System Map</h2>
+      <p class="module-subtitle">Subsystem boundaries and the objects that cross them.</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The four zones</h3>
+      <p>
+        YinshML is an AlphaZero-style loop. Strip away the telemetry and memory pooling and
+        the dependency graph collapses into four zones: a <strong>Game Core</strong> that owns the
+        only mutable truth (<span class="term" data-definition="The single canonical game object: board, ring/marker placement, current player, phase, move history, scores. Every other subsystem reads it; only the engine mutates it.">GameState</span>),
+        a <strong>Search</strong> zone that turns one position into a move distribution, a
+        <strong>Learning</strong> zone that turns positions into tensors and tensors into weights,
+        and an <strong>Orchestration</strong> zone that runs the whole self-play&rarr;train&rarr;eval cycle.
+        Every arrow in the diagram is a concrete Python object; the seams are where those objects
+        change representation (GameState &rarr; tensor &rarr; logits &rarr; visit counts &rarr; weights).
+      </p>
+      <p>
+        Click any component below to see the key object it produces or consumes and the file it
+        lives in. The two entrypoints at the top &mdash;
+        <code>TrainingSupervisor.train_iteration()</code> and <code>run_large_scale_selfplay.py</code>
+        &mdash; are the only things you ever invoke directly; everything else is wired beneath them.
+      </p>
+
+      <div class="arch-diagram">
+        <div class="arch-zone arch-zone-orchestration">
+          <h4 class="arch-zone-label">Orchestration</h4>
+          <div class="arch-component"
+               data-desc="TrainingSupervisor (yinsh_ml/training/supervisor.py). Owns train_iteration(): wires SelfPlay, YinshTrainer, and ModelTournament; manages best_model.pt, the replay buffer path, the heuristic-weight curriculum, and Dirichlet-noise tapering. Reads config from mode_settings."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9881;</div>
+            <span>TrainingSupervisor</span>
+          </div>
+          <div class="arch-component"
+               data-desc="SelfPlayRunner (yinsh_ml/self_play/game_runner.py). The data-only path used by run_large_scale_selfplay.py. Drives a configurable Policy (random/heuristic/MCTS/adaptive), records GameRecord objects, and persists them via SelfPlayDataManager. No training, no weight updates."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9654;</div>
+            <span>SelfPlayRunner</span>
+          </div>
+        </div>
+
+        <div class="arch-zone arch-zone-learning">
+          <h4 class="arch-zone-label">Learning</h4>
+          <div class="arch-component"
+               data-desc="StateEncoder (yinsh_ml/utils/encoding.py). encode_state(GameState) -> np.float32 (6,11,11); side-normalized channels 0-3 + valid moves + phase/side sentinel at off-board A1. decode_state recovers side-to-move from that sentinel. total_moves = 7433 (the policy-head width), source of truth for both encoders."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9636;</div>
+            <span>StateEncoder</span>
+          </div>
+          <div class="arch-component"
+               data-desc="YinshNetwork + NetworkWrapper (yinsh_ml/network/). ResNet w/ attention: input (6 or 15,11,11) -> policy logits[7433] + tanh'd value. wrapper.predict(tensor) -> (move_probs softmax, value). load_model HARD-FAILS on policy-size mismatch (8390 vs 7433) and on channel mismatch."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9650;</div>
+            <span>YinshNetwork + Wrapper</span>
+          </div>
+          <div class="arch-component"
+               data-desc="YinshTrainer (yinsh_ml/training/trainer.py). Consumes (state, policy, value) experiences into a replay buffer; trains policy head (cross-entropy vs visit-count target) + value head (MSE/soft-CE). Emits updated weights back into the shared NetworkWrapper. Optional EMA shadow checkpoint for eval."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9874;</div>
+            <span>YinshTrainer</span>
+          </div>
+          <div class="arch-component"
+               data-desc="ParquetDataStorage / SelfPlayDataManager (yinsh_ml/self_play/data_storage.py). Persists GameRecord rows (state, policy, value, metadata) to Parquet (~3KB/game vs ~1.5MB JSON). Fast parallel load via PyArrow; the bulk data path's sink and the analysis corpus source."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9638;</div>
+            <span>ParquetDataStorage</span>
+          </div>
+        </div>
+
+        <div class="arch-zone arch-zone-search">
+          <h4 class="arch-zone-label">Search</h4>
+          <div class="arch-component"
+               data-desc="MCTS (yinsh_ml/training/self_play.py::MCTS). THE single engine: search_batch() (batched leaf eval, training path) + search() (singleton). Consumes (move_probs, value) priors from the network and/or heuristic value; emits a visit-count policy np.ndarray over 7433 slots. Subtree reuse across moves."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9906;</div>
+            <span>MCTS</span>
+          </div>
+          <div class="arch-component"
+               data-desc="Heuristic Evaluator (yinsh_ml/heuristics/evaluator.py + features.py). 7 phase-weighted, all-differential attack features -> a scalar value estimate for a GameState. Used as MCTS leaf value in pure_heuristic/hybrid modes and standalone by HeuristicAgent's negamax."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9874;</div>
+            <span>Heuristic Evaluator</span>
+          </div>
+          <div class="arch-component"
+               data-desc="Transposition Table + Zobrist (yinsh_ml/search/transposition_table.py, yinsh_ml/game/zobrist.py). ZobristHasher.hash_state(state) hashes board AND side-to-move AND phase. Depth-preferred replacement, 2^20 entries default. Caches evaluated positions for negamax/MCTS; 60-80% hit rates."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9783;</div>
+            <span>Transposition + Zobrist</span>
+          </div>
+        </div>
+
+        <div class="arch-zone arch-zone-gamecore">
+          <h4 class="arch-zone-label">Game Core</h4>
+          <div class="arch-component"
+               data-desc="Game Engine (yinsh_ml/game/). board.py + game_state.py + moves.py + constants.py + types.py. The ONLY mutable source of truth. Produces GameState (board, phase, current_player, history, scores) and legal Move lists; enforces rules, captures, stalemate, and ring removal."
+               onclick="showArchDesc(this)">
+            <div class="arch-icon">&#9818;</div>
+            <span>Game Engine</span>
+          </div>
+        </div>
+
+        <div class="arch-description" id="arch-desc">Click any component to see the object it emits/consumes and the file it lives in.</div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Package layout &mdash; who owns what</h3>
+      <p>
+        Each package under <code>yinsh_ml/</code> is the source of truth for exactly one object.
+        When you need to change how that object looks, this is the directory you edit &mdash; and
+        the seam you have to re-validate downstream.
+      </p>
+
+      <div class="file-tree">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/</span>
+          <span class="ft-desc">The framework package</span>
+          <div class="ft-children">
+            <div class="ft-folder">
+              <span class="ft-name">game/</span>
+              <span class="ft-desc">Owns GameState, Board, Move, Player/GamePhase enums, and ZobristHasher. The rules engine.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">utils/</span>
+              <span class="ft-desc">Owns StateEncoder (encoding.py) + EnhancedStateEncoder. GameState &harr; np.float32 tensor; defines total_moves = 7433. Also tournament + elo_manager + metrics_logger.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">network/</span>
+              <span class="ft-desc">Owns YinshNetwork (model.py) + NetworkWrapper (wrapper.py). Tensor -> (move_probs[7433], value). Hard-fails on policy/channel mismatch.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">training/</span>
+              <span class="ft-desc">Owns MCTS (self_play.py), YinshTrainer (trainer.py), TrainingSupervisor (supervisor.py). The search engine, the optimizer loop, and the orchestrator.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">search/</span>
+              <span class="ft-desc">Owns TranspositionTable + NodeType enums. Position cache (Zobrist-keyed, depth-preferred). NB: search/mcts.py was excised 2026-05-21 (dead duplicate).</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">heuristics/</span>
+              <span class="ft-desc">Owns YinshHeuristics evaluator + the 7 learned, phase-weighted features + phase detection. GameState -> scalar value.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">agents/</span>
+              <span class="ft-desc">Owns HeuristicAgent: pure negamax + alpha-beta over the heuristic evaluator, with built-in transposition table.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">self_play/</span>
+              <span class="ft-desc">Owns SelfPlayRunner (game_runner.py), Policy classes (policies.py), GameRecord, and ParquetDataStorage (data_storage.py). The data-only generation + persistence path.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">memory/</span>
+              <span class="ft-desc">Owns GameStatePool + TensorPool + adaptive sizing. Object reuse to cut GC pressure; injected into SelfPlay/MCTS by the supervisor.</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">viz/</span>
+              <span class="ft-desc">Owns the live game viewer: board_render.py (hex Figure) + game_replay.py (Parquet -> reconstructed Board/GameState).</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The objects that cross the seams</h3>
+      <p>
+        Six principal objects move between subsystems. Each is tagged
+        <em>producer &rarr; consumer</em>; the shape is load-bearing, so the exact type is given.
+        Section&nbsp;02 dissects each of these in detail.
+      </p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#9818;</div>
+          <div>
+            <strong>GameState <span style="opacity:.6">&mdash; Game Engine &rarr; everyone</span></strong>
+            <p>The mutable truth: board, phase, current_player, move history, scores. Read by encoder, MCTS, heuristics, and the runner; mutated only inside <code>yinsh_ml/game/</code>.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#9636;</div>
+          <div>
+            <strong>encoded tensor <code>np.float32 (6 or 15, 11, 11)</code> <span style="opacity:.6">&mdash; StateEncoder &rarr; Network</span></strong>
+            <p><code>encode_state(GameState)</code> at <code>yinsh_ml/utils/encoding.py:323</code>. Side-normalized channels 0&ndash;3, valid-moves channel, phase+side sentinel at off-board A1. 15-ch in enhanced mode.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#9650;</div>
+          <div>
+            <strong><code>(move_probs[7433], value)</code> <span style="opacity:.6">&mdash; Network &rarr; MCTS / agent</span></strong>
+            <p><code>NetworkWrapper.predict(tensor)</code> at <code>yinsh_ml/network/wrapper.py:273</code>. Softmaxed policy over all 7433 move slots + a single tanh'd scalar value. The prior MCTS expands against.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#9906;</div>
+          <div>
+            <strong>visit-count policy <code>np.ndarray</code> <span style="opacity:.6">&mdash; MCTS &rarr; training</span></strong>
+            <p>Normalized root visit distribution over 7433 slots from <code>MCTS.search_batch()</code> (<code>yinsh_ml/training/self_play.py</code>). This &mdash; not the raw network policy &mdash; is the cross-entropy target.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#9638;</div>
+          <div>
+            <strong>GameRecord / experience <span style="opacity:.6">&mdash; self-play &rarr; storage &rarr; trainer</span></strong>
+            <p><code>(state, policy, value, metadata)</code> tuples. Streamed to Parquet by <code>SelfPlayDataManager</code> (data path) or fed straight into <code>YinshTrainer</code>'s replay buffer (in-loop path).</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#9874;</div>
+          <div>
+            <strong>updated weights <span style="opacity:.6">&mdash; Trainer &rarr; NetworkWrapper</span></strong>
+            <p><code>YinshTrainer</code> mutates the <em>shared</em> <code>NetworkWrapper</code> in place, so the next self-play iteration plays with the freshest weights (the supervisor re-points <code>self.self_play.network</code> each iteration).</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The two entrypoints</h3>
+      <p>
+        Everything above is reachable from exactly two top-level drivers. Know which one you are in
+        before you touch anything: one closes the learning loop, the other only opens the data spigot.
+      </p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">&#9881;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Full loop &mdash; TrainingSupervisor.train_iteration()</strong>
+          <p>
+            One <em>self-play &rarr; train &rarr; eval &rarr; select</em> cycle
+            (<code>yinsh_ml/training/supervisor.py:1003</code>). It re-points
+            <code>self.self_play.network</code> at the current weights, applies the heuristic-weight
+            curriculum and iteration-aware Dirichlet taper, generates <code>num_games</code> in
+            batches of 10, folds each game's experiences into the trainer's replay buffer, trains,
+            then runs the tournament + anchor eval and updates <code>best_model.pt</code>. Weights are
+            <strong>never reverted</strong> by default (AlphaZero-style continuous training); the gate
+            is opt-in via <code>revert_self_play_on_gate_failure</code>.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#9654;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Data-only path &mdash; run_large_scale_selfplay.py</strong>
+          <p>
+            Drives <code>SelfPlayRunner</code> (<code>yinsh_ml/self_play/game_runner.py</code>) with a
+            chosen policy to emit <code>GameRecord</code>s into Parquet. No network training, no weight
+            updates, no tournament &mdash; this is the corpus generator behind the 100K-game analysis,
+            not the learning loop. Use it when you want <em>data</em>, not a <em>better model</em>.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        Next: <strong>Section 02 &mdash; The Shared Data Types</strong> drills into each object above
+        &mdash; the exact channel layout of the encoded tensor, the 7433-slot move indexing, the
+        GameRecord schema, and the visit-count policy normalization that ties MCTS to training.
+      </p>
+    </div>
+
+  </div>
+</section>
+<section class="module" id="module-2">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">02</span>
+      <h2 class="module-title">The Shared Currency: Core Data Types</h2>
+      <p class="module-subtitle">The exact objects, fields, and shapes passed across module boundaries.</p>
+    </div>
+
+    <!-- ===================== SCREEN 1: quick-reference cards ===================== -->
+    <div class="screen">
+      <p>Every module in YinshML speaks in a small set of shared types. A type produced in one file is consumed verbatim in another &mdash; the <span class="term" data-definition="A Python dataclass auto-generates __init__, __repr__, and field storage from typed class attributes. 'frozen=True' makes instances immutable and hashable.">dataclass</span> contract <em>is</em> the API. These are the objects that travel the seams.</p>
+
+      <div class="pattern-cards animate-in">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">P</div>
+          <h4 class="pattern-title">Position</h4>
+          <p class="pattern-desc"><code>game/constants.py:42</code> &mdash; frozen <code>(column:str, row:int)</code>. The atom of board geometry; algebraic cell like <code>E5</code>.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">M</div>
+          <h4 class="pattern-title">Move</h4>
+          <p class="pattern-desc"><code>game/types.py:21</code> &mdash; frozen, hashable. The unit of action; produced by the move generator, consumed by <code>GameState.make_move</code> and the encoder.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">G</div>
+          <h4 class="pattern-title">GameState</h4>
+          <p class="pattern-desc"><code>game/game_state.py:106</code> &mdash; the mutable source of truth: board, phase, player, scores, history.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">T</div>
+          <h4 class="pattern-title">State Tensor</h4>
+          <p class="pattern-desc"><code>utils/encoding.py:330</code> &mdash; <code>np.float32[6,11,11]</code> (or 15-ch enhanced). The bridge from game logic into the network.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">N</div>
+          <h4 class="pattern-title">Network I/O</h4>
+          <p class="pattern-desc"><code>network/wrapper.py:273</code> &mdash; tensor in, <code>(move_probs[7433], value)</code> out. The inference contract.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">E</div>
+          <h4 class="pattern-title">Experience / Record</h4>
+          <p class="pattern-desc"><code>training/self_play.py:2029</code> &mdash; the <code>(state, policy, value)</code> triple; persisted as <code>GameRecord</code> (<code>self_play/game_recorder.py:31</code>).</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 2: Position / Move / enums ===================== -->
+    <div class="screen">
+      <h3>Position, Move, and the three enums</h3>
+      <p>The lowest layer. <code>Player</code> is a signed enum (<code>WHITE=1</code>, <code>BLACK=-1</code>) so its value doubles as a sign multiplier in differential heuristics.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">class</span> <span class="code-function">Player</span>(Enum):</span>
+<span class="code-line">    WHITE = <span class="code-string">1</span></span>
+<span class="code-line">    BLACK = -<span class="code-string">1</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">MoveType</span>(Enum):</span>
+<span class="code-line">    PLACE_RING = <span class="code-string">"PLACE_RING"</span></span>
+<span class="code-line">    MOVE_RING = <span class="code-string">"MOVE_RING"</span></span>
+<span class="code-line">    REMOVE_MARKERS = <span class="code-string">"REMOVE_MARKERS"</span></span>
+<span class="code-line">    REMOVE_RING = <span class="code-string">"REMOVE_RING"</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GamePhase</span>(Enum):</span>
+<span class="code-line">    RING_PLACEMENT = <span class="code-string">0</span></span>
+<span class="code-line">    MAIN_GAME = <span class="code-string">1</span></span>
+<span class="code-line">    ROW_COMPLETION = <span class="code-string">2</span></span>
+<span class="code-line">    RING_REMOVAL = <span class="code-string">3</span></span>
+<span class="code-line">    GAME_OVER = <span class="code-string">4</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Player</strong> (<code>constants.py:11</code>): two members, ints <code>+1 / -1</code>. <em>Produced</em> everywhere a side is named; <em>consumed</em> by heuristics as a literal sign. <code>.opponent</code> flips it.</p>
+            <p class="tl"><strong>MoveType</strong> (<code>types.py:8</code>): the four legal action kinds. Drives the policy-slot layout in the encoder &mdash; each kind owns a contiguous index range.</p>
+            <p class="tl"><strong>GamePhase</strong> (<code>types.py:14</code>): the five lifecycle states. Note <code>ROW_COMPLETION=2</code> sits between MAIN_GAME and RING_REMOVAL. <em>Consumed</em> by encoder channel 5 (normalized by <code>len(GamePhase)-1 = 4</code>) and by phase-specific heuristic weights.</p>
+            <p class="tl"><strong>Invariant:</strong> these enums are the single source of truth &mdash; integer values are persisted and channel-normalized, so renumbering is a breaking change.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">@dataclass</span>(frozen=<span class="code-keyword">True</span>)</span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">Position</span>:</span>
+<span class="code-line">    column: <span class="code-keyword">str</span>  <span class="code-comment"># A-K</span></span>
+<span class="code-line">    row: <span class="code-keyword">int</span>     <span class="code-comment"># 1-11</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">@dataclass</span>(frozen=<span class="code-keyword">True</span>)</span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">Move</span>:</span>
+<span class="code-line">    type: MoveType</span>
+<span class="code-line">    player: Player</span>
+<span class="code-line">    source: Optional[Position] = <span class="code-keyword">None</span></span>
+<span class="code-line">    destination: Optional[Position] = <span class="code-keyword">None</span></span>
+<span class="code-line">    markers: Optional[Tuple[Position, ...]] = <span class="code-keyword">None</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Position</strong> (<code>constants.py:42</code>): immutable <code>(column, row)</code>. <code>str(pos)</code> &rarr; <code>"E5"</code>; <code>from_string("E5")</code> inverts it. Only the 85 cells in <code>VALID_POSITIONS</code> (<code>constants.py:63</code>) are on-board.</p>
+            <p class="tl"><strong>Move</strong> (<code>types.py:21</code>): <code>frozen=True</code> &rarr; immutable &amp; hashable. <code>__post_init__</code> coerces a <code>markers</code> list into a tuple so equality/hash stay stable.</p>
+            <p class="tl"><code>source</code>/<code>destination</code>/<code>markers</code> are <em>optional</em>: a <code>PLACE_RING</code> uses only <code>source</code>; <code>MOVE_RING</code> uses both endpoints; <code>REMOVE_MARKERS</code> uses the <code>markers</code> tuple.</p>
+            <p class="tl"><em>Produced</em> by <code>MoveGenerator</code>; <em>consumed</em> by <code>make_move</code>, MCTS dict keys, and the encoder's <code>move_to_index</code>. <code>__hash__</code> is memoized but stripped on pickle (per-process <code>PYTHONHASHSEED</code>).</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 3: GameState ===================== -->
+    <div class="screen">
+      <h3>GameState: the mutable source of truth</h3>
+      <p>Everything else is derived from this object. It is mutated in place (<code>make_move</code>) and copied for search (<code>copy_from</code> for pool reuse, avoiding <code>deepcopy</code>).</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">@dataclass</span></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GameState</span>:</span>
+<span class="code-line">    board: Board</span>
+<span class="code-line">    current_player: Player</span>
+<span class="code-line">    phase: GamePhase</span>
+<span class="code-line">    white_score: <span class="code-keyword">int</span></span>
+<span class="code-line">    black_score: <span class="code-keyword">int</span></span>
+<span class="code-line">    rings_placed: Dict[Player, <span class="code-keyword">int</span>]</span>
+<span class="code-line">    move_history: List[Move]</span>
+<span class="code-line"></span>
+<span class="code-line">    <span class="code-comment"># row-completion bookkeeping (None when inactive)</span></span>
+<span class="code-line">    _move_maker: Optional[Player] = <span class="code-keyword">None</span></span>
+<span class="code-line">    _prev_player: Optional[Player] = <span class="code-keyword">None</span></span>
+<span class="code-line">    _last_regular_player: Optional[Player] = <span class="code-keyword">None</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>board</strong> &mdash; a <code>Board</code> holding piece placement; <code>to_numpy_array()</code> feeds channels 0&ndash;3 of the encoder.</p>
+            <p class="tl"><strong>current_player</strong> &mdash; whose turn; starts <code>WHITE</code>. Drives side-normalization in <code>encode_state</code> and recovery from the A1 sentinel in <code>decode_state</code>.</p>
+            <p class="tl"><strong>phase</strong> &mdash; current <code>GamePhase</code>; starts <code>RING_PLACEMENT</code>. Gates which moves are legal and which heuristic weights apply.</p>
+            <p class="tl"><strong>white_score / black_score</strong> &mdash; completed rows (rings removed). <code>POINTS_TO_WIN=3</code> ends the game.</p>
+            <p class="tl"><strong>rings_placed</strong> &mdash; per-player count during placement; complete at <code>RINGS_PER_PLAYER=5</code> each.</p>
+            <p class="tl"><strong>move_history</strong> &mdash; ordered <code>List[Move]</code>; replayed by the viz layer and Parquet reconstruction.</p>
+            <p class="tl"><strong>Invariant:</strong> the <code>_*</code> bookkeeping fields are <em>always present</em> (<code>None</code> when inactive) so pool reuse never inherits stale row-completion markers (<code>game_state.py:127</code>).</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 4: encoded tensor + network I/O ===================== -->
+    <div class="screen">
+      <h3>The encoded state tensor &amp; network I/O</h3>
+      <p>This is the seam where game logic becomes math. <code>encode_state</code> turns a <code>GameState</code> into a fixed <code>(6,11,11)</code> tensor; the network maps it to a policy vector and a scalar value.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">encode_state</span>(self, game_state) -&gt; np.ndarray:</span>
+<span class="code-line">    state = np.zeros((<span class="code-string">6</span>, <span class="code-string">11</span>, <span class="code-string">11</span>), dtype=np.float32)</span>
+<span class="code-line">    <span class="code-comment"># 0: current rings   1: opponent rings</span></span>
+<span class="code-line">    <span class="code-comment"># 2: current markers 3: opponent markers</span></span>
+<span class="code-line">    <span class="code-comment"># 4: valid-move sources mask</span></span>
+<span class="code-line">    phase_value = game_state.phase.value / (len(GamePhase)-<span class="code-string">1</span>)</span>
+<span class="code-line">    state[<span class="code-string">5</span>] = phase_value          <span class="code-comment"># ch 5 broadcast</span></span>
+<span class="code-line">    state[<span class="code-string">5</span>, <span class="code-string">0</span>, <span class="code-string">0</span>] = sentinel   <span class="code-comment"># A1: side-to-move</span></span>
+<span class="code-line">    <span class="code-keyword">return</span> state</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Shape</strong> <code>(6,11,11) float32</code> (<code>encoding.py:330</code>). 6 channels over the 11&times;11 grid; only 85 cells are real, the rest are structural padding.</p>
+            <p class="tl"><strong>Channels 0&ndash;3</strong> are <em>side-normalized</em>: index 0/2 are always the <em>current</em> player's rings/markers, 1/3 the opponent's &mdash; not white/black. The network never sees raw color.</p>
+            <p class="tl"><strong>Channel 4</strong> is the valid-move source mask; <strong>channel 5</strong> broadcasts the phase value, then overwrites off-board cell A1 with a 0/1 side-to-move sentinel.</p>
+            <p class="tl"><strong>Enhanced (15-ch)</strong>: <code>EnhancedStateEncoder</code> (<code>enhanced_encoding.py:55</code>) keeps 0&ndash;3, adds row threats (4&ndash;5), partial rows (6&ndash;7), ring mobility (8), center distance (9), ring influence (10), valid dests (11), phase (12), turn number (13), score diff (14).</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Shape invariant: side recovery lives in channel 5, not color</strong>
+          <p>Because channels 0&ndash;3 are "current player first," <code>decode_state</code> cannot tell white from black by channel. It reads side-to-move from the A1 sentinel (<code>row_idx=0, col_idx=0</code>) on channel 5, and the phase from on-board cell F6 (<code>row 5, col 5</code>). A1 is off the hex board (column A only has rows 2&ndash;5), so the sentinel never collides with real state and survives D2 augmentation. In the 15-ch encoder the phase/sentinel move to channel <code>CH_GAME_PHASE = 12</code> &mdash; magic-indexing channel 5 there reads opponent row-threats and silently breaks.</p>
+        </div>
+      </div>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">predict</span>(self, state_tensor, move_mask=<span class="code-keyword">None</span>,</span>
+<span class="code-line">            temperature=<span class="code-string">1.0</span>) -&gt; Tuple[Tensor, Tensor]:</span>
+<span class="code-line">    <span class="code-comment"># state_tensor: (6, 11, 11)</span></span>
+<span class="code-line">    move_logits, value = self.network(state_tensor)</span>
+<span class="code-line">    <span class="code-keyword">if</span> move_mask <span class="code-keyword">is not</span> <span class="code-keyword">None</span>:</span>
+<span class="code-line">        move_logits = move_logits.masked_fill(~move_mask, -inf)</span>
+<span class="code-line">    move_probabilities = F.softmax(move_logits/temperature)</span>
+<span class="code-line">    <span class="code-keyword">return</span> move_probabilities, value</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Input</strong>: a <code>(6,11,11)</code> tensor (<code>wrapper.py:273</code>). <code>forward()</code> (<code>model.py:377</code>) runs conv trunk &rarr; two heads.</p>
+            <p class="tl"><strong>Policy head</strong> (<code>model.py:148</code>): <code>Linear(..., total_moves)</code> &rarr; raw logits of length <strong>7433</strong>. <code>predict</code> masks illegal slots to <code>-inf</code>, then softmaxes to probabilities.</p>
+            <p class="tl"><strong>Value head</strong>: a scalar &mdash; <code>(batch,)</code> in classification mode, <code>(batch,1)</code> in regression. Already tanh'd inside the model; do <em>not</em> tanh again.</p>
+            <p class="tl"><em>Produced</em> by the network; <em>consumed</em> by MCTS as priors + leaf value. <code>load_model</code> hard-fails on any policy-size mismatch &mdash; no silent slot filtering.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 5: experience / stored record + badges ===================== -->
+    <div class="screen">
+      <h3>Training experience &amp; the stored record</h3>
+      <p>Self-play emits parallel lists, zipped into the <code>(state, policy, value)</code> tuples the trainer learns from. The value is assigned per stored position from the final game outcome (signed by the position's player).</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">states:   List[np.ndarray] = []   <span class="code-comment"># (6,11,11) f32</span></span>
+<span class="code-line">policies: List[np.ndarray] = []   <span class="code-comment"># (7433,)  f32</span></span>
+<span class="code-line">players = []                      <span class="code-comment"># Player per position</span></span>
+<span class="code-line">...</span>
+<span class="code-line"><span class="code-keyword">if</span> store_target <span class="code-keyword">and</span> is_learner_turn:</span>
+<span class="code-line">    encoded_state = state_encoder.encode_state(state)</span>
+<span class="code-line">    states.append(encoded_state.astype(np.float32))</span>
+<span class="code-line">    policies.append(move_probs)</span>
+<span class="code-line">    players.append(state.current_player)</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>states</strong> &mdash; one encoded <code>(6,11,11)</code> tensor per stored turn (<code>self_play.py:2029</code>).</p>
+            <p class="tl"><strong>policies</strong> &mdash; the full MCTS visit distribution, length <code>total_moves = 7433</code>. This is <code>move_probs</code> over <em>all</em> slots, not just legal ones &mdash; the training target for the policy head.</p>
+            <p class="tl"><strong>players</strong> &mdash; the side at each position; later combined with the game outcome to produce the per-position value label.</p>
+            <p class="tl"><strong>Terminal position</strong> (<code>self_play.py:2128</code>): appended with a zero policy so it trains <em>only</em> the value head.</p>
+            <p class="tl"><em>Produced</em> by self-play; <em>consumed</em> by <code>YinshTrainer</code> (policy = cross-entropy, value = MSE/classification).</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">@dataclass</span></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GameRecord</span>:</span>
+<span class="code-line">    game_id: <span class="code-keyword">str</span></span>
+<span class="code-line">    start_time: <span class="code-keyword">float</span></span>
+<span class="code-line">    end_time: <span class="code-keyword">float</span></span>
+<span class="code-line">    duration: <span class="code-keyword">float</span></span>
+<span class="code-line">    total_turns: <span class="code-keyword">int</span></span>
+<span class="code-line">    winner: Optional[<span class="code-keyword">str</span>]</span>
+<span class="code-line">    final_score: Dict[<span class="code-keyword">str</span>, <span class="code-keyword">int</span>]</span>
+<span class="code-line">    turns: List[GameTurn]</span>
+<span class="code-line">    metadata: Dict[<span class="code-keyword">str</span>, Any]</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>GameRecord</strong> (<code>self_play/game_recorder.py:31</code>): the on-disk unit, serialized to Parquet via <code>data_storage.py</code> (~3KB/game vs ~1.5MB JSON).</p>
+            <p class="tl"><strong>turns</strong> &mdash; <code>List[GameTurn]</code> (<code>game_recorder.py:17</code>): each turn holds <code>turn_number</code>, <code>current_player</code>, a serialized <code>move</code> dict, a <code>features</code> dict, and a timestamp.</p>
+            <p class="tl"><strong>winner / final_score</strong> &mdash; outcome fields; <code>final_score</code> keyed by side. The replay/viz layer reconstructs <code>Board</code> snapshots by replaying serialized moves through <code>GameState</code>.</p>
+            <p class="tl"><strong>Invariant:</strong> the move serialization in each <code>GameTurn</code> must round-trip back through <code>GameState.make_move</code> &mdash; the viz and analysis layers depend on faithful replay.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Magic constants that pin these shapes</h3>
+      <div class="badge-list animate-in">
+        <div class="badge-item">
+          <code class="badge-code">total_moves = 7433</code>
+          <span class="badge-desc">Policy-vector length. Computed as <code>85 + 7140 + 85 + 123</code> in <code>StateEncoder.__init__</code> (<code>utils/encoding.py:146</code>); use <code>StateEncoder().total_moves</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">channels = 6 | 15</code>
+          <span class="badge-desc"><code>NUM_CHANNELS = 6</code> basic (<code>encoding.py:103</code>) / <code>15</code> enhanced (<code>enhanced_encoding.py:83</code>). Selected by <code>use_enhanced_encoding</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">board = 11&times;11 / 85</code>
+          <span class="badge-desc">Grid is 11&times;11; only 85 cells are valid (<code>VALID_POSITIONS</code>, <code>constants.py:63</code>; column counts <code>[4,7,8,9,10,9,10,9,8,7,4]</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">RINGS_PER_PLAYER = 5</code>
+          <span class="badge-desc">Rings placed before MAIN_GAME (<code>constants.py:103</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">POINTS_TO_WIN = 3</code>
+          <span class="badge-desc">Completed rows to win (<code>constants.py:105</code>; blitz variant <code>= 1</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">num_value_classes = 7</code>
+          <span class="badge-desc">Discrete outcome buckets for classification value head; default in <code>NetworkWrapper.__init__</code> (<code>network/wrapper.py:28</code>).</span>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Shape invariant: policy length MUST equal total_moves</strong>
+          <p>Every policy vector &mdash; network output, MCTS target, stored Parquet row &mdash; is length <strong>7433</strong>. The slot layout is contiguous and collision-free: placement <code>[0,85)</code>, ring movement <code>[85,7225)</code> (<code>src&middot;84 + adjusted_dst</code>), ring removal <code>[7225,7310)</code>, marker removal <code>[7310,7433)</code> (123 enumerated 5-in-a-row lines). Changing <code>_enumerate_remove_markers_lines()</code> reshuffles slots and <em>breaks every saved checkpoint</em>; <code>NetworkWrapper.load_model</code> hard-fails on size mismatch rather than silently filtering. The pre-fix legacy size was 8390 &mdash; not load-compatible.</p>
+        </div>
+      </div>
+
+      <p class="module-closing">These types are produced and consumed at one critical seam: the <code>GameState</code> &rlarr; Network boundary, where <code>encode_state</code> serializes a position and <code>predict</code> returns policy + value. <strong>Section 3</strong> walks that seam end to end &mdash; how a live <code>GameState</code> becomes a tensor, crosses into the network, and returns as a move distribution the search layer can act on.</p>
+    </div>
+
+  </div>
+</section>
+<section class="module" id="module-3">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">03</span>
+      <h2 class="module-title">The State &harr; Network Seam</h2>
+      <p class="module-subtitle">How a GameState becomes a tensor becomes a policy + value becomes a Move.</p>
+    </div>
+
+    <!-- ===================== SCREEN 1: THE FORWARD PATH ===================== -->
+    <div class="screen">
+      <p>
+        Three objects meet at this seam: a
+        <span class="term" data-definition="The mutable Python object holding the board, side-to-move, game phase, and move history. Defined in yinsh_ml/game/game_state.py.">GameState</span>,
+        the <span class="term" data-definition="StateEncoder converts a GameState to/from the numeric tensors the network reads, and owns the move-index layout. Defined in yinsh_ml/utils/encoding.py.">StateEncoder</span>,
+        and the <span class="term" data-definition="NetworkWrapper wraps the torch YinshNetwork: it owns the encoder, the device, masking, and temperature. Defined in yinsh_ml/network/wrapper.py.">NetworkWrapper</span>
+        (which itself owns a <code>YinshNetwork</code>). The contract is purely shape- and index-driven: a
+        <code>(6, 11, 11)</code> float array goes in, a flat <code>move_probs[7433]</code> distribution plus a scalar <code>value</code> come out, and the encoder's
+        move-index table is the only thing that maps a policy slot back to a concrete <code>Move</code>.
+      </p>
+
+      <div class="flow-animation animate-in" id="flow-state-net" data-steps='[
+        {"highlight":"flow-actor-1","label":"A GameState carries the board, side-to-move, and game phase for the position to evaluate"},
+        {"highlight":"flow-actor-2","label":"StateEncoder.encode_state walks the board and writes a (6,11,11) float32 array","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-3","label":"NetworkWrapper.predict receives the state tensor plus an optional boolean move_mask","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-4","label":"YinshNetwork.forward returns policy logits of length 7433 and a scalar value head output","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-3","label":"predict masks invalid slots with -inf then softmaxes to move_probs plus the already-tanhd value","packet":true,"from":"actor-4","to":"actor-3"},
+        {"highlight":"flow-actor-2","label":"select_move or decode_move reads move_probs at each valid moves index to pick a slot","packet":true,"from":"actor-3","to":"actor-2"},
+        {"highlight":"flow-actor-1","label":"The chosen slot resolves back to a concrete Move applied to the GameState","packet":true,"from":"actor-2","to":"actor-1"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">GS</div>
+            <span>GameState</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">EN</div>
+            <span>StateEncoder</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">NW</div>
+            <span>NetworkWrapper</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">NN</div>
+            <span>YinshNetwork</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to trace the forward path</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="flow-step-num">1</div>
+          <p>GameState &rarr; <code>(6,11,11)</code> tensor</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">2</div>
+          <p>predict &rarr; mask + softmax</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">3</div>
+          <p><code>move_probs[7433]</code> + value</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">4</div>
+          <p>select_move &rarr; Move</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 2: ENCODE + PREDICT SIGNATURES ===================== -->
+    <div class="screen">
+      <h3>Encode: GameState &rarr; <code>(6,11,11)</code></h3>
+      <p>
+        <code>encoding.py:323</code>. The encoder is <em>side-normalized</em>: channels 0/2 are always the current player's rings/markers,
+        1/3 the opponent's. Channel 4 is the valid-moves mask written from each move's <code>source</code> cell; channel 5 broadcasts
+        the phase and overrides the off-board <span class="term" data-definition="Column A only spans rows 2-5, so cell A1 (row_idx 0, col_idx 0) is never a real board position. It safely stores the side-to-move sentinel and survives D2 augmentation.">A1</span>
+        cell with a side-to-move sentinel.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">encode_state</span>(self, game_state: GameState) -&gt; np.ndarray:</span>
+<span class="code-line">    state = np.<span class="code-function">zeros</span>((<span class="code-property">6</span>, <span class="code-property">11</span>, <span class="code-property">11</span>), dtype=np.float32)</span>
+<span class="code-line">    is_white = (game_state.current_player == Player.WHITE)</span>
+<span class="code-line">    <span class="code-comment"># ch 0/1 rings, ch 2/3 markers: current-first</span></span>
+<span class="code-line">    state[<span class="code-property">0</span>, r, c] = <span class="code-property">1.0</span>   <span class="code-comment"># current rings</span></span>
+<span class="code-line">    <span class="code-comment"># ch 4: valid-move sources</span></span>
+<span class="code-line">    <span class="code-keyword">for</span> move <span class="code-keyword">in</span> game_state.<span class="code-function">get_valid_moves</span>():</span>
+<span class="code-line">        state[<span class="code-property">4</span>, src_row, src_col] = <span class="code-property">1.0</span></span>
+<span class="code-line">    <span class="code-comment"># ch 5: phase broadcast + A1 sentinel</span></span>
+<span class="code-line">    state[<span class="code-property">5</span>] = phase_value</span>
+<span class="code-line">    state[<span class="code-property">5</span>, <span class="code-property">0</span>, <span class="code-property">0</span>] = WHITE_SENTINEL <span class="code-keyword">if</span> is_white <span class="code-keyword">else</span> BLACK_SENTINEL</span>
+<span class="code-line">    <span class="code-keyword">return</span> state</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Returns</strong> a dense numpy array, not a torch tensor. The wrapper does the <code>from_numpy().float()</code> conversion and device move.</p>
+            <p class="tl">Side-to-move decides which color lands in the "current" channels, so the network never sees raw white-vs-black.</p>
+            <p class="tl">Channels 0-3 are the four piece planes. Coordinates are <code>(row-1, col-'A')</code>, clamped to the 11x11 grid.</p>
+            <p class="tl">Channel 4 is the move-source mask: one hot cell per ring that can legally move this turn. This is the only "valid moves" signal baked into the tensor.</p>
+            <p class="tl">Channel 5 carries phase everywhere, then stamps the off-board A1 cell with a 0/1 sentinel so <code>decode_state</code> can recover side-to-move without flipping colors.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Predict: tensor &rarr; <code>(move_probs, value)</code></h3>
+      <p>
+        <code>wrapper.py:273</code>. The single-position path. It runs <code>self.network(state_tensor)</code>, masks invalid slots with <code>-inf</code>
+        <em>before</em> softmax, scales by <code>temperature</code>, and returns probabilities plus the value. The value is <strong>not</strong> re-tanh'd here &mdash;
+        the network already bounds it (<code>model.py:139</code> region / classification expectation), so a second tanh would over-compress.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">predict</span>(self, state_tensor,</span>
+<span class="code-line">            move_mask=<span class="code-property">None</span>, temperature=<span class="code-property">1.0</span>):</span>
+<span class="code-line">    self.network.<span class="code-function">eval</span>()</span>
+<span class="code-line">    <span class="code-keyword">with</span> torch.<span class="code-function">no_grad</span>():</span>
+<span class="code-line">        move_logits, value = self.<span class="code-function">network</span>(state_tensor)</span>
+<span class="code-line">        <span class="code-comment"># value already tanh'd by net - NO re-tanh</span></span>
+<span class="code-line">        <span class="code-keyword">if</span> move_mask <span class="code-keyword">is not</span> <span class="code-property">None</span>:</span>
+<span class="code-line">            move_logits = move_logits.<span class="code-function">masked_fill</span>(</span>
+<span class="code-line">                ~move_mask, <span class="code-function">float</span>(<span class="code-string">'-inf'</span>))</span>
+<span class="code-line">        scaled = move_logits / temperature</span>
+<span class="code-line">        probs = F.<span class="code-function">softmax</span>(scaled, dim=<span class="code-property">1</span>)</span>
+<span class="code-line">        <span class="code-keyword">return</span> probs, value</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Args:</strong> a <code>(6,11,11)</code> (or batched) tensor, an optional boolean mask, and a temperature.</p>
+            <p class="tl">Eval mode + no-grad: this is pure inference, no autograd graph built.</p>
+            <p class="tl">One forward call yields raw policy logits of length 7433 and the value head output.</p>
+            <p class="tl">The commented-out <code>torch.tanh(value)</code> is the load-bearing absence: the value is bounded once, inside the net.</p>
+            <p class="tl">Masking sets illegal slots to <code>-inf</code> so softmax drives them to exactly zero probability.</p>
+            <p class="tl"><strong>Returns</strong> a normalized distribution over all 7433 slots and the scalar value.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 3: BATCH PATH + FORWARD HEADS ===================== -->
+    <div class="screen">
+      <h3>The batched path MCTS actually calls</h3>
+      <p>
+        <code>wrapper.py:617</code>. <code>predict_batch</code> takes a <em>list of GameStates</em>, encodes each into one pooled batch tensor, runs a
+        single forward pass, and returns <strong>raw logits</strong> (not softmaxed, not masked). This is deliberate: the caller &mdash; batched MCTS &mdash;
+        applies its own masking and softmax per leaf. Temperature is folded into the logits when it is not <code>1.0</code>.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">predict_batch</span>(self, game_states, temperature=<span class="code-property">1.0</span>):</span>
+<span class="code-line">    batch_tensor = self.<span class="code-function">_acquire_input_tensor</span>(<span class="code-function">len</span>(game_states))</span>
+<span class="code-line">    <span class="code-keyword">for</span> i, gs <span class="code-keyword">in</span> <span class="code-function">enumerate</span>(game_states):</span>
+<span class="code-line">        arr = self.state_encoder.<span class="code-function">encode_state</span>(gs)</span>
+<span class="code-line">        batch_tensor[i] = torch.<span class="code-function">from_numpy</span>(arr).<span class="code-function">float</span>()</span>
+<span class="code-line">    <span class="code-keyword">with</span> torch.<span class="code-function">no_grad</span>():</span>
+<span class="code-line">        policy_logits, values = self.<span class="code-function">network</span>(batch_tensor)</span>
+<span class="code-line">        <span class="code-keyword">if</span> temperature != <span class="code-property">1.0</span>:</span>
+<span class="code-line">            policy_logits = policy_logits / temperature</span>
+<span class="code-line">        <span class="code-keyword">return</span> policy_logits, values  <span class="code-comment"># raw, caller masks</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Args:</strong> a list of GameState objects (one per MCTS leaf) and a temperature.</p>
+            <p class="tl">The batch input tensor comes from the <span class="term" data-definition="A reuse pool of pre-allocated torch tensors that cuts allocation churn and GC pressure during high-throughput batched inference. Lives in yinsh_ml/memory.">TensorPool</span>, sized <code>(batch, 6, 11, 11)</code>, and is released in a finally block.</p>
+            <p class="tl">Each state is encoded and copied into its batch row &mdash; same <code>encode_state</code> as the singleton path.</p>
+            <p class="tl">One forward pass over the whole batch is the throughput win over per-leaf calls.</p>
+            <p class="tl"><strong>Returns</strong> <code>(batch_size, 7433)</code> logits and <code>(batch_size, 1)</code> values, both unmasked &mdash; masking and softmax are the search layer's job.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Inside the net: two heads, one trunk</h3>
+      <p>
+        <code>model.py:377</code>. <code>forward</code> runs the shared conv trunk, then splits. The policy head is
+        <code>Conv2d(c,64,1) &rarr; Flatten &rarr; Linear(64&middot;11&middot;11, 1024) &rarr; Linear(1024, total_moves)</code> emitting raw logits
+        (<code>model.py:148</code>). In classification value mode the value head's logits are softmaxed and dotted with <code>outcome_values</code>
+        to yield an expectation already in <code>[-1, 1]</code> &mdash; that is the single tanh-equivalent bounding referenced by <code>predict</code>.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">forward</span>(self, x) -&gt; Tuple[Tensor, Tensor]:</span>
+<span class="code-line">    x = self.<span class="code-function">conv_block</span>(x)            <span class="code-comment"># shared trunk</span></span>
+<span class="code-line">    <span class="code-keyword">for</span> block <span class="code-keyword">in</span> self.main_blocks: x = <span class="code-function">block</span>(x)</span>
+<span class="code-line">    policy = self.<span class="code-function">policy_head</span>(x)     <span class="code-comment"># (B, 7433) logits</span></span>
+<span class="code-line">    value_output = self.<span class="code-function">value_head</span>(x)</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.value_mode == <span class="code-string">'classification'</span>:</span>
+<span class="code-line">        probs = F.<span class="code-function">softmax</span>(value_output, dim=-<span class="code-property">1</span>)</span>
+<span class="code-line">        value = (probs * self.outcome_values).<span class="code-function">sum</span>(-<span class="code-property">1</span>)</span>
+<span class="code-line">        self._value_logits = value_output  <span class="code-comment"># for CE loss</span></span>
+<span class="code-line">    <span class="code-keyword">else</span>:</span>
+<span class="code-line">        value = value_output.<span class="code-function">squeeze</span>(-<span class="code-property">1</span>)  <span class="code-comment"># tanh'd scalar</span></span>
+<span class="code-line">    <span class="code-keyword">return</span> policy, value</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Args:</strong> <code>(batch, input_channels, 11, 11)</code> &mdash; 6 channels basic, 15 enhanced.</p>
+            <p class="tl">Trunk: an entry conv block then a stack of residual/attention blocks, shared by both heads.</p>
+            <p class="tl">Policy head ends in a bare <code>Linear(..., total_moves)</code> &mdash; raw logits, no activation, so masking and temperature happen downstream.</p>
+            <p class="tl">Classification value mode turns class logits into a probability-weighted expectation over the discrete outcome centers; the result is already in <code>[-1,1]</code>.</p>
+            <p class="tl">The raw class logits are stashed on <code>_value_logits</code> so the trainer can run cross-entropy without changing this interface.</p>
+            <p class="tl"><strong>Returns</strong> <code>(policy_logits, value)</code> &mdash; the exact pair every predict path consumes.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 4: CONTRACTS + ENCODING PLUMBING ===================== -->
+    <div class="screen">
+      <h3>Hard contracts at the seam</h3>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Policy length and channel count are load-bearing invariants</strong>
+          <p>
+            The policy head length must equal <code>StateEncoder().total_moves == 7433</code>
+            (<code>85 + 7140 + 85 + 123</code>, <code>encoding.py:146</code>). This number <em>is</em> the move-index layout: slot &harr; move meaning is fixed by it.
+            <code>NetworkWrapper.load_model</code> (<code>wrapper.py:423</code>) <strong>hard-fails</strong> on three mismatches rather than silently filtering &mdash;
+            input-channel count (<code>wrapper.py:434</code>), value-head mode/classes (<code>wrapper.py:450</code>), and policy-head size (<code>wrapper.py:492</code>).
+            Silent filtering would leave the offending layer randomly initialized and play garbage. Known past policy sizes: <code>7395</code> (pre-rework),
+            <code>8390</code> (collision-prone REMOVE_MARKERS), <code>7433</code> (current). Switching sizes means retrain or explicit migration &mdash; old checkpoints will not load.
+          </p>
+        </div>
+      </div>
+
+      <h3>The <code>use_enhanced_encoding</code> plumbing</h3>
+      <p>
+        A single boolean threads channel count from the wrapper constructor down to both the encoder choice and the network's input conv.
+        <code>load_model</code> can also <em>flip</em> this flag to match a checkpoint's conv-in dimension (<code>wrapper.py:78</code>), so the encoder
+        instantiated at <code>wrapper.py:200</code> always agrees with the loaded weights.
+      </p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">1</div>
+          <div>
+            <strong><code>NetworkWrapper(use_enhanced_encoding=..., num_channels=..., num_blocks=..., value_mode='classification', num_value_classes=7, value_head_type=...)</code></strong>
+            <p><code>wrapper.py:26</code>. The flag sets <code>input_channels = 15 if use_enhanced_encoding else 6</code>. When a <code>model_path</code> is given, channel count, block count, value mode, and head type are auto-detected from the state_dict and can override the flag.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">2</div>
+          <div>
+            <strong>Encoder selection &mdash; <code>wrapper.py:200</code></strong>
+            <p><code>self.use_enhanced_encoding</code> (post-autodetect) picks <code>EnhancedStateEncoder()</code> (15-ch) or <code>StateEncoder()</code> (6-ch). Reading the post-detect flag, not the constructor arg, is what prevents an encoder/weights mismatch that would yield 0-move games.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">3</div>
+          <div>
+            <strong><code>YinshNetwork(input_channels=6 or 15, ...)</code></strong>
+            <p><code>wrapper.py:161</code> &rarr; <code>model.py:82</code>. The same channel count sizes the entry <code>Conv2d(input_channels, num_channels, 3, padding=1)</code>. Both sides of the seam read one source of truth, so the conv-in dimension and the encoder's output channels can never silently drift.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">total_moves = 7433</code>
+          <span class="badge-desc">85 ring placements + 7140 ring moves + 85 marker removals + 123 REMOVE_MARKERS lines (encoding.py:146).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">input_channels = 6 | 15</code>
+          <span class="badge-desc">Basic vs enhanced encoder; the only thing that changes the trunk's first conv.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">value_mode = classification</code>
+          <span class="badge-desc">Expectation over 7 outcome classes in [-1,1]; load_model hard-fails on a mode mismatch.</span>
+        </div>
+      </div>
+
+      <p>
+        Downstream, <code>predict_batch</code> is the hot path: batched MCTS collects many leaf GameStates, hands them to this seam in one shot, and applies
+        its own masking and priors to the returned logits. That consumer &mdash; where evaluation meets search &mdash; is
+        <strong>Section 4: the Search &harr; Evaluation seam</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+<section class="module" id="module-4">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">04</span>
+      <h2 class="module-title">The Search &harr; Evaluation Seam</h2>
+      <p class="module-subtitle">What MCTS is wired to, what it returns, and how leaves get scored.</p>
+    </div>
+
+    <!-- ============ SCREEN 1: The constructor seam ============ -->
+    <div class="screen animate-in">
+      <p>There is exactly one MCTS engine in the codebase:
+        <code class="badge-code">yinsh_ml/training/self_play.py::MCTS</code>. Its
+        constructor declares every collaborator the search leans on &mdash; the
+        network it queries at leaves, an optional
+        <span class="term" data-definition="The 7-feature differential position scorer in yinsh_ml/heuristics/evaluator.py. Returns a scalar advantage for the side to move.">heuristic evaluator</span>,
+        a memory pool, and an optional shared inference evaluator that coalesces
+        GPU calls across instances. Read the signature as the seam&apos;s contract.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">__init__</span>(<span class="code-property">self</span>,</span>
+<span class="code-line">    network: NetworkWrapper,</span>
+<span class="code-line">    evaluation_mode: str = <span class="code-string">"pure_neural"</span>,</span>
+<span class="code-line">    heuristic_evaluator: Optional[YinshHeuristics] = <span class="code-keyword">None</span>,</span>
+<span class="code-line">    heuristic_weight: float = <span class="code-string">0.5</span>,</span>
+<span class="code-line">    num_simulations: int = <span class="code-string">100</span>,</span>
+<span class="code-line">    c_puct: float = <span class="code-string">1.0</span>,</span>
+<span class="code-line">    ...</span>
+<span class="code-line">    game_state_pool: Optional[GameStatePool] = <span class="code-keyword">None</span>,</span>
+<span class="code-line">    evaluator=<span class="code-keyword">None</span>,  <span class="code-comment"># shared InferenceEvaluator</span></span>
+<span class="code-line">): ...</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>self_play.py:141</strong> &mdash; the single MCTS engine&apos;s constructor.</p>
+            <p class="tl"><code>network</code>: the <code>NetworkWrapper</code> queried for (policy logits, value) at every leaf. Held as <code>self.network</code>.</p>
+            <p class="tl"><code>evaluation_mode</code>: a string switch &mdash; <code>"pure_neural"</code>, <code>"pure_heuristic"</code>, or <code>"hybrid"</code> &mdash; that picks the leaf scorer.</p>
+            <p class="tl"><code>heuristic_evaluator</code>: a <code>YinshHeuristics</code> instance. Required for heuristic and hybrid modes; ignored in pure-neural.</p>
+            <p class="tl"><code>heuristic_weight</code>: the blend factor in hybrid mode. 0.0 = all network, 1.0 = all heuristic.</p>
+            <p class="tl"><code>num_simulations</code> / <code>c_puct</code>: rollout budget (early-game) and the PUCT exploration constant.</p>
+            <p class="tl"><code>game_state_pool</code>: optional <code>GameStatePool</code> for reusing per-sim <code>GameState</code> copies (less GC churn).</p>
+            <p class="tl"><code>evaluator</code>: optional shared <code>InferenceEvaluator</code>. When set, leaf batches route through it instead of <code>network.predict_batch</code> &mdash; it coalesces requests across MCTS instances (self_play.py:195&ndash;263).</p>
+          </div>
+        </div>
+      </div>
+
+      <p>What the engine <em>emits</em> is a visit-count policy. Both entry points
+        return an <code>np.ndarray</code> sized to
+        <code class="badge-code">StateEncoder().total_moves</code> (7433):</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">search</span>(<span class="code-property">self</span>, state: GameState,</span>
+<span class="code-line">           move_number: int) -&gt; np.ndarray:</span>
+<span class="code-line">    ...  <span class="code-comment"># one-leaf-at-a-time path</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">def</span> <span class="code-function">search_batch</span>(<span class="code-property">self</span>, state: GameState,</span>
+<span class="code-line">           move_number: int,</span>
+<span class="code-line">           batch_size: int = <span class="code-string">32</span>) -&gt; np.ndarray:</span>
+<span class="code-line">    ...  <span class="code-comment"># batched-leaf path (training/eval)</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>search() (self_play.py:616)</strong> &mdash; consumes a <code>GameState</code> + the outer-game move number (for temperature / Dirichlet tapering). Runs the budget of simulations, scoring one leaf per sim via <code>_evaluate_state</code>.</p>
+            <p class="tl">Returns a length-<code>total_moves</code> vector of root child visit counts (the improved policy that self-play samples its move from).</p>
+            <p class="tl"><strong>search_batch() (self_play.py:839)</strong> &mdash; same contract, but collects up to <code>batch_size</code> leaves before evaluating them in one network call. This is the path used in training and bulk evaluation; <code>search()</code> is the singleton fallback.</p>
+            <p class="tl"><code>move_number</code> drives the rollout budget (early vs late sims) and root Dirichlet-noise mixing &mdash; not just temperature.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SCREEN 2: Batched leaf-eval flow ============ -->
+    <div class="screen animate-in">
+      <h3>The batched leaf-evaluation loop</h3>
+      <p><code>search_batch</code> descends the tree per simulation, but instead of
+        scoring each leaf inline it queues the leaf&apos;s <code>GameState</code>.
+        When the queue fills (or the budget ends) it flushes through
+        <code>_evaluate_and_backup_batch</code> (self_play.py:1089), which calls
+        <code>predict_batch</code> once for the whole batch &mdash; or hands off to
+        the shared <code>evaluator</code> if one was injected. Step through it:</p>
+
+      <div class="flow-animation" id="flow-leaf-eval" data-steps='[
+        {"highlight":"flow-actor-1","label":"search_batch descends the tree per sim and bottoms out at an unexpanded leaf GameState"},
+        {"highlight":"flow-actor-1","label":"The leaf is queued into batch_leaves; sims keep running until batch_size leaves are collected"},
+        {"highlight":"flow-actor-1","label":"On flush MCTS hands the list of leaf states to the leaf scorer","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"InferenceEvaluator coalesces this batch with requests from other MCTS instances","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"NetworkWrapper.predict_batch runs one forward pass over all states"},
+        {"highlight":"flow-actor-3","label":"It returns (policy_logits_batch, values_batch) back up the chain","packet":true,"from":"actor-3","to":"actor-1"},
+        {"highlight":"flow-actor-1","label":"MCTS softmaxes each policy row into priors, expands the leaf, and backs the value up the search path"},
+        {"highlight":"flow-actor-1","label":"After all sims, root child visit counts become the returned policy vector over total_moves"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">M</div>
+            <span>MCTS (search_batch)</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">I</div>
+            <span>InferenceEvaluator</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">N</div>
+            <span>NetworkWrapper</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click &quot;Next Step&quot; to begin</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128279;</div>
+        <div class="callout-content">
+          <strong class="callout-title">The actual routing branch</strong>
+          <p>In <code>_evaluate_and_backup_batch</code> (self_play.py:1117&ndash;1120):
+            <code>if self.evaluator is not None: ...evaluator.evaluate_batch(states)</code>
+            <code>else: ...network.predict_batch(states)</code>. The shared
+            evaluator and <code>predict_batch</code> return the same shape, so the
+            only thing that changes is who runs the GPU call. Actor 2 is skipped
+            entirely when <code>evaluator</code> is <code>None</code>.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SCREEN 3: Mode switch + heuristic stack ============ -->
+    <div class="screen animate-in">
+      <h3>How <code>evaluation_mode</code> picks the leaf scorer</h3>
+      <p>The same string switch governs both leaf paths
+        (<code>_evaluate_state</code> at self_play.py:1307 for the singleton path,
+        <code>_evaluate_and_backup_batch</code> at 1111 for the batch). Three
+        branches:</p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">N</div>
+          <h4 class="pattern-title">pure_neural</h4>
+          <p class="pattern-desc">Leaf value and priors come entirely from the network. <code>predict_batch</code> logits are softmaxed into priors; the value head supplies the backed-up value. The heuristic evaluator is never touched.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">H</div>
+          <h4 class="pattern-title">pure_heuristic</h4>
+          <p class="pattern-desc"><code>YinshHeuristics.evaluate_position</code> scores each leaf (states evaluated individually &mdash; heuristics do not batch). Priors are a uniform distribution over legal moves.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">&#9878;</div>
+          <h4 class="pattern-title">hybrid</h4>
+          <p class="pattern-desc">Both run. With <code>w_h = heuristic_weight</code>, <code>w_n = 1 - w_h</code>: <code>value = w_n&middot;value_nn + w_h&middot;value_heuristic</code> and the priors blend the same way (self_play.py:1145&ndash;1160).</p>
+        </div>
+      </div>
+
+      <p>When the heuristic branch is live, it sits on top of a small stack &mdash;
+        each layer feeds the one above it:</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#127919;</div>
+          <div>
+            <strong>YinshHeuristics</strong> &mdash; <code>heuristics/evaluator.py</code>
+            <p><code>evaluate_position(state, player)</code> returns a differential scalar (positive = good for that player). The seam&apos;s entry point into the heuristic stack.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#129518;</div>
+          <div>
+            <strong>features.py</strong> &mdash; the 7 features
+            <p><code>extract_all_features(state, player)</code> (features.py:495) computes completed-runs differential, ring centrality, ring spread, potential runs, connected chains, ring mobility, edge proximity.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#9878;</div>
+          <div>
+            <strong>weight_manager.py</strong> &mdash; phase-specific weights
+            <p><code>WeightManager</code> (weight_manager.py:15) holds per-phase weight dicts keyed <code>early</code> / <code>mid</code> / <code>late</code>; features are weighted by the active phase.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#128338;</div>
+          <div>
+            <strong>phase_detection.py</strong> &mdash; classifies the phase
+            <p><code>detect_phase</code> / <code>get_phase_weights</code> map a <code>GameState</code> to its phase bucket so the weight manager knows which column to read.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Offense-only equilibrium risk</strong>
+          <p>All 7 heuristic features are attack-oriented and differential. Defense
+            is only captured <em>implicitly</em>: it shows up as the opponent&apos;s
+            term in the differential, which negamax can only act on at search depth
+            &ge;3. At depth 1&ndash;2 (shallow rollouts, pure-heuristic mode) the
+            engine can drift into one-sided attacking play with no defensive
+            response. The Trajectory tab of the live viewer exists to spot this
+            signature &mdash; sustained one-sided feature growth without reply.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SCREEN 4: Shared search infra ============ -->
+    <div class="screen animate-in">
+      <h3>Shared search infrastructure</h3>
+      <p>The heuristic engine has a sibling: <code>HeuristicAgent</code>
+        (<code>agents/heuristic_agent.py</code>), a pure negamax + alpha-beta player.
+        It does <em>not</em> reuse the MCTS engine, but it leans on the same
+        position-caching primitives &mdash; the transposition table and Zobrist
+        hasher &mdash; so improvements there pay off in both search paths.</p>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">TranspositionTable</code>
+          <span class="badge-desc">search/transposition_table.py &mdash; Zobrist-keyed position cache. Depth-preferred replacement (keeps the deeper search), default <code>size_power=20</code> (2^20 = ~1M entries). Stores (value, best_move, depth, node_type) per <code>store()</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">ZobristHasher.hash_state</code>
+          <span class="badge-desc">game/zobrist.py:359 &mdash; hashes board <em>and</em> side-to-move <em>and</em> game phase, so two identical layouts differing only in <code>current_player</code> or <code>phase</code> hash apart. The TT key.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">toggle_side_to_move</code>
+          <span class="badge-desc">game/zobrist.py:372 &mdash; O(1) incremental hash flip when only the side-to-move changes; avoids a full re-hash of the board.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">toggle_phase</code>
+          <span class="badge-desc">game/zobrist.py:392 &mdash; O(1) incremental flip when the game phase transitions (e.g. RING_PLACEMENT &rarr; MAIN_GAME).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">HeuristicAgent._negamax</code>
+          <span class="badge-desc">agents/heuristic_agent.py:316 &mdash; negamax + alpha-beta, probing the same TT via <code>_zobrist_hasher.hash_state</code> (heuristic_agent.py:327&ndash;328) and storing EXACT / LOWER_BOUND / UPPER_BOUND entries by the alpha-beta window.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">use_transposition_table</code>
+          <span class="badge-desc">agents/heuristic_agent.py:70 &mdash; on by default in <code>HeuristicAgentConfig</code>; <code>transposition_table_size_power</code> (default 20) and <code>zobrist_seed</code> are configurable alongside it.</span>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">There is exactly one MCTS engine</strong>
+          <p>The engine is <code>training/self_play.py::MCTS</code> &mdash; nothing
+            else. The old <code>search/mcts.py::MCTS</code> was a dead, broken
+            duplicate (uniform-random, never reached the network) and was excised
+            2026-05-21; see <code>TECH_DEBT.md</code>. If you find a reference to
+            <code>search/mcts.py</code>, it is stale. Edit the search behavior in
+            <code>self_play.py</code> and re-run the MCTS parity tests
+            (<code>test_mcts_serial_vs_batch_parity.py</code>, <code>test_subtree_reuse.py</code>).</p>
+        </div>
+      </div>
+
+      <p class="module-footer-note">Next: <strong>Section 5 &mdash; Self-Play
+        &harr; Storage &harr; Training</strong>, where the visit-count policy this
+        seam emits becomes a stored training target and flows back into the network
+        that scores these very leaves.</p>
+    </div>
+  </div>
+</section>
+<section class="module" id="module-5">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">05</span>
+      <h2 class="module-title">The Self-Play &harr; Storage &harr; Training Seam</h2>
+      <p class="module-subtitle">From a finished game to a gradient step, and the supervisor that drives it.</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 1: The iteration loop -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <p>
+        Every training iteration is one turn of the same crank:
+        <code class="badge-code">TrainingSupervisor.train_iteration()</code>
+        (<code>yinsh_ml/training/supervisor.py:1003</code>) generates self-play games,
+        folds the resulting
+        <span class="term" data-definition="One training sample: the board encoded as a tensor, the MCTS-derived move distribution at that position, and the value target for the side to move.">(state, policy, value)</span>
+        tuples into the replay buffer, trains the network for N epochs, then runs a
+        tournament and either promotes or discards the new weights. The seam has two
+        distinct sides &mdash; an <strong>in-memory replay buffer</strong> (the AlphaZero training path
+        the supervisor actually drives) and a <strong>Parquet archive</strong> (the analysis/audit
+        path through <code>game_runner.py</code>). Both are documented below; do not
+        confuse them.
+      </p>
+
+      <div class="flow-animation" id="flow-train-iter" data-steps='[
+        {"highlight":"flow-actor-1","label":"Supervisor begins an iteration. It points SelfPlay at the latest network weights (always-latest, AlphaZero style)."},
+        {"highlight":"flow-actor-1","label":"Self-play workers run games. Each move is chosen by MCTS guided by the network policy plus value or heuristic.","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"Per learner position MCTS emits a visit-count distribution as the policy target. Final score gives the value target signed per side to move."},
+        {"highlight":"flow-actor-2","label":"add_game_experience folds states policies and values into the in-memory replay buffer. Games over 100 moves are subsampled first.","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"YinshTrainer samples mixed batches from the buffer across many past games to break correlation.","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-4","label":"Loss = policy cross-entropy against the visit distribution plus value loss (classification CE or regression MSE)."},
+        {"highlight":"flow-actor-4","label":"Two optimizers step: policy head and value head plus shared trunk. NetworkWrapper.network weights are updated in place."},
+        {"highlight":"flow-actor-4","label":"Candidate weights face the previous best in a tournament; ELO and a Wilson lower-bound gate decide the outcome.","packet":true,"from":"actor-4","to":"actor-5"},
+        {"highlight":"flow-actor-5","label":"Promote if the Wilson lower bound clears promotion_threshold; otherwise keep the latest weights and continue (no hard revert)."}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">SP</div>
+            <span>SelfPlay driver</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">M</div>
+            <span>MCTS workers</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">B</div>
+            <span>Replay buffer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">T</div>
+            <span>YinshTrainer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-5">
+            <div class="flow-actor-icon">E</div>
+            <span>Tournament + ELO</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to walk one train_iteration()</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 2: The producer side -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>Producer: how a game becomes experiences</h3>
+      <p>
+        The training-path producer is the per-game worker in
+        <code>yinsh_ml/training/self_play.py</code> (not <code>game_runner.py</code>, which
+        feeds the Parquet archive). At each learner position it appends three parallel lists.
+        The <strong>policy</strong> is the MCTS visit-count distribution over all
+        <code>total_moves</code> slots; the <strong>value</strong> is the final game outcome,
+        signed for the side that was to move.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># self_play.py:2095 — store target only on the learner's turn</span></span>
+<span class="code-line"><span class="code-keyword">if</span> store_target <span class="code-keyword">and</span> is_learner_turn:</span>
+<span class="code-line">    encoded_state = state_encoder.encode_state(state).astype(np.float32)</span>
+<span class="code-line">    states.append(encoded_state)</span>
+<span class="code-line">    policies.append(move_probs)      <span class="code-comment"># MCTS visit dist</span></span>
+<span class="code-line">    players.append(state.current_player)</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># self_play.py:2142 — outcome from final score, clipped to [-1, 1]</span></span>
+<span class="code-line">score_diff   = state.white_score - state.black_score</span>
+<span class="code-line">outcome_white = float(np.clip(score_diff / <span class="code-number">3.0</span>, -<span class="code-number">1.0</span>, <span class="code-number">1.0</span>))</span>
+<span class="code-line">values = [outcome_white <span class="code-keyword">if</span> p == Player.WHITE</span>
+<span class="code-line">         <span class="code-keyword">else</span> -outcome_white <span class="code-keyword">for</span> p <span class="code-keyword">in</span> players]</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Only record a sample when it is the learner's turn (cross-teacher games skip the opponent's positions).</p>
+            <p class="tl">Encode the board to its 6- or 15-channel tensor &mdash; the network input.</p>
+            <p class="tl">The policy target is <code>move_probs</code>, MCTS's normalized visit counts over every move slot. Visited-more = trained-toward-more.</p>
+            <p class="tl">Remember whose turn it was so the value sign can be assigned later.</p>
+            <p class="tl">The whole game shares one outcome: white's score minus black's, divided by 3 (a win is 3 rows) and clamped to [-1, 1].</p>
+            <p class="tl">Flip the sign for black-to-move positions, so every value is "did the side to move end up winning?"</p>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        The terminal position is appended with a <strong>zero policy</strong>
+        (<code>self_play.py:2130</code>) so it trains only the value head. These three lists
+        flow straight into <code>trainer.add_game_experience(states, policies, values, &hellip;)</code>
+        (<code>trainer.py:116</code>) &mdash; note the buffer stores the <em>position-specific MCTS
+        root value</em> as the value target, not a re-derived margin.
+      </p>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Long games are subsampled before storage</strong>
+          <p>
+            In <code>GameExperience.add_game_experience()</code> at
+            <code>trainer.py:152</code>, any game with <code>len(states) &gt; 100</code> is thinned:
+            keep the first 20 and last 20 positions, then randomly sample up to 30 of the
+            middle ones (<code>trainer.py:154-172</code>). States, policies, values, and
+            move-numbers are all sliced by the same <code>keep_indices</code>, so they stay
+            aligned. This caps redundancy from long, low-information midgames before they
+            bloat the buffer. Toggle with the <code>subsample_long_games</code> constructor
+            flag.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 3: The two storage shapes -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>Storage: replay buffer vs. Parquet archive</h3>
+      <p>
+        The <strong>training path</strong> keeps experiences in RAM in
+        <code>GameExperience</code> (parallel lists <code>states / move_probs / values /
+        phases / move_numbers</code>, <code>trainer.py</code>); policies are downcast to
+        <code>float16</code> to halve buffer memory (<code>trainer.py:206</code>). The
+        <strong>analysis/audit path</strong> serializes full games to Parquet through
+        <code>ParquetDataStorage</code> (<code>self_play/data_storage.py:50</code>), batched
+        one file per <code>StorageConfig.batch_size</code> games (default 100).
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># game_recorder.py:17 — the per-turn stored record</span></span>
+<span class="code-line"><span class="code-keyword">@dataclass</span></span>
+<span class="code-line"><span class="code-keyword">class</span> <span class="code-function">GameTurn</span>:</span>
+<span class="code-line">    turn_number: int</span>
+<span class="code-line">    current_player: str</span>
+<span class="code-line">    move: Dict[str, Any]       <span class="code-comment"># serialized move</span></span>
+<span class="code-line">    features: Dict[str, Any]   <span class="code-comment"># heuristic feature dict</span></span>
+<span class="code-line">    timestamp: float</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># data_storage.py:77 — batch then flush to one parquet file</span></span>
+<span class="code-line"><span class="code-keyword">def</span> <span class="code-function">store_game_record</span>(self, game_record: GameRecord) -> <span class="code-keyword">None</span>:</span>
+<span class="code-line">    self.current_batch.append(game_record)</span>
+<span class="code-line">    <span class="code-keyword">if</span> len(self.current_batch) >= self.config.batch_size:</span>
+<span class="code-line">        self._write_batch()   <span class="code-comment"># df.to_parquet(...)</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">The Parquet schema is turn-grained: each <code>GameTurn</code> carries the move, the player, and the 7-feature heuristic dict for that position.</p>
+            <p class="tl">Note this archive stores <em>moves and features</em> for replay/analysis &mdash; not the (state-tensor, policy, value) training triples. Those live only in the in-RAM buffer.</p>
+            <p class="tl">Games accumulate in <code>current_batch</code>...</p>
+            <p class="tl">...and once <code>batch_size</code> (default 100) games are queued, the whole batch is flattened to a DataFrame and written as one Snappy-compressed Parquet file.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>_batch_to_dataframe()</code> (<code>data_storage.py:138</code>) flattens game-level
+        metadata onto every turn row and spreads <code>turn.features</code> into columns;
+        <code>flush()</code> (<code>data_storage.py:185</code>) writes any partial trailing batch.
+        If PyArrow/fastparquet are missing, the writer silently falls back to JSON
+        (<code>data_storage.py:105</code>).
+      </p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128190;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Parquet vs. JSON: ~500&times; smaller</strong>
+          <p>
+            Columnar Snappy-compressed Parquet stores a game in roughly <strong>~3&nbsp;KB</strong>
+            versus <strong>~1.5&nbsp;MB</strong> for the equivalent JSON &mdash; about a 500&times;
+            reduction, plus fast parallel loads via PyArrow. The 100K-game corpus is
+            ~344&nbsp;MB of Parquet. Always store training/analysis data as Parquet; JSON is the
+            degraded fallback only.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 4: The trainer loss -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>Consumer: the loss the trainer actually computes</h3>
+      <p>
+        <code>YinshTrainer</code> samples mixed batches and computes two losses with two
+        optimizers (the policy head and the value-head-plus-trunk are stepped separately so
+        the trunk gets both signals). The policy loss is a
+        <span class="term" data-definition="Cross-entropy between two probability distributions: penalizes the predicted move distribution for diverging from the MCTS visit-count target. Equivalent to -sum(target * log(predicted)).">cross-entropy</span>
+        against the MCTS visit distribution.
+      </p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># trainer.py:1120 — POLICY LOSS: cross-entropy vs MCTS target</span></span>
+<span class="code-line">scaled_logits = pred_logits / self.temperature</span>
+<span class="code-line">log_probs     = F.log_softmax(scaled_logits, dim=<span class="code-number">1</span>)</span>
+<span class="code-line">policy_loss   = -(target_probs * log_probs).sum(dim=<span class="code-number">1</span>).mean()</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># trainer.py:1170 — VALUE LOSS: classification mode</span></span>
+<span class="code-line"><span class="code-keyword">if</span> self.network.network.value_mode == <span class="code-string">'classification'</span>:</span>
+<span class="code-line">    ce_loss    = F.cross_entropy(value_logits_fp32, target_class)</span>
+<span class="code-line">    value_loss = ce_loss + discrimination_loss</span>
+<span class="code-line"><span class="code-comment"># trainer.py:1288 — VALUE LOSS: legacy regression mode</span></span>
+<span class="code-line"><span class="code-keyword">else</span>:</span>
+<span class="code-line">    value_loss_mse = F.mse_loss(pred_values.view(-<span class="code-number">1</span>), target_values_flat)</span>
+<span class="code-line">    value_loss     = value_loss_mse + variance_penalty</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># trainer.py:1352</span></span>
+<span class="code-line">total_loss = policy_loss + value_loss</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Temperature-scale the policy logits, then log-softmax across all 7433 move slots.</p>
+            <p class="tl">Cross-entropy: <code>-(target * log_pred)</code> summed over moves, averaged over the batch. <code>target_probs</code> is the MCTS visit distribution; only valid moves carry mass.</p>
+            <p class="tl">Value head is mode-switched. In <code>'classification'</code> mode the scalar outcome is bucketed into 7 ordinal classes (score-diff -3..+3) and trained with cross-entropy.</p>
+            <p class="tl">In legacy <code>'regression'</code> mode the value head instead predicts a scalar directly and is trained with MSE plus a variance penalty that discourages collapse.</p>
+            <p class="tl">The reported total is just the sum; in practice each head is back-propped through its own optimizer (see <code>trainer.py:1115-1331</code>).</p>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>value_mode</code> lives on the network (<code>YinshNetwork</code>) and is read at
+        <code>trainer.py:1170</code>; classification additionally maps the soft target with an
+        optional Gaussian spread (<code>soft_value_target_sigma</code>,
+        <code>trainer.py:1189</code>) to encode ordinal structure. Epoch-level accumulation and
+        the entropy-collapse watch run in <code>train_epoch</code>.
+      </p>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 5: Policies + config plumbing -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>The four move-selection policies</h3>
+      <p>
+        Self-play move choice is pluggable via <code>yinsh_ml/self_play/policies.py</code>
+        (<code>PolicyFactory.create_policy</code>, <code>policies.py:948</code>). Note that the
+        supervisor's high-throughput training path drives the batched
+        <code>self_play.py::MCTS</code> engine directly; these policy classes are the
+        configurable <code>SelfPlayRunner</code> / analysis path.
+      </p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">R</div>
+          <h4 class="pattern-title">RandomMovePolicy</h4>
+          <p class="pattern-desc">
+            Uniform baseline (<code>policies.py:26</code>) with a small
+            <code>rule_based_probability</code> of phase-aware nudges (prefer center on
+            placement, push toward the opponent). Used to seed exploration / sanity baselines.
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">H</div>
+          <h4 class="pattern-title">HeuristicPolicy</h4>
+          <p class="pattern-desc">
+            Wraps <code>HeuristicAgent</code> negamax + alpha-beta (<code>policies.py:305</code>).
+            Epsilon-greedy plus temperature softmax over scored moves; a fast mode skips search
+            for &lt;100&nbsp;ms/move. Decays exploration over games.
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">M</div>
+          <h4 class="pattern-title">MCTSPolicy</h4>
+          <p class="pattern-desc">
+            Neural-guided MCTS wrapper (<code>policies.py:598</code>) &mdash; now
+            <strong>removed/raises</strong>: it bound the dead <code>search/mcts.py</code> engine.
+            Production MCTS self-play goes through <code>self_play.py::MCTS.search_batch</code>.
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">A</div>
+          <h4 class="pattern-title">AdaptivePolicy</h4>
+          <p class="pattern-desc">
+            Transitions heuristic &rarr; neural by training progress
+            (<code>policies.py:720</code>): linear/exponential/step schedule over
+            <code>transition_steps</code>, gated by a neural-quality check before switching.
+          </p>
+        </div>
+      </div>
+
+      <h3>Config plumbing: YAML key &rarr; component</h3>
+      <p>
+        <code>scripts/run_training.py</code> loads one YAML (<code>load_config</code>,
+        <code>run_training.py:22</code>) and reads these keys into the supervisor / trainer:
+      </p>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">self_play.games_per_iteration</code>
+          <span class="badge-desc">Games generated per iteration &rarr; <code>train_iteration(num_games=&hellip;)</code> (<code>run_training.py:469,527</code>). Default 50.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">self_play.num_simulations</code>
+          <span class="badge-desc">MCTS sim budget per move &rarr; <code>mcts_simulations</code> on the supervisor (<code>run_training.py:499</code>). Default 96.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">self_play.mcts_batch_size</code>
+          <span class="badge-desc">Leaf-eval batch size for <code>search_batch</code> (<code>run_training.py:309</code>). Default 32.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">trainer.epochs_per_iteration</code>
+          <span class="badge-desc">Training epochs per iteration &rarr; <code>train_iteration(epochs=&hellip;)</code> (<code>run_training.py:470,527</code>). Default 40.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">trainer.batch_size</code>
+          <span class="badge-desc">Minibatch size for buffer sampling (<code>run_training.py:335</code>). Default 256.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">arena.promotion_threshold</code>
+          <span class="badge-desc">Wilson lower-bound win-rate the candidate must clear to promote (<code>run_training.py:437</code>, used by <code>_should_promote</code>, <code>supervisor.py:3012</code>). Default 0.55.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">num_iterations</code>
+          <span class="badge-desc">Outer loop length (<code>run_training.py:216,525</code>). Default 50; overridable with <code>-n</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">anchor.mcts_simulations</code>
+          <span class="badge-desc">Sims for the fixed pure-neural anchor eval (<code>run_training.py:461</code>). Default 64.</span>
+        </div>
+      </div>
+
+      <p>
+        The promotion decision is not a bare win-rate: <code>_should_promote</code>
+        (<code>supervisor.py:3012</code>) computes a Wilson 95% lower bound on the head-to-head
+        wins and promotes only if it exceeds <code>promotion_threshold</code>. A failed gate
+        does <em>not</em> hard-revert &mdash; the loop continues on the latest weights
+        (AlphaZero-style), optionally reloading <code>best_model.pt</code> for the next
+        self-play round.
+      </p>
+
+      <p class="module-closing">
+        That closes the producer&ndash;storage&ndash;consumer loop. <strong>Section 6</strong> covers
+        the cross-cutting infrastructure this seam leans on &mdash; memory pools, Zobrist/transposition
+        caching, encoder channel invariants, and the policy-size hard-fail contract that keeps a
+        stale checkpoint from silently corrupting training.
+      </p>
+    </div>
+
+  </div>
+</section>
+<section class="module" id="module-6">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">06</span>
+      <h2 class="module-title">Cross-Cutting Infrastructure &amp; Invariants</h2>
+      <p class="module-subtitle">Shared plumbing, and the contracts that break the build if you touch one side.</p>
+    </div>
+
+    <!-- ===================== SCREEN 1: Shared memory infra ===================== -->
+    <div class="screen animate-in">
+      <h3>Shared memory infrastructure</h3>
+      <p>
+        Three packages under <code>yinsh_ml/memory/</code> exist purely to reduce allocation
+        churn during self-play and training. None of them own behavior — they are
+        <span class="term" data-definition="An object that is constructed once and handed to other components, rather than each component allocating its own. The receiver uses it but does not own its lifecycle.">injected dependencies</span>:
+        the consumer accepts a pool through a constructor argument and threads it down. Know the
+        argument name and you know how to wire (or unwire) it.
+      </p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">🗃️</div>
+          <div>
+            <strong>GameStatePool &mdash; <code>yinsh_ml/memory/game_state_pool.py:199</code></strong>
+            <p>
+              Reuses <code>GameState</code> objects to cut GC pressure during deep search. Threaded
+              into the MCTS engine via the <code>game_state_pool=</code> arg
+              (<code>self_play.py:171</code> and <code>:1504</code>); when present,
+              <code>get()</code> / <code>return_game_state()</code> replace fresh allocations.
+              Also passed by the self-play game runner. <strong>Bypassed entirely</strong> when
+              <code>self_play.use_cpp_engine: true</code> &mdash; the C++ <code>State.clone()</code>
+              beats any pool reuse (<code>scripts/run_training.py:317</code>).
+            </p>
+          </div>
+        </div>
+
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">🧮</div>
+          <div>
+            <strong>TensorPool &mdash; <code>yinsh_ml/memory/tensor_pool.py:114</code></strong>
+            <p>
+              Reuses inference tensors for batched NN evaluation. Passed to the network via
+              <code>NetworkWrapper(tensor_pool=...)</code> (<code>wrapper.py:27</code>); the
+              wrapper draws policy/value buffers of shape <code>(batch, _policy_size)</code> from it
+              instead of calling <code>torch.zeros</code> each batch (<code>wrapper.py:239</code>).
+              Configured via <code>TensorPoolConfig</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">📈</div>
+          <div>
+            <strong>AdaptivePoolSizer &mdash; <code>yinsh_ml/memory/adaptive.py:197</code></strong>
+            <p>
+              Resizes pools at runtime from hit-rate/utilization windows
+              (<code>create_adaptive_pool_sizer()</code>, <code>adaptive.py:372</code>). Wraps a pool
+              rather than replacing it &mdash; the consumer still sees a plain
+              <code>GameStatePool</code>/<code>TensorPool</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-4)">⚡</div>
+          <div>
+            <strong>ZeroCopyTensorFactory &mdash; <code>yinsh_ml/memory/zero_copy.py:81</code></strong>
+            <p>
+              Builds pinned/shared-storage tensors for zero-copy host&rarr;GPU transfer, plus
+              <code>InPlaceOperations</code> (<code>zero_copy.py:255</code>) for buffer-reusing math.
+              A throughput optimization on the batched-inference path; not on the correctness path.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">🔌</div>
+        <div class="callout-content">
+          <strong class="callout-title">Pools are optional and default-None</strong>
+          <p>
+            Every consumer treats its pool arg as <code>Optional[...] = None</code> and guards with a
+            <code>_pool_enabled = pool is not None</code> flag (<code>self_play.py:278</code>). Code
+            paths must stay correct with the pool absent &mdash; the pool only changes
+            <em>where memory comes from</em>, never <em>what the result is</em>. A pool that returns
+            a stale, un-reset object is a silent correctness bug, not a performance one.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 2: Change-one-change-all invariants ===================== -->
+    <div class="screen animate-in">
+      <h3>Change-one-change-all invariants</h3>
+      <p>
+        These are the highest-risk edits in the codebase: a single constant or convention duplicated
+        across multiple files, where changing one side silently (or loudly) corrupts the other. Each
+        card names the invariant, the files on <strong>both</strong> sides, and the failure mode. The
+        canonical source for most of these is the <em>Foundational Rule Fixes</em> section of
+        <code>CLAUDE.md</code>.
+      </p>
+
+      <div class="step-cards">
+        <div class="step-card">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <strong>Policy size = 7433 = <code>StateEncoder().total_moves</code></strong>
+            <p>
+              <code>total_moves = 85 + 7140 + 85 + 123 = 7433</code>
+              (<code>utils/encoding.py:146</code>) defines the policy-head width in
+              <code>YinshNetwork</code> (<code>network/model.py</code>). On load,
+              <code>NetworkWrapper.load_model</code> compares the checkpoint's
+              <code>policy_head.7.weight</code> rows against the live encoder and
+              <strong>hard-fails</strong> on mismatch (<code>wrapper.py:473&ndash;503</code>).
+              <em>Failure mode:</em> old <code>8390</code>-slot checkpoints (pre-April-2026 REMOVE_MARKERS
+              fix) are not load-compatible &mdash; a clear <code>RuntimeError</code>, not a silent
+              wrong-move map.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <strong>Channel count: 6 (basic) vs 15 (enhanced) must agree across encoder &harr; model &harr; checkpoint</strong>
+            <p>
+              <code>StateEncoder</code> (6-ch, <code>encoding.py</code>) or
+              <code>EnhancedStateEncoder</code> (15-ch, <code>enhanced_encoding.py</code>) must match
+              <code>YinshNetwork(input_channels=...)</code> and the saved
+              <code>conv_block.0.weight</code> dim-1. The wrapper auto-detects channels from the
+              checkpoint (<code>wrapper.py:82&ndash;88</code>) and hard-fails on encoder mismatch
+              (<code>wrapper.py:428&ndash;443</code>). <em>Failure mode:</em> switching channel counts
+              requires <strong>regenerating supervised data + retraining</strong> &mdash; there is no
+              silent channel filtering.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <strong>Zobrist hash MUST include board + side-to-move + game phase</strong>
+            <p>
+              <code>ZobristHasher.hash_state</code> XORs in a <code>side_to_move_key</code> and a
+              per-phase key (<code>game/zobrist.py:114&ndash;119,178&ndash;185</code>), with O(1)
+              <code>toggle_side_to_move</code> / <code>toggle_phase</code> helpers.
+              <em>Failure mode:</em> drop either component and the transposition table
+              (<code>search/transposition_table.py</code>) returns <strong>wrong-position hits</strong>
+              &mdash; identical piece layouts with a different mover or phase collide and the cached
+              eval is silently wrong.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <strong>Channels 0&ndash;3 are side-normalized; recover the mover from the A1 sentinel on channel 5</strong>
+            <p>
+              The encoder writes pieces as &ldquo;current player first&rdquo; (channels 0&ndash;3),
+              then stamps a 0/1 side-to-move sentinel at off-board cell <strong>A1</strong>
+              (<code>row=0,col=0</code>) on channel 5 (<code>encoding.py:384&ndash;391</code>).
+              <code>decode_state</code> reads the mover from that sentinel
+              (<code>encoding.py:589&ndash;596</code>). <em>Failure mode:</em> any code that
+              re-flips colors by <code>current_player</code> double-inverts the board; A1 is off the
+              hex grid (column A only spans rows 2&ndash;5) so it never collides with real state and
+              survives D2 augmentation.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">5</div>
+          <div class="step-body">
+            <strong><code>DIRECTIONS</code> / <code>HEX_LINE_AXES</code> are the single source of truth for hex lines</strong>
+            <p>
+              <code>constants.py:96</code> (<code>DIRECTIONS</code>, 3 forward axes) and
+              <code>constants.py:127</code> (<code>HEX_LINE_AXES</code>, 6 signed) define every legal
+              line. The opposite-sign pseudo-diagonal <code>(1,&nbsp;-1)</code> / <code>(-1,&nbsp;1)</code>
+              is <strong>NOT</strong> a board line (<code>constants.py:84&ndash;87</code>).
+              <em>Failure mode:</em> reintroducing it (in <code>find_marker_rows</code> /
+              <code>is_valid_marker_sequence</code>) revives the pseudo-diagonal row bug &mdash; phantom
+              rows, illegal captures, and a policy-space size drift.
+            </p>
+          </div>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">6</div>
+          <div class="step-body">
+            <strong><code>value_mode</code> + <code>num_value_classes</code> must agree across wrapper, value head, and trainer loss</strong>
+            <p>
+              <code>NetworkWrapper(value_mode='classification'|'regression', num_value_classes=7)</code>
+              (<code>wrapper.py:28</code>) selects the value-head shape and the trainer's loss
+              (cross-entropy vs MSE). <code>load_model</code> hard-fails on a mode mismatch
+              (<code>wrapper.py:445&ndash;458</code>) and on a class-count mismatch
+              (<code>wrapper.py:465&ndash;472</code>). <em>Failure mode:</em> a regression checkpoint
+              loaded into a classification wrapper (or a class-count drift) &mdash; rejected with a
+              <code>RuntimeError</code> telling you to re-instantiate with the matching mode.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">⚠️</div>
+        <div class="callout-content">
+          <strong class="callout-title">All six are guarded, but only some loudly</strong>
+          <p>
+            Invariants 1, 2, and 6 throw at <code>load_model</code> time &mdash; you find out
+            immediately. Invariants 3, 4, and 5 fail <em>silently</em>: the program runs, produces
+            plausible numbers, and quietly trains on a corrupted target. Treat any edit to
+            <code>zobrist.py</code>, the encoder sentinel, or <code>constants.py</code> hex axes as a
+            full-test-suite change.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 3: Config → component map ===================== -->
+    <div class="screen animate-in">
+      <h3>Config sections &rarr; who reads them</h3>
+      <p>
+        Training is driven by a single <code>configs/*.yaml</code> parsed in
+        <code>scripts/run_training.py</code>. Top-level sections are read into <code>mode_settings</code>
+        and handed to <code>TrainingSupervisor</code>. The mapping below is the real key set
+        (line refs into <code>run_training.py</code>).
+      </p>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">encoding.type</code>
+          <span class="badge-desc">
+            <code>basic</code> (6-ch) or <code>enhanced</code> (15-ch); picks the encoder and the
+            network's <code>input_channels</code> &mdash; see invariant&nbsp;2. <code>:264&ndash;281</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">network</code>
+          <span class="badge-desc">
+            <code>value_head_type</code> = <code>spatial</code>|<code>gap</code>|<code>gap_v2</code>;
+            channel/block capacity is auto-detected from an init checkpoint. <code>:266,274</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">self_play</code>
+          <span class="badge-desc">
+            MCTS knobs: <code>evaluation_mode</code>, <code>num_simulations</code>, <code>c_puct</code>,
+            <code>mcts_batch_size</code>, <code>use_cpp_engine</code>, subtree reuse, temperature. <code>:258,293+</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">trainer</code>
+          <span class="badge-desc">
+            <code>batch_size</code>, <code>lr</code>, <code>epochs_per_iteration</code>,
+            <code>value_loss_weights</code>, EMA, augmentation, search-consistency. <code>:259,335+</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">arena</code>
+          <span class="badge-desc">
+            Gating / promotion: <code>promotion_threshold</code> (0.55),
+            <code>tournament_sliding_window</code>, <code>games_per_match</code>, gate-revert. <code>:260,437+</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">anchor</code>
+          <span class="badge-desc">
+            Fixed-strength eval: <code>enabled</code>, <code>num_games</code>, <code>depth</code>,
+            <code>mcts_enabled</code> &mdash; the primary strength metric. <code>:449&ndash;461</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">augmentation</code>
+          <span class="badge-desc">
+            <code>enabled</code> + <code>max_augmentations</code> (D2 dihedral expansion); falls back
+            to <code>trainer.*</code> keys. <code>:265,269&ndash;270</code>
+          </span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">export</code>
+          <span class="badge-desc">
+            <code>export_every</code> + <code>coreml_dir</code> for periodic CoreML
+            <code>.mlpackage</code> emission. <code>:253&ndash;255</code>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SCREEN 4: File tree ===================== -->
+    <div class="screen animate-in">
+      <h3>Cross-cutting packages &mdash; the shared object each provides</h3>
+      <p>
+        Where the shared plumbing lives. Each entry names the one object other modules reach for.
+      </p>
+
+      <div class="file-tree">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/memory/</span>
+          <span class="ft-desc">Allocation reuse; all consumers inject these as optional args</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">game_state_pool.py</span>
+              <span class="ft-desc">GameStatePool &rarr; MCTS game_state_pool= arg</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">tensor_pool.py</span>
+              <span class="ft-desc">TensorPool &rarr; NetworkWrapper(tensor_pool=)</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">adaptive.py</span>
+              <span class="ft-desc">AdaptivePoolSizer &mdash; runtime pool resizing</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">zero_copy.py</span>
+              <span class="ft-desc">ZeroCopyTensorFactory / InPlaceOperations</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/utils/</span>
+          <span class="ft-desc">Encoding + measurement shared by training and eval</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">encoding.py</span>
+              <span class="ft-desc">StateEncoder &mdash; total_moves=7433, A1 sentinel</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">enhanced_encoding.py</span>
+              <span class="ft-desc">EnhancedStateEncoder &mdash; 15-channel variant</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">metrics_logger.py</span>
+              <span class="ft-desc">MetricsLogger &mdash; training metrics sink</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">tournament.py</span>
+              <span class="ft-desc">Tournament harness for arena gating</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">elo_manager.py</span>
+              <span class="ft-desc">ELO ratings across checkpoint history</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/search/</span>
+          <span class="ft-desc">Search support (the MCTS engine itself lives in training/self_play.py)</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">transposition_table.py</span>
+              <span class="ft-desc">Zobrist-keyed position cache, depth-preferred</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">node_type.py</span>
+              <span class="ft-desc">EXACT / LOWER_BOUND / UPPER_BOUND bounds</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">README.md</span>
+              <span class="ft-desc">Authoritative Zobrist + TT documentation</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">📚</div>
+        <div class="callout-content">
+          <strong class="callout-title">Where the authoritative docs live</strong>
+          <p>
+            Start with <code>CLAUDE.md</code> &mdash; its <em>Foundational Rule Fixes</em> section is
+            the source of truth for invariants 1&ndash;6 and the 8390&rarr;7433 break. For the search
+            system, <code>yinsh_ml/search/README.md</code> covers Zobrist hashing and the
+            transposition table. <code>TECH_DEBT.md</code> records why the old
+            <code>search/mcts.py</code> engine was excised (one engine now). For the training direction,
+            <code>TRAINING_REFACTOR_PLAN.md</code>.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">🧭</div>
+        <div class="callout-content">
+          <strong class="callout-title">You&rsquo;ve reached the end &mdash; and the riskiest surface</strong>
+          <p>
+            Nice work walking the whole atlas. Remember the one thing this closing section exists to
+            burn in: the invariants above are duplicated truths spread across files. They are the
+            highest-risk edit surface in the repo &mdash; the policy size, channel count, Zobrist
+            composition, encoder sentinel, hex axes, and value-mode triple. When you touch one side,
+            grep for the other before you commit, and run the full suite. For everything else, three
+            files answer most questions: <code>CLAUDE.md</code>,
+            <code>scripts/run_training.py</code>, and <code>yinsh_ml/network/wrapper.py</code>.
+          </p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+  </main>
+
+  <script>
+/**
+ * CODEBASE-TO-COURSE — COMPLETE JS ENGINE
+ * Copy this file verbatim into the course output directory.
+ * Never regenerate it. It handles all interactivity generically.
+ *
+ * Engines included:
+ *  - Navigation & progress bar
+ *  - Scroll-triggered reveal animations
+ *  - Keyboard navigation
+ *  - Glossary tooltips
+ *  - Quiz (multiple-choice & scenario)
+ *  - Drag-and-drop matching
+ *  - Group chat animation
+ *  - Data flow / message flow animation
+ *  - Architecture diagram
+ *  - "Spot the bug" challenge
+ *  - Layer toggle
+ */
+(function () {
+  'use strict';
+
+  /* ── HELPERS ──────────────────────────────────────────────── */
+  function $(sel, ctx) { return (ctx || document).querySelector(sel); }
+  function $$(sel, ctx) { return Array.from((ctx || document).querySelectorAll(sel)); }
+
+  /* ── NAVIGATION & PROGRESS BAR ────────────────────────────── */
+  const progressBar = $('#progress-bar');
+  const navDots     = $$('.nav-dot');
+  const modules     = $$('.module');
+
+  function updateProgress() {
+    if (!progressBar) return;
+    const scrollTop    = window.scrollY;
+    const scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const pct          = scrollHeight > 0 ? (scrollTop / scrollHeight) * 100 : 0;
+    progressBar.style.width = pct + '%';
+    progressBar.setAttribute('aria-valuenow', Math.round(pct));
+    updateNavDots();
+  }
+
+  function updateNavDots() {
+    const scrollMid = window.scrollY + window.innerHeight / 2;
+    modules.forEach((mod, i) => {
+      const dot = navDots[i];
+      if (!dot) return;
+      const top    = mod.offsetTop;
+      const bottom = top + mod.offsetHeight;
+      if (scrollMid >= top && scrollMid < bottom) {
+        dot.classList.add('active');
+        dot.classList.remove('visited');
+      } else if (window.scrollY + window.innerHeight > top) {
+        dot.classList.remove('active');
+        dot.classList.add('visited');
+      } else {
+        dot.classList.remove('active', 'visited');
+      }
+    });
+  }
+
+  window.addEventListener('scroll', () => requestAnimationFrame(updateProgress), { passive: true });
+  updateProgress();
+
+  // Nav dot click → scroll to module
+  navDots.forEach(dot => {
+    dot.addEventListener('click', () => {
+      const target = $('#' + dot.dataset.target);
+      if (target) target.scrollIntoView({ behavior: 'smooth' });
+    });
+  });
+
+  /* ── KEYBOARD NAVIGATION ───────────────────────────────────── */
+  function currentModuleIndex() {
+    const scrollMid = window.scrollY + window.innerHeight / 2;
+    for (let i = 0; i < modules.length; i++) {
+      const top    = modules[i].offsetTop;
+      const bottom = top + modules[i].offsetHeight;
+      if (scrollMid >= top && scrollMid < bottom) return i;
+    }
+    return 0;
+  }
+
+  document.addEventListener('keydown', e => {
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      const next = modules[currentModuleIndex() + 1];
+      if (next) { next.scrollIntoView({ behavior: 'smooth' }); e.preventDefault(); }
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      const prev = modules[currentModuleIndex() - 1];
+      if (prev) { prev.scrollIntoView({ behavior: 'smooth' }); e.preventDefault(); }
+    }
+  });
+
+  /* ── SCROLL-TRIGGERED REVEAL ───────────────────────────────── */
+  const revealObserver = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+        revealObserver.unobserve(entry.target);
+      }
+    });
+  }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+
+  $$('.animate-in').forEach(el => revealObserver.observe(el));
+
+  // Stagger children
+  $$('.stagger-children').forEach(parent => {
+    Array.from(parent.children).forEach((child, i) => {
+      child.style.setProperty('--stagger-index', i);
+    });
+  });
+
+  /* ── GLOSSARY TOOLTIPS ─────────────────────────────────────── */
+  let activeTooltip = null;
+
+  function positionTooltip(term, tip) {
+    const rect     = term.getBoundingClientRect();
+    const tipWidth = Math.min(320, Math.max(200, window.innerWidth * 0.8));
+    let left = rect.left + rect.width / 2 - tipWidth / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tipWidth - 8));
+    tip.style.left  = left + 'px';
+    tip.style.width = tipWidth + 'px';
+    document.body.appendChild(tip);
+    const tipHeight = tip.offsetHeight;
+    if (rect.top - tipHeight - 12 < 0) {
+      tip.style.top = (rect.bottom + 8) + 'px';
+      tip.classList.add('flip');
+    } else {
+      tip.style.top = (rect.top - tipHeight - 8) + 'px';
+      tip.classList.remove('flip');
+    }
+  }
+
+  function showTooltip(term, tip) {
+    if (activeTooltip && activeTooltip !== tip) {
+      activeTooltip.classList.remove('visible');
+      activeTooltip.remove();
+    }
+    positionTooltip(term, tip);
+    requestAnimationFrame(() => tip.classList.add('visible'));
+    activeTooltip = tip;
+  }
+
+  function hideTooltip(tip) {
+    tip.classList.remove('visible');
+    setTimeout(() => { if (!tip.classList.contains('visible')) tip.remove(); }, 150);
+    if (activeTooltip === tip) activeTooltip = null;
+  }
+
+  $$('.term').forEach(term => {
+    const tip = document.createElement('span');
+    tip.className = 'term-tooltip';
+    tip.textContent = term.dataset.definition;
+
+    term.addEventListener('mouseenter', () => showTooltip(term, tip));
+    term.addEventListener('mouseleave', () => hideTooltip(tip));
+    term.addEventListener('click', e => {
+      e.stopPropagation();
+      tip.classList.contains('visible') ? hideTooltip(tip) : showTooltip(term, tip);
+    });
+  });
+
+  document.addEventListener('click', () => {
+    if (activeTooltip) { activeTooltip.classList.remove('visible'); activeTooltip.remove(); activeTooltip = null; }
+  });
+
+  /* ── QUIZ ENGINE ───────────────────────────────────────────── */
+  window.selectOption = function (btn) {
+    const block = btn.closest('.quiz-question-block');
+    $$('.quiz-option', block).forEach(o => o.classList.remove('selected'));
+    btn.classList.add('selected');
+  };
+
+  window.checkQuiz = function (containerId) {
+    const container = $('#' + containerId);
+    if (!container) return;
+    $$('.quiz-question-block', container).forEach(q => {
+      const selected  = $('.quiz-option.selected', q);
+      const feedback  = $('.quiz-feedback', q);
+      const correct   = q.dataset.correct;
+      const rightExp  = q.dataset.explanationRight  || '';
+      const wrongExp  = q.dataset.explanationWrong  || '';
+
+      if (!selected) {
+        feedback.textContent = 'Pick an answer first!';
+        feedback.className = 'quiz-feedback show warning';
+        return;
+      }
+      $$('.quiz-option', q).forEach(o => o.disabled = true);
+
+      if (selected.dataset.value === correct) {
+        selected.classList.add('correct');
+        feedback.innerHTML = '<strong>Exactly!</strong> ' + rightExp;
+        feedback.className = 'quiz-feedback show success';
+      } else {
+        selected.classList.add('incorrect');
+        const correctBtn = $(`.quiz-option[data-value="${correct}"]`, q);
+        if (correctBtn) correctBtn.classList.add('correct');
+        feedback.innerHTML = '<strong>Not quite.</strong> ' + wrongExp;
+        feedback.className = 'quiz-feedback show error';
+      }
+    });
+  };
+
+  window.resetQuiz = function (containerId) {
+    const container = $('#' + containerId);
+    if (!container) return;
+    $$('.quiz-option', container).forEach(o => {
+      o.classList.remove('selected', 'correct', 'incorrect');
+      o.disabled = false;
+    });
+    $$('.quiz-feedback', container).forEach(f => { f.className = 'quiz-feedback'; f.textContent = ''; });
+  };
+
+  /* ── DRAG-AND-DROP ENGINE ──────────────────────────────────── */
+  function initDnD(containerEl) {
+    if (!containerEl) return;
+    const chips = $$('.dnd-chip', containerEl);
+    const zones = $$('.dnd-zone', containerEl);
+
+    // Mouse (HTML5 Drag API)
+    chips.forEach(chip => {
+      chip.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/plain', chip.dataset.answer);
+        chip.classList.add('dragging');
+      });
+      chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
+    });
+
+    zones.forEach(zone => {
+      const target = $('.dnd-zone-target', zone);
+      if (!target) return;
+      target.addEventListener('dragover',  e => { e.preventDefault(); target.classList.add('drag-over'); });
+      target.addEventListener('dragleave', ()  => target.classList.remove('drag-over'));
+      target.addEventListener('drop', e => {
+        e.preventDefault();
+        target.classList.remove('drag-over');
+        const answer = e.dataTransfer.getData('text/plain');
+        const chip   = $(`.dnd-chip[data-answer="${answer}"]`, containerEl);
+        if (!chip) return;
+        target.textContent    = chip.textContent;
+        target.dataset.placed = answer;
+        chip.classList.add('placed');
+      });
+    });
+
+    // Touch
+    chips.forEach(chip => {
+      chip.addEventListener('touchstart', e => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        const ghost = chip.cloneNode(true);
+        ghost.classList.add('touch-ghost');
+        ghost.style.cssText = `position:fixed;z-index:9999;pointer-events:none;left:${touch.clientX - 40}px;top:${touch.clientY - 20}px;`;
+        document.body.appendChild(ghost);
+        chip._ghost  = ghost;
+        chip._answer = chip.dataset.answer;
+      }, { passive: false });
+
+      chip.addEventListener('touchmove', e => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        if (chip._ghost) {
+          chip._ghost.style.left = (touch.clientX - 40) + 'px';
+          chip._ghost.style.top  = (touch.clientY - 20) + 'px';
+        }
+        zones.forEach(z => { const t = $('.dnd-zone-target', z); if (t) t.classList.remove('drag-over'); });
+        const el = document.elementFromPoint(touch.clientX, touch.clientY);
+        const zt = el && el.closest('.dnd-zone-target');
+        if (zt) zt.classList.add('drag-over');
+      }, { passive: false });
+
+      chip.addEventListener('touchend', e => {
+        if (chip._ghost) { chip._ghost.remove(); chip._ghost = null; }
+        const touch = e.changedTouches[0];
+        const el    = document.elementFromPoint(touch.clientX, touch.clientY);
+        const zt    = el && el.closest('.dnd-zone-target');
+        if (zt) {
+          zt.textContent    = chip.textContent;
+          zt.dataset.placed = chip._answer;
+          chip.classList.add('placed');
+        }
+        zones.forEach(z => { const t = $('.dnd-zone-target', z); if (t) t.classList.remove('drag-over'); });
+      });
+    });
+  }
+
+  window.checkDnD = function (containerId) {
+    const container = $('#' + containerId);
+    if (!container) return;
+    $$('.dnd-zone', container).forEach(zone => {
+      const target  = $('.dnd-zone-target', zone);
+      if (!target || !target.dataset.placed) return;
+      if (target.dataset.placed === zone.dataset.correct) {
+        target.classList.add('correct-placed');
+      } else {
+        target.classList.add('incorrect-placed');
+      }
+    });
+  };
+
+  window.resetDnD = function (containerId) {
+    const container = $('#' + containerId);
+    if (!container) return;
+    $$('.dnd-zone-target', container).forEach(t => {
+      t.textContent = 'Drop here';
+      delete t.dataset.placed;
+      t.classList.remove('correct-placed', 'incorrect-placed');
+    });
+    $$('.dnd-chip', container).forEach(c => c.classList.remove('placed', 'dragging'));
+  };
+
+  // Auto-init all dnd containers
+  $$('.dnd-container').forEach(el => initDnD(el));
+
+  /* ── GROUP CHAT ENGINE ─────────────────────────────────────── */
+  function initChat(containerEl) {
+    if (!containerEl) return;
+    const messages    = $$('.chat-message', containerEl);
+    const typingEl    = $('.chat-typing', containerEl);
+    const typingAvEl  = $('#' + containerEl.id + '-typing-avatar') || $('.chat-avatar', typingEl);
+    const progressEl  = $('.chat-progress', containerEl);
+    let index = 0;
+
+    // Build actor map from messages
+    const actors = {};
+    messages.forEach(msg => {
+      const sender = msg.dataset.sender;
+      const avatar = $('.chat-avatar', msg);
+      if (avatar && !actors[sender]) {
+        actors[sender] = { initial: avatar.textContent.trim(), style: avatar.style.background };
+      }
+    });
+
+    function updateProgress() {
+      if (progressEl) progressEl.textContent = index + ' / ' + messages.length + ' messages';
+    }
+
+    function showNext() {
+      if (index >= messages.length) return;
+      const msg    = messages[index];
+      const sender = msg.dataset.sender;
+
+      if (typingEl && actors[sender]) {
+        if (typingAvEl) {
+          typingAvEl.textContent       = actors[sender].initial;
+          typingAvEl.style.background  = actors[sender].style;
+        }
+        typingEl.style.display = 'flex';
+      }
+
+      setTimeout(() => {
+        if (typingEl) typingEl.style.display = 'none';
+        msg.style.display = 'flex';
+        msg.style.animation = 'fadeSlideUp 0.3s var(--ease-out)';
+        index++;
+        updateProgress();
+      }, 800);
+    }
+
+    function showAll() {
+      const iv = setInterval(() => {
+        if (index >= messages.length) { clearInterval(iv); return; }
+        showNext();
+      }, 1200);
+    }
+
+    function reset() {
+      index = 0;
+      messages.forEach(m => { m.style.display = 'none'; m.style.animation = ''; });
+      if (typingEl) typingEl.style.display = 'none';
+      updateProgress();
+    }
+
+    // Bind controls
+    const nextBtn  = $('.chat-next-btn',  containerEl);
+    const allBtn   = $('.chat-all-btn',   containerEl);
+    const resetBtn = $('.chat-reset-btn', containerEl);
+    if (nextBtn)  nextBtn.addEventListener('click',  showNext);
+    if (allBtn)   allBtn.addEventListener('click',   showAll);
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+
+    updateProgress();
+  }
+
+  $$('.chat-window').forEach(el => initChat(el));
+
+  /* ── FLOW ANIMATION ENGINE ─────────────────────────────────── */
+  function initFlow(containerEl) {
+    if (!containerEl) return;
+    const stepsData  = JSON.parse(containerEl.dataset.steps || '[]');
+    const labelEl    = $('.flow-step-label', containerEl);
+    const progressEl = $('.flow-progress',   containerEl);
+    const packet     = $('.flow-packet',     containerEl);
+    let step = 0;
+
+    function updateProgress() {
+      if (progressEl) progressEl.textContent = 'Step ' + step + ' / ' + stepsData.length;
+    }
+
+    function animatePacket(fromId, toId) {
+      if (!packet) return;
+      const fromEl = $('#' + fromId);
+      const toEl   = $('#' + toId);
+      if (!fromEl || !toEl) return;
+      const fromR = fromEl.getBoundingClientRect();
+      const toR   = toEl.getBoundingClientRect();
+      const contR = containerEl.getBoundingClientRect();
+      const fx = fromR.left + fromR.width / 2  - contR.left;
+      const fy = fromR.top  + fromR.height / 2 - contR.top;
+      const tx = toR.left   + toR.width / 2    - contR.left;
+      const ty = toR.top    + toR.height / 2   - contR.top;
+      packet.style.setProperty('--packet-from-x', fx + 'px');
+      packet.style.setProperty('--packet-from-y', fy + 'px');
+      packet.style.setProperty('--packet-to-x',   tx + 'px');
+      packet.style.setProperty('--packet-to-y',   ty + 'px');
+      packet.style.display    = 'block';
+      packet.style.animation  = 'none';
+      packet.offsetHeight; // reflow
+      packet.style.animation  = 'packetMove 0.8s var(--ease-in-out) forwards';
+      setTimeout(() => { packet.style.display = 'none'; }, 850);
+    }
+
+    function next() {
+      if (step >= stepsData.length) return;
+      const s = stepsData[step];
+      $$('.flow-actor', containerEl).forEach(a => a.classList.remove('active'));
+      if (s.highlight) {
+        const hEl = $('#' + s.highlight, containerEl) || $('#flow-' + s.highlight);
+        if (hEl) hEl.classList.add('active');
+      }
+      if (s.packet && s.from && s.to) animatePacket('flow-' + s.from, 'flow-' + s.to);
+      if (labelEl) labelEl.textContent = s.label || '';
+      step++;
+      updateProgress();
+    }
+
+    function reset() {
+      step = 0;
+      $$('.flow-actor', containerEl).forEach(a => a.classList.remove('active'));
+      if (labelEl) labelEl.textContent = 'Click "Next Step" to begin';
+      if (packet)  packet.style.display = 'none';
+      updateProgress();
+    }
+
+    const nextBtn  = $('.flow-next-btn',  containerEl);
+    const resetBtn = $('.flow-reset-btn', containerEl);
+    if (nextBtn)  nextBtn.addEventListener('click',  next);
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+
+    updateProgress();
+  }
+
+  $$('.flow-animation').forEach(el => initFlow(el));
+
+  /* ── ARCHITECTURE DIAGRAM ──────────────────────────────────── */
+  $$('.arch-component').forEach(comp => {
+    comp.addEventListener('click', function () {
+      const diagram = this.closest('.arch-diagram');
+      $$('.arch-component', diagram).forEach(c => c.classList.remove('active'));
+      this.classList.add('active');
+      const descEl = $('.arch-description', diagram);
+      if (descEl) descEl.textContent = this.dataset.desc || '';
+    });
+  });
+
+  /* ── BUG CHALLENGE ─────────────────────────────────────────── */
+  window.checkBugLine = function (el, isCorrect) {
+    const challenge = el.closest('.bug-challenge');
+    const feedback  = $('.bug-feedback', challenge);
+    if (isCorrect) {
+      el.classList.add('correct');
+      feedback.innerHTML  = '<strong>Found it!</strong> ' + (el.dataset.explanation || '');
+      feedback.className  = 'bug-feedback show success';
+      $$('.bug-line', challenge).forEach(l => l.style.pointerEvents = 'none');
+    } else {
+      el.classList.add('incorrect');
+      feedback.innerHTML  = (el.dataset.hint || 'Not this line — keep looking...');
+      feedback.className  = 'bug-feedback show error';
+      setTimeout(() => {
+        el.classList.remove('incorrect');
+        feedback.className = 'bug-feedback';
+      }, 1800);
+    }
+  };
+
+  /* ── LAYER TOGGLE ──────────────────────────────────────────── */
+  window.showLayer = function (layerId, btn) {
+    const demo = btn ? btn.closest('.layer-demo') : null;
+    if (!demo) return;
+    $$('.layer', demo).forEach(l => l.style.display = 'none');
+    $$('.layer-tab', demo).forEach(t => t.classList.remove('active'));
+    const layer = $('#' + layerId);
+    if (layer) layer.style.display = 'block';
+    btn.classList.add('active');
+  };
+
+})();
+
+  </script>
+</body>
+</html>
