@@ -1,0 +1,104 @@
+# e24_phase1a_lr_1e-4.yaml — E24 Phase 1a (LR SWEEP, config-only, no build).
+#
+# ONE variable across the three sweep configs: trainer.lr = 0.0001.
+# Everything else is the reigning-champion recipe (faithful clone of
+# e19_rung1_depth.yaml = branchB1B2B3 = iter1_ema's loop), with two deliberate,
+# shared-across-arms resets vs e19:
+#   - num_simulations 800->200, late_simulations 400->100  (depth is NOT the lever
+#     here; E22/E19 showed depth treads water — keep it cheap + at champion default)
+#   - games_per_iteration 200->400  (E24 Phase 1a)
+#   - num_iterations -> 3            (short, cheap diagnostic)
+#
+# Guards held ON (all pre-existing config, no build): cosine LR + warmup_epochs 1,
+# tight promotion gate 0.55, revert_self_play_on_gate_failure: true (so any
+# degradation under a hotter LR cannot COMPOUND — this is the gate-confound test:
+# "1e-4 degrades" was confounded with the old loose 0.20 gate).
+#
+# Warm-start from iter1_ema (primary). Fresher-seed fallback arm: only if ALL
+# three LRs read flat (see docs/experiments/e24_phase1a.md). Launch via
+# scripts/e24_phase1a_sweep.sh.
+
+anchor:
+  depth: 1
+  enabled: true
+  max_moves_per_game: 150
+  num_games: 40
+  seed: 1337
+  skip_first_n_iterations: 1
+arena:
+  eval_report_both_modes: true
+  eval_seed: 20260601
+  games_per_match: 200
+  gate_revert_on_mtime_mismatch: fail
+  promotion_threshold: 0.55
+  raw_policy_temperature: 0.5
+  revert_self_play_on_gate_failure: true
+  tournament_sliding_window: 3
+augmentation:
+  enabled: true
+  max_augmentations: 4
+device: auto
+encoding:
+  type: enhanced
+export:
+  coreml_dir: models/coreml
+  export_every: 5
+network:
+  value_head_type: spatial
+num_iterations: 3
+phase_weights:
+  MAIN_GAME: 2.0
+  RING_PLACEMENT: 1.0
+  RING_REMOVAL: 0.5
+save_dir: runs_e24/lr_1e-4
+self_play:
+  annealing_steps: 30
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  enable_subtree_reuse: true
+  epsilon_mix_end: 0.0
+  epsilon_mix_iteration_end: 0.3
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_start: 0.25
+  epsilon_mix_taper_moves: 20
+  evaluation_mode: hybrid
+  final_temp: 0.1
+  fpu_reduction: 0.25
+  games_per_iteration: 400
+  heuristic_weight: 0.3
+  heuristic_weight_anneal_iterations: 5
+  heuristic_weight_end: 0.0
+  heuristic_weight_start: 0.5
+  initial_temp: 1.0
+  late_simulations: 100
+  max_depth: 150
+  mcts_batch_size: 64
+  num_simulations: 200
+  num_workers: 16
+  simulation_switch_ply: 20
+  temp_clamp_fraction: 0.6
+  use_batched_mcts: true
+  use_shared_evaluator: false
+  value_weight: 1.0
+trainer:
+  batch_size: 256
+  batches_per_epoch: auto
+  discrimination_weight: 0.0
+  ema_decay: 0.999
+  enable_autocast: true
+  epochs_per_iteration: 1
+  l2_reg: 0.0
+  lr: 0.0001
+  lr_schedule: cosine
+  max_buffer_size: 100000
+  max_oversampling: 4.0
+  search_consistency:
+    enabled: true
+  soft_value_target_sigma: 0.5
+  use_ema_for_eval: true
+  value_head_lr_factor: 5.0
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  warmup_epochs: 1
+version: 1
