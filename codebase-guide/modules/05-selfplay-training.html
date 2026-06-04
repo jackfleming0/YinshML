@@ -1,0 +1,222 @@
+<section class="module" id="module-5">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">05</span>
+      <h2 class="module-title">Learning From Experience</h2>
+      <p class="module-subtitle">The AI just played thousands of games against itself. Now what?</p>
+    </div>
+
+    <!-- SCREEN 1: The big idea -->
+    <div class="screen animate-in">
+      <h3>Playing against a mirror</h3>
+      <p>By now the agent can search a position and pick a move. But a player that never learns from its games never improves. The trick at the heart of this whole project is <strong>self-play</strong>: the network plays full games against a copy of itself, and every position it visits becomes a tiny lesson it can study afterward.</p>
+
+      <p>This is the loop that powers AlphaZero-style systems. There are no human game records, no labeled "correct moves" handed down by an expert. The data the network learns from is data it <em>generated itself</em> &mdash; and because each new version plays a little better than the last, the lessons keep getting harder and better. The system pulls itself up by its own bootstraps.</p>
+
+      <p>Three things happen in order: generate games, turn each position into a training example, then nudge the network toward those examples. Let's walk through the lifecycle of a single position as it travels from the board to a gradient update.</p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">Why self-play works at all</strong>
+          <p>The search (<span class="term" data-definition="Monte Carlo Tree Search: an algorithm that explores many possible move sequences and counts how often each first move gets visited. The more a move is explored, the more promising it looked.">MCTS</span>) is smarter than the raw network because it actually looks ahead. So the network learns to imitate a stronger version of itself &mdash; the search results &mdash; rather than just copying what it already believed. That gap is where improvement comes from.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: The data lifecycle flow -->
+    <div class="screen animate-in">
+      <h3>The lifecycle of one position</h3>
+      <p>Each game produces a stream of board positions. For every position the system records three things together &mdash; this trio is called an <span class="term" data-definition="A single training example bundling the board encoding, the move-probability target, and the eventual-outcome target. The three things the network learns to predict from one position.">experience tuple</span>: the <strong>state</strong> (the board, encoded as tensors), the <strong>policy target</strong> (which moves were worth considering), and the <strong>value target</strong> (did this side end up winning).</p>
+
+      <p>Walk through it step by step. Notice how a position born on the board ends up reshaping the network that created it.</p>
+
+      <div class="flow-animation" data-steps='[
+        {"highlight":"flow-actor-1","label":"SelfPlayRunner plays a full game; the agent searches each position with MCTS"},
+        {"highlight":"flow-actor-1","label":"Every position becomes a tuple: board state, policy target (MCTS visit counts), value target (who won)","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"GameExperience subsamples very long games, then holds the tuples in a replay buffer"},
+        {"highlight":"flow-actor-2","label":"Completed games are also written to disk as compact Parquet files","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"sample_batch draws a random mini-batch of tuples back out for training","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-4","label":"YinshTrainer runs one forward pass, computes policy + value loss, and takes a gradient step"},
+        {"highlight":"flow-actor-4","label":"The updated network plays the next round of self-play, a little stronger","packet":true,"from":"actor-4","to":"actor-1"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">🎮</div>
+            <span>Self-Play</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">📦</div>
+            <span>Replay Buffer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">💾</div>
+            <span>Parquet Store</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">🧠</div>
+            <span>Trainer</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to begin</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <p>The actors in that loop map directly to files: <code>yinsh_ml/self_play/game_runner.py</code> drives the games (<code>SelfPlayRunner</code>), <code>yinsh_ml/training/self_play.py</code> turns positions into tuples, <code>yinsh_ml/self_play/data_storage.py</code> writes Parquet, and <code>yinsh_ml/training/trainer.py</code> holds the replay buffer and the training step.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">📁</div>
+        <div class="callout-content">
+          <strong class="callout-title">Parquet vs JSON: about 500&times; smaller</strong>
+          <p>Games are stored in <span class="term" data-definition="A compact, columnar file format built for fast analytical reads. Stores columns together so loading just the values you need is fast and cheap.">Parquet</span>, not JSON. A single game lands at roughly <strong>3 KB</strong> versus about <strong>1.5 MB</strong> as JSON &mdash; a ~500&times; reduction. That is the difference between storing a hundred games and storing a hundred thousand.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 3: Where the targets come from -->
+    <div class="screen animate-in">
+      <h3>Where do the two targets come from?</h3>
+      <p>The <strong>state</strong> is the easy part: it is just the board encoded as a stack of tensors (covered in Module&nbsp;3). The two <em>targets</em> are where the cleverness lives, and they come from very different places.</p>
+
+      <p>The <strong>policy target</strong> is the <span class="term" data-definition="During MCTS, each candidate move is explored some number of times. A move explored 400 times out of 800 total gets a target probability of 0.5. Better moves get explored more, so the visit counts form a soft ranking of moves.">MCTS visit-count distribution</span>: a probability spread over moves, where moves the search explored more get more weight. Crucially this is a <em>better</em> policy than the raw network's first guess, because the search actually looked ahead before deciding what to explore. That is what the network chases.</p>
+
+      <p>The <strong>value target</strong> is the eventual game result from that position's point of view &mdash; a number reflecting whether the side to move went on to win, lose, or draw. A position from a game you won is labeled positive; one from a game you lost is labeled negative. Over millions of positions, the network learns to look at a board and estimate "am I winning here?"</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">🗺️</div>
+          <div>
+            <strong>State &mdash; the question</strong>
+            <p>The encoded board: rings, markers, valid moves, phase. What the network sees as input.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">🎯</div>
+          <div>
+            <strong>Policy target &mdash; the move answer</strong>
+            <p>MCTS visit counts as a probability distribution. "These were the moves worth thinking about."</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">🏆</div>
+          <div>
+            <strong>Value target &mdash; the outcome answer</strong>
+            <p>The eventual game result from this side's perspective. "This position led to a win/loss."</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">✂️</div>
+        <div class="callout-content">
+          <strong class="callout-title">Why subsample long games?</strong>
+          <p>In <code>GameExperience.add_game_experience</code>, games longer than <strong>100 moves</strong> are subsampled: keep the first 20 and last 20 positions, randomly sample ~30 from the middle. A 200-move game has a lot of near-identical mid-game positions &mdash; keeping all of them would flood the buffer with redundant, correlated examples and crowd out variety. Trimming keeps the data diverse.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 4: The two-headed loss in code -->
+    <div class="screen animate-in">
+      <h3>One network, two heads, two losses</h3>
+      <p>The network has two output <span class="term" data-definition="A head is a small output branch on top of the shared network body. This network has two: one predicts move probabilities, the other predicts the position value.">heads</span>, so training uses two losses that get summed together. The <strong>policy head</strong> learns with <span class="term" data-definition="A loss that measures how far a predicted probability distribution is from a target distribution. It is large when the network puts weight on moves the target ignored, and small when they match.">cross-entropy</span> against the MCTS distribution. The <strong>value head</strong> learns to match the game outcome. Here is the real policy loss from <code>trainer.py</code>.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">scaled_logits = pred_logits / self.temperature</span>
+<span class="code-line">log_probs = F.log_softmax(scaled_logits, dim=1)</span>
+<span class="code-line">policy_loss = -(target_probs * log_probs).sum(dim=1).mean()</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># value head, classification mode</span></span>
+<span class="code-line">log_probs = F.log_softmax(value_logits_fp32, dim=1)</span>
+<span class="code-line">ce_loss = -(target_dist * log_probs).sum(dim=1).mean()</span>
+<span class="code-line">value_loss = ce_loss + discrimination_loss</span>
+</code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Soften the raw move scores with a temperature knob first.</p>
+            <p class="tl">Turn them into log-probabilities the network is predicting.</p>
+            <p class="tl">Cross-entropy: punish the network wherever its move probabilities disagree with the MCTS visit counts. This is the policy loss.</p>
+            <p class="tl">&nbsp;</p>
+            <p class="tl">Now the value head, which predicts the outcome.</p>
+            <p class="tl">Same trick: log-probabilities, this time over discrete outcome buckets.</p>
+            <p class="tl">Compare against the game result and add a nudge that rewards confident (non-zero) predictions. This is the value loss.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>Both losses share one forward pass and are added into a single <code>total_loss</code> that backpropagates once. The shared body of the network therefore learns from <em>both</em> signals at the same time &mdash; "which move" and "am I winning" &mdash; which is exactly why one network can do both jobs. (The value head here uses a <span class="term" data-definition="Instead of predicting one number, the value head predicts a probability across a handful of discrete outcome buckets (score differences). This trains more stably than a raw regression target.">classification</span> framing over outcome buckets; a simpler setup would use plain <span class="term" data-definition="Mean Squared Error: average of the squared differences between prediction and target. The standard loss for predicting a single number.">MSE</span> toward the outcome.)</p>
+    </div>
+
+    <!-- SCREEN 5: Policies + quiz -->
+    <div class="screen animate-in">
+      <h3>Who actually picks the moves?</h3>
+      <p>Self-play needs a <em>move-selection policy</em> &mdash; the thing that decides what to play at each turn. The codebase ships four of them in <code>yinsh_ml/self_play/policies.py</code>, ranging from "pick anything" to "search hard, guided by the network." You mix them depending on what kind of training data you want.</p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎲</div>
+          <h4 class="pattern-title">Random</h4>
+          <p class="pattern-desc"><code>RandomMovePolicy</code> &mdash; picks a legal move at random (with a small rule-based nudge). The baseline: cheap, weak, useful for sanity checks and bootstrapping.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">📐</div>
+          <h4 class="pattern-title">Heuristic</h4>
+          <p class="pattern-desc"><code>HeuristicPolicy</code> &mdash; <span class="term" data-definition="A search that assumes both players play optimally, scoring a position as the best you can force given the opponent does the same. Alpha-beta pruning skips branches that cannot change the result.">negamax</span> search over the 7 learned features. No neural net needed; strong and fully on the CPU.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">🧠</div>
+          <h4 class="pattern-title">MCTS</h4>
+          <p class="pattern-desc"><code>MCTSPolicy</code> &mdash; tree search guided by the network's policy prior and value estimate. This is the policy that produces the rich visit-count targets training depends on.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">🔀</div>
+          <h4 class="pattern-title">Adaptive</h4>
+          <p class="pattern-desc"><code>AdaptivePolicy</code> &mdash; switches between the others based on training progress. Cheap policies early when the net is weak, stronger search later.</p>
+        </div>
+      </div>
+
+      <p>With the data lifecycle and the loss in hand, test the most important idea: where the training targets actually come from.</p>
+
+      <div class="quiz-container" id="quiz-module5">
+        <div class="quiz-question-block"
+             data-correct="option-b"
+             data-explanation-right="Right. The policy target is the MCTS visit-count distribution, and the value target is the eventual game result from that position's perspective. The network learns to imitate the search (which looked ahead) and to predict outcomes."
+             data-explanation-wrong="Think about what makes self-play improve. The policy target is not the network's own raw guess (that would teach it nothing new) and the value target is not a hand-coded score &mdash; it comes from how the game actually ended.">
+          <h3 class="quiz-question">In an experience tuple, where do the policy target and value target come from?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Both come from the raw network output at that position, before any search.</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>The policy target is the MCTS visit-count distribution; the value target is the eventual game outcome from that side's perspective.</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Both are hand-labeled by human YINSH experts before training.</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module5')">Check Answer</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module5')">Try Again</button>
+      </div>
+
+      <p>So the engine generates games, distills each position into a (state, policy, value) lesson, stores it compactly, and replays it into a two-headed gradient step &mdash; over and over, getting stronger each cycle. But something has to <em>orchestrate</em> all of this: decide when to stop self-play and start training, measure whether the new network is actually better, and run the tournaments that produce <span class="term" data-definition="A rating that goes up when you beat strong opponents and down when you lose. Used to track whether each new network version is genuinely improving.">ELO</span> scores. That conductor &mdash; plus a map for finding your way around the repo &mdash; is Module&nbsp;6.</p>
+    </div>
+
+  </div>
+</section>

@@ -1,0 +1,268 @@
+<section class="module" id="module-4">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">04</span>
+      <h2 class="module-title">The Search &harr; Evaluation Seam</h2>
+      <p class="module-subtitle">What MCTS is wired to, what it returns, and how leaves get scored.</p>
+    </div>
+
+    <!-- ============ SCREEN 1: The constructor seam ============ -->
+    <div class="screen animate-in">
+      <p>There is exactly one MCTS engine in the codebase:
+        <code class="badge-code">yinsh_ml/training/self_play.py::MCTS</code>. Its
+        constructor declares every collaborator the search leans on &mdash; the
+        network it queries at leaves, an optional
+        <span class="term" data-definition="The 7-feature differential position scorer in yinsh_ml/heuristics/evaluator.py. Returns a scalar advantage for the side to move.">heuristic evaluator</span>,
+        a memory pool, and an optional shared inference evaluator that coalesces
+        GPU calls across instances. Read the signature as the seam&apos;s contract.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">__init__</span>(<span class="code-property">self</span>,</span>
+<span class="code-line">    network: NetworkWrapper,</span>
+<span class="code-line">    evaluation_mode: str = <span class="code-string">"pure_neural"</span>,</span>
+<span class="code-line">    heuristic_evaluator: Optional[YinshHeuristics] = <span class="code-keyword">None</span>,</span>
+<span class="code-line">    heuristic_weight: float = <span class="code-string">0.5</span>,</span>
+<span class="code-line">    num_simulations: int = <span class="code-string">100</span>,</span>
+<span class="code-line">    c_puct: float = <span class="code-string">1.0</span>,</span>
+<span class="code-line">    ...</span>
+<span class="code-line">    game_state_pool: Optional[GameStatePool] = <span class="code-keyword">None</span>,</span>
+<span class="code-line">    evaluator=<span class="code-keyword">None</span>,  <span class="code-comment"># shared InferenceEvaluator</span></span>
+<span class="code-line">): ...</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>self_play.py:141</strong> &mdash; the single MCTS engine&apos;s constructor.</p>
+            <p class="tl"><code>network</code>: the <code>NetworkWrapper</code> queried for (policy logits, value) at every leaf. Held as <code>self.network</code>.</p>
+            <p class="tl"><code>evaluation_mode</code>: a string switch &mdash; <code>"pure_neural"</code>, <code>"pure_heuristic"</code>, or <code>"hybrid"</code> &mdash; that picks the leaf scorer.</p>
+            <p class="tl"><code>heuristic_evaluator</code>: a <code>YinshHeuristics</code> instance. Required for heuristic and hybrid modes; ignored in pure-neural.</p>
+            <p class="tl"><code>heuristic_weight</code>: the blend factor in hybrid mode. 0.0 = all network, 1.0 = all heuristic.</p>
+            <p class="tl"><code>num_simulations</code> / <code>c_puct</code>: rollout budget (early-game) and the PUCT exploration constant.</p>
+            <p class="tl"><code>game_state_pool</code>: optional <code>GameStatePool</code> for reusing per-sim <code>GameState</code> copies (less GC churn).</p>
+            <p class="tl"><code>evaluator</code>: optional shared <code>InferenceEvaluator</code>. When set, leaf batches route through it instead of <code>network.predict_batch</code> &mdash; it coalesces requests across MCTS instances (self_play.py:195&ndash;263).</p>
+          </div>
+        </div>
+      </div>
+
+      <p>What the engine <em>emits</em> is a visit-count policy. Both entry points
+        return an <code>np.ndarray</code> sized to
+        <code class="badge-code">StateEncoder().total_moves</code> (7433):</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">search</span>(<span class="code-property">self</span>, state: GameState,</span>
+<span class="code-line">           move_number: int) -&gt; np.ndarray:</span>
+<span class="code-line">    ...  <span class="code-comment"># one-leaf-at-a-time path</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">def</span> <span class="code-function">search_batch</span>(<span class="code-property">self</span>, state: GameState,</span>
+<span class="code-line">           move_number: int,</span>
+<span class="code-line">           batch_size: int = <span class="code-string">32</span>) -&gt; np.ndarray:</span>
+<span class="code-line">    ...  <span class="code-comment"># batched-leaf path (training/eval)</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>search() (self_play.py:616)</strong> &mdash; consumes a <code>GameState</code> + the outer-game move number (for temperature / Dirichlet tapering). Runs the budget of simulations, scoring one leaf per sim via <code>_evaluate_state</code>.</p>
+            <p class="tl">Returns a length-<code>total_moves</code> vector of root child visit counts (the improved policy that self-play samples its move from).</p>
+            <p class="tl"><strong>search_batch() (self_play.py:839)</strong> &mdash; same contract, but collects up to <code>batch_size</code> leaves before evaluating them in one network call. This is the path used in training and bulk evaluation; <code>search()</code> is the singleton fallback.</p>
+            <p class="tl"><code>move_number</code> drives the rollout budget (early vs late sims) and root Dirichlet-noise mixing &mdash; not just temperature.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SCREEN 2: Batched leaf-eval flow ============ -->
+    <div class="screen animate-in">
+      <h3>The batched leaf-evaluation loop</h3>
+      <p><code>search_batch</code> descends the tree per simulation, but instead of
+        scoring each leaf inline it queues the leaf&apos;s <code>GameState</code>.
+        When the queue fills (or the budget ends) it flushes through
+        <code>_evaluate_and_backup_batch</code> (self_play.py:1089), which calls
+        <code>predict_batch</code> once for the whole batch &mdash; or hands off to
+        the shared <code>evaluator</code> if one was injected. Step through it:</p>
+
+      <div class="flow-animation" id="flow-leaf-eval" data-steps='[
+        {"highlight":"flow-actor-1","label":"search_batch descends the tree per sim and bottoms out at an unexpanded leaf GameState"},
+        {"highlight":"flow-actor-1","label":"The leaf is queued into batch_leaves; sims keep running until batch_size leaves are collected"},
+        {"highlight":"flow-actor-1","label":"On flush MCTS hands the list of leaf states to the leaf scorer","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"InferenceEvaluator coalesces this batch with requests from other MCTS instances","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"NetworkWrapper.predict_batch runs one forward pass over all states"},
+        {"highlight":"flow-actor-3","label":"It returns (policy_logits_batch, values_batch) back up the chain","packet":true,"from":"actor-3","to":"actor-1"},
+        {"highlight":"flow-actor-1","label":"MCTS softmaxes each policy row into priors, expands the leaf, and backs the value up the search path"},
+        {"highlight":"flow-actor-1","label":"After all sims, root child visit counts become the returned policy vector over total_moves"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">M</div>
+            <span>MCTS (search_batch)</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">I</div>
+            <span>InferenceEvaluator</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">N</div>
+            <span>NetworkWrapper</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click &quot;Next Step&quot; to begin</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128279;</div>
+        <div class="callout-content">
+          <strong class="callout-title">The actual routing branch</strong>
+          <p>In <code>_evaluate_and_backup_batch</code> (self_play.py:1117&ndash;1120):
+            <code>if self.evaluator is not None: ...evaluator.evaluate_batch(states)</code>
+            <code>else: ...network.predict_batch(states)</code>. The shared
+            evaluator and <code>predict_batch</code> return the same shape, so the
+            only thing that changes is who runs the GPU call. Actor 2 is skipped
+            entirely when <code>evaluator</code> is <code>None</code>.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SCREEN 3: Mode switch + heuristic stack ============ -->
+    <div class="screen animate-in">
+      <h3>How <code>evaluation_mode</code> picks the leaf scorer</h3>
+      <p>The same string switch governs both leaf paths
+        (<code>_evaluate_state</code> at self_play.py:1307 for the singleton path,
+        <code>_evaluate_and_backup_batch</code> at 1111 for the batch). Three
+        branches:</p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">N</div>
+          <h4 class="pattern-title">pure_neural</h4>
+          <p class="pattern-desc">Leaf value and priors come entirely from the network. <code>predict_batch</code> logits are softmaxed into priors; the value head supplies the backed-up value. The heuristic evaluator is never touched.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">H</div>
+          <h4 class="pattern-title">pure_heuristic</h4>
+          <p class="pattern-desc"><code>YinshHeuristics.evaluate_position</code> scores each leaf (states evaluated individually &mdash; heuristics do not batch). Priors are a uniform distribution over legal moves.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">&#9878;</div>
+          <h4 class="pattern-title">hybrid</h4>
+          <p class="pattern-desc">Both run. With <code>w_h = heuristic_weight</code>, <code>w_n = 1 - w_h</code>: <code>value = w_n&middot;value_nn + w_h&middot;value_heuristic</code> and the priors blend the same way (self_play.py:1145&ndash;1160).</p>
+        </div>
+      </div>
+
+      <p>When the heuristic branch is live, it sits on top of a small stack &mdash;
+        each layer feeds the one above it:</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#127919;</div>
+          <div>
+            <strong>YinshHeuristics</strong> &mdash; <code>heuristics/evaluator.py</code>
+            <p><code>evaluate_position(state, player)</code> returns a differential scalar (positive = good for that player). The seam&apos;s entry point into the heuristic stack.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#129518;</div>
+          <div>
+            <strong>features.py</strong> &mdash; the 7 features
+            <p><code>extract_all_features(state, player)</code> (features.py:495) computes completed-runs differential, ring centrality, ring spread, potential runs, connected chains, ring mobility, edge proximity.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#9878;</div>
+          <div>
+            <strong>weight_manager.py</strong> &mdash; phase-specific weights
+            <p><code>WeightManager</code> (weight_manager.py:15) holds per-phase weight dicts keyed <code>early</code> / <code>mid</code> / <code>late</code>; features are weighted by the active phase.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#128338;</div>
+          <div>
+            <strong>phase_detection.py</strong> &mdash; classifies the phase
+            <p><code>detect_phase</code> / <code>get_phase_weights</code> map a <code>GameState</code> to its phase bucket so the weight manager knows which column to read.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Offense-only equilibrium risk</strong>
+          <p>All 7 heuristic features are attack-oriented and differential. Defense
+            is only captured <em>implicitly</em>: it shows up as the opponent&apos;s
+            term in the differential, which negamax can only act on at search depth
+            &ge;3. At depth 1&ndash;2 (shallow rollouts, pure-heuristic mode) the
+            engine can drift into one-sided attacking play with no defensive
+            response. The Trajectory tab of the live viewer exists to spot this
+            signature &mdash; sustained one-sided feature growth without reply.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SCREEN 4: Shared search infra ============ -->
+    <div class="screen animate-in">
+      <h3>Shared search infrastructure</h3>
+      <p>The heuristic engine has a sibling: <code>HeuristicAgent</code>
+        (<code>agents/heuristic_agent.py</code>), a pure negamax + alpha-beta player.
+        It does <em>not</em> reuse the MCTS engine, but it leans on the same
+        position-caching primitives &mdash; the transposition table and Zobrist
+        hasher &mdash; so improvements there pay off in both search paths.</p>
+
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">TranspositionTable</code>
+          <span class="badge-desc">search/transposition_table.py &mdash; Zobrist-keyed position cache. Depth-preferred replacement (keeps the deeper search), default <code>size_power=20</code> (2^20 = ~1M entries). Stores (value, best_move, depth, node_type) per <code>store()</code>.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">ZobristHasher.hash_state</code>
+          <span class="badge-desc">game/zobrist.py:359 &mdash; hashes board <em>and</em> side-to-move <em>and</em> game phase, so two identical layouts differing only in <code>current_player</code> or <code>phase</code> hash apart. The TT key.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">toggle_side_to_move</code>
+          <span class="badge-desc">game/zobrist.py:372 &mdash; O(1) incremental hash flip when only the side-to-move changes; avoids a full re-hash of the board.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">toggle_phase</code>
+          <span class="badge-desc">game/zobrist.py:392 &mdash; O(1) incremental flip when the game phase transitions (e.g. RING_PLACEMENT &rarr; MAIN_GAME).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">HeuristicAgent._negamax</code>
+          <span class="badge-desc">agents/heuristic_agent.py:316 &mdash; negamax + alpha-beta, probing the same TT via <code>_zobrist_hasher.hash_state</code> (heuristic_agent.py:327&ndash;328) and storing EXACT / LOWER_BOUND / UPPER_BOUND entries by the alpha-beta window.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">use_transposition_table</code>
+          <span class="badge-desc">agents/heuristic_agent.py:70 &mdash; on by default in <code>HeuristicAgentConfig</code>; <code>transposition_table_size_power</code> (default 20) and <code>zobrist_seed</code> are configurable alongside it.</span>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">There is exactly one MCTS engine</strong>
+          <p>The engine is <code>training/self_play.py::MCTS</code> &mdash; nothing
+            else. The old <code>search/mcts.py::MCTS</code> was a dead, broken
+            duplicate (uniform-random, never reached the network) and was excised
+            2026-05-21; see <code>TECH_DEBT.md</code>. If you find a reference to
+            <code>search/mcts.py</code>, it is stale. Edit the search behavior in
+            <code>self_play.py</code> and re-run the MCTS parity tests
+            (<code>test_mcts_serial_vs_batch_parity.py</code>, <code>test_subtree_reuse.py</code>).</p>
+        </div>
+      </div>
+
+      <p class="module-footer-note">Next: <strong>Section 5 &mdash; Self-Play
+        &harr; Storage &harr; Training</strong>, where the visit-count policy this
+        seam emits becomes a stored training target and flows back into the network
+        that scores these very leaves.</p>
+    </div>
+  </div>
+</section>

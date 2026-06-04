@@ -1,0 +1,302 @@
+<section class="module" id="module-4">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">04</span>
+      <h2 class="module-title">How the AI Thinks</h2>
+      <p class="module-subtitle">The net has a hunch about each move — but a hunch is not a plan. So the AI plays out many what-ifs.</p>
+    </div>
+
+    <!-- SCREEN 1: Intuition + the two search styles -->
+    <div class="screen animate-in">
+      <p>Imagine staring at a YINSH board. Your gut says "that ring looks strong" — but a strong-looking move can still lose three turns later. Good players do not trust the gut alone; they play the position forward in their head: <em>if I go here, they go there, then I can do this</em>. That forward simulation is what we call
+        <span class="term" data-definition="Game-tree search means exploring the tree of possible future positions: from the current board, every legal move leads to a child position, each of which has its own children, and so on. The AI walks this tree to judge which move leads to the best outcomes.">game-tree search</span>,
+        and it is the whole job of the code in this module.</p>
+
+      <p>YinshML uses two different search engines, suited to two different situations:</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#127922;</div>
+          <div>
+            <strong>MCTS &mdash; the explorer</strong>
+            <p>Runs many guided "rollouts" through promising lines, building a search tree shaped by the neural network and/or heuristics. Lives in <code>yinsh_ml/training/self_play.py</code> (class <code>MCTS</code>). This is the engine used to generate training data.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#9989;</div>
+          <div>
+            <strong>Negamax + alpha-beta &mdash; the calculator</strong>
+            <p>A classical brute-force search that examines moves to a fixed depth, pruning lines it can prove are irrelevant. Lives in <code>yinsh_ml/agents/heuristic_agent.py</code>. This is the pure, network-free opponent.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>The calculator uses
+        <span class="term" data-definition="Negamax is a compact way to write minimax search for two-player zero-sum games: instead of separate maximize and minimize steps, every node maximizes, and the child value is simply negated (what is good for me is exactly as bad for you). YinshML stores child values from the opponent perspective and negates on the way up.">negamax</span>
+        with
+        <span class="term" data-definition="Alpha-beta pruning skips branches that cannot change the final decision. Alpha is the best score the maximizer is already assured of; beta is the best the minimizer is assured of. When alpha meets or exceeds beta, the rest of that branch is irrelevant and is cut off, saving huge amounts of work.">alpha-beta pruning</span>
+        &mdash; it scores leaves with the heuristic evaluator and cuts off branches that cannot beat what it has already found.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128161;</div>
+        <div class="callout-content">
+          <strong class="callout-title">One engine, not two MCTS</strong>
+          <p>There used to be a second, broken MCTS in <code>search/mcts.py</code> that never actually reached the network. It was deleted. Today there is exactly one MCTS engine: <code>MCTS.search_batch()</code> is the batched path used in training, and <code>MCTS.search()</code> is the single-position path.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: The four phases of one MCTS iteration -->
+    <div class="screen animate-in">
+      <h3>One MCTS iteration, four phases</h3>
+      <p><span class="term" data-definition="Monte Carlo Tree Search builds a search tree one simulation at a time. Each simulation walks down from the root to a promising unexplored position, scores it, and feeds that score back up the path. After many simulations, the move that was explored most often is chosen.">MCTS</span>
+        does not search every move equally. It spends its budget where it matters by repeating one small loop &mdash; many times over. Each pass through the loop has four phases. Step through them below.</p>
+
+      <div class="flow-animation" id="mcts-flow" data-steps='[
+        {"highlight":"flow-actor-1","label":"SELECT: starting at the root, walk down the tree. At each node pick the child with the highest PUCT score, balancing what looks good so far against what is under-explored."},
+        {"highlight":"flow-actor-2","label":"SELECT continues until we reach a leaf: a position the tree has not expanded yet.","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"EXPAND: add that leaf as a new node in the tree, ready to receive a score and children."},
+        {"highlight":"flow-actor-3","label":"EVALUATE: score the leaf. Depending on evaluation_mode this is the neural network, the heuristic evaluator, or a blend of both.","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"The evaluator returns a value (how good is this position) and a policy (a prior hint over the next moves)."},
+        {"highlight":"flow-actor-4","label":"BACKUP: send that value back up the path, updating every node on the way. Each node remembers its visit count and running average value.","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-1","label":"BACKUP reaches the root. One iteration done. Repeat many times, then play the most-visited root move."}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">&#127795;</div>
+            <span>Root / tree</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">&#127809;</div>
+            <span>Leaf node</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">&#129504;</div>
+            <span>Evaluator</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">&#11014;</div>
+            <span>Backup path</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to walk through one MCTS iteration</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <p>The clever part is the SELECT step. The rule used to choose a child is called
+        <span class="term" data-definition="PUCT (Predictor + Upper Confidence bounds applied to Trees) is the formula MCTS uses to pick which child to explore. It adds two terms: Q, how good the child has looked so far, and U, an exploration bonus that is large for moves the network thinks are promising but that have been visited few times.">PUCT</span>.
+        It combines a "what we have learned" term (Q, the average value seen) with a "what we have not yet tried" bonus (U, biggest for high-prior, low-visit children). Early on, U dominates and the search spreads out; as visits accumulate, Q takes over and the search focuses.</p>
+    </div>
+
+    <!-- SCREEN 3: Code <-> English of the PUCT selection -->
+    <div class="screen animate-in">
+      <h3>Reading the selection formula</h3>
+      <p>Here is the heart of <code>_select_action</code> in the real MCTS code &mdash; the vectorized PUCT score it computes for every child at once. Do not worry about NumPy; read the right-hand column.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">scaled_q = self.value_weight * q_values</span>
+<span class="code-line">sqrt_parent = np.sqrt(parent_visit_count)</span>
+<span class="code-line">u_visited = c_puct * priors * sqrt_parent / (1.0 + visits)</span>
+<span class="code-line">u_unvisited = c_puct * priors * sqrt_parent_eps</span>
+<span class="code-line">u_values = np.where(visited_mask, u_visited, u_unvisited)</span>
+<span class="code-line">scores = scaled_q + u_values + noise</span>
+          </code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Q term:</strong> how good has this child looked across all the times we visited it.</p>
+            <p class="tl">The exploration bonus grows with the square root of how often we visited the parent.</p>
+            <p class="tl"><strong>U term for visited children:</strong> high when the network gave it a strong prior, but it shrinks each time we visit it (the <code>1 + visits</code> divisor).</p>
+            <p class="tl">A child we have never tried gets a clean exploration bonus with no shrink.</p>
+            <p class="tl">Pick the right formula per child: visited ones shrink, fresh ones do not.</p>
+            <p class="tl"><strong>Final score = exploit (Q) + explore (U) + a tiny random tiebreaker.</strong> The child with the highest score wins this step.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>One subtlety worth a glossary stop:
+        <span class="term" data-definition="First-Play Urgency (FPU) decides how to value a child that has never been visited, so it has no Q yet. YinshML uses a reduction: an unvisited child inherits the parent value minus a penalty (fpu_reduction, default 0.25), discouraging the search from blindly diving into every untried move.">First-Play Urgency</span>.
+        A child with zero visits has no average value to use, so MCTS estimates one: it takes the parent value and subtracts a small penalty (<code>fpu_reduction</code>, default 0.25). This stops the search from wandering into every untried branch at once.</p>
+    </div>
+
+    <!-- SCREEN 4: Heuristics + the failure mode -->
+    <div class="screen animate-in">
+      <h3>The 7 heuristic features</h3>
+      <p>When the search needs to score a position <em>without</em> the network (in <code>pure_heuristic</code> mode, or as the calculator agent leaf evaluation), it uses a hand-tuned
+        <span class="term" data-definition="A heuristic is a fast, approximate rule-of-thumb for judging a position, instead of an exact calculation. Here it is a weighted sum of seven board features learned from analyzing 100,000+ games.">heuristic</span>
+        evaluator in <code>yinsh_ml/heuristics/evaluator.py</code>. It scores a board as a weighted sum of seven features, learned from analysis of 100K+ games:</p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">&#127942;</div>
+          <h4 class="pattern-title">Completed Runs Differential <span style="opacity:0.6">0.239</span></h4>
+          <p class="pattern-desc">My finished 5-in-a-rows minus yours. The single most important signal &mdash; it is closest to actually winning.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">&#127919;</div>
+          <h4 class="pattern-title">Ring Centrality <span style="opacity:0.6">0.211</span></h4>
+          <p class="pattern-desc">How central my rings sit. Central rings reach more of the board and create more threats.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">&#8596;</div>
+          <h4 class="pattern-title">Ring Spread <span style="opacity:0.6">0.187</span></h4>
+          <p class="pattern-desc">How well my rings are distributed rather than clumped, keeping options open across the board.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">&#128300;</div>
+          <h4 class="pattern-title">Potential Runs <span style="opacity:0.6">0.171</span></h4>
+          <p class="pattern-desc">How many near-complete rows I am building &mdash; threats that could become completed runs soon.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">&#128279;</div>
+          <h4 class="pattern-title">Connected Marker Chains <span style="opacity:0.6">0.086</span></h4>
+          <p class="pattern-desc">Runs of my markers already linked together, the raw material for future rows.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">&#128257;</div>
+          <h4 class="pattern-title">Ring Mobility <span style="opacity:0.6">0.071</span></h4>
+          <p class="pattern-desc">How many moves my rings have available. More mobility means more flexibility.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">&#128205;</div>
+          <h4 class="pattern-title">Edge Proximity <span style="opacity:0.6">0.036</span></h4>
+          <p class="pattern-desc">A small penalty for hugging the board edge, where rings are cramped. The least influential feature.</p>
+        </div>
+      </div>
+
+      <p>These weights are <strong>phase-specific</strong>. The <code>weight_manager.py</code> swaps in different weight sets for the opening, middlegame, and endgame &mdash; mobility matters early, completed runs and center control matter late.</p>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;&#65039;</div>
+        <div class="callout-content">
+          <strong class="callout-title">The offense-only equilibrium trap</strong>
+          <p>Look closely: all seven features are <em>attack-oriented</em> and all <em>differential</em> (mine minus yours). There is no explicit "block their threat" feature. Defense is only captured <em>implicitly</em> &mdash; under negamax, blocking shows up because the opponent gains lower the differential a few plies ahead. This works at search depth &ge;3, but at depth 1&ndash;2 the search cannot see far enough and defense can collapse, with both sides racing to attack while ignoring each other. The live game viewer exists partly to catch exactly this failure signature.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: Transposition tables + Zobrist + quiz -->
+    <div class="screen animate-in">
+      <h3>Not searching the same position twice</h3>
+      <p>Different move orders often reach the <em>same</em> board. Re-searching it is wasted work. A
+        <span class="term" data-definition="A transposition table is a cache that maps a board position to the result already computed for it. When search reaches a position it has seen before, it reuses the stored value instead of searching it again. The name comes from transpositions: different move orders that lead to the same position.">transposition table</span>
+        (in <code>yinsh_ml/search/transposition_table.py</code>) caches each searched position so the calculator agent can reuse the result instantly.</p>
+
+      <p>The cache key comes from
+        <span class="term" data-definition="Zobrist hashing turns a whole board position into a single 64-bit number by XOR-ing together precomputed random values, one per piece-on-square. It updates in O(1) when a piece moves, and identical positions always produce the same number.">Zobrist hashing</span>.
+        Crucially, <code>ZobristHasher.hash_state</code> mixes in three things, not just the pieces:</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">current = self.hash_board(game_state.board)</span>
+<span class="code-line">current = self.toggle_side_to_move(game_state.current_player, current)</span>
+<span class="code-line">current = self.toggle_phase(game_state.phase, current)</span>
+<span class="code-line">return current</span>
+          </code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Start from the hash of the piece layout (XOR a random number for every piece on every square).</p>
+            <p class="tl">Mix in whose turn it is &mdash; the same layout is a different position if it is the other player to move.</p>
+            <p class="tl">Mix in the game phase &mdash; placement, main game, and ring-removal have different legal moves even with identical pieces.</p>
+            <p class="tl">The result is one 64-bit key. Two truly-different positions almost never collide.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128202;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Depth-preferred, and it pays off</strong>
+          <p>The table holds 2<sup>20</sup> (~1M) entries by default. When a slot is taken, it keeps the entry from the <em>deeper</em> search (depth-preferred replacement), since deeper results are more valuable. Typical hit rates land at 60&ndash;80% during tree search &mdash; most positions are answered from cache.</p>
+        </div>
+      </div>
+
+      <div class="quiz-container" id="quiz-module4">
+        <div class="quiz-question-block"
+             data-correct="option-b"
+             data-explanation-right="Right. evaluation_mode is a string constructor arg on MCTS; hybrid blends a neural value and policy with the heuristic via heuristic_weight."
+             data-explanation-wrong="Not quite. evaluation_mode selects HOW leaves are scored: only the heuristic, only the network, or a weighted blend of both.">
+          <h3 class="quiz-question">What do the three MCTS <code>evaluation_mode</code> values control?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>How many simulations to run per move</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>How a leaf is scored: pure_heuristic, pure_neural, or hybrid (a blend)</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Which player moves first in self-play</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-c"
+             data-explanation-right="Exactly. Different move orders reach the same board (a transposition); the table lets the search reuse the stored result instead of recomputing it."
+             data-explanation-wrong="Think about why the same board position keeps showing up: different sequences of moves can lead to it, and recomputing it each time is wasted work.">
+          <h3 class="quiz-question">Why does a transposition table speed up search?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It makes the neural network run on the GPU</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It increases the search depth automatically</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It caches already-searched positions, so repeated boards reached via different move orders are reused</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-a"
+             data-explanation-right="Correct. hash_state XORs in the board layout AND the side-to-move AND the game phase, so otherwise-identical layouts that differ in turn or phase hash differently."
+             data-explanation-wrong="Reread the hash_state snippet: it deliberately mixes in more than just the pieces, because the same layout can be a genuinely different position.">
+          <h3 class="quiz-question">What does <code>ZobristHasher.hash_state</code> include in the hash?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Board layout, side-to-move, and game phase</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Only the positions of the pieces</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>The full move history of the game</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module4')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module4')">Try Again</button>
+      </div>
+
+      <p>So now the AI can think: the network supplies hunches, MCTS turns hunches into plans, and the heuristic and transposition table keep the classical search fast and grounded. In <strong>Module 5</strong> we put this thinking to work &mdash; the AI plays many games against itself, and every move it searches becomes a fresh training example for the network.</p>
+    </div>
+  </div>
+</section>

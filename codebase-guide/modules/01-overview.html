@@ -1,0 +1,180 @@
+<section class="module" id="module-1">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">01</span>
+      <h2 class="module-title">What YinshML Actually Does</h2>
+      <p class="module-subtitle">A program that teaches itself to play a board game by playing against itself, millions of times, and keeping notes on what worked.</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Start with one command</h3>
+      <p>Before any architecture diagrams, here is the thing you will actually run:</p>
+
+      <div class="badge-list animate-in">
+        <div class="badge-item">
+          <code class="badge-code">python scripts/run_training.py</code>
+          <span class="badge-desc">Kicks off the whole learning loop: play games, learn from them, repeat.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">python run_large_scale_selfplay.py</code>
+          <span class="badge-desc">Just generates game data, without the learning step. Useful for building a dataset.</span>
+        </div>
+      </div>
+
+      <p>That first command is the front door to this entire codebase. YinshML is an
+        <span class="term" data-definition="A way of training a program where it learns from the results of its own actions (rewards and penalties), rather than from labeled examples. Like learning to ride a bike by falling over, not by reading a manual.">reinforcement learning</span>
+        framework for <strong>YINSH</strong>, an abstract strategy board game played on a hexagonal grid. The goal is to produce an agent that plays YINSH extremely well.</p>
+
+      <p>The twist: it learns with <em>no human games at all</em>. It is built in the style of
+        <span class="term" data-definition="A famous game-AI system from DeepMind that mastered chess and Go purely by playing against itself, with no human game data. YinshML borrows its core recipe.">AlphaZero</span>
+        — the agent starts knowing only the rules, plays against itself over and over, and gradually gets better by noticing which moves tend to lead to wins.</p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">The whole idea in one sentence</strong>
+          <p>Imagine a player who becomes superhuman purely by playing themselves a few million times and writing down, after every game, which positions turned out well. No coach, no opening book, no human games. That feedback loop is the entire system — everything in this repo exists to make that loop fast and stable.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The core loop</h3>
+      <p>Strip away the engineering and YinshML is a single loop that runs over and over. Each pass through it is called an <strong>iteration</strong>. Step through it below:</p>
+
+      <div class="flow-animation animate-in" id="flow-training-loop" data-steps='[
+        {"highlight":"flow-actor-1","label":"Self-play: the current agent plays full games against a copy of itself, choosing moves with a guided search."},
+        {"highlight":"flow-actor-1","label":"Every position visited is saved as an experience: the board state, the move probabilities the search found, and who eventually won.","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"Experience buffer: thousands of these (state, policy, value) tuples pile up, ready to learn from."},
+        {"highlight":"flow-actor-2","label":"The buffer feeds the neural network the lessons from all those games.","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"Train: the network adjusts its weights to better predict good moves (policy) and who will win (value)."},
+        {"highlight":"flow-actor-3","label":"The freshly trained network is sent to the arena to be tested.","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-4","label":"Evaluate: the new network plays a tournament against the previous best. If it wins clearly enough, it is promoted."},
+        {"highlight":"flow-actor-4","label":"The new champion becomes the agent for the next round, and the loop repeats — each cycle a little stronger.","packet":true,"from":"actor-4","to":"actor-1"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">♟</div>
+            <span>Self-Play</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">📦</div>
+            <span>Experience Buffer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">🧠</div>
+            <span>Train Network</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">🏆</div>
+            <span>Evaluate &amp; Keep</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to walk through one training iteration</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <p>Two pieces of jargon do all the heavy lifting here. A
+        <span class="term" data-definition="A move recommendation: a probability spread over all possible moves, saying how promising each one looks. Sums to 1, like dividing 100 percent of your attention across the options.">policy</span>
+        is the network saying "here is how good each possible move looks." A
+        <span class="term" data-definition="A single number estimating who is winning from this position, e.g. +1 if the side to move is expected to win, -1 if expected to lose. The network predicts it before the game is decided.">value</span>
+        is the network saying "from this position, I think this side is winning by about this much." The whole point of training is to make both predictions sharper over time.</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The six subsystems</h3>
+      <p>The loop above is orchestrated across six major parts of the codebase. Each card is a chunk of the repo you will meet in later modules:</p>
+
+      <div class="pattern-cards animate-in">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎲</div>
+          <h4 class="pattern-title">Game Engine</h4>
+          <p class="pattern-desc">The rules of YINSH in code: the board, legal moves, when the game is over, who won. Everything else sits on top of this. <code>yinsh_ml/game/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">🧠</div>
+          <h4 class="pattern-title">Neural Network</h4>
+          <p class="pattern-desc">Looks at a board and outputs two things: a policy (which moves look good) and a value (who is winning). This is the part that actually learns. <code>yinsh_ml/network/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">🔍</div>
+          <h4 class="pattern-title">Search / MCTS</h4>
+          <p class="pattern-desc">Looks ahead by simulating many possible futures, guided by the network, to pick a stronger move than the network alone would. <code>yinsh_ml/training/self_play.py</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">📐</div>
+          <h4 class="pattern-title">Heuristics</h4>
+          <p class="pattern-desc">Hand-crafted scoring rules (center control, marker chains, etc.) learned from 100K games. They give the search good instincts before the network is strong. <code>yinsh_ml/heuristics/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-5)">
+          <div class="pattern-icon" style="background: var(--color-actor-5)">♟</div>
+          <h4 class="pattern-title">Self-Play</h4>
+          <p class="pattern-desc">Runs games of the agent against itself and records every position as training data. The factory that produces experience. <code>yinsh_ml/self_play/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎛️</div>
+          <h4 class="pattern-title">Training Supervisor</h4>
+          <p class="pattern-desc">The conductor. Runs self-play, then training, then evaluation, then repeats — wiring all the pieces above into one loop. <code>yinsh_ml/training/supervisor.py</code></p>
+        </div>
+      </div>
+
+      <p>The
+        <span class="term" data-definition="The orchestrator class that runs one full self-play → train → evaluate cycle per iteration, and decides whether the new network is good enough to keep.">Training Supervisor</span>
+        is the one to anchor on. Its single method <code>train_iteration()</code> is one full turn of the loop, and its own docstring spells it out: "One full self-play → training → evaluation → model-selection cycle."</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">From command to loop, in code</h3>
+      <p>Here is the actual entry point — the tail of <code>scripts/run_training.py</code>. Notice how little there is: it builds the supervisor, then calls one method in a loop.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">supervisor = <span class="code-function">TrainingSupervisor</span>(</span>
+<span class="code-line">    network=network,</span>
+<span class="code-line">    mcts_simulations=<span class="code-function">int</span>(sp.get(<span class="code-string">"num_simulations"</span>, 96)),</span>
+<span class="code-line">    mode_settings=mode_settings,</span>
+<span class="code-line">)</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">for</span> it <span class="code-keyword">in</span> <span class="code-function">range</span>(start_iteration, num_iterations):</span>
+<span class="code-line">    summary = supervisor.<span class="code-function">train_iteration</span>(</span>
+<span class="code-line">        num_games=games_per_iteration,</span>
+<span class="code-line">        epochs=epochs_per_iteration,</span>
+<span class="code-line">    )</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Build the conductor that runs everything, handing it the freshly built neural network.</p>
+            <p class="tl">Tell its look-ahead search how hard to think per move — here, 96 simulated futures.</p>
+            <p class="tl">Pass in all the knobs from the config file (learning rate, how many games, and so on).</p>
+            <p class="tl">Now just repeat the loop, once per iteration, for as many rounds as configured (default 50).</p>
+            <p class="tl">Each call to <code>train_iteration</code> is one full turn of the wheel: play games, learn, get tested. That single line is the heartbeat of the whole project.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>Those knobs live in plain YAML at <code>configs/training.yaml</code>. For example, <code>num_iterations: 50</code> sets how many times the loop runs, <code>games_per_iteration: 50</code> sets how many self-play games feed each round, and <code>promotion_threshold: 0.55</code> sets the bar a new network must clear in the tournament to be crowned the new best. You tune the experiment by editing that file, not the code.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">📊</div>
+        <div class="callout-content">
+          <strong class="callout-title">How "is the new one actually better?" gets answered</strong>
+          <p>After training, the new network plays a head-to-head tournament against the reigning champion. Results feed an
+            <span class="term" data-definition="A rating system from chess: every player has a number, and beating a stronger opponent raises yours more than beating a weaker one. Lets you compare versions that never played each other directly.">ELO</span>
+            rating so you can track strength across versions on one scale. The network is only kept if it wins clearly enough — that gate is what makes the loop a ratchet that mostly goes up.</p>
+        </div>
+      </div>
+
+      <p>That is the 10,000-foot view: one command, one loop, six subsystems, getting stronger each pass. Everything rests on the rules of the game itself — so <strong>Module 2 dives into the Game Engine</strong>: the hexagonal board, how moves and captures work, and how a YINSH position is represented in code.</p>
+    </div>
+  </div>
+</section>

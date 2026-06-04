@@ -1,0 +1,1710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YinshML — A Guided Tour of the Codebase</title>
+
+  <!-- Google Fonts: Bricolage Grotesque · DM Sans · JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700;12..96,800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400;1,9..40,500&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="styles.css">
+
+  <style>
+    :root {
+      --color-accent:       #2A7B9B;
+      --color-accent-hover: #1F6280;
+      --color-accent-light: #E4F2F7;
+      --color-accent-muted: #5A9DB8;
+    }
+  </style>
+
+  <script src="main.js" defer></script>
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="progress-bar" id="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+    <div class="nav-inner">
+      <span class="nav-title">YinshML · Guided Tour</span>
+      <div class="nav-dots" id="nav-dots" role="tablist">
+        <button class="nav-dot" data-target="module-1" data-tooltip="What YinshML Is" role="tab" aria-label="Module 1: What YinshML Is"></button>
+        <button class="nav-dot" data-target="module-2" data-tooltip="The Game Engine" role="tab" aria-label="Module 2: The Game Engine"></button>
+        <button class="nav-dot" data-target="module-3" data-tooltip="Eyes &amp; Brain: Encoding + Network" role="tab" aria-label="Module 3: State Encoding and the Neural Network"></button>
+        <button class="nav-dot" data-target="module-4" data-tooltip="How the AI Thinks: Search" role="tab" aria-label="Module 4: Search — MCTS and Heuristics"></button>
+        <button class="nav-dot" data-target="module-5" data-tooltip="Learning Loop: Self-Play + Training" role="tab" aria-label="Module 5: The Self-Play and Training Loop"></button>
+        <button class="nav-dot" data-target="module-6" data-tooltip="Orchestration, Evaluation &amp; Finding Your Way" role="tab" aria-label="Module 6: Orchestration, Evaluation, and Navigating the Repo"></button>
+      </div>
+    </div>
+  </nav>
+
+  <main id="main">
+    <!-- modules/*.html content is assembled here by build.sh -->
+<section class="module" id="module-1">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">01</span>
+      <h2 class="module-title">What YinshML Actually Does</h2>
+      <p class="module-subtitle">A program that teaches itself to play a board game by playing against itself, millions of times, and keeping notes on what worked.</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Start with one command</h3>
+      <p>Before any architecture diagrams, here is the thing you will actually run:</p>
+
+      <div class="badge-list animate-in">
+        <div class="badge-item">
+          <code class="badge-code">python scripts/run_training.py</code>
+          <span class="badge-desc">Kicks off the whole learning loop: play games, learn from them, repeat.</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">python run_large_scale_selfplay.py</code>
+          <span class="badge-desc">Just generates game data, without the learning step. Useful for building a dataset.</span>
+        </div>
+      </div>
+
+      <p>That first command is the front door to this entire codebase. YinshML is an
+        <span class="term" data-definition="A way of training a program where it learns from the results of its own actions (rewards and penalties), rather than from labeled examples. Like learning to ride a bike by falling over, not by reading a manual.">reinforcement learning</span>
+        framework for <strong>YINSH</strong>, an abstract strategy board game played on a hexagonal grid. The goal is to produce an agent that plays YINSH extremely well.</p>
+
+      <p>The twist: it learns with <em>no human games at all</em>. It is built in the style of
+        <span class="term" data-definition="A famous game-AI system from DeepMind that mastered chess and Go purely by playing against itself, with no human game data. YinshML borrows its core recipe.">AlphaZero</span>
+        — the agent starts knowing only the rules, plays against itself over and over, and gradually gets better by noticing which moves tend to lead to wins.</p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">The whole idea in one sentence</strong>
+          <p>Imagine a player who becomes superhuman purely by playing themselves a few million times and writing down, after every game, which positions turned out well. No coach, no opening book, no human games. That feedback loop is the entire system — everything in this repo exists to make that loop fast and stable.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The core loop</h3>
+      <p>Strip away the engineering and YinshML is a single loop that runs over and over. Each pass through it is called an <strong>iteration</strong>. Step through it below:</p>
+
+      <div class="flow-animation animate-in" id="flow-training-loop" data-steps='[
+        {"highlight":"flow-actor-1","label":"Self-play: the current agent plays full games against a copy of itself, choosing moves with a guided search."},
+        {"highlight":"flow-actor-1","label":"Every position visited is saved as an experience: the board state, the move probabilities the search found, and who eventually won.","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"Experience buffer: thousands of these (state, policy, value) tuples pile up, ready to learn from."},
+        {"highlight":"flow-actor-2","label":"The buffer feeds the neural network the lessons from all those games.","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"Train: the network adjusts its weights to better predict good moves (policy) and who will win (value)."},
+        {"highlight":"flow-actor-3","label":"The freshly trained network is sent to the arena to be tested.","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-4","label":"Evaluate: the new network plays a tournament against the previous best. If it wins clearly enough, it is promoted."},
+        {"highlight":"flow-actor-4","label":"The new champion becomes the agent for the next round, and the loop repeats — each cycle a little stronger.","packet":true,"from":"actor-4","to":"actor-1"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">♟</div>
+            <span>Self-Play</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">📦</div>
+            <span>Experience Buffer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">🧠</div>
+            <span>Train Network</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">🏆</div>
+            <span>Evaluate &amp; Keep</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to walk through one training iteration</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <p>Two pieces of jargon do all the heavy lifting here. A
+        <span class="term" data-definition="A move recommendation: a probability spread over all possible moves, saying how promising each one looks. Sums to 1, like dividing 100 percent of your attention across the options.">policy</span>
+        is the network saying "here is how good each possible move looks." A
+        <span class="term" data-definition="A single number estimating who is winning from this position, e.g. +1 if the side to move is expected to win, -1 if expected to lose. The network predicts it before the game is decided.">value</span>
+        is the network saying "from this position, I think this side is winning by about this much." The whole point of training is to make both predictions sharper over time.</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">The six subsystems</h3>
+      <p>The loop above is orchestrated across six major parts of the codebase. Each card is a chunk of the repo you will meet in later modules:</p>
+
+      <div class="pattern-cards animate-in">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎲</div>
+          <h4 class="pattern-title">Game Engine</h4>
+          <p class="pattern-desc">The rules of YINSH in code: the board, legal moves, when the game is over, who won. Everything else sits on top of this. <code>yinsh_ml/game/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">🧠</div>
+          <h4 class="pattern-title">Neural Network</h4>
+          <p class="pattern-desc">Looks at a board and outputs two things: a policy (which moves look good) and a value (who is winning). This is the part that actually learns. <code>yinsh_ml/network/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">🔍</div>
+          <h4 class="pattern-title">Search / MCTS</h4>
+          <p class="pattern-desc">Looks ahead by simulating many possible futures, guided by the network, to pick a stronger move than the network alone would. <code>yinsh_ml/training/self_play.py</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">📐</div>
+          <h4 class="pattern-title">Heuristics</h4>
+          <p class="pattern-desc">Hand-crafted scoring rules (center control, marker chains, etc.) learned from 100K games. They give the search good instincts before the network is strong. <code>yinsh_ml/heuristics/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-5)">
+          <div class="pattern-icon" style="background: var(--color-actor-5)">♟</div>
+          <h4 class="pattern-title">Self-Play</h4>
+          <p class="pattern-desc">Runs games of the agent against itself and records every position as training data. The factory that produces experience. <code>yinsh_ml/self_play/</code></p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎛️</div>
+          <h4 class="pattern-title">Training Supervisor</h4>
+          <p class="pattern-desc">The conductor. Runs self-play, then training, then evaluation, then repeats — wiring all the pieces above into one loop. <code>yinsh_ml/training/supervisor.py</code></p>
+        </div>
+      </div>
+
+      <p>The
+        <span class="term" data-definition="The orchestrator class that runs one full self-play → train → evaluate cycle per iteration, and decides whether the new network is good enough to keep.">Training Supervisor</span>
+        is the one to anchor on. Its single method <code>train_iteration()</code> is one full turn of the loop, and its own docstring spells it out: "One full self-play → training → evaluation → model-selection cycle."</p>
+    </div>
+
+    <div class="screen animate-in">
+      <h3 class="screen-heading">From command to loop, in code</h3>
+      <p>Here is the actual entry point — the tail of <code>scripts/run_training.py</code>. Notice how little there is: it builds the supervisor, then calls one method in a loop.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">supervisor = <span class="code-function">TrainingSupervisor</span>(</span>
+<span class="code-line">    network=network,</span>
+<span class="code-line">    mcts_simulations=<span class="code-function">int</span>(sp.get(<span class="code-string">"num_simulations"</span>, 96)),</span>
+<span class="code-line">    mode_settings=mode_settings,</span>
+<span class="code-line">)</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-keyword">for</span> it <span class="code-keyword">in</span> <span class="code-function">range</span>(start_iteration, num_iterations):</span>
+<span class="code-line">    summary = supervisor.<span class="code-function">train_iteration</span>(</span>
+<span class="code-line">        num_games=games_per_iteration,</span>
+<span class="code-line">        epochs=epochs_per_iteration,</span>
+<span class="code-line">    )</span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Build the conductor that runs everything, handing it the freshly built neural network.</p>
+            <p class="tl">Tell its look-ahead search how hard to think per move — here, 96 simulated futures.</p>
+            <p class="tl">Pass in all the knobs from the config file (learning rate, how many games, and so on).</p>
+            <p class="tl">Now just repeat the loop, once per iteration, for as many rounds as configured (default 50).</p>
+            <p class="tl">Each call to <code>train_iteration</code> is one full turn of the wheel: play games, learn, get tested. That single line is the heartbeat of the whole project.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>Those knobs live in plain YAML at <code>configs/training.yaml</code>. For example, <code>num_iterations: 50</code> sets how many times the loop runs, <code>games_per_iteration: 50</code> sets how many self-play games feed each round, and <code>promotion_threshold: 0.55</code> sets the bar a new network must clear in the tournament to be crowned the new best. You tune the experiment by editing that file, not the code.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">📊</div>
+        <div class="callout-content">
+          <strong class="callout-title">How "is the new one actually better?" gets answered</strong>
+          <p>After training, the new network plays a head-to-head tournament against the reigning champion. Results feed an
+            <span class="term" data-definition="A rating system from chess: every player has a number, and beating a stronger opponent raises yours more than beating a weaker one. Lets you compare versions that never played each other directly.">ELO</span>
+            rating so you can track strength across versions on one scale. The network is only kept if it wins clearly enough — that gate is what makes the loop a ratchet that mostly goes up.</p>
+        </div>
+      </div>
+
+      <p>That is the 10,000-foot view: one command, one loop, six subsystems, getting stronger each pass. Everything rests on the rules of the game itself — so <strong>Module 2 dives into the Game Engine</strong>: the hexagonal board, how moves and captures work, and how a YINSH position is represented in code.</p>
+    </div>
+  </div>
+</section>
+<section class="module" id="module-2">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">02</span>
+      <h2 class="module-title">The Board and the Rules</h2>
+      <p class="module-subtitle">How a hexagonal board game becomes clean, testable Python — pieces, phases, and the one bug that hid in plain sight.</p>
+    </div>
+
+    <!-- SCREEN 1: Mental model of the board -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Picture the board first</h3>
+
+      <p>Before a single line of code makes sense, you need the mental picture. YINSH is played on a
+        <span class="term" data-definition="A board made of hexagons (six-sided cells) packed together. Unlike a square chessboard where you move up/down/left/right, a hex grid gives you three natural straight-line directions instead of four.">hexagonal grid</span>
+        — not a square chessboard. The code models it as an 11&times;11 coordinate space, but the playing
+        surface is a diamond cut out of that square: only <strong>85 of the 121 cells are real</strong>. The
+        corners are empty.</p>
+
+      <p>Each column (lettered <code>A</code> through <code>K</code>) holds a different number of valid
+        rows, and those counts form the diamond shape: <code>[4, 7, 8, 9, 10, 9, 10, 9, 8, 7, 4]</code>.
+        Column <code>A</code> only has rows 2&ndash;5; the fat middle columns reach all the way across.
+        This is why you'll constantly see <code>is_valid_position()</code> guarding the code — most of the
+        coordinate plane simply isn't on the board.</p>
+
+      <p>Two players, <span class="term" data-definition="One of the two players. In code Player.WHITE is the integer 1 and Player.BLACK is -1, so flipping sides is as cheap as multiplying by -1.">WHITE and BLACK</span>,
+        share the board. Each owns two kinds of pieces: <span class="term" data-definition="A ring is a player's movable piece. You start with 5. Rings slide in straight lines and are how you actually make moves — markers can't move on their own.">rings</span>
+        (the things you actually move) and <span class="term" data-definition="A marker is a small token that gets dropped onto the board when a ring leaves a square. Markers flip color when a ring jumps over them, and lining up five of your color is how you score.">markers</span>
+        (tokens that get left behind and flip color). Hold those two ideas — rings move, markers accumulate —
+        and the rest of the engine falls into place.</p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">Why integers for players?</strong>
+          <p><code>Player.WHITE = 1</code> and <code>Player.BLACK = -1</code> isn't arbitrary. Encoding the
+          two sides as <code>+1 / -1</code> means "the other player" is just multiplication by &minus;1, and a
+          board can be flipped to the current player's perspective by sign math instead of branching. This
+          tiny choice ripples all the way up into how the neural network sees positions in Module 3.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: The files -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Six files, one game engine</h3>
+
+      <p>Everything about the rules lives in <code>yinsh_ml/game/</code>. There's no AI here yet — this is the
+        pure, deterministic referee that the search algorithms and neural network sit on top of. Each file
+        has a single, sharp job:</p>
+
+      <div class="file-tree">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/game/</span>
+          <span class="ft-desc">The rules of YINSH, as plain Python — no machine learning</span>
+          <div class="ft-children">
+            <div class="ft-file">
+              <span class="ft-name">constants.py</span>
+              <span class="ft-desc">Board geometry &amp; rule numbers: the 85 valid positions, the hex directions, 5 rings per player, 5 markers per row, 3 rows to win</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">types.py</span>
+              <span class="ft-desc">The vocabulary: Move, MoveType, GamePhase enums — small, frozen dataclasses everything else passes around</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">board.py</span>
+              <span class="ft-desc">Where the pieces actually are. Places/moves pieces, flips markers when a ring jumps them, finds completed rows</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">game_state.py</span>
+              <span class="ft-desc">The referee: whose turn it is, the current phase, move history, win/stalemate detection, applying a move</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">moves.py</span>
+              <span class="ft-desc">Move generation — given a state, enumerate every legal move a player could make right now</span>
+            </div>
+            <div class="ft-file">
+              <span class="ft-name">zobrist.py</span>
+              <span class="ft-desc">A fast fingerprint of a position (a single integer hash) so the search can recognize "seen this before" instantly</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p>A useful way to read the dependency arrow: <code>constants</code> and <code>types</code> define the
+        nouns and numbers, <code>board</code> holds the physical state, <code>game_state</code> is the rules
+        engine that orchestrates everything, and <code>moves</code> + <code>zobrist</code> are services the
+        higher layers (search, training) lean on heavily.</p>
+    </div>
+
+    <!-- SCREEN 3: The phases -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">A game in three acts</h3>
+
+      <p>YINSH unfolds in distinct <span class="term" data-definition="A game phase is a named stage of the game with its own legal moves. YINSH cycles through placing rings, normal play, and removing a ring after you score — the engine tracks which phase you're in so it knows what moves are even allowed.">phases</span>,
+        and the engine encodes them as a <code>GamePhase</code> enum. The phase decides which moves are legal,
+        so almost every method in <code>game_state.py</code> branches on it. Here is the whole arc:</p>
+
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="flow-step-num">1</div>
+          <p><strong>RING_PLACEMENT</strong><br>Players alternate dropping their 5 rings onto empty cells. When all 10 are down, the phase flips automatically.</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">2</div>
+          <p><strong>MAIN_GAME</strong><br>Move a ring in a straight line. It leaves a marker behind and flips any markers it jumps over. The real game.</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">3</div>
+          <p><strong>RING_REMOVAL</strong><br>Made a <span class="term" data-definition="A run is five (or more) of your own markers in an unbroken straight line along a hex axis. Completing one lets you remove the five markers and one of your rings — and scores a point.">run</span> of 5? Remove those markers and lift one of your own rings off the board to score.</p>
+        </div>
+        <div class="flow-arrow">&rarr;</div>
+        <div class="flow-step">
+          <div class="flow-step-num">🏆</div>
+          <p><strong>Win</strong><br>Removing 3 rings (<code>POINTS_TO_WIN = 3</code>) ends the game. Steps 2&ndash;3 loop until someone gets there.</p>
+        </div>
+      </div>
+
+      <p>The counterintuitive bit: removing your <em>own</em> ring is how you win. Every score costs you a piece,
+        so each point makes you slightly weaker — the late game is a tense balance of attack and self-sacrifice.
+        The enum also has <code>ROW_COMPLETION</code> and <code>GAME_OVER</code> states for the in-between
+        bookkeeping moments.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">🔁</div>
+        <div class="callout-content">
+          <strong class="callout-title">Markers flip — that's the whole strategy</strong>
+          <p>When a ring slides over a line of markers, every marker it passes flips to the opposite color
+          (<code>board.move_ring</code>: <em>"Move a ring... flipping markers in between"</em>). A single move
+          can turn your opponent's near-complete row into yours, or shatter it entirely. This flip mechanic is
+          why a position can swing wildly from one move — and why the search has to look ahead carefully.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 4: Code translation - directions + the bug -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Three directions, not four — and the bug that proved it</h3>
+
+      <p>On a square grid, a straight line runs in 4 axes. On a hex grid there are only <strong>3</strong>. The
+        engine pins this down in <code>constants.py</code> as the single source of truth for "what counts as a
+        straight line." Here's the forward-only set used to scan for runs:</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-comment"># constants.py — the 3 hex axes (forward only)</span></span>
+<span class="code-line">DIRECTIONS = [</span>
+<span class="code-line">    (<span class="code-property">0</span>, <span class="code-property">1</span>),  <span class="code-comment"># Vertical</span></span>
+<span class="code-line">    (<span class="code-property">1</span>, <span class="code-property">0</span>),  <span class="code-comment"># Horizontal</span></span>
+<span class="code-line">    (<span class="code-property">1</span>, <span class="code-property">1</span>),  <span class="code-comment"># Diagonal (matching-sign)</span></span>
+<span class="code-line">]</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># The OTHER diagonal (1, -1) is a PSEUDO-diagonal:</span></span>
+<span class="code-line"><span class="code-comment"># it is NOT a real line on the YINSH board.</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">A straight line on this board can run in exactly three ways.</p>
+            <p class="tl">Straight up the column.</p>
+            <p class="tl">Straight across the row.</p>
+            <p class="tl">Diagonally — but only the diagonal where both numbers move the <em>same</em> way (both up, or both down).</p>
+            <p class="tl">The "opposite-sign" diagonal (across one, down the other) <em>looks</em> like a line on a square grid, but in this hex coordinate system it connects cells that aren't actually neighbors.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>For the full set of 6 directions (both ways along each axis), the engine has <code>HEX_DIRECTIONS</code>
+        and the membership set <code>HEX_LINE_AXES</code>. Ring movement uses those; run detection uses the
+        3 forward <code>DIRECTIONS</code> so it walks each axis only once.</p>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">🐛</div>
+        <div class="callout-content">
+          <strong class="callout-title">The pseudo-diagonal bug</strong>
+          <p>An earlier version of <code>find_marker_rows</code> hard-coded the <code>(-1, 1)</code> direction
+          into its scan. On a real hex board that's not a line at all, so the engine "found" rows that didn't
+          exist — phantom wins. The fix (April 2026) deleted the inline list and made <code>DIRECTIONS</code>
+          the one place straight-lines are defined. The lesson is universal: when the same geometric truth is
+          re-typed in multiple files, one copy <em>will</em> drift. Centralize it.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: Win/stalemate + atomic removal, then quiz -->
+    <div class="screen animate-in">
+      <h3 class="screen-heading">Who won? And what about the edge cases?</h3>
+
+      <p>The referee's verdict lives in <code>game_state.py</code>. It's mostly a score check, but it also
+        handles a subtle case: a player who has <em>no legal moves</em> loses, even without anyone reaching 3
+        points. That's a <span class="term" data-definition="A stalemate is when the player whose turn it is has no legal move at all. In this engine that player loses (their opponent wins), rather than the game being a draw.">stalemate</span>.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">get_winner</span>(self):</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.white_score &gt;= <span class="code-property">3</span>:</span>
+<span class="code-line">        <span class="code-keyword">return</span> Player.WHITE</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.black_score &gt;= <span class="code-property">3</span>:</span>
+<span class="code-line">        <span class="code-keyword">return</span> Player.BLACK</span>
+<span class="code-line">    <span class="code-keyword">if</span> self.<span class="code-function">is_stalemate</span>():</span>
+<span class="code-line">        <span class="code-keyword">return</span> self.current_player.opponent</span>
+<span class="code-line">    <span class="code-keyword">return</span> <span class="code-keyword">None</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">First, the simple case: did White remove 3 rings? They win.</p>
+            <p class="tl">Same check for Black.</p>
+            <p class="tl">Nobody at 3 yet — but is the player to move completely stuck?</p>
+            <p class="tl">If so, they lose: the <em>opponent</em> is the winner.</p>
+            <p class="tl">Otherwise the game is still going — return None (no winner yet).</p>
+          </div>
+        </div>
+      </div>
+
+      <p>Note the performance seam: <code>is_terminal()</code> is kept O(1) (just "are we in GAME_OVER?") because
+        MCTS calls it on <em>every</em> node, while the expensive <code>is_stalemate()</code> — which enumerates
+        all legal moves — is only called once per turn at game-ending time. Another careful detail:
+        <code>_handle_marker_removal</code> is <strong>atomic</strong>. It validates all five target markers
+        first, then removes them, so a malformed move can never leave the board half-updated.</p>
+
+      <div class="quiz-container" id="quiz-module2">
+        <div class="quiz-question-block"
+             data-correct="option-c"
+             data-explanation-right="Right. The board is a diamond carved out of an 11x11 grid, and the column counts [4,7,8,9,10,9,10,9,8,7,4] add up to 85 valid cells. is_valid_position() exists precisely because the other 36 cells aren't on the board."
+             data-explanation-wrong="Not quite. The grid is 11x11 = 121 cells, but the playing surface is a diamond — only the cells listed in VALID_POSITIONS count. Add up [4,7,8,9,10,9,10,9,8,7,4].">
+          <h3 class="quiz-question">How many valid playing positions are there on the YINSH board?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>121 — it's an 11&times;11 grid</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>64 — like a chessboard</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>85 — a diamond cut out of the 11&times;11 grid</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-b"
+             data-explanation-right="Exactly. A hex grid has 3 straight-line axes (vertical, horizontal, matching-sign diagonal). DIRECTIONS holds these three; the opposite-sign diagonal is a pseudo-diagonal that isn't a real line."
+             data-explanation-wrong="Think hexagons, not squares. A square grid has 4 line axes, but a hex grid has only 3 — that's exactly why DIRECTIONS lists three entries and why the (1,-1) pseudo-diagonal caused a bug.">
+          <h3 class="quiz-question">Why does <code>DIRECTIONS</code> in constants.py contain only three entries?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>To save memory — more would be wasteful</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>A hex grid has only 3 straight-line axes, not 4</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>One for each game phase</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-a"
+             data-explanation-right="Correct — and that's the twist. You score by removing one of your OWN rings (POINTS_TO_WIN = 3), so every point costs you a piece. Completing a run lets you remove the markers and lift a ring."
+             data-explanation-wrong="Re-read the win condition. You don't capture the opponent's rings — you complete runs of YOUR markers and then remove your OWN rings to score. First to 3 removed rings wins.">
+          <h3 class="quiz-question">In YINSH, how do you score a point?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Complete a run of 5 markers, then remove one of your own rings</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Capture three of the opponent's rings</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Place all 5 of your rings first</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module2')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module2')">Try Again</button>
+      </div>
+
+      <p>You now have the full referee: a hex diamond of 85 cells, two players as <code>+1 / -1</code>, three
+        phases, three line directions, and a win at 3 self-removed rings. <strong>Next up in Module 3:</strong>
+        a board is great for humans, but a neural network only speaks numbers. We'll see how
+        <code>StateEncoder</code> turns this living board into a stack of grids the network can actually read.</p>
+    </div>
+
+  </div>
+</section>
+<section class="module" id="module-3">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">03</span>
+      <h2 class="module-title">Teaching the Computer to See the Board</h2>
+      <p class="module-subtitle">How a YINSH position becomes numbers, and how the neural network turns those numbers into "where to play" and "who's winning."</p>
+    </div>
+
+    <!-- SCREEN 1: motivation + the tensor idea -->
+    <div class="screen animate-in">
+      <h3>A neural net only eats numbers</h3>
+
+      <p>The neural network at the heart of this project doesn't know what a ring or a marker is. It doesn't see a hexagonal board. It does exactly one thing: take a big grid of numbers in, and push a different set of numbers out. So before the network can have an opinion about a position, we have to hand it the board <em>as numbers</em>.</p>
+
+      <p>The richer translation happens in <code>yinsh_ml/utils/enhanced_encoding.py</code>, in a class called <code>EnhancedStateEncoder</code>. Its <code>encode_state</code> method takes a live <code>GameState</code> and produces a
+        <span class="term" data-definition="A tensor is just a multi-dimensional array of numbers — like a spreadsheet, but it can have more than two dimensions. Here it's a stack of 11x11 grids.">tensor</span>
+        of shape <code>(15, 11, 11)</code>: fifteen stacked 11&times;11 grids, one number in every cell.</p>
+
+      <p>Why 11&times;11? The YINSH board is an 11&times;11 hex grid (85 real playing positions live inside it). And why fifteen grids? Because a single grid can only say one thing per cell — "is there <em>something</em> here?" — but we want the network to see far more than raw pieces. Each of the fifteen
+        <span class="term" data-definition="A channel is one of the stacked grids in a tensor. Each channel records a different fact about every board cell — like separate transparency sheets laid on top of each other.">channels</span>
+        is a separate "layer" recording one specific fact: the first few are raw pieces, and the rest are <em>pre-computed strategic hints</em> the network would otherwise have to discover on its own.</p>
+
+      <div class="callout callout-info animate-in">
+        <div class="callout-icon">🎛️</div>
+        <div class="callout-content">
+          <strong class="callout-title">Two encoders, one flag</strong>
+          <p>Fifteen channels is the <em>enhanced</em> encoding (<code>EnhancedStateEncoder</code>) — the one this module covers. There's also a leaner 6-channel <em>basic</em> encoder (<code>StateEncoder</code>, the lightweight default) that ships only raw pieces, legal moves and phase. Which one you get is chosen by a single flag — <code>use_enhanced_encoding</code> on the <code>NetworkWrapper</code> — that plumbs all the way down to <code>input_channels=15</code> (or <code>6</code>) on the network. The enhanced encoder simply <em>inherits</em> from the basic one and overrides <code>encode_state</code>, so the move encoding/decoding is shared. The two are <strong>not</strong> interchangeable at load time: <code>NetworkWrapper.load_model</code> hard-fails if a checkpoint's channel count doesn't match the encoder, so switching means regenerating data and retraining.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: the 15 channels -->
+    <div class="screen animate-in">
+      <h3>What lives in each of the fifteen channels</h3>
+
+      <p>Here's the whole encoding, channel by channel. The first four are raw pieces; channels 4&ndash;10 are hand-computed strategic features (threats, runs, mobility, board geometry); channel 11 is legality; and channels 12&ndash;14 smuggle in global facts (phase + whose turn, how far into the game, and the score gap).</p>
+
+      <div class="icon-rows animate-in">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">0</div>
+          <div>
+            <strong>Current player's rings</strong>
+            <p>A 1.0 wherever the side-to-move has a ring, 0.0 everywhere else.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">1</div>
+          <div>
+            <strong>Opponent's rings</strong>
+            <p>Same idea, for the other player's rings.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">2</div>
+          <div>
+            <strong>Current player's markers</strong>
+            <p>Markers (the flippable pieces) belonging to the side-to-move.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">3</div>
+          <div>
+            <strong>Opponent's markers</strong>
+            <p>The other player's markers.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-5)">4</div>
+          <div>
+            <strong>Current player's row threats</strong>
+            <p>Empty cells where the mover already has <em>four</em> markers in a line — drop one here and it's a completed row of 5. A pre-spotted "win this exchange" cell.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-5)">5</div>
+          <div>
+            <strong>Opponent's row threats</strong>
+            <p>The same, for the opponent — the cells you urgently need to block.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-5)">6</div>
+          <div>
+            <strong>Current player's partial rows</strong>
+            <p>Cells that are part of a 3&ndash;4 marker run (a row that's <em>building</em> but not yet a threat).</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-5)">7</div>
+          <div>
+            <strong>Opponent's partial rows</strong>
+            <p>The opponent's 3&ndash;4 marker runs — early warning of trouble forming.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">8</div>
+          <div>
+            <strong>Ring mobility</strong>
+            <p>At each ring's cell, how many legal moves that ring has, scaled to 0&ndash;1 (count &divide; 20, capped). A pinned-down ring reads low; a free one reads high.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">9</div>
+          <div>
+            <strong>Center distance</strong>
+            <p>A fixed heatmap of the board: 1.0 at the center, fading to 0.0 at the rim. The same every game — it just hands the network a sense of "the middle is valuable."</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">10</div>
+          <div>
+            <strong>Ring influence</strong>
+            <p>Every cell the current player's rings can reach this turn — a footprint of where the mover can project force.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">11</div>
+          <div>
+            <strong>Valid-moves mask</strong>
+            <p>A 1.0 on every cell that is a legal <em>source</em> to move/place from right now — a cheat-sheet of where action is possible.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-4)">12</div>
+          <div>
+            <strong>Game phase (broadcast) + side-to-move sentinel</strong>
+            <p>The same phase number (0.0 / 0.5 / 1.0) written across the whole grid, with one off-board cell — A1 — overwritten with a 0/1 flag for whose turn it is.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-4)">13</div>
+          <div>
+            <strong>Turn number</strong>
+            <p>How far into the game we are, as one value painted across the grid: <code>move_count / 100</code>, capped at 1.0. Lets the network behave differently in the opening vs the endgame.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-4)">14</div>
+          <div>
+            <strong>Score differential</strong>
+            <p>The captured-ring lead from the mover's point of view: <code>diff / 3</code>, clamped to &minus;1&hellip;+1. Positive means the side-to-move is ahead on the scoreboard.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>The clever bit runs through all the "player" channels (0&ndash;3, the threats/partials in 4&ndash;7, the influence in 10, the score in 14): they are <strong>side-normalized</strong>. Channel 0 is <em>always</em> "the player to move," whether that's White or Black; channel 4 is always <em>the mover's</em> threats. The network never has to learn "am I White or Black today?" — it always sees the world from the mover's point of view. That's the same trick chess engines use to halve what they need to learn.</p>
+
+      <div class="callout callout-accent animate-in">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">The A1 sentinel: a smuggled bit</strong>
+          <p>Because the piece channels hide the real colors, the decoder needs a way to remember whose turn it actually is. The encoder stashes that one bit at cell <strong>A1</strong> — but in the 15-channel layout it lives on <strong>channel 12</strong> (the phase channel), not channel 5, because here channel 5 is already busy holding opponent row threats. A1 is <em>off</em> the real board (column A only has rows 2&ndash;5), so it never collides with a real piece. Phase itself is read back from an on-board cell (F6), never A1, and <code>decode_state</code> uses the A1 bit to un-normalize the colors.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 3: the code translation -->
+    <div class="screen animate-in">
+      <h3>The encoder, line by line</h3>
+
+      <p>Here's the shape of <code>EnhancedStateEncoder.encode_state</code>. On the left is the actual structure; on the right is what each piece is really doing. Most of the work is delegated to small <code>_encode_*</code> helpers, one per feature group.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">state = np.zeros((<span class="code-string">15</span>, <span class="code-string">11</span>, <span class="code-string">11</span>), dtype=np.float32)</span>
+<span class="code-line">is_white = (current_player == WHITE)</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-function">self._encode_pieces</span>(state, gs, is_white)       <span class="code-keyword"># 0-3</span></span>
+<span class="code-line"><span class="code-function">self._encode_row_threats</span>(state, gs, is_white)  <span class="code-keyword"># 4-5</span></span>
+<span class="code-line"><span class="code-function">self._encode_partial_rows</span>(state, gs, is_white) <span class="code-keyword"># 6-7</span></span>
+<span class="code-line"><span class="code-function">self._encode_ring_mobility</span>(state, gs)          <span class="code-keyword"># 8</span></span>
+<span class="code-line">state[<span class="code-string">9</span>] = self._center_distance_map      <span class="code-keyword"># 9</span></span>
+<span class="code-line"><span class="code-function">self._encode_ring_influence</span>(state, gs, is_white) <span class="code-keyword"># 10</span></span>
+<span class="code-line"><span class="code-function">self._encode_valid_moves</span>(state, gs)            <span class="code-keyword"># 11</span></span>
+<span class="code-line"></span>
+<span class="code-line">state[<span class="code-string">12</span>] = phase.value / (len(GamePhase)-<span class="code-string">1</span>)</span>
+<span class="code-line">state[<span class="code-string">12</span>, <span class="code-string">0</span>, <span class="code-string">0</span>] = <span class="code-string">0.0</span> <span class="code-keyword">if</span> is_white <span class="code-keyword">else</span> <span class="code-string">1.0</span></span>
+<span class="code-line">state[<span class="code-string">13</span>] = min(move_count / <span class="code-string">100.0</span>, <span class="code-string">1.0</span>)</span>
+<span class="code-line"><span class="code-function">self._encode_score_differential</span>(state, gs, is_white) <span class="code-keyword"># 14</span></span></code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Start with fifteen empty 11&times;11 grids, all zeros.</p>
+            <p class="tl">Figure out who's to move so every "player" channel can be normalized to the mover.</p>
+            <p class="tl">Fill the four raw-piece channels (rings &amp; markers, current player first).</p>
+            <p class="tl">Mark the cells that complete a row of 5 — yours on 4, the opponent's on 5.</p>
+            <p class="tl">Mark 3&ndash;4 marker runs that are still building — yours on 6, theirs on 7.</p>
+            <p class="tl">Write each ring's freedom-to-move into channel 8.</p>
+            <p class="tl">Drop in the fixed center-distance heatmap — it never changes, so it's precomputed once.</p>
+            <p class="tl">Paint every cell the mover's rings can reach into channel 10.</p>
+            <p class="tl">Light up channel 11 at every cell you could legally move <em>from</em>.</p>
+            <p class="tl">Squash the phase to 0.0/0.5/1.0 across channel 12, then overwrite off-board A1 with the whose-turn bit.</p>
+            <p class="tl">Record how far into the game we are (move count &divide; 100) across channel 13.</p>
+            <p class="tl">Finally, write the score lead from the mover's perspective into channel 14.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>Each <code>_encode_*</code> helper does the obvious thing — e.g. <code>_encode_pieces</code> stamps a 1.0 at every ring/marker cell (current player into channels 0/2, opponent into 1/3), and <code>_find_row_threats</code> walks the three real hex axes (<code>DIRECTIONS</code>) looking for 4-in-a-row that an empty cell would finish.</p>
+    </div>
+
+    <!-- SCREEN 4: the network + two heads -->
+    <div class="screen animate-in">
+      <h3>From a stack of grids to two answers</h3>
+
+      <p>That 15&times;11&times;11 tensor goes into <code>YinshNetwork</code> (in <code>yinsh_ml/network/model.py</code>), built with <code>input_channels=15</code>. It's a
+        <span class="term" data-definition="A convolutional neural network (CNN) is a network designed for grid-shaped data. It slides small filters across the grid to detect local patterns — perfect for a board where what matters is which pieces sit near each other.">CNN</span>
+        in the AlphaZero style. First a stack of
+        <span class="term" data-definition="A residual block is two convolution layers whose output is added back to its own input. That 'add the input back' shortcut lets very deep networks train without the signal fading — you stack many of them safely.">residual blocks</span>
+        and
+        <span class="term" data-definition="Attention lets the network learn which parts of the board to focus on. Here a spatial-attention block produces a per-cell weight map and emphasizes the cells that matter for the current decision.">attention</span>
+        blocks chew on the board, each
+        <span class="term" data-definition="A convolution slides a small window (a filter) over the grid and computes a weighted sum at each spot. Stacking many of them lets the network recognize bigger and bigger patterns — runs, threats, ring formations.">convolution</span>
+        learning richer patterns — runs forming, rings boxed in, threats building. (With the enhanced encoder, some of those patterns arrive <em>pre-chewed</em> in channels 4&ndash;10, which is the whole point: the docstring pegs the design at roughly +100 ELO over basic.)</p>
+
+      <p>Then the network splits into <strong>two heads</strong> — two separate small sub-networks reading from the same shared body. One predicts <em>what to do</em>, the other predicts <em>how it's going</em>.</p>
+
+      <div class="pattern-cards animate-in">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎯</div>
+          <h4 class="pattern-title">Policy head</h4>
+          <p class="pattern-desc">Outputs <strong>7433 numbers</strong> — one
+            <span class="term" data-definition="The policy head is the part of the network that scores possible moves. It produces one number per move slot; higher means 'this move looks more promising.'">"score per move slot"</span>
+            across every move the game could ever express. After softmax these become a probability distribution: "I'd play here 40% of the time, there 12%..." It's the network's gut instinct about good moves. Raw, pre-softmax outputs are called
+            <span class="term" data-definition="Logits are the raw, unbounded scores a network produces before they're squashed into probabilities by softmax. Big logit = strong preference.">logits</span>.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">⚖️</div>
+          <h4 class="pattern-title">Value head</h4>
+          <p class="pattern-desc">Outputs <strong>a single number</strong> between &minus;1 and +1: who's winning from here.
+            <span class="term" data-definition="The value head estimates the eventual outcome of the game from the current position, as one number from the mover's point of view: +1 = winning, -1 = losing, 0 = even.">+1 means the side-to-move is winning</span>,
+            &minus;1 means losing, 0 is a dead heat. The final squashing uses
+            <span class="term" data-definition="tanh is a math function that smoothly squashes any number into the range -1 to +1, which is exactly the range we want for 'who's winning.'">tanh</span>
+            (or a softmax over outcome classes), so the answer always stays in range.</p>
+        </div>
+      </div>
+
+      <p>Note that the policy head's <strong>7433</strong> is unchanged by the encoder: it counts <em>output</em> moves, not input channels. It's not a round number someone picked — it's computed: 85 ring-placement slots + 7140 ring-move slots + 85 ring-removal slots + 123 marker-removal lines. The single source of truth is <code>StateEncoder().total_moves</code>, and the network reads <em>that</em> value rather than hardcoding it. Swapping the 6-channel encoder for the 15-channel one changes the network's <em>input</em> width, never its policy <em>output</em>.</p>
+
+      <div class="callout callout-warning animate-in">
+        <div class="callout-icon">⚠️</div>
+        <div class="callout-content">
+          <strong class="callout-title">Two hard contracts: 7433 slots and 15 channels</strong>
+          <p>A saved model's policy head is exactly 7433 wide, and its input is exactly 15 channels — both are baked into the checkpoint. If you load a checkpoint whose policy size <em>or</em> channel count doesn't match the live encoder, <code>NetworkWrapper.load_model</code> <strong>hard-fails with an error</strong> rather than silently loading a mismatched model and playing garbage. (Older checkpoints used 8390 policy slots before a move-encoding fix, or 6 input channels for basic encoding; neither is load-compatible with a 15-channel, 7433-slot model.)</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: quiz -->
+    <div class="screen animate-in">
+      <h3>Check your understanding</h3>
+
+      <div class="quiz-container" id="quiz-module3">
+        <div class="quiz-question-block"
+             data-correct="opt-norm"
+             data-explanation-right="Right. The player channels always put the side-to-move first, so the network learns one consistent 'me vs them' view instead of separately learning to play as White and as Black."
+             data-explanation-wrong="Not quite — it isn't about saving memory or board size. The point of side-normalization is that the network always sees the position from the mover's perspective, so it only has to learn the game once.">
+          <h3 class="quiz-question">Why are the "player" channels (rings, markers, threats, &hellip;) side-normalized so the current player is always first?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-mem" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>To use less memory by storing fewer grids</span>
+            </button>
+            <button class="quiz-option" data-value="opt-norm" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>So the network always sees the position from the mover's point of view and only learns the game once</span>
+            </button>
+            <button class="quiz-option" data-value="opt-board" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Because the board is bigger for the current player</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-hints"
+             data-explanation-right="Exactly. Channels 4-10 are hand-computed strategic features — row threats, partial rows, ring mobility, center distance, ring influence — that the basic 6-channel encoder leaves the network to discover for itself."
+             data-explanation-wrong="Not quite. The extra nine channels in the enhanced encoder aren't more pieces or more legal-move masks — they're pre-computed strategic hints (threats, partial rows, mobility, center distance, influence, turn number, score).">
+          <h3 class="quiz-question">What do the nine extra channels in the enhanced (15-ch) encoder add over the basic (6-ch) one?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-pieces" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>More copies of the raw piece positions at higher resolution</span>
+            </button>
+            <button class="quiz-option" data-value="opt-hints" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Pre-computed strategic features: row threats, partial rows, mobility, center distance, influence, turn &amp; score</span>
+            </button>
+            <button class="quiz-option" data-value="opt-out" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>More output move slots, growing the policy head past 7433</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-sum"
+             data-explanation-right="Correct. 85 placements + 7140 ring moves + 85 ring removals + 123 marker-removal lines = 7433, from StateEncoder().total_moves — and it's independent of how many input channels the encoder uses."
+             data-explanation-wrong="Not quite. 7433 isn't a guess or a power of two, and it doesn't change with the encoder — it's the exact count of all distinct move slots (placements + ring moves + ring removals + marker-removal lines), computed by StateEncoder().total_moves.">
+          <h3 class="quiz-question">Where does the policy head's size of 7433 come from — and does switching to 15 channels change it?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-round" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It's a power of two chosen for GPU efficiency, and 15 channels rounds it up</span>
+            </button>
+            <button class="quiz-option" data-value="opt-sum" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It's the total count of all distinct move slots (<code>StateEncoder().total_moves</code>), unchanged by the input channel count</span>
+            </button>
+            <button class="quiz-option" data-value="opt-cells" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It's the number of cells on the 11&times;11 board times the channel count</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module3')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module3')">Try Again</button>
+      </div>
+
+      <p>So now the network can look at any position — raw pieces <em>and</em> pre-digested strategy — and instantly offer two opinions: a ranked list of moves, and a guess at who's ahead. But a single gut reaction isn't enough to play well — strong play comes from <em>thinking ahead</em>, trying moves, and seeing where they lead. In <strong>Module 4</strong> we'll see how the AI uses this network inside a search that actually reasons about the future.</p>
+    </div>
+
+  </div>
+</section>
+<section class="module" id="module-4">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">04</span>
+      <h2 class="module-title">How the AI Thinks</h2>
+      <p class="module-subtitle">The net has a hunch about each move — but a hunch is not a plan. So the AI plays out many what-ifs.</p>
+    </div>
+
+    <!-- SCREEN 1: Intuition + the two search styles -->
+    <div class="screen animate-in">
+      <p>Imagine staring at a YINSH board. Your gut says "that ring looks strong" — but a strong-looking move can still lose three turns later. Good players do not trust the gut alone; they play the position forward in their head: <em>if I go here, they go there, then I can do this</em>. That forward simulation is what we call
+        <span class="term" data-definition="Game-tree search means exploring the tree of possible future positions: from the current board, every legal move leads to a child position, each of which has its own children, and so on. The AI walks this tree to judge which move leads to the best outcomes.">game-tree search</span>,
+        and it is the whole job of the code in this module.</p>
+
+      <p>YinshML uses two different search engines, suited to two different situations:</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#127922;</div>
+          <div>
+            <strong>MCTS &mdash; the explorer</strong>
+            <p>Runs many guided "rollouts" through promising lines, building a search tree shaped by the neural network and/or heuristics. Lives in <code>yinsh_ml/training/self_play.py</code> (class <code>MCTS</code>). This is the engine used to generate training data.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#9989;</div>
+          <div>
+            <strong>Negamax + alpha-beta &mdash; the calculator</strong>
+            <p>A classical brute-force search that examines moves to a fixed depth, pruning lines it can prove are irrelevant. Lives in <code>yinsh_ml/agents/heuristic_agent.py</code>. This is the pure, network-free opponent.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>The calculator uses
+        <span class="term" data-definition="Negamax is a compact way to write minimax search for two-player zero-sum games: instead of separate maximize and minimize steps, every node maximizes, and the child value is simply negated (what is good for me is exactly as bad for you). YinshML stores child values from the opponent perspective and negates on the way up.">negamax</span>
+        with
+        <span class="term" data-definition="Alpha-beta pruning skips branches that cannot change the final decision. Alpha is the best score the maximizer is already assured of; beta is the best the minimizer is assured of. When alpha meets or exceeds beta, the rest of that branch is irrelevant and is cut off, saving huge amounts of work.">alpha-beta pruning</span>
+        &mdash; it scores leaves with the heuristic evaluator and cuts off branches that cannot beat what it has already found.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128161;</div>
+        <div class="callout-content">
+          <strong class="callout-title">One engine, not two MCTS</strong>
+          <p>There used to be a second, broken MCTS in <code>search/mcts.py</code> that never actually reached the network. It was deleted. Today there is exactly one MCTS engine: <code>MCTS.search_batch()</code> is the batched path used in training, and <code>MCTS.search()</code> is the single-position path.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: The four phases of one MCTS iteration -->
+    <div class="screen animate-in">
+      <h3>One MCTS iteration, four phases</h3>
+      <p><span class="term" data-definition="Monte Carlo Tree Search builds a search tree one simulation at a time. Each simulation walks down from the root to a promising unexplored position, scores it, and feeds that score back up the path. After many simulations, the move that was explored most often is chosen.">MCTS</span>
+        does not search every move equally. It spends its budget where it matters by repeating one small loop &mdash; many times over. Each pass through the loop has four phases. Step through them below.</p>
+
+      <div class="flow-animation" id="mcts-flow" data-steps='[
+        {"highlight":"flow-actor-1","label":"SELECT: starting at the root, walk down the tree. At each node pick the child with the highest PUCT score, balancing what looks good so far against what is under-explored."},
+        {"highlight":"flow-actor-2","label":"SELECT continues until we reach a leaf: a position the tree has not expanded yet.","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"EXPAND: add that leaf as a new node in the tree, ready to receive a score and children."},
+        {"highlight":"flow-actor-3","label":"EVALUATE: score the leaf. Depending on evaluation_mode this is the neural network, the heuristic evaluator, or a blend of both.","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"The evaluator returns a value (how good is this position) and a policy (a prior hint over the next moves)."},
+        {"highlight":"flow-actor-4","label":"BACKUP: send that value back up the path, updating every node on the way. Each node remembers its visit count and running average value.","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-1","label":"BACKUP reaches the root. One iteration done. Repeat many times, then play the most-visited root move."}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">&#127795;</div>
+            <span>Root / tree</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">&#127809;</div>
+            <span>Leaf node</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">&#129504;</div>
+            <span>Evaluator</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">&#11014;</div>
+            <span>Backup path</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to walk through one MCTS iteration</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <p>The clever part is the SELECT step. The rule used to choose a child is called
+        <span class="term" data-definition="PUCT (Predictor + Upper Confidence bounds applied to Trees) is the formula MCTS uses to pick which child to explore. It adds two terms: Q, how good the child has looked so far, and U, an exploration bonus that is large for moves the network thinks are promising but that have been visited few times.">PUCT</span>.
+        It combines a "what we have learned" term (Q, the average value seen) with a "what we have not yet tried" bonus (U, biggest for high-prior, low-visit children). Early on, U dominates and the search spreads out; as visits accumulate, Q takes over and the search focuses.</p>
+    </div>
+
+    <!-- SCREEN 3: Code <-> English of the PUCT selection -->
+    <div class="screen animate-in">
+      <h3>Reading the selection formula</h3>
+      <p>Here is the heart of <code>_select_action</code> in the real MCTS code &mdash; the vectorized PUCT score it computes for every child at once. Do not worry about NumPy; read the right-hand column.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">scaled_q = self.value_weight * q_values</span>
+<span class="code-line">sqrt_parent = np.sqrt(parent_visit_count)</span>
+<span class="code-line">u_visited = c_puct * priors * sqrt_parent / (1.0 + visits)</span>
+<span class="code-line">u_unvisited = c_puct * priors * sqrt_parent_eps</span>
+<span class="code-line">u_values = np.where(visited_mask, u_visited, u_unvisited)</span>
+<span class="code-line">scores = scaled_q + u_values + noise</span>
+          </code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl"><strong>Q term:</strong> how good has this child looked across all the times we visited it.</p>
+            <p class="tl">The exploration bonus grows with the square root of how often we visited the parent.</p>
+            <p class="tl"><strong>U term for visited children:</strong> high when the network gave it a strong prior, but it shrinks each time we visit it (the <code>1 + visits</code> divisor).</p>
+            <p class="tl">A child we have never tried gets a clean exploration bonus with no shrink.</p>
+            <p class="tl">Pick the right formula per child: visited ones shrink, fresh ones do not.</p>
+            <p class="tl"><strong>Final score = exploit (Q) + explore (U) + a tiny random tiebreaker.</strong> The child with the highest score wins this step.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>One subtlety worth a glossary stop:
+        <span class="term" data-definition="First-Play Urgency (FPU) decides how to value a child that has never been visited, so it has no Q yet. YinshML uses a reduction: an unvisited child inherits the parent value minus a penalty (fpu_reduction, default 0.25), discouraging the search from blindly diving into every untried move.">First-Play Urgency</span>.
+        A child with zero visits has no average value to use, so MCTS estimates one: it takes the parent value and subtracts a small penalty (<code>fpu_reduction</code>, default 0.25). This stops the search from wandering into every untried branch at once.</p>
+    </div>
+
+    <!-- SCREEN 4: Heuristics + the failure mode -->
+    <div class="screen animate-in">
+      <h3>The 7 heuristic features</h3>
+      <p>When the search needs to score a position <em>without</em> the network (in <code>pure_heuristic</code> mode, or as the calculator agent leaf evaluation), it uses a hand-tuned
+        <span class="term" data-definition="A heuristic is a fast, approximate rule-of-thumb for judging a position, instead of an exact calculation. Here it is a weighted sum of seven board features learned from analyzing 100,000+ games.">heuristic</span>
+        evaluator in <code>yinsh_ml/heuristics/evaluator.py</code>. It scores a board as a weighted sum of seven features, learned from analysis of 100K+ games:</p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">&#127942;</div>
+          <h4 class="pattern-title">Completed Runs Differential <span style="opacity:0.6">0.239</span></h4>
+          <p class="pattern-desc">My finished 5-in-a-rows minus yours. The single most important signal &mdash; it is closest to actually winning.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">&#127919;</div>
+          <h4 class="pattern-title">Ring Centrality <span style="opacity:0.6">0.211</span></h4>
+          <p class="pattern-desc">How central my rings sit. Central rings reach more of the board and create more threats.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">&#8596;</div>
+          <h4 class="pattern-title">Ring Spread <span style="opacity:0.6">0.187</span></h4>
+          <p class="pattern-desc">How well my rings are distributed rather than clumped, keeping options open across the board.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">&#128300;</div>
+          <h4 class="pattern-title">Potential Runs <span style="opacity:0.6">0.171</span></h4>
+          <p class="pattern-desc">How many near-complete rows I am building &mdash; threats that could become completed runs soon.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">&#128279;</div>
+          <h4 class="pattern-title">Connected Marker Chains <span style="opacity:0.6">0.086</span></h4>
+          <p class="pattern-desc">Runs of my markers already linked together, the raw material for future rows.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">&#128257;</div>
+          <h4 class="pattern-title">Ring Mobility <span style="opacity:0.6">0.071</span></h4>
+          <p class="pattern-desc">How many moves my rings have available. More mobility means more flexibility.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">&#128205;</div>
+          <h4 class="pattern-title">Edge Proximity <span style="opacity:0.6">0.036</span></h4>
+          <p class="pattern-desc">A small penalty for hugging the board edge, where rings are cramped. The least influential feature.</p>
+        </div>
+      </div>
+
+      <p>These weights are <strong>phase-specific</strong>. The <code>weight_manager.py</code> swaps in different weight sets for the opening, middlegame, and endgame &mdash; mobility matters early, completed runs and center control matter late.</p>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;&#65039;</div>
+        <div class="callout-content">
+          <strong class="callout-title">The offense-only equilibrium trap</strong>
+          <p>Look closely: all seven features are <em>attack-oriented</em> and all <em>differential</em> (mine minus yours). There is no explicit "block their threat" feature. Defense is only captured <em>implicitly</em> &mdash; under negamax, blocking shows up because the opponent gains lower the differential a few plies ahead. This works at search depth &ge;3, but at depth 1&ndash;2 the search cannot see far enough and defense can collapse, with both sides racing to attack while ignoring each other. The live game viewer exists partly to catch exactly this failure signature.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: Transposition tables + Zobrist + quiz -->
+    <div class="screen animate-in">
+      <h3>Not searching the same position twice</h3>
+      <p>Different move orders often reach the <em>same</em> board. Re-searching it is wasted work. A
+        <span class="term" data-definition="A transposition table is a cache that maps a board position to the result already computed for it. When search reaches a position it has seen before, it reuses the stored value instead of searching it again. The name comes from transpositions: different move orders that lead to the same position.">transposition table</span>
+        (in <code>yinsh_ml/search/transposition_table.py</code>) caches each searched position so the calculator agent can reuse the result instantly.</p>
+
+      <p>The cache key comes from
+        <span class="term" data-definition="Zobrist hashing turns a whole board position into a single 64-bit number by XOR-ing together precomputed random values, one per piece-on-square. It updates in O(1) when a piece moves, and identical positions always produce the same number.">Zobrist hashing</span>.
+        Crucially, <code>ZobristHasher.hash_state</code> mixes in three things, not just the pieces:</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">current = self.hash_board(game_state.board)</span>
+<span class="code-line">current = self.toggle_side_to_move(game_state.current_player, current)</span>
+<span class="code-line">current = self.toggle_phase(game_state.phase, current)</span>
+<span class="code-line">return current</span>
+          </code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Start from the hash of the piece layout (XOR a random number for every piece on every square).</p>
+            <p class="tl">Mix in whose turn it is &mdash; the same layout is a different position if it is the other player to move.</p>
+            <p class="tl">Mix in the game phase &mdash; placement, main game, and ring-removal have different legal moves even with identical pieces.</p>
+            <p class="tl">The result is one 64-bit key. Two truly-different positions almost never collide.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#128202;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Depth-preferred, and it pays off</strong>
+          <p>The table holds 2<sup>20</sup> (~1M) entries by default. When a slot is taken, it keeps the entry from the <em>deeper</em> search (depth-preferred replacement), since deeper results are more valuable. Typical hit rates land at 60&ndash;80% during tree search &mdash; most positions are answered from cache.</p>
+        </div>
+      </div>
+
+      <div class="quiz-container" id="quiz-module4">
+        <div class="quiz-question-block"
+             data-correct="option-b"
+             data-explanation-right="Right. evaluation_mode is a string constructor arg on MCTS; hybrid blends a neural value and policy with the heuristic via heuristic_weight."
+             data-explanation-wrong="Not quite. evaluation_mode selects HOW leaves are scored: only the heuristic, only the network, or a weighted blend of both.">
+          <h3 class="quiz-question">What do the three MCTS <code>evaluation_mode</code> values control?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>How many simulations to run per move</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>How a leaf is scored: pure_heuristic, pure_neural, or hybrid (a blend)</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Which player moves first in self-play</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-c"
+             data-explanation-right="Exactly. Different move orders reach the same board (a transposition); the table lets the search reuse the stored result instead of recomputing it."
+             data-explanation-wrong="Think about why the same board position keeps showing up: different sequences of moves can lead to it, and recomputing it each time is wasted work.">
+          <h3 class="quiz-question">Why does a transposition table speed up search?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It makes the neural network run on the GPU</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It increases the search depth automatically</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It caches already-searched positions, so repeated boards reached via different move orders are reused</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="option-a"
+             data-explanation-right="Correct. hash_state XORs in the board layout AND the side-to-move AND the game phase, so otherwise-identical layouts that differ in turn or phase hash differently."
+             data-explanation-wrong="Reread the hash_state snippet: it deliberately mixes in more than just the pieces, because the same layout can be a genuinely different position.">
+          <h3 class="quiz-question">What does <code>ZobristHasher.hash_state</code> include in the hash?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Board layout, side-to-move, and game phase</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Only the positions of the pieces</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>The full move history of the game</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module4')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module4')">Try Again</button>
+      </div>
+
+      <p>So now the AI can think: the network supplies hunches, MCTS turns hunches into plans, and the heuristic and transposition table keep the classical search fast and grounded. In <strong>Module 5</strong> we put this thinking to work &mdash; the AI plays many games against itself, and every move it searches becomes a fresh training example for the network.</p>
+    </div>
+  </div>
+</section>
+<section class="module" id="module-5">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">05</span>
+      <h2 class="module-title">Learning From Experience</h2>
+      <p class="module-subtitle">The AI just played thousands of games against itself. Now what?</p>
+    </div>
+
+    <!-- SCREEN 1: The big idea -->
+    <div class="screen animate-in">
+      <h3>Playing against a mirror</h3>
+      <p>By now the agent can search a position and pick a move. But a player that never learns from its games never improves. The trick at the heart of this whole project is <strong>self-play</strong>: the network plays full games against a copy of itself, and every position it visits becomes a tiny lesson it can study afterward.</p>
+
+      <p>This is the loop that powers AlphaZero-style systems. There are no human game records, no labeled "correct moves" handed down by an expert. The data the network learns from is data it <em>generated itself</em> &mdash; and because each new version plays a little better than the last, the lessons keep getting harder and better. The system pulls itself up by its own bootstraps.</p>
+
+      <p>Three things happen in order: generate games, turn each position into a training example, then nudge the network toward those examples. Let's walk through the lifecycle of a single position as it travels from the board to a gradient update.</p>
+
+      <div class="callout callout-accent">
+        <div class="callout-icon">💡</div>
+        <div class="callout-content">
+          <strong class="callout-title">Why self-play works at all</strong>
+          <p>The search (<span class="term" data-definition="Monte Carlo Tree Search: an algorithm that explores many possible move sequences and counts how often each first move gets visited. The more a move is explored, the more promising it looked.">MCTS</span>) is smarter than the raw network because it actually looks ahead. So the network learns to imitate a stronger version of itself &mdash; the search results &mdash; rather than just copying what it already believed. That gap is where improvement comes from.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: The data lifecycle flow -->
+    <div class="screen animate-in">
+      <h3>The lifecycle of one position</h3>
+      <p>Each game produces a stream of board positions. For every position the system records three things together &mdash; this trio is called an <span class="term" data-definition="A single training example bundling the board encoding, the move-probability target, and the eventual-outcome target. The three things the network learns to predict from one position.">experience tuple</span>: the <strong>state</strong> (the board, encoded as tensors), the <strong>policy target</strong> (which moves were worth considering), and the <strong>value target</strong> (did this side end up winning).</p>
+
+      <p>Walk through it step by step. Notice how a position born on the board ends up reshaping the network that created it.</p>
+
+      <div class="flow-animation" data-steps='[
+        {"highlight":"flow-actor-1","label":"SelfPlayRunner plays a full game; the agent searches each position with MCTS"},
+        {"highlight":"flow-actor-1","label":"Every position becomes a tuple: board state, policy target (MCTS visit counts), value target (who won)","packet":true,"from":"actor-1","to":"actor-2"},
+        {"highlight":"flow-actor-2","label":"GameExperience subsamples very long games, then holds the tuples in a replay buffer"},
+        {"highlight":"flow-actor-2","label":"Completed games are also written to disk as compact Parquet files","packet":true,"from":"actor-2","to":"actor-3"},
+        {"highlight":"flow-actor-3","label":"sample_batch draws a random mini-batch of tuples back out for training","packet":true,"from":"actor-3","to":"actor-4"},
+        {"highlight":"flow-actor-4","label":"YinshTrainer runs one forward pass, computes policy + value loss, and takes a gradient step"},
+        {"highlight":"flow-actor-4","label":"The updated network plays the next round of self-play, a little stronger","packet":true,"from":"actor-4","to":"actor-1"}
+      ]'>
+        <div class="flow-actors">
+          <div class="flow-actor" id="flow-actor-1">
+            <div class="flow-actor-icon">🎮</div>
+            <span>Self-Play</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-2">
+            <div class="flow-actor-icon">📦</div>
+            <span>Replay Buffer</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-3">
+            <div class="flow-actor-icon">💾</div>
+            <span>Parquet Store</span>
+          </div>
+          <div class="flow-actor" id="flow-actor-4">
+            <div class="flow-actor-icon">🧠</div>
+            <span>Trainer</span>
+          </div>
+        </div>
+
+        <div class="flow-packet" id="flow-packet"></div>
+
+        <div class="flow-step-label" id="flow-label">Click "Next Step" to begin</div>
+
+        <div class="flow-controls">
+          <button class="btn flow-next-btn">Next Step</button>
+          <button class="btn flow-reset-btn">Restart</button>
+          <span class="flow-progress"></span>
+        </div>
+      </div>
+
+      <p>The actors in that loop map directly to files: <code>yinsh_ml/self_play/game_runner.py</code> drives the games (<code>SelfPlayRunner</code>), <code>yinsh_ml/training/self_play.py</code> turns positions into tuples, <code>yinsh_ml/self_play/data_storage.py</code> writes Parquet, and <code>yinsh_ml/training/trainer.py</code> holds the replay buffer and the training step.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">📁</div>
+        <div class="callout-content">
+          <strong class="callout-title">Parquet vs JSON: about 500&times; smaller</strong>
+          <p>Games are stored in <span class="term" data-definition="A compact, columnar file format built for fast analytical reads. Stores columns together so loading just the values you need is fast and cheap.">Parquet</span>, not JSON. A single game lands at roughly <strong>3 KB</strong> versus about <strong>1.5 MB</strong> as JSON &mdash; a ~500&times; reduction. That is the difference between storing a hundred games and storing a hundred thousand.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 3: Where the targets come from -->
+    <div class="screen animate-in">
+      <h3>Where do the two targets come from?</h3>
+      <p>The <strong>state</strong> is the easy part: it is just the board encoded as a stack of tensors (covered in Module&nbsp;3). The two <em>targets</em> are where the cleverness lives, and they come from very different places.</p>
+
+      <p>The <strong>policy target</strong> is the <span class="term" data-definition="During MCTS, each candidate move is explored some number of times. A move explored 400 times out of 800 total gets a target probability of 0.5. Better moves get explored more, so the visit counts form a soft ranking of moves.">MCTS visit-count distribution</span>: a probability spread over moves, where moves the search explored more get more weight. Crucially this is a <em>better</em> policy than the raw network's first guess, because the search actually looked ahead before deciding what to explore. That is what the network chases.</p>
+
+      <p>The <strong>value target</strong> is the eventual game result from that position's point of view &mdash; a number reflecting whether the side to move went on to win, lose, or draw. A position from a game you won is labeled positive; one from a game you lost is labeled negative. Over millions of positions, the network learns to look at a board and estimate "am I winning here?"</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">🗺️</div>
+          <div>
+            <strong>State &mdash; the question</strong>
+            <p>The encoded board: rings, markers, valid moves, phase. What the network sees as input.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">🎯</div>
+          <div>
+            <strong>Policy target &mdash; the move answer</strong>
+            <p>MCTS visit counts as a probability distribution. "These were the moves worth thinking about."</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">🏆</div>
+          <div>
+            <strong>Value target &mdash; the outcome answer</strong>
+            <p>The eventual game result from this side's perspective. "This position led to a win/loss."</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">✂️</div>
+        <div class="callout-content">
+          <strong class="callout-title">Why subsample long games?</strong>
+          <p>In <code>GameExperience.add_game_experience</code>, games longer than <strong>100 moves</strong> are subsampled: keep the first 20 and last 20 positions, randomly sample ~30 from the middle. A 200-move game has a lot of near-identical mid-game positions &mdash; keeping all of them would flood the buffer with redundant, correlated examples and crowd out variety. Trimming keeps the data diverse.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 4: The two-headed loss in code -->
+    <div class="screen animate-in">
+      <h3>One network, two heads, two losses</h3>
+      <p>The network has two output <span class="term" data-definition="A head is a small output branch on top of the shared network body. This network has two: one predicts move probabilities, the other predicts the position value.">heads</span>, so training uses two losses that get summed together. The <strong>policy head</strong> learns with <span class="term" data-definition="A loss that measures how far a predicted probability distribution is from a target distribution. It is large when the network puts weight on moves the target ignored, and small when they match.">cross-entropy</span> against the MCTS distribution. The <strong>value head</strong> learns to match the game outcome. Here is the real policy loss from <code>trainer.py</code>.</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code><span class="code-line">scaled_logits = pred_logits / self.temperature</span>
+<span class="code-line">log_probs = F.log_softmax(scaled_logits, dim=1)</span>
+<span class="code-line">policy_loss = -(target_probs * log_probs).sum(dim=1).mean()</span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># value head, classification mode</span></span>
+<span class="code-line">log_probs = F.log_softmax(value_logits_fp32, dim=1)</span>
+<span class="code-line">ce_loss = -(target_dist * log_probs).sum(dim=1).mean()</span>
+<span class="code-line">value_loss = ce_loss + discrimination_loss</span>
+</code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Soften the raw move scores with a temperature knob first.</p>
+            <p class="tl">Turn them into log-probabilities the network is predicting.</p>
+            <p class="tl">Cross-entropy: punish the network wherever its move probabilities disagree with the MCTS visit counts. This is the policy loss.</p>
+            <p class="tl">&nbsp;</p>
+            <p class="tl">Now the value head, which predicts the outcome.</p>
+            <p class="tl">Same trick: log-probabilities, this time over discrete outcome buckets.</p>
+            <p class="tl">Compare against the game result and add a nudge that rewards confident (non-zero) predictions. This is the value loss.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>Both losses share one forward pass and are added into a single <code>total_loss</code> that backpropagates once. The shared body of the network therefore learns from <em>both</em> signals at the same time &mdash; "which move" and "am I winning" &mdash; which is exactly why one network can do both jobs. (The value head here uses a <span class="term" data-definition="Instead of predicting one number, the value head predicts a probability across a handful of discrete outcome buckets (score differences). This trains more stably than a raw regression target.">classification</span> framing over outcome buckets; a simpler setup would use plain <span class="term" data-definition="Mean Squared Error: average of the squared differences between prediction and target. The standard loss for predicting a single number.">MSE</span> toward the outcome.)</p>
+    </div>
+
+    <!-- SCREEN 5: Policies + quiz -->
+    <div class="screen animate-in">
+      <h3>Who actually picks the moves?</h3>
+      <p>Self-play needs a <em>move-selection policy</em> &mdash; the thing that decides what to play at each turn. The codebase ships four of them in <code>yinsh_ml/self_play/policies.py</code>, ranging from "pick anything" to "search hard, guided by the network." You mix them depending on what kind of training data you want.</p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">🎲</div>
+          <h4 class="pattern-title">Random</h4>
+          <p class="pattern-desc"><code>RandomMovePolicy</code> &mdash; picks a legal move at random (with a small rule-based nudge). The baseline: cheap, weak, useful for sanity checks and bootstrapping.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">📐</div>
+          <h4 class="pattern-title">Heuristic</h4>
+          <p class="pattern-desc"><code>HeuristicPolicy</code> &mdash; <span class="term" data-definition="A search that assumes both players play optimally, scoring a position as the best you can force given the opponent does the same. Alpha-beta pruning skips branches that cannot change the result.">negamax</span> search over the 7 learned features. No neural net needed; strong and fully on the CPU.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">🧠</div>
+          <h4 class="pattern-title">MCTS</h4>
+          <p class="pattern-desc"><code>MCTSPolicy</code> &mdash; tree search guided by the network's policy prior and value estimate. This is the policy that produces the rich visit-count targets training depends on.</p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-4)">
+          <div class="pattern-icon" style="background: var(--color-actor-4)">🔀</div>
+          <h4 class="pattern-title">Adaptive</h4>
+          <p class="pattern-desc"><code>AdaptivePolicy</code> &mdash; switches between the others based on training progress. Cheap policies early when the net is weak, stronger search later.</p>
+        </div>
+      </div>
+
+      <p>With the data lifecycle and the loss in hand, test the most important idea: where the training targets actually come from.</p>
+
+      <div class="quiz-container" id="quiz-module5">
+        <div class="quiz-question-block"
+             data-correct="option-b"
+             data-explanation-right="Right. The policy target is the MCTS visit-count distribution, and the value target is the eventual game result from that position's perspective. The network learns to imitate the search (which looked ahead) and to predict outcomes."
+             data-explanation-wrong="Think about what makes self-play improve. The policy target is not the network's own raw guess (that would teach it nothing new) and the value target is not a hand-coded score &mdash; it comes from how the game actually ended.">
+          <h3 class="quiz-question">In an experience tuple, where do the policy target and value target come from?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="option-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Both come from the raw network output at that position, before any search.</span>
+            </button>
+            <button class="quiz-option" data-value="option-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>The policy target is the MCTS visit-count distribution; the value target is the eventual game outcome from that side's perspective.</span>
+            </button>
+            <button class="quiz-option" data-value="option-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Both are hand-labeled by human YINSH experts before training.</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module5')">Check Answer</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module5')">Try Again</button>
+      </div>
+
+      <p>So the engine generates games, distills each position into a (state, policy, value) lesson, stores it compactly, and replays it into a two-headed gradient step &mdash; over and over, getting stronger each cycle. But something has to <em>orchestrate</em> all of this: decide when to stop self-play and start training, measure whether the new network is actually better, and run the tournaments that produce <span class="term" data-definition="A rating that goes up when you beat strong opponents and down when you lose. Used to track whether each new network version is genuinely improving.">ELO</span> scores. That conductor &mdash; plus a map for finding your way around the repo &mdash; is Module&nbsp;6.</p>
+    </div>
+
+  </div>
+</section>
+<section class="module" id="module-6">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">06</span>
+      <h2 class="module-title">Orchestration, Evaluation &amp; Finding Your Way</h2>
+      <p class="module-subtitle">You now know the moving parts — here is the conductor that drives them, and how to jump in and make your first change.</p>
+    </div>
+
+    <!-- SCREEN 1: The conductor -->
+    <div class="screen animate-in">
+      <h3>Meet the conductor</h3>
+      <p>Over the last five modules you met the players in the orchestra: the game engine, the encoder and network, the search, and the self-play training loop. This module introduces the <strong>conductor</strong> that keeps them all in time — and then hands you the baton.</p>
+
+      <p>That conductor is the <code>TrainingSupervisor</code> in <code>yinsh_ml/training/supervisor.py</code>. It runs the whole show in a loop: generate a batch of self-play games, train the network on those games, then <em>evaluate</em> the freshly trained network to decide whether it is actually better than the best model so far. Only if it passes does it get <strong>promoted</strong> to become the new best.</p>
+
+      <p>It is a big file — its own header admits it is ~2,500 lines and overdue for a split — because it has absorbed orchestration, the training loop, tournament evaluation, checkpoint management, and metrics logging. Do not let the size scare you; the lifecycle it runs is simple to picture.</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#127922;</div>
+          <div>
+            <strong>1. Self-play</strong>
+            <p>Run MCTS-guided games against itself to produce fresh (state, policy, value) training examples.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#129504;</div>
+          <div>
+            <strong>2. Train</strong>
+            <p>Update the network on the new data — policy head via cross-entropy, value head via MSE.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#127942;</div>
+          <div>
+            <strong>3. Evaluate &amp; promote</strong>
+            <p>Play the new network against the current best in a
+              <span class="term" data-definition="A tournament here is a set of games played between two model versions so their relative strength can be measured — many games, alternating colors, to average out luck.">tournament</span>,
+              track results with
+              <span class="term" data-definition="ELO is a single number summarizing a player's strength, borrowed from chess. Beating a strong opponent raises your number a lot; beating a weak one barely moves it. Higher means stronger.">ELO</span>,
+              and keep the winner.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: Whole-repo map -->
+    <div class="screen animate-in">
+      <h3>The whole-repo map</h3>
+      <p>Before you touch anything, it helps to know where things live. Almost all the real code sits under <code>yinsh_ml/</code>, organized by responsibility. Here is the tour in one glance — when you need to change behavior, this tells you which door to open.</p>
+
+      <div class="file-tree animate-in">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/</span>
+          <span class="ft-desc">The package — everything important lives here</span>
+          <div class="ft-children">
+            <div class="ft-folder">
+              <span class="ft-name">game/</span>
+              <span class="ft-desc">Core rules: board, moves, state, phases, Zobrist hashing</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">network/</span>
+              <span class="ft-desc">The neural net (model.py) and its inference wrapper</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">utils/</span>
+              <span class="ft-desc">State encoder, metrics logger, and tournament + ELO machinery</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">search/</span>
+              <span class="ft-desc">Transposition table, node types, profiling (search support)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">heuristics/</span>
+              <span class="ft-desc">The 7 hand-built evaluation features and phase weights</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">agents/</span>
+              <span class="ft-desc">Game-playing agents (the negamax HeuristicAgent)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">training/</span>
+              <span class="ft-desc">The loop: trainer, self_play (the one MCTS), and supervisor (the conductor)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">self_play/</span>
+              <span class="ft-desc">Self-play infrastructure: game runner, move policies, Parquet storage</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">memory/</span>
+              <span class="ft-desc">Object/tensor pools and zero-copy GPU transfers (performance)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">viz/</span>
+              <span class="ft-desc">Live game viewer — renders boards and replays games for auditing</span>
+            </div>
+          </div>
+        </div>
+        <div class="ft-folder">
+          <span class="ft-name">scripts/run_training.py</span>
+          <span class="ft-desc">Main entry point: starts the TrainingSupervisor from a config</span>
+        </div>
+        <div class="ft-file">
+          <span class="ft-name">run_large_scale_selfplay.py</span>
+          <span class="ft-desc">Generate big batches of self-play training data</span>
+        </div>
+        <div class="ft-file">
+          <span class="ft-name">run_dashboard.py</span>
+          <span class="ft-desc">Launch the training dashboard to watch progress</span>
+        </div>
+      </div>
+
+      <div class="callout callout-info animate-in">
+        <div class="callout-icon">i</div>
+        <div class="callout-content">
+          <strong class="callout-title">Where to start reading</strong>
+          <p>When in doubt, the root <code>CLAUDE.md</code> is the authoritative map of commands and module responsibilities. For the bigger picture, read <code>TRAINING_REFACTOR_PLAN.md</code> (the plan for stronger play) and <code>QUICK_START_GUIDE.md</code> (key findings from 100K games). For the caching layer, <code>yinsh_ml/search/README.md</code> explains Zobrist hashing and the transposition table.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 3: First hour -->
+    <div class="screen animate-in">
+      <h3>Your first hour with the repo</h3>
+      <p>Reading is good; running is better. Here is a concrete on-ramp from a fresh clone to watching a live training run. Every command below comes straight from the repo docs.</p>
+
+      <div class="step-cards animate-in">
+        <div class="step-card">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <strong>Set up the environment</strong>
+            <p>Create a virtualenv, install dependencies, and install the package in editable mode so your code changes take effect immediately.</p>
+            <pre><code>python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install -e .</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <strong>Run the tests</strong>
+            <p>Confirm a green baseline before changing anything. Tests live in <code>tests/</code> and <code>yinsh_ml/tests/</code>; the slow ones are marked <code>@pytest.mark.slow</code>, so skip them for a fast first pass.</p>
+            <pre><code>pytest -m "not slow"</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <strong>Generate some self-play data</strong>
+            <p>Produce a batch of games the trainer can learn from. The output is compact Parquet (~3KB per game).</p>
+            <pre><code>python run_large_scale_selfplay.py</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <strong>Launch a training run</strong>
+            <p>Hand the whole loop to the supervisor. Point it at a config to control iteration count, encoding type, and more.</p>
+            <pre><code>python scripts/run_training.py --config configs/my_config.yaml</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">5</div>
+          <div class="step-body">
+            <strong>Watch the dashboard</strong>
+            <p>In a second terminal, open the dashboard to watch ELO, win rates, and loss curves move as training proceeds.</p>
+            <pre><code>python run_dashboard.py</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 4: Entry points + evaluation pipeline -->
+    <div class="screen animate-in">
+      <h3>The entry points, and how a model earns promotion</h3>
+      <p>A handful of commands are the doors into the system. Keep this list handy — each one is a different way to drive or inspect the same machinery.</p>
+
+      <div class="badge-list animate-in">
+        <div class="badge-item">
+          <code class="badge-code">pytest -m "not slow"</code>
+          <span class="badge-desc">Run the fast test suite (game logic, search, heuristics, training)</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">python scripts/run_training.py</code>
+          <span class="badge-desc">Start the TrainingSupervisor: self-play, train, evaluate, promote</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">python run_large_scale_selfplay.py</code>
+          <span class="badge-desc">Generate training data via large-scale self-play</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">yinsh-track --help</code>
+          <span class="badge-desc">CLI for experiment tracking (commands in yinsh_ml/cli/commands/)</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">streamlit run scripts/dashboard_games.py</code>
+          <span class="badge-desc">Live game viewer for auditing self-play game by game</span>
+        </div>
+      </div>
+
+      <p>Step 3 of the conductor's loop — deciding whether a freshly trained network is actually <em>better</em> — is the subtle part. You cannot just trust a lower training loss; the only honest test is making the two networks play. Here is what that looks like in code terms:</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code>
+<span class="code-line">candidate = train(network, new_games)</span>
+<span class="code-line">stats = tournament.play(candidate, best_model)</span>
+<span class="code-line">elo = elo_tracker.update(stats)</span>
+<span class="code-line">if passes_gate(stats.win_rate):</span>
+<span class="code-line">    best_model = candidate</span>
+          </code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Train a <strong>candidate</strong> network on the games we just generated.</p>
+            <p class="tl">Make the candidate play many games against the current champion (<code>yinsh_ml/utils/tournament.py</code>), alternating colors.</p>
+            <p class="tl">Feed the win/loss/draw record into the rating system (<code>yinsh_ml/utils/elo_manager.py</code>) to get an updated strength number.</p>
+            <p class="tl">Apply the promotion gate: did the candidate win convincingly enough — not just by luck — to be trusted?</p>
+            <p class="tl">If yes, the candidate becomes the new best model. If not, we keep the champion and try again next iteration.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>The real supervisor uses a statistical <em>Wilson gate</em> on the win rate (so a lucky streak in a few games is not enough) and tracks ratings over time. A temporary ELO dip between iterations is normal and expected — the model needs to explore worse-looking moves to find better strategies, and recovers with continued training.</p>
+
+      <div class="callout callout-accent animate-in">
+        <div class="callout-icon">&#128161;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Debugging tip: check the cache, then the pools</strong>
+          <p>If search feels slow, inspect the
+            <span class="term" data-definition="The transposition table is a cache of positions the search has already scored, keyed by a Zobrist hash. The hit rate is the fraction of lookups that found a cached answer — higher means more redundant work avoided.">transposition-table hit rate</span>
+            via <code>agent.last_search_stats['transposition_table_metrics']['hit_rate']</code>. A healthy rate is roughly 60–80%; below 50%, grow the table or clear it between games. For memory pressure, enable the <code>GameStatePool</code> and <code>TensorPool</code> from <code>yinsh_ml/memory/</code> to cut allocation churn.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: Quiz + wrap-up -->
+    <div class="screen animate-in">
+      <h3>Check your bearings</h3>
+      <p>Three quick questions to confirm you know where the levers are and how the conductor makes its decisions.</p>
+
+      <div class="quiz-container" id="quiz-module6">
+        <div class="quiz-question-block"
+             data-correct="opt-b"
+             data-explanation-right="Right. A lower training loss is encouraging but not proof — the only honest measure is making the candidate and the current best play a tournament, scoring the result with ELO, and promoting only if it clears a statistical win-rate gate."
+             data-explanation-wrong="Not quite. Training loss alone can fall while real strength stalls. The supervisor decides 'better' by playing the candidate against the current best in a tournament and gating on the win rate.">
+          <h3 class="quiz-question">How does the supervisor decide a new model is "better" and should be promoted?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Whichever model has the lower training loss wins automatically</span>
+            </button>
+            <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It plays a tournament vs the current best, tracks ELO, and promotes only if a win-rate gate passes</span>
+            </button>
+            <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It promotes every newly trained model and never reverts</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-c"
+             data-explanation-right="Exactly — heuristic features are extracted in yinsh_ml/heuristics/features.py and wired into the evaluator, with phase-specific weights in weight_manager.py. That is the home for a new feature."
+             data-explanation-wrong="Look again. Heuristic evaluation lives in yinsh_ml/heuristics/ — features.py for extraction, evaluator.py to combine them, and weight_manager.py for phase-specific weights.">
+          <h3 class="quiz-question">You want to add a new hand-built evaluation feature. Where do you start?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>yinsh_ml/network/model.py — add a new output head</span>
+            </button>
+            <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>yinsh_ml/game/board.py — change the board representation</span>
+            </button>
+            <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>yinsh_ml/heuristics/features.py, then wire it into evaluator.py and weight_manager.py</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-a"
+             data-explanation-right="Correct — 60-80% is the healthy range for the transposition table in game-tree search. Below 50%, grow the table or clear it between games."
+             data-explanation-wrong="Not quite. The docs cite a typical, healthy transposition-table hit rate of 60-80%; under 50% is the signal to grow or clear the table.">
+          <h3 class="quiz-question">What is a healthy transposition-table hit rate during search?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Roughly 60-80%</span>
+            </button>
+            <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Under 10%</span>
+            </button>
+            <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Exactly 100% or the table is broken</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module6')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module6')">Try Again</button>
+      </div>
+
+      <h3>You made it — now go build</h3>
+      <p>Congratulations: you have walked the whole tour. You know the game engine and its rules, how a board becomes tensors and flows through the network, how MCTS turns a hunch into a plan, how self-play turns play into learning, and now how the <code>TrainingSupervisor</code> conducts it all and decides which model earns promotion.</p>
+
+      <p>The fastest way to make this knowledge stick is to change one small thing and watch the effect. Tweak a heuristic weight in <code>yinsh_ml/heuristics/weight_manager.py</code>, generate a few games with the live viewer (<code>streamlit run scripts/dashboard_games.py</code>) to audit the result, or adjust an MCTS parameter in <code>yinsh_ml/training/self_play.py</code> and rerun the relevant tests.</p>
+
+      <p>For your next reading, start with <code>CLAUDE.md</code> for the authoritative command list and the step-by-step "Adding a New Heuristic Feature" and "Modifying MCTS Search" workflows, then <code>TRAINING_REFACTOR_PLAN.md</code> for where the project is headed. Welcome aboard — the codebase is yours to improve now.</p>
+    </div>
+
+  </div>
+</section>
+  </main>
+
+</body>
+</html>

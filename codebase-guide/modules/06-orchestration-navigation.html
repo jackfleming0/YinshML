@@ -1,0 +1,325 @@
+<section class="module" id="module-6">
+  <div class="module-content">
+    <div class="module-header">
+      <span class="module-number">06</span>
+      <h2 class="module-title">Orchestration, Evaluation &amp; Finding Your Way</h2>
+      <p class="module-subtitle">You now know the moving parts — here is the conductor that drives them, and how to jump in and make your first change.</p>
+    </div>
+
+    <!-- SCREEN 1: The conductor -->
+    <div class="screen animate-in">
+      <h3>Meet the conductor</h3>
+      <p>Over the last five modules you met the players in the orchestra: the game engine, the encoder and network, the search, and the self-play training loop. This module introduces the <strong>conductor</strong> that keeps them all in time — and then hands you the baton.</p>
+
+      <p>That conductor is the <code>TrainingSupervisor</code> in <code>yinsh_ml/training/supervisor.py</code>. It runs the whole show in a loop: generate a batch of self-play games, train the network on those games, then <em>evaluate</em> the freshly trained network to decide whether it is actually better than the best model so far. Only if it passes does it get <strong>promoted</strong> to become the new best.</p>
+
+      <p>It is a big file — its own header admits it is ~2,500 lines and overdue for a split — because it has absorbed orchestration, the training loop, tournament evaluation, checkpoint management, and metrics logging. Do not let the size scare you; the lifecycle it runs is simple to picture.</p>
+
+      <div class="icon-rows">
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-1)">&#127922;</div>
+          <div>
+            <strong>1. Self-play</strong>
+            <p>Run MCTS-guided games against itself to produce fresh (state, policy, value) training examples.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-2)">&#129504;</div>
+          <div>
+            <strong>2. Train</strong>
+            <p>Update the network on the new data — policy head via cross-entropy, value head via MSE.</p>
+          </div>
+        </div>
+        <div class="icon-row">
+          <div class="icon-circle" style="background: var(--color-actor-3)">&#127942;</div>
+          <div>
+            <strong>3. Evaluate &amp; promote</strong>
+            <p>Play the new network against the current best in a
+              <span class="term" data-definition="A tournament here is a set of games played between two model versions so their relative strength can be measured — many games, alternating colors, to average out luck.">tournament</span>,
+              track results with
+              <span class="term" data-definition="ELO is a single number summarizing a player's strength, borrowed from chess. Beating a strong opponent raises your number a lot; beating a weak one barely moves it. Higher means stronger.">ELO</span>,
+              and keep the winner.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 2: Whole-repo map -->
+    <div class="screen animate-in">
+      <h3>The whole-repo map</h3>
+      <p>Before you touch anything, it helps to know where things live. Almost all the real code sits under <code>yinsh_ml/</code>, organized by responsibility. Here is the tour in one glance — when you need to change behavior, this tells you which door to open.</p>
+
+      <div class="file-tree animate-in">
+        <div class="ft-folder open">
+          <span class="ft-name">yinsh_ml/</span>
+          <span class="ft-desc">The package — everything important lives here</span>
+          <div class="ft-children">
+            <div class="ft-folder">
+              <span class="ft-name">game/</span>
+              <span class="ft-desc">Core rules: board, moves, state, phases, Zobrist hashing</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">network/</span>
+              <span class="ft-desc">The neural net (model.py) and its inference wrapper</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">utils/</span>
+              <span class="ft-desc">State encoder, metrics logger, and tournament + ELO machinery</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">search/</span>
+              <span class="ft-desc">Transposition table, node types, profiling (search support)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">heuristics/</span>
+              <span class="ft-desc">The 7 hand-built evaluation features and phase weights</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">agents/</span>
+              <span class="ft-desc">Game-playing agents (the negamax HeuristicAgent)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">training/</span>
+              <span class="ft-desc">The loop: trainer, self_play (the one MCTS), and supervisor (the conductor)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">self_play/</span>
+              <span class="ft-desc">Self-play infrastructure: game runner, move policies, Parquet storage</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">memory/</span>
+              <span class="ft-desc">Object/tensor pools and zero-copy GPU transfers (performance)</span>
+            </div>
+            <div class="ft-folder">
+              <span class="ft-name">viz/</span>
+              <span class="ft-desc">Live game viewer — renders boards and replays games for auditing</span>
+            </div>
+          </div>
+        </div>
+        <div class="ft-folder">
+          <span class="ft-name">scripts/run_training.py</span>
+          <span class="ft-desc">Main entry point: starts the TrainingSupervisor from a config</span>
+        </div>
+        <div class="ft-file">
+          <span class="ft-name">run_large_scale_selfplay.py</span>
+          <span class="ft-desc">Generate big batches of self-play training data</span>
+        </div>
+        <div class="ft-file">
+          <span class="ft-name">run_dashboard.py</span>
+          <span class="ft-desc">Launch the training dashboard to watch progress</span>
+        </div>
+      </div>
+
+      <div class="callout callout-info animate-in">
+        <div class="callout-icon">i</div>
+        <div class="callout-content">
+          <strong class="callout-title">Where to start reading</strong>
+          <p>When in doubt, the root <code>CLAUDE.md</code> is the authoritative map of commands and module responsibilities. For the bigger picture, read <code>TRAINING_REFACTOR_PLAN.md</code> (the plan for stronger play) and <code>QUICK_START_GUIDE.md</code> (key findings from 100K games). For the caching layer, <code>yinsh_ml/search/README.md</code> explains Zobrist hashing and the transposition table.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 3: First hour -->
+    <div class="screen animate-in">
+      <h3>Your first hour with the repo</h3>
+      <p>Reading is good; running is better. Here is a concrete on-ramp from a fresh clone to watching a live training run. Every command below comes straight from the repo docs.</p>
+
+      <div class="step-cards animate-in">
+        <div class="step-card">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <strong>Set up the environment</strong>
+            <p>Create a virtualenv, install dependencies, and install the package in editable mode so your code changes take effect immediately.</p>
+            <pre><code>python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install -e .</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <strong>Run the tests</strong>
+            <p>Confirm a green baseline before changing anything. Tests live in <code>tests/</code> and <code>yinsh_ml/tests/</code>; the slow ones are marked <code>@pytest.mark.slow</code>, so skip them for a fast first pass.</p>
+            <pre><code>pytest -m "not slow"</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <strong>Generate some self-play data</strong>
+            <p>Produce a batch of games the trainer can learn from. The output is compact Parquet (~3KB per game).</p>
+            <pre><code>python run_large_scale_selfplay.py</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <strong>Launch a training run</strong>
+            <p>Hand the whole loop to the supervisor. Point it at a config to control iteration count, encoding type, and more.</p>
+            <pre><code>python scripts/run_training.py --config configs/my_config.yaml</code></pre>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="step-num">5</div>
+          <div class="step-body">
+            <strong>Watch the dashboard</strong>
+            <p>In a second terminal, open the dashboard to watch ELO, win rates, and loss curves move as training proceeds.</p>
+            <pre><code>python run_dashboard.py</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 4: Entry points + evaluation pipeline -->
+    <div class="screen animate-in">
+      <h3>The entry points, and how a model earns promotion</h3>
+      <p>A handful of commands are the doors into the system. Keep this list handy — each one is a different way to drive or inspect the same machinery.</p>
+
+      <div class="badge-list animate-in">
+        <div class="badge-item">
+          <code class="badge-code">pytest -m "not slow"</code>
+          <span class="badge-desc">Run the fast test suite (game logic, search, heuristics, training)</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">python scripts/run_training.py</code>
+          <span class="badge-desc">Start the TrainingSupervisor: self-play, train, evaluate, promote</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">python run_large_scale_selfplay.py</code>
+          <span class="badge-desc">Generate training data via large-scale self-play</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">yinsh-track --help</code>
+          <span class="badge-desc">CLI for experiment tracking (commands in yinsh_ml/cli/commands/)</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">streamlit run scripts/dashboard_games.py</code>
+          <span class="badge-desc">Live game viewer for auditing self-play game by game</span>
+        </div>
+      </div>
+
+      <p>Step 3 of the conductor's loop — deciding whether a freshly trained network is actually <em>better</em> — is the subtle part. You cannot just trust a lower training loss; the only honest test is making the two networks play. Here is what that looks like in code terms:</p>
+
+      <div class="translation-block animate-in">
+        <div class="translation-code">
+          <span class="translation-label">CODE</span>
+          <pre><code>
+<span class="code-line">candidate = train(network, new_games)</span>
+<span class="code-line">stats = tournament.play(candidate, best_model)</span>
+<span class="code-line">elo = elo_tracker.update(stats)</span>
+<span class="code-line">if passes_gate(stats.win_rate):</span>
+<span class="code-line">    best_model = candidate</span>
+          </code></pre>
+        </div>
+        <div class="translation-english">
+          <span class="translation-label">PLAIN ENGLISH</span>
+          <div class="translation-lines">
+            <p class="tl">Train a <strong>candidate</strong> network on the games we just generated.</p>
+            <p class="tl">Make the candidate play many games against the current champion (<code>yinsh_ml/utils/tournament.py</code>), alternating colors.</p>
+            <p class="tl">Feed the win/loss/draw record into the rating system (<code>yinsh_ml/utils/elo_manager.py</code>) to get an updated strength number.</p>
+            <p class="tl">Apply the promotion gate: did the candidate win convincingly enough — not just by luck — to be trusted?</p>
+            <p class="tl">If yes, the candidate becomes the new best model. If not, we keep the champion and try again next iteration.</p>
+          </div>
+        </div>
+      </div>
+
+      <p>The real supervisor uses a statistical <em>Wilson gate</em> on the win rate (so a lucky streak in a few games is not enough) and tracks ratings over time. A temporary ELO dip between iterations is normal and expected — the model needs to explore worse-looking moves to find better strategies, and recovers with continued training.</p>
+
+      <div class="callout callout-accent animate-in">
+        <div class="callout-icon">&#128161;</div>
+        <div class="callout-content">
+          <strong class="callout-title">Debugging tip: check the cache, then the pools</strong>
+          <p>If search feels slow, inspect the
+            <span class="term" data-definition="The transposition table is a cache of positions the search has already scored, keyed by a Zobrist hash. The hit rate is the fraction of lookups that found a cached answer — higher means more redundant work avoided.">transposition-table hit rate</span>
+            via <code>agent.last_search_stats['transposition_table_metrics']['hit_rate']</code>. A healthy rate is roughly 60–80%; below 50%, grow the table or clear it between games. For memory pressure, enable the <code>GameStatePool</code> and <code>TensorPool</code> from <code>yinsh_ml/memory/</code> to cut allocation churn.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: Quiz + wrap-up -->
+    <div class="screen animate-in">
+      <h3>Check your bearings</h3>
+      <p>Three quick questions to confirm you know where the levers are and how the conductor makes its decisions.</p>
+
+      <div class="quiz-container" id="quiz-module6">
+        <div class="quiz-question-block"
+             data-correct="opt-b"
+             data-explanation-right="Right. A lower training loss is encouraging but not proof — the only honest measure is making the candidate and the current best play a tournament, scoring the result with ELO, and promoting only if it clears a statistical win-rate gate."
+             data-explanation-wrong="Not quite. Training loss alone can fall while real strength stalls. The supervisor decides 'better' by playing the candidate against the current best in a tournament and gating on the win rate.">
+          <h3 class="quiz-question">How does the supervisor decide a new model is "better" and should be promoted?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Whichever model has the lower training loss wins automatically</span>
+            </button>
+            <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It plays a tournament vs the current best, tracks ELO, and promotes only if a win-rate gate passes</span>
+            </button>
+            <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>It promotes every newly trained model and never reverts</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-c"
+             data-explanation-right="Exactly — heuristic features are extracted in yinsh_ml/heuristics/features.py and wired into the evaluator, with phase-specific weights in weight_manager.py. That is the home for a new feature."
+             data-explanation-wrong="Look again. Heuristic evaluation lives in yinsh_ml/heuristics/ — features.py for extraction, evaluator.py to combine them, and weight_manager.py for phase-specific weights.">
+          <h3 class="quiz-question">You want to add a new hand-built evaluation feature. Where do you start?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>yinsh_ml/network/model.py — add a new output head</span>
+            </button>
+            <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>yinsh_ml/game/board.py — change the board representation</span>
+            </button>
+            <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>yinsh_ml/heuristics/features.py, then wire it into evaluator.py and weight_manager.py</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <div class="quiz-question-block"
+             data-correct="opt-a"
+             data-explanation-right="Correct — 60-80% is the healthy range for the transposition table in game-tree search. Below 50%, grow the table or clear it between games."
+             data-explanation-wrong="Not quite. The docs cite a typical, healthy transposition-table hit rate of 60-80%; under 50% is the signal to grow or clear the table.">
+          <h3 class="quiz-question">What is a healthy transposition-table hit rate during search?</h3>
+          <div class="quiz-options">
+            <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Roughly 60-80%</span>
+            </button>
+            <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Under 10%</span>
+            </button>
+            <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)">
+              <div class="quiz-option-radio"></div>
+              <span>Exactly 100% or the table is broken</span>
+            </button>
+          </div>
+          <div class="quiz-feedback"></div>
+        </div>
+
+        <button class="quiz-check-btn" onclick="checkQuiz('quiz-module6')">Check Answers</button>
+        <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module6')">Try Again</button>
+      </div>
+
+      <h3>You made it — now go build</h3>
+      <p>Congratulations: you have walked the whole tour. You know the game engine and its rules, how a board becomes tensors and flows through the network, how MCTS turns a hunch into a plan, how self-play turns play into learning, and now how the <code>TrainingSupervisor</code> conducts it all and decides which model earns promotion.</p>
+
+      <p>The fastest way to make this knowledge stick is to change one small thing and watch the effect. Tweak a heuristic weight in <code>yinsh_ml/heuristics/weight_manager.py</code>, generate a few games with the live viewer (<code>streamlit run scripts/dashboard_games.py</code>) to audit the result, or adjust an MCTS parameter in <code>yinsh_ml/training/self_play.py</code> and rerun the relevant tests.</p>
+
+      <p>For your next reading, start with <code>CLAUDE.md</code> for the authoritative command list and the step-by-step "Adding a New Heuristic Feature" and "Modifying MCTS Search" workflows, then <code>TRAINING_REFACTOR_PLAN.md</code> for where the project is headed. Welcome aboard — the codebase is yours to improve now.</p>
+    </div>
+
+  </div>
+</section>
