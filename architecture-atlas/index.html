@@ -1547,6 +1547,117 @@
         (AlphaZero-style), optionally reloading <code>best_model.pt</code> for the next
         self-play round.
       </p>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCREEN 6: Compute profile — CPU vs GPU bottlenecks -->
+    <!-- ============================================================ -->
+    <div class="screen animate-in">
+      <h3>Compute profile: what is CPU-bound vs GPU-bound</h3>
+      <p>
+        The supervisor logs the split every iteration &mdash;
+        <code>Breakdown: SelfPlay=&hellip;s, Train=&hellip;s, &hellip;</code>
+        (<code>supervisor.py:2110</code>) &mdash; and in the AlphaZero regime self-play usually
+        dominates the wall clock. The two phases load opposite resources:
+        <strong>self-play is CPU/coordination-bound</strong>, the <strong>gradient update is
+        GPU-bound</strong>, and almost every optimization in this seam exists to stop the first
+        from starving the second.
+      </p>
+
+      <div class="pattern-cards">
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-1)">
+          <div class="pattern-icon" style="background: var(--color-actor-1)">CPU</div>
+          <h4 class="pattern-title">Self-play generation</h4>
+          <p class="pattern-desc">
+            <strong>CPU-bound.</strong> Pure-Python game logic, MCTS tree ops
+            (select/expand/backup), Zobrist hashing, transposition lookups and heuristic scoring all
+            run on CPU and are parallelized across cores with a <code>ProcessPoolExecutor</code>
+            (<code>self_play.py:1845</code>, <code>num_workers</code>). Game logic was hot enough to
+            warrant an opt-in C++ bitboard engine (<code>use_cpp_engine</code> &rarr;
+            <code>CppGameState</code>, <code>self_play.py:1966,2237</code>).
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-2)">
+          <div class="pattern-icon" style="background: var(--color-actor-2)">GPU</div>
+          <h4 class="pattern-title">Network training</h4>
+          <p class="pattern-desc">
+            <strong>GPU-bound.</strong> Batched forward/backward on-device, bf16
+            <code>torch.autocast</code> on CUDA/MPS (<code>trainer.py:719-726</code>), zero-copy
+            transfers. The CPU cost hiding here is batch assembly + dihedral symmetry
+            <strong>augmentation</strong> (up to 12&times; expansion, <code>trainer.py:54,61</code>),
+            which can starve the GPU if it is not overlapped with the step.
+          </p>
+        </div>
+        <div class="pattern-card" style="border-top: 3px solid var(--color-actor-3)">
+          <div class="pattern-icon" style="background: var(--color-actor-3)">CPU</div>
+          <h4 class="pattern-title">Arena / evaluation</h4>
+          <p class="pattern-desc">
+            <strong>CPU-bound</strong>, same shape as self-play: real games driven by MCTS + game
+            logic, with batched net inference at the leaves. The promotion tournament therefore
+            competes with self-play for the same CPU workers.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout callout-warning">
+        <div class="callout-icon">&#9888;</div>
+        <div class="callout-content">
+          <strong class="callout-title">During self-play the GPU is the idle resource</strong>
+          <p>
+            Workers do run the net on CUDA when present (<code>self_play.py:2203</code>), but each
+            MCTS only collects <code>mcts_batch_size</code> (default 32,
+            <code>self_play.py:1494</code>) leaves at a time. N independent worker processes firing
+            small inference calls <em>&ldquo;serialize on the GPU's command queue rather than
+            coalescing into one&rdquo;</em> (<code>BATCHED_EVALUATOR_DESIGN.md:40</code>) &mdash; so
+            the GPU sits underfed while CPU is the bottleneck. That is the entire reason for the
+            shared <code>InferenceEvaluator</code> threaded mode: <em>one model on the GPU, N threads
+            play games against it, coalescing inference</em> (<code>self_play.py:1761</code>). It
+            trades CPU-side coordination for higher GPU utilization.
+          </p>
+        </div>
+      </div>
+
+      <h3>Which knob relieves which constraint</h3>
+      <div class="badge-list">
+        <div class="badge-item">
+          <code class="badge-code">num_workers &uarr;</code>
+          <span class="badge-desc">CPU (self-play/arena): more parallel game workers &mdash; the primary self-play throughput lever (<code>self_play.py:1845</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">use_cpp_engine</code>
+          <span class="badge-desc">CPU: swaps Python game logic for the C++ bitboard engine in workers (<code>self_play.py:2237</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">shared evaluator / mcts_batch_size</code>
+          <span class="badge-desc">GPU-feeding: coalesce small leaf batches so self-play stops starving the GPU (<code>self_play.py:1761</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">GameStatePool / TensorPool</code>
+          <span class="badge-desc">CPU: reuse allocations to cut GC/alloc pressure in the hot loop (<code>yinsh_ml/memory/</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">trainer.batch_size &uarr; + autocast</code>
+          <span class="badge-desc">GPU (training): bigger matmuls + bf16 raise utilization &mdash; target &gt;80% (<code>CLAUDE.md:472-473</code>).</span>
+        </div>
+        <div class="badge-item">
+          <code class="badge-code">zero-copy / pinned memory</code>
+          <span class="badge-desc">Transfer seam: keep host&harr;device copies from becoming the limiter (<code>memory/zero_copy.py</code>, <code>CLAUDE.md:474</code>).</span>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">&#129518;</div>
+        <div class="callout-content">
+          <strong class="callout-title">The balance shifts with network size</strong>
+          <p>
+            With a small net on a large GPU (the common case here) self-play is heavily CPU-bound on
+            Python game logic + MCTS. Scale the network up enough and leaf evaluation pushes back
+            toward the GPU. Use the <code>SelfPlay=/Train=</code> breakdown
+            (<code>supervisor.py:2110</code>) and live GPU utilization as the ground truth before
+            tuning &mdash; measure which side you are on, do not guess.
+          </p>
+        </div>
+      </div>
 
       <p class="module-closing">
         That closes the producer&ndash;storage&ndash;consumer loop. <strong>Section 6</strong> covers
