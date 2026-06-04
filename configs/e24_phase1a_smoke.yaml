@@ -1,0 +1,92 @@
+# e24_phase1a_smoke.yaml — SMOKE ONLY (not an experiment).
+# Slashed clone of e24_phase1a_lr_1e-4.yaml: 1 iter, 4 games, 20 sims, 2 workers.
+# Purpose: validate the full box path end-to-end in ~minutes — real 15ch encoder,
+# run_training, and the driver's eval/glob/value_head_calibration/measure_h2h
+# wiring — before committing to a real arm. Run via:
+#   CFG_OVERRIDE=configs/e24_phase1a_smoke.yaml LR=smoke H2H_GAMES=4 \
+#     VAL_DATA=/tmp/smoke.npz PY=/venv/main/bin/python bash scripts/e24_phase1a_sweep.sh
+
+anchor:
+  depth: 1
+  enabled: true
+  max_moves_per_game: 150
+  num_games: 2
+  seed: 1337
+  skip_first_n_iterations: 1
+arena:
+  eval_report_both_modes: true
+  eval_seed: 20260601
+  games_per_match: 4
+  gate_revert_on_mtime_mismatch: fail
+  promotion_threshold: 0.55
+  raw_policy_temperature: 0.5
+  revert_self_play_on_gate_failure: true
+  tournament_sliding_window: 3
+augmentation:
+  enabled: true
+  max_augmentations: 4
+device: auto
+encoding:
+  type: enhanced
+export:
+  coreml_dir: models/coreml
+  export_every: 5
+network:
+  value_head_type: spatial
+num_iterations: 1
+phase_weights:
+  MAIN_GAME: 2.0
+  RING_PLACEMENT: 1.0
+  RING_REMOVAL: 0.5
+save_dir: runs_e24/smoke
+self_play:
+  annealing_steps: 30
+  c_puct: 1.0
+  dirichlet_alpha: 0.3
+  enable_subtree_reuse: true
+  epsilon_mix_end: 0.0
+  epsilon_mix_iteration_end: 0.3
+  epsilon_mix_iteration_start: 1.0
+  epsilon_mix_start: 0.25
+  epsilon_mix_taper_moves: 20
+  evaluation_mode: hybrid
+  final_temp: 0.1
+  fpu_reduction: 0.25
+  games_per_iteration: 4
+  heuristic_weight: 0.3
+  heuristic_weight_anneal_iterations: 5
+  heuristic_weight_end: 0.0
+  heuristic_weight_start: 0.5
+  initial_temp: 1.0
+  late_simulations: 20
+  max_depth: 150
+  mcts_batch_size: 64
+  num_simulations: 20
+  num_workers: 2
+  simulation_switch_ply: 20
+  temp_clamp_fraction: 0.6
+  use_batched_mcts: true
+  use_shared_evaluator: false
+  value_weight: 1.0
+trainer:
+  batch_size: 32
+  batches_per_epoch: auto
+  discrimination_weight: 0.0
+  ema_decay: 0.999
+  enable_autocast: true
+  epochs_per_iteration: 1
+  l2_reg: 0.0
+  lr: 0.0001
+  lr_schedule: cosine
+  max_buffer_size: 100000
+  max_oversampling: 4.0
+  search_consistency:
+    enabled: true
+  soft_value_target_sigma: 0.5
+  use_ema_for_eval: true
+  value_head_lr_factor: 5.0
+  value_loss_weights:
+  - 0.5
+  - 0.5
+  warmup_epochs: 1
+version: 1

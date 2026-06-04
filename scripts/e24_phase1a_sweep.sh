@@ -40,7 +40,7 @@ if [ ! -f "$VAL_DATA" ]; then
 fi
 
 run_arm() {
-  local tag="$1"; local cfg="configs/e24_phase1a_lr_${tag}.yaml"
+  local tag="$1"; local cfg="${CFG_OVERRIDE:-configs/e24_phase1a_lr_${tag}.yaml}"
   local savedir="runs_e24/lr_${tag}${TAGSUFFIX}"
   echo "==================================================================="
   echo "ARM lr=${tag}${TAGSUFFIX} ($cfg): seed=${SEED} -> ${savedir}   $(date -u +%H:%M:%SZ)"

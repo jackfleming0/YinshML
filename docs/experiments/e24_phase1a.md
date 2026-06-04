@@ -59,6 +59,21 @@ PY=/venv/main/bin/python VAL_DATA=expert_games/engine_labeled_15ch.npz \
   bash scripts/e24_phase1a_sweep.sh
 # single arm:  LR=1e-4 PY=/venv/main/bin/python bash scripts/e24_phase1a_sweep.sh
 ```
+
+### Smoke first (~5 min — validates the full path before the real run)
+The real 15ch encode + `run_training` + the driver's eval/glob/calibration/H2H
+wiring can't be tested off-box. Run this once after checkout to shake them out:
+```bash
+# tiny engine corpus (exercises the real encoder + .npz write)
+/venv/main/bin/python scripts/gen_engine_labeled_corpus.py \
+    --out /tmp/smoke.npz --games 2 --depth 1 --workers 2 --max-positions 50
+# one tiny arm through the SAME driver (1 iter / 4 games / 20 sims)
+CFG_OVERRIDE=configs/e24_phase1a_smoke.yaml LR=smoke H2H_GAMES=4 \
+    VAL_DATA=/tmp/smoke.npz PY=/venv/main/bin/python \
+    bash scripts/e24_phase1a_sweep.sh 2>&1 | tee /tmp/e24_smoke.log
+```
+Clean smoke ⇒ the full sweep will run. Then do the corpus + sweep above.
+
 Outputs: `auc_e24/lr*_auc.txt` (primary), `h2h_e24/*.json` (+ `e19_summarize.py`
 slope table), `runs_e24/lr_*/…/*_ema.pt`.
 
