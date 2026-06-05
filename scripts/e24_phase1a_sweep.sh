@@ -84,7 +84,7 @@ eval_arm() {
 for tag in $LR; do run_arm "$tag"; eval_arm "$tag"; done
 
 echo "=== H2H SLOPE SUMMARY (confirmatory) ==="
-$PY scripts/e19_summarize.py h2h_e24 || true
+$PY scripts/e24_summarize_h2h.py h2h_e24 || true
 echo
 echo "=== READ THE RESULT (docs/experiments/e24_phase1a.md) ==="
 echo "PRIMARY = the value-head AUC trend in auc_e24/*.txt:"
