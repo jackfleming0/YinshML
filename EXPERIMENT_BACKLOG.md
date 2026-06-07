@@ -382,6 +382,81 @@ runbook `docs/experiments/e24_phase1a.md`. The value-head AUC reuses the existin
 model-independent HeuristicAgent labels — one quick data-gen on the box). So Phase
 1a is fully buildable now: gen corpus → run the sweep driver.
 
+## Post-E24 lever board (2026-06-07) — the plateau is NOT a stopping point
+
+**Where we are:** four swings at the plateau — E19 (depth), E22 (cross-teacher),
+E24 (LR sweep) — all NOT_STRONGER. But every one of them **poked the
+mirror-continuation self-play loop while keeping the same value head.** We
+exhausted *one class* of lever, not the space.
+
+**The reframe that re-opens the search (the crack in the "ceiling" story):** the
+"value head is at a ceiling" conclusion rests on two weak foundations —
+1. **It was measured on noisy human games** (AUC 0.737). Enthusiast play has a
+   *blunder floor* no evaluator can predict, so 0.737 partly measures human
+   unpredictability, not the head's limit. The one attempt at a cleaner corpus
+   (E24's `gen_engine_labeled_corpus.py`) was OOD garbage — so we still **don't
+   know the value head's true discrimination on strong, clean positions.**
+2. **It was only ever trained with signals that don't exceed it** — mirror
+   self-play at 200 sims, where the MCTS-improved target ≈ the raw net (no
+   gradient). Every failed run fed the head a target no better than itself.
+
+So the untested lever is **inject a stronger, cleaner signal at scale** — the
+canonical thing that actually makes these systems strong. The board:
+
+### E25 — Binding-constraint diagnostic (Lever C)  `[cheap, do-FIRST — aims the big run]`
+
+The cheap move that points the expensive ones. Two parts:
+- **Clean value-eval:** build a *representative* held-out set — strong **self-play /
+  high-budget-MCTS** positions (NOT heuristic-generated; that was E24's OOD
+  mistake), labeled by outcome — and re-measure the value head's AUC. If iter1_ema
+  reads *well above* 0.737 on clean positions, the "ceiling" was a human-noise
+  artifact and the value head may not be the bottleneck at all.
+- **Policy-vs-value ablation:** hold one head fixed and vary the other in MCTS
+  (e.g., random/uniform value + real policy, vs real value + flat policy) to see
+  which actually bounds played strength at this level. We've been *assuming* value
+  is the limit; this measures it.
+- **Why:** redirects all downstream effort — if the binding constraint is the
+  **policy** or **capacity**, the value-target work (E21/E26) is mis-aimed.
+- **Cost:** ~a day, mostly offline/inference (reuses `value_head_calibration.py` +
+  a small ablation harness). **Reasons to not believe:** a clean self-play corpus
+  is labeled by *our own* play, so it's not fully independent — read it as
+  "discrimination on in-distribution strong positions," not ground truth.
+
+### E26 — High-budget-search distillation campaign (Lever A)  `[the top bet — expert iteration done right]`
+
+The principled root-cause fix: **the training target must EXCEED the student.**
+Generate data from a deliberately *stronger* teacher — iter1_ema (or the ensemble,
+E21) running MCTS at **very high budget (1600–3200+ sims)** — and **supervised-
+distill** those (search-improved policy, search-value) targets into the net.
+- **Why it's different from everything that failed:** it does NOT need the value
+  head to spontaneously improve — *search manufactures the better signal* (KL grows
+  with sims, P1-confirmed), then distillation banks it. E19 tried depth *in the
+  loop at lower budget*; this is *dedicated high-budget teacher-gen + clean offline
+  distillation*, a materially stronger setup that attacks the "no gradient" root
+  cause directly.
+- **Cost:** real — needs the **E20 throughput build** (high-sim self-play is
+  CPU-bound) or patience/compute; a multi-day run.
+- **Reasons to not believe:** high-budget MCTS is still *guided* by the current
+  eval, so if the eval is genuinely blind (E25 says so), the teacher may not exceed
+  the student by enough — which is exactly why **E25 gates E26**. Also overlaps
+  D1 (self-play corpus pretrain) and E1 — fold those in.
+
+### The rest of the board (cross-refs, not re-scoped here)
+- **Lever B — test-time compute = ship NOW, free strength:** **E18** (deploy
+  symmetric MCTS, +6–22 pp, no training) + simply playing at higher MCTS budget.
+  Raises *played* strength immediately; do regardless.
+- **Lever D — architecture/capacity:** **A4** (scalar regression value head — recover
+  the decisiveness gradient the 3-class head discards) and/or a bigger trunk.
+  Gated on E25 (its prior is dented *if* the limit is data, not arch).
+- **Lever E — ensemble-teacher:** **E21**. Still viable as E26's teacher, but needs
+  *decorrelated* members we may lack; the ~1h mode-b probe is the cheap test.
+
+**Recommended sequence:** ship **E18 + higher play-time sims** (free) → run **E25**
+(~a day; find the real binding constraint) → commit the big chips to **E26**,
+*configured by what E25 reveals* (value → E26/E21 teacher; policy/capacity → D/A4).
+The discipline is unchanged: cheap diagnostics aim the expensive swing; H2H vs the
+fixed champion iter1_ema is the only verdict (R1).
+
 ## Status snapshot (as of 2026-05-31 ~14:00 UTC) — recovery + Tasks 1 & 2 landed
 
 The 2026-05-29/30 work was recovered from a stash (it was never committed; the
