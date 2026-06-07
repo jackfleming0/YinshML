@@ -364,8 +364,15 @@ micro-version can't, a much weaker claim.** This is the lever the evidence point
 and the one never pulled.
 
 **Discipline:** H2H vs the FIXED champion iter1_ema (R1); one regime change at a
-time; hard go/no-go at each rung. **Recommended next action: Phase 1a — it's a day,
-no code, and decisive either way.**
+time; hard go/no-go at each rung.
+
+> **⛔ Phase 1a RAN (2026-06-04) — NOT_STRONGER, the ladder stops here.** Full
+> 3-arm LR sweep: AUC never lifts off 0.737 at any LR; more LR = more erosion
+> (3e-4 H2H *collapsed* 53→32%). **LR is not the lever** (hypothesis falsified),
+> and Phase 1b/2 are NOT the next step — see the Done entry "E24 Phase 1a". The
+> ladder redirects OUT of optimizer-space to the value-TARGET path (E21
+> ensemble-teacher / value-head architecture). E18 (deploy symmetric MCTS)
+> remains the cheap free win.
 
 **Phase 1a artifacts (BUILT, ready to launch):** `configs/e24_phase1a_lr_{3e-5,1e-4,3e-4}.yaml`
 (champion recipe, one variable = `trainer.lr`), driver `scripts/e24_phase1a_sweep.sh`,
@@ -2411,6 +2418,78 @@ current state of the priors?" The verdict + crucial detail + confirmed
 findings answer that in ~30 seconds. The operational lessons section
 prevents the most common research-debt failure mode: rediscovering the
 same bug or pattern session after session.
+
+---
+
+### E24 Phase 1a — LR sweep from iter1_ema — **NOT_STRONGER / LR IS NOT THE LEVER** (2026-06-04)
+
+Three-arm LR sweep continuing self-play from `iter1_ema` (warm-start), one
+variable = `trainer.lr` ∈ {3e-5, 1e-4, 3e-4}, everything else the champion recipe
+(15ch, 200 sims, 400 games/iter, 3 iters, cosine+warmup, tight **0.55 gate +
+revert**). The direct test of E24's premise: *was the value head frozen because
+our LR was too timid (1e-5)?* Run sequentially on the box, ~6 h/iter (CPU-bound
+self-play), ~3 days / 9 training-iters total. Value head tracked per-iter via
+`value_head_calibration.py` on the **human** corpus (the engine-labeled corpus I
+built proved OOD — see lessons). Full per-iter tables:
+`docs/experiments/e24_phase1a_results.md`.
+
+**Result — monotonic erosion with LR, zero improvement at any LR:**
+
+| LR | value-head AUC (start→end) | v_std (end) | Brier (end) | H2H vs frozen (slope) |
+|---|---|---|---|---|
+| 1e-5 (historical) | frozen | — | — | — |
+| 3e-5 | 0.737 → 0.736 | 0.319 | 0.672 | 45→52% (+3.3, noise) |
+| 1e-4 | 0.737 → 0.732 | 0.291 | 0.679 | 53→47% (−3.3, noise) |
+| 3e-4 | 0.737 → **0.724** | **0.239** | 0.690 | 53→**32%** (−10.8, **COLLAPSE**) |
+
+**The crucial detail:** AUC never lifts off 0.737 at *any* LR; higher LR only
+drags it down faster and compresses v_std harder (the value head regressing toward
+the mean). The 3e-5/1e-4 H2H slopes (±3.3) are noise — opposite directions, every
+Wilson CI brackets 50% — but **3e-4's H2H is a real collapse** (53→32%, −10.8
+pp/iter, 19-41 by iter-2): the one significant gameplay signal in the whole sweep,
+and it's strongly negative. The in-loop gate **rejected + reverted every degrading
+iter** (gentler arms retained ≈ iter-1 ≈ champion) — so good gating prevents
+*runaway* collapse but cannot *manufacture* a gain. **E24's "too timid" hypothesis
+is falsified: LR is not the lever — gentle LR treads water, hot LR collapses, none
+improve.** The bottleneck is the training TARGET — mirror self-play yields ~50/50
+noisy value labels → no gradient toward better discrimination → more LR just
+accelerates regression.
+
+**Confirmed/falsified findings:**
+- ❌ "Value head is frozen because LR was too low" — falsified; 10× LR erodes, doesn't improve.
+- ❌ Phase 2 (anti-forgetting: KL-anchor + buffer-mix) as the fix — would *preserve* 0.737
+  but can't push it up (no signal to push); demoted, not the next step.
+- ❌ Fresher-seed fallback (the "AUC flat = maybe over-converged seed" branch) — weakened: the
+  head *moves* (down), so it's a SIGNAL problem, not a plasticity/seed problem.
+- ✅ Tight 0.55 gate + revert works as a degradation guard (caught every bad iter; anchor stayed 40/40).
+- ✅ Re-confirms (now *earned*, not extrapolated) the E19/E22 read: the evaluator/value-TARGET is the bottleneck.
+- 🟡 Scope guard (avoid the prior overclaim): this is **continuation + mirror self-play + real LR**.
+  It does NOT test from-scratch self-play or a non-mirror/decisive target.
+
+**Operational lessons logged:**
+- **Engine-labeled corpus was OOD.** `gen_engine_labeled_corpus.py` (HeuristicAgent self-play) gave
+  baseline iter1_ema AUC 0.575 / Brier 1.086 (worse than blind) — because the *positions* came from
+  myopic heuristic play the net never trained on. The independent *labeler* was right; letting it
+  generate the *positions* was the flaw. Use the human corpus; a correct engine corpus relabels
+  REPRESENTATIVE positions. (Driver default switched to human.)
+- **Read the n=8000 AUC, not the n=60 H2H — except when H2H is unambiguous.** The 3e-5/1e-4 H2H
+  slope ±3.3 pp/iter in *opposite* directions — both noise (4-game swings, CIs bracket 50%). But
+  3e-4's −10.8 pp/iter (53→32%, 19-41) is past noise → a real collapse. Rule: trust H2H only when
+  it clears the ~±13 pp CI at n=60; otherwise lead with AUC.
+- **"Best Brier" can be the value head GIVING UP.** On the OOD engine corpus, 3e-4 had the *lowest*
+  Brier (1.014) yet the *worst* gameplay (collapse). Cause: v_std compressed to 0.333 → predictions
+  shrink toward 0 → on a near-blind corpus, predicting ~0 mechanically lowers Brier. Lower Brier +
+  shrinking v_std = the evaluator regressing to the mean, not improving. Always read Brier with v_std
+  and against a representative corpus.
+- `e19_summarize.py` hardcodes `arm[AB]` tags → silently matches nothing on `lr*` files; added
+  `e24_summarize_h2h.py`.
+
+**Next experiments per sequencing matrix:** the E24 LR ladder terminates here —
+do NOT run Phase 1b/2 (LR/anti-forgetting are not the lever). Redirect to the
+**value-TARGET** path: **E21** ensemble-teacher distillation (manufacture a target
+that exceeds the student) and/or a value-head/architecture change (A4 regression
+head, or decisive-signal targets). E18 (deploy symmetric MCTS) remains the cheap
+free win.
 
 ---
 
