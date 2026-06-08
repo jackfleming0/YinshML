@@ -31,6 +31,46 @@ a clear next step, this file is the first thing to read.
 
 ---
 
+## Status snapshot (2026-06-08) — sharkdp benchmark + value-head ceiling (the value lever is OUT)
+
+**Full write-up: [`docs/experiments/e25_sharkdp_value_ceiling.md`](docs/experiments/e25_sharkdp_value_ceiling.md).**
+
+Integrated a 2nd external engine (**sharkdp/yinsh**, Rust negamax+defensive
+heuristic) as a benchmark. Pecking order: **iter1_ema ≫ yngine > sharkdp >
+HeuristicAgent** — iter1 sweeps sharkdp **20–0** at 200 sims; yngine beats
+sharkdp 26–14; sharkdp beats HeuristicAgent 6–0. So our NN dominates the whole
+classical field, and **sharkdp is weaker than the yngine corpus iter1 already
+trained on** → a sharkdp/cross-engine pretraining corpus would be a *downgrade*,
+not a lift.
+
+That killed the "stronger teacher corpus" idea, so we chased the real plateau
+constraint — the value head — and **ruled it out as the lever**:
+- 0.737 value-AUC is a *supervised-era* ceiling (`best_supervised` == `iter1_ema`);
+  self-play never moved it.
+- Retraining on decisive, spread-rich data does **nothing** to held-out AUC —
+  frozen head (overfits, test declines to 0.66), full-net 6k (flat ~0.70),
+  full-net 85k MPS (best 0.700 @ep2 = zero-shot, declines to 0.67 while
+  train→0.98). It's a **representational/
+  intrinsic ceiling, not a data problem.** ~0.74 is plausibly near the Bayes
+  ceiling for static YINSH value (one tempo flips the game).
+- Bonus: `trainer.py` Fix #1 already uses MCTS root values as value targets, so
+  "relabel with search value" is a no-op.
+
+**Implication:** stop chasing value discrimination (and value-oriented corpus
+diversity). iter1's strength is **search + policy**; the levers to beat it are
+**(a) search budget + policy quality, (b) richer encoding/capacity** — not a
+better teacher corpus.
+
+**Next experiment → intrinsic-ceiling check:** train a value head hard from
+scratch on a large decisive corpus (`yngine_volume` / `boardspace_human_*`) with
+a proper *game-split*. Caps ~0.74 → the encoding is the limit (lever = richer
+representation). Clears ~0.80 → encoding is fine, reopens a narrow corpus angle.
+Cheap, decisive, Mac-runnable. New tooling this session:
+`scripts/{eval_vs_sharkdp,eval_engine_vs_engine,smoke_sharkdp_bridge,value_ceiling_probe}.py`,
+`yinsh_ml/sharkdp/`, `third_party/sharkdp_yinsh/crates/yinsh_driver`.
+
+---
+
 ## Status snapshot (as of 2026-06-01 ~21:30 UTC) — symmetry run verdict + next-run strategy
 
 **The symmetry foundation run failed its strength goal.** `runs_symmetry/20260601_105750`

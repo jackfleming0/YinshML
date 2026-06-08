@@ -56,6 +56,11 @@ third_party/yngine/**
 # committed; the build script is idempotent and rebuilds in minutes.
 third_party/yngine_driver/build-release/
 third_party/yngine_driver/build*/
+# sharkdp eval harness — vendored Rust driver crate source. The sharkdp/yinsh
+# clone (third_party/sharkdp_yinsh) stays ignored; install.sh copies this crate
+# into it at the pinned commit and builds. See third_party/sharkdp_driver/README.md.
+!third_party/sharkdp_driver/
+!third_party/sharkdp_driver/**
 !.gitmodules
 # Opening-theory diagnostic outputs: self-play + heuristic-baseline parquet
 # dumps. Reproducible by re-running scripts/measure_model_openings.py and
