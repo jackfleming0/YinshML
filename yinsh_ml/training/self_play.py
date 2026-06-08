@@ -204,6 +204,14 @@ class MCTS:
                  # detector. None ⇒ no scalar logging (last_effective_child_visits
                  # is still set on the instance for in-process probes/tests).
                  metrics_logger=None,
+                 # --- E25 binding-constraint ablation (default off; pure_neural only) ---
+                 # Neuter one head at leaf evaluation to find which bounds played
+                 # strength (scripts/e25_ablation_h2h.py):
+                 #   ablate_policy -> uniform prior over valid moves (value kept)
+                 #   ablate_value  -> constant 0 leaf value (prior kept)
+                 # Both False = unchanged behavior. No effect outside pure_neural.
+                 ablate_policy: bool = False,
+                 ablate_value: bool = False,
                 ):
         """
         Initialize MCTS.
@@ -283,6 +291,10 @@ class MCTS:
         # *** Store using the new name 'value_weight' ***
         self.value_weight = value_weight
         self.max_depth = max_depth # Store max_depth
+
+        # E25 binding-constraint ablation flags (default off).
+        self.ablate_policy = bool(ablate_policy)
+        self.ablate_value = bool(ablate_value)
 
         # Rollout Budget Scheduling
         self.early_simulations = num_simulations
@@ -689,6 +701,8 @@ class MCTS:
             if value is None and depth < self.max_depth:
                 policy, net_value = self._evaluate_state(current_state) # Get NN prediction
                 value = net_value # Use network's value if not terminal
+                if self.ablate_policy or self.ablate_value:
+                    policy, value = self._apply_head_ablation(policy, value, current_state)
 
                 # *** Add check: Ensure state didn't become terminal between _get_value and _evaluate_state ***
                 if current_state.is_terminal():
@@ -1170,6 +1184,8 @@ class MCTS:
             else:  # pure_neural
                 policy = policy_nn
                 value = value_nn
+                if self.ablate_policy or self.ablate_value:
+                    policy, value = self._apply_head_ablation(policy, value, current_state)
 
             # Expand node if allowed.
             #
@@ -1382,6 +1398,28 @@ class MCTS:
             return white_pov_value
         return -white_pov_value
 
+
+    def _apply_head_ablation(self, policy, value, current_state):
+        """E25 binding-constraint ablation (pure_neural only; no-op when both flags off).
+
+        ``ablate_policy`` replaces the NN prior with a uniform distribution over
+        valid moves (value head kept) — tests how well the value head ALONE guides
+        play. ``ablate_value`` replaces the leaf value with a constant 0 (prior
+        kept) — tests how well the policy prior ALONE guides play. Whichever
+        ablation collapses H2H strength is the binding head. Returns (policy, value).
+        """
+        if self.ablate_policy:
+            valid_moves = current_state.get_valid_moves()
+            policy = np.zeros(self.state_encoder.total_moves, dtype=np.float32)
+            if valid_moves:
+                p = 1.0 / len(valid_moves)
+                for mv in valid_moves:
+                    idx = self.state_encoder.move_to_index(mv)
+                    if 0 <= idx < len(policy):
+                        policy[idx] = p
+        if self.ablate_value:
+            value = 0.0
+        return policy, value
 
     def _mask_invalid_moves(self, policy: np.ndarray, valid_moves: List[Move]) -> np.ndarray:
         """Mask out invalid moves from the policy vector and re-normalize."""
