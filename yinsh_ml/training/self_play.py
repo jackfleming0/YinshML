@@ -2656,6 +2656,7 @@ def play_games_inference_client(
                                          'value_head_type', 'opponent_model_path']}
         mcts_init_config['evaluator'] = evaluator
 
+        _wall_start = time.time()
         for game_id in game_ids:
             if use_cpp_engine:
                 local_game_state_pool = None
@@ -2691,6 +2692,23 @@ def play_games_inference_client(
                     mcts.reset_tree()
                 except Exception:
                     pass
+
+        # E20 bottleneck attribution: split this worker's wall time into IPC
+        # wait (blocked on the server reply: transport + server batching + GPU),
+        # encode (CPU state→array), and tree-CPU (everything else: MCTS
+        # selection/expansion + make_move). High ipc_wait fraction ⇒ IPC/server
+        # bound (shared-memory transport is the lever); high tree fraction ⇒
+        # worker-CPU bound (integer-keyed tree is the lever).
+        _wall = max(1e-9, time.time() - _wall_start)
+        _ipc = evaluator.ipc_wait_s
+        _enc = evaluator.encode_s
+        _tree = max(0.0, _wall - _ipc - _enc)
+        worker_logger.info(
+            "E20-profile w%d: wall=%.1fs ipc_wait=%.0f%% encode=%.0f%% tree_cpu=%.0f%% "
+            "(%d calls, %.1f states/call)",
+            worker_id, _wall, 100 * _ipc / _wall, 100 * _enc / _wall, 100 * _tree / _wall,
+            evaluator.calls, evaluator.states / max(1, evaluator.calls),
+        )
 
     except Exception as e:
         # Construction-time failure (model load, etc.): report None for every

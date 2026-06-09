@@ -208,6 +208,16 @@ class ProcessEvaluatorClient:
         self.response_queue = response_queue
         self.encoder = encoder
         self._seq = 0
+        # Lightweight diagnostics (E20 bottleneck attribution). `ipc_wait_s` is
+        # time blocked on the server reply (IPC + server batching + GPU forward);
+        # `encode_s` is CPU encode time; `calls`/`states` for averages. The
+        # worker logs these at shutdown so we can tell IPC/server-bound (high
+        # ipc_wait fraction of wall) from worker-CPU-bound (low) without a
+        # profiler — see docs/experiments/e20_throughput_build.md Open Levers.
+        self.ipc_wait_s = 0.0
+        self.encode_s = 0.0
+        self.calls = 0
+        self.states = 0
 
     def evaluate(self, state):
         logits, values = self.evaluate_batch([state])
@@ -217,14 +227,20 @@ class ProcessEvaluatorClient:
         if not states:
             raise ValueError("evaluate_batch called with empty states list")
 
+        _t0 = time.monotonic()
         arr = np.stack(
             [self.encoder.encode_state(s).astype(np.float32) for s in states]
         )
         self._seq += 1
         seq = self._seq
         self.request_queue.put((self.worker_id, seq, arr))
+        _t1 = time.monotonic()
 
         rseq, logits_np, values_np = self.response_queue.get()
+        self.ipc_wait_s += time.monotonic() - _t1
+        self.encode_s += _t1 - _t0
+        self.calls += 1
+        self.states += len(states)
         # Single in-flight request per worker; a mismatch means a stale reply
         # leaked through (shouldn't happen) — drain until we see ours.
         while rseq != seq:
