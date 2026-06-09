@@ -426,17 +426,27 @@ function currentSide() {
   return el ? el.value : "WHITE";
 }
 
-async function applyMove(moveSpec) {
+async function applyMove(moveSpec, mover = "human", moverMeta = null) {
   state.busy = true;
   state.hoverArrow = null;
   // Snapshot the pre-move pieces for the animation diff. Must be a copy —
   // applyNewPosition mutates state.pieces in place.
   const prevPiecesSnapshot = new Map(state.pieces);
   try {
+    // `mover` ("human" | "engine") tags move provenance so the server log can
+    // attribute each move — the server is stateless and otherwise can't tell a
+    // human click from an auto-played engine move (both hit /api/move). Default
+    // "human" covers board clicks, self-play, and capture-panel picks; only
+    // computerMakeMove passes "engine" + moverMeta (model/sims/symmetry).
     const res = await fetch("/api/move", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...currentPositionPayload(), move: moveSpec }),
+      body: JSON.stringify({
+        ...currentPositionPayload(),
+        move: moveSpec,
+        mover,
+        mover_meta: moverMeta,
+      }),
     });
     const data = await res.json();
     if (!data.ok) {
@@ -1665,12 +1675,20 @@ async function computerMakeMove() {
   }
 
   if (!topMove) return;
-  await applyMove({
-    type: topMove.type,
-    source: topMove.source,
-    destination: topMove.destination,
-    markers: topMove.markers,
-  });
+  await applyMove(
+    {
+      type: topMove.type,
+      source: topMove.source,
+      destination: topMove.destination,
+      markers: topMove.markers,
+    },
+    "engine",
+    {
+      model_id: modelSel.value,
+      num_sims: state.game.computerSims,
+      symmetric: symmetricEnabled(),
+    },
+  );
 }
 
 function handleGameEnd() {
