@@ -1,7 +1,10 @@
 # E20 — Self-play throughput build
 
-**Status:** BUILT + MEASURED on a rented 4090 (2026-06-09). ~20× serial / ~9.5× the
-old process-pool ceiling, measured. Chasing the last ~1.6× to the GPU roofline.
+**Status:** BUILT + MEASURED on a rented 4090 (2026-06-09). **27× serial (pure-neural)
+/ 9.1× the real hybrid recipe**, measured. Cheap-win frontier reached — now
+transport-overhead bound at ~55% of the bf16 roofline; recommend banking bf16 and
+redirecting (see Recommendation). Levers landed: process coalescing → real virtual
+loss (2.7×) → bf16 forward (1.29×) → fp16-wire (1.05×).
 **Date(s):** scoped 2026-06-01; built + measured 2026-06-09.
 **Cost:** engineering build + a few 4090-hours of micro-benchmarking (no full training run).
 **Branch / artifacts:** landed on `main` (commits `f5d0d14` inference server →
@@ -28,15 +31,31 @@ at ~677 games/hr (4 workers) then *regressed*. Two levers fixed it, measured on 
 | process_pool @8 | 636 | *regresses* | n/a |
 | inference_server @32 (coalescing only) | 2,351 | 7.2× | 16 |
 | inference_server @32 + real virtual loss | 6,447 | 19.8× | 125 |
-| **inference_server @48 + real virtual loss (peak)** | **7,140** | **21.9×** | **127** |
+| inference_server @48 + real virtual loss | 7,140 | 21.9× | 127 |
+| inference_server @48 + bf16 forward | 8,351 | 25.6× | — |
+| **inference_server @48 + bf16 + fp16-wire (peak)** | **8,789** | **27.0×** | — |
 
-Confirmed on the **real (hybrid) recipe**: 3,834 g/hr @32w = **8.65× serial** (smaller
-than pure-neural because per-worker heuristic CPU work slows request generation).
+Confirmed on the **real (hybrid) recipe**: 3,834 (fp32) → **4,019 g/hr @32w with bf16
+= 9.1× serial** (smaller than pure-neural because per-worker heuristic CPU work slows
+request generation — hybrid is more worker-CPU bound, tree_cpu ≈ 30%).
 
-GPU roofline (pure forward, no MCTS) ≈ **12,800 evals/sec at batch ~256**; at the 48w
-peak we feed ~7,690 evals/sec ≈ **64% of roofline**, GPU ~64% duty cycle. The coalesced
-batch plateaus at ~127 and **more workers regress** (64w < 48w) — so the remaining ~1.6×
-is **CPU/IPC/single-process-server bound, not GPU-batch bound** (see Open Levers).
+### Lever-by-lever (where the gains came from, and where they stopped)
+
+| lever | g/hr | step | note |
+|---|---:|---:|---|
+| process coalescing | 326 → 2,351 | 7.2× | the server |
+| **real virtual loss** | 2,351 → 6,447 | **2.7×** | the big one — fills in-search batches |
+| more workers (32→48) | 6,447 → 7,140 | 1.1× | plateaus; 64w regresses |
+| **bf16 forward** | 6,482 → 8,351 | **1.29×** | raises the roofline 1.7× |
+| fp16-wire transport | 8,351 → 8,789 | 1.05× | *small — transport is latency-bound, not bytes* |
+
+**Diminishing returns are now explicit.** The bf16 roofline is ~19–23k evals/sec
+(batch 128–512) but at the 48w peak we feed ~10k evals/sec ≈ **~55% of the bf16
+roofline** — the GPU is no longer the wall. The remaining gap is **per-message
+transport/coordination overhead in the single-threaded server**, proven by fp16-wire:
+halving the (batch, 7433) policy payload returned only +5%, so it's latency/Python
+overhead, not bandwidth. Closing it requires re-architecting the transport (see Open
+Levers), a real build for an estimated ~1.4–1.7× — past the point of cheap wins.
 
 **The win reinvests two ways** ("data-dense training in the same wall-clock"): more
 games/hr *or* more sims/move at fixed wall-clock. Per E25 (value-head representational
@@ -170,34 +189,44 @@ tolerance (argmax + `atol=1e-2`), not bit-equality.
 
 ---
 
-## Open levers toward the roofline (64% → ~100%)
+## Bottleneck attribution (how levers were chosen — by profile, not intuition)
 
-The gap is **no longer GPU-batch bound** — at 48w the GPU is ~64% duty cycle, idle
-~36% waiting for requests, and more workers regress. The remaining 1.6× is
-**worker-CPU + IPC + single-process-server overhead**. Before the invasive lever,
-**profile where a worker's per-leaf time goes** (tree CPU vs encode vs IPC round-trip
-wait) — isolate the variable, then attack it:
+Per-worker wall split (instrumented in `ProcessEvaluatorClient`, logged as
+`E20-profile`) + `nvidia-smi` during the run:
 
-1. **`inference_server_max_wait_ms`** (cheap, test first) — currently 1.0. Won't grow
-   the batch much if workers can't supply it, but quick to falsify. Add `--max-wait`
-   to the bench and sweep {1, 3, 5}.
-2. **Faster IPC transport** — the server pickles a ~127-array batch in and scatters 48
-   responses out *per forward*, single-threaded Python, at ~61 forward/sec. Shared-memory
-   ring buffers (fixed-size slots) instead of `mp.Queue` pickling would cut both the
-   server's scatter overhead and per-worker round-trip latency. Likely the biggest
-   remaining lever now that we're IPC/server-bound.
-3. **Vectorize the server scatter** / consider 2 server threads (GPU forward releases
-   the GIL, so a drain thread + a scatter thread can overlap).
-4. **Reduce per-worker tree CPU** — Gemini's integer-keyed-tree refactor (kill the
-   ~23s/game Python `cpp_move_to_py`/`Position.__init__` glue, `BITBOARD_FOLLOWUP_PLAN.md`).
-   Now **justified** (we're worker-CPU bound at the real recipe), and it doubles as the
-   single-game-latency lever for the analysis board. Invasive — do it last, after
-   profiling confirms tree CPU (not IPC) is the worker's dominant cost.
+| config | ipc_wait | tree_cpu | GPU sm-util (steady) | → verdict |
+|---|---:|---:|---:|---|
+| pure-neural @48 | 90% | 8% | median 78%, max 88% | **GPU-forward bound** → bf16 |
+| hybrid @32 | 68% | 30% | — | mixed; bf16 still helps |
 
-**Reinvestment (don't lose the plot):** the ~20× already banked converts to more
-sims/move at fixed wall-clock. Per [[e25]], that (sharper value targets) is the
-higher-value spend than raw games/hr — so chasing roofline and reinvesting in depth
-are the same goal.
+This is what ruled levers in/out with data: the integer-keyed tree (tree_cpu only 8%)
+and shared-memory transport (the GPU was *busy*, not starved) were both **rejected by
+the profile**; **bf16** (cheaper forward) was the right call. After bf16 the GPU fell to
+~55% of the raised roofline, and fp16-wire's **+5%** proved the residual wall is server
+transport **latency/coordination overhead, not bandwidth**.
+
+## Remaining levers (diminishing — past the cheap-win frontier)
+
+At **27× serial (pure) / 9.1× (hybrid)**, ~55% of the bf16 roofline, transport-overhead
+bound. What's left is a real build, not a tweak:
+
+1. **Re-architect the server transport** — one Python process does `queue.get`×N →
+   concat → forward → `queue.put`×N (pickle per response); that per-message coordination
+   is the wall. Options: shared-memory ring buffers (no pickle), a separate scatter
+   thread (the GPU forward releases the GIL, so drain ∥ forward ∥ scatter can overlap),
+   or sharded servers. Est. ~1.4–1.7×. **The only remaining lever with real headroom.**
+2. **`inference_server_max_wait_ms`** sweep {1,3,5} — cheap, untested, marginal.
+3. **Rejected by profiling:** integer-keyed tree (tree_cpu 8%); fp16-wire is done.
+
+## Recommendation / stopping point
+
+The cheap-win frontier is spent (last two levers: 1.29× bf16, 1.05× fp16-wire). **Bank
+bf16** — set `inference_server_dtype: bf16` in training configs; it's inference-only
+data-gen (the net still trains in fp32), standard and safe — and **redirect**. Per
+[[e25]] the binding constraint on *model strength* is the value-head ceiling, not
+self-play speed, so the 9–27× already banked is best spent on **more sims/move**
+(sharper value targets) than on the server re-architecture for another ~1.5×. Revisit
+lever #1 only if a future run is provably self-play-throughput bound at the new ceiling.
 
 ---
 

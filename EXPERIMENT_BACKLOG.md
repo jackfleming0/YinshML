@@ -98,7 +98,7 @@ the expensive swing.**
 
 #### E20 — Self-play throughput build (process-based inference server)  `BUILT · MEASURED`
 **What:** Process-based GPU inference server (coalesce across worker processes) + real virtual loss (fill in-search batches). Built process-side, not threaded, because the C++ bindings only release the GIL in Bench* fns.
-**Outcome (2026-06-09, 4090):** **21.9× serial / 9.5× the old process-pool ceiling** (peak 7,140 g/hr @48 workers, pure-neural); **8.65× serial on the real hybrid recipe**. At 64% of the GPU roofline; remaining ~1.6× is CPU/IPC/server-bound (batch plateaus ~127, more workers regress). Reinvest the win as more sims/move (E25 value-target quality).
+**Outcome (2026-06-09, 4090):** **27× serial (pure-neural, 8,789 g/hr @48w) / 9.1× on the real hybrid recipe.** Levers: process coalescing (7.2×) → real virtual loss (2.7×) → bf16 forward (1.29×) → fp16-wire (1.05×). Now transport-overhead bound at ~55% of the bf16 roofline; cheap-win frontier reached. Recommend banking bf16 (`inference_server_dtype: bf16`) and reinvesting in more sims/move (E25 value-target quality); remaining lever (server transport re-architecture, ~1.5×) only if a run is provably throughput-bound.
 → [details](docs/experiments/e20_throughput_build.md)
 
 #### HF-2 — Heuristic features as network inputs (functional-form test)  `QUEUED`
