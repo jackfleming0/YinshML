@@ -96,9 +96,9 @@ the expensive swing.**
 **Outcome:** Pending — gate is the ~1h mode-b H2H probe (does ensemble{iter1, sym15} beat iter1?). Diversity is the whole risk; obvious candidates are correlated.
 → [details](docs/experiments/e21_ensemble_teacher.md)
 
-#### E20 — Throughput build (shared evaluator + bitboards) in service of depth  `QUEUED · gated`
-**What:** Shared GPU evaluator + bitboards to raise CPU-bound self-play throughput so deeper/high-sim search is affordable.
-**Outcome:** Pending — build only once a depth rung (E19) or E26 proves a real per-iteration learning rate. Throughput multiplies improvement, doesn't create it.
+#### E20 — Self-play throughput build (process-based inference server)  `BUILT · MEASURED`
+**What:** Process-based GPU inference server (coalesce across worker processes) + real virtual loss (fill in-search batches). Built process-side, not threaded, because the C++ bindings only release the GIL in Bench* fns.
+**Outcome (2026-06-09, 4090):** **21.9× serial / 9.5× the old process-pool ceiling** (peak 7,140 g/hr @48 workers, pure-neural); **8.65× serial on the real hybrid recipe**. At 64% of the GPU roofline; remaining ~1.6× is CPU/IPC/server-bound (batch plateaus ~127, more workers regress). Reinvest the win as more sims/move (E25 value-target quality).
 → [details](docs/experiments/e20_throughput_build.md)
 
 #### HF-2 — Heuristic features as network inputs (functional-form test)  `QUEUED`
