@@ -1,0 +1,13 @@
+[package]
+name = "yinsh_driver"
+version = "0.1.0"
+description = "Line-based stdin/stdout protocol bridge around sharkdp/yinsh's negamax AI, mirroring third_party/yngine_driver so YinshML can play against it."
+edition = "2024"
+
+[dependencies]
+yinsh = { path = "../yinsh" }
+yinsh_ai = { path = "../yinsh_ai" }
+
+[[bin]]
+name = "yinsh-driver"
+path = "src/main.rs"

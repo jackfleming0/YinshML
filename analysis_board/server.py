@@ -198,6 +198,14 @@ def _log_move_event(
         event = {
             "ts": now.isoformat(),
             "play_session_id": payload.get("play_session_id"),
+            # Move provenance, stamped client-side ("human" | "engine"). The
+            # server is stateless and can't otherwise distinguish an auto-played
+            # engine move from a human click — both arrive via /api/move.
+            # mover_meta carries the engine config (model_id/num_sims/symmetric)
+            # for engine moves; null for human moves. Absent in pre-2026-06-08
+            # logs, so downstream readers must treat None as "unknown".
+            "mover": payload.get("mover"),
+            "mover_meta": payload.get("mover_meta"),
             "pre_position": {
                 "pieces": payload.get("pieces"),
                 "phase": payload.get("phase"),

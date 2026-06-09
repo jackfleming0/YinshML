@@ -167,6 +167,38 @@ def summarize_session(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     final_position = last.get("new_position") or {}
     final_scores = final_position.get("scores") or {}
 
+    # Move provenance (logged from 2026-06-08; absent in older logs). Derive
+    # which color the engine played from the per-move `mover` tags, so we can
+    # report engine win/loss directly instead of guessing from move timing.
+    engine_sides: set = set()
+    engine_meta: Optional[Dict[str, Any]] = None
+    have_provenance = False
+    for ev in events:
+        mover = ev.get("mover")
+        if mover is None:
+            continue
+        have_provenance = True
+        side = (ev.get("pre_position") or {}).get("side_to_move")
+        if mover == "engine":
+            if side:
+                engine_sides.add(side)
+            if engine_meta is None and ev.get("mover_meta"):
+                engine_meta = ev.get("mover_meta")
+    if len(engine_sides) == 1:
+        engine_side: Optional[str] = next(iter(engine_sides))
+    elif engine_sides:
+        engine_side = "MIXED"  # engine moved as both colors — unexpected
+    else:
+        engine_side = None
+    engine_result: Optional[str] = None
+    if last_game_over and engine_side in ("WHITE", "BLACK"):
+        if last_winner == engine_side:
+            engine_result = "engine_won"
+        elif last_winner is None:
+            engine_result = "draw"
+        else:
+            engine_result = "engine_lost"
+
     return {
         "play_session_id": first.get("play_session_id"),
         "start": start_ts.isoformat() if start_ts else None,
@@ -184,6 +216,10 @@ def summarize_session(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "completed": last_game_over,
         "winner": last_winner,
         "final_scores": final_scores,
+        "has_provenance": have_provenance,
+        "engine_side": engine_side,
+        "engine_result": engine_result,
+        "engine_meta": engine_meta,
     }
 
 
@@ -198,7 +234,17 @@ def _outcome_str(summary: Dict[str, Any]) -> str:
     scores = summary.get("final_scores") or {}
     ws = scores.get("WHITE", "?")
     bs = scores.get("BLACK", "?")
-    return f"{winner or 'DRAW'} {ws}-{bs}"
+    base = f"{winner or 'DRAW'} {ws}-{bs}"
+    # Append the engine verdict when the log carries move provenance.
+    er = summary.get("engine_result")
+    es = summary.get("engine_side")
+    if er == "engine_won":
+        base += f"  [engine WON as {es}]"
+    elif er == "engine_lost":
+        base += f"  [engine LOST as {es}]"
+    elif er == "draw" and es in ("WHITE", "BLACK"):
+        base += f"  [engine drew as {es}]"
+    return base
 
 
 def format_one_line(summary: Dict[str, Any]) -> str:
@@ -270,6 +316,11 @@ def aggregate_stats(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
         statistics.mean(s["num_moves"] for s in completed if s.get("num_moves") is not None)
         if completed else None
     )
+    # Engine record over completed games that carry provenance (mover tags).
+    engine_games = [s for s in completed if s.get("engine_side") in ("WHITE", "BLACK")]
+    engine_wins = sum(1 for s in engine_games if s.get("engine_result") == "engine_won")
+    engine_losses = sum(1 for s in engine_games if s.get("engine_result") == "engine_lost")
+    engine_draws = sum(1 for s in engine_games if s.get("engine_result") == "draw")
     return {
         "total_sessions": total,
         "completed": len(completed),
@@ -279,6 +330,10 @@ def aggregate_stats(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
         "draws": draws,
         "avg_completed_duration_s": avg_dur,
         "avg_completed_move_count": avg_moves,
+        "engine_games": len(engine_games),
+        "engine_wins": engine_wins,
+        "engine_losses": engine_losses,
+        "engine_draws": engine_draws,
     }
 
 
@@ -368,6 +423,12 @@ def main() -> None:
         print(
             f"  avg completed: {stats['avg_completed_duration_s']:.0f}s, "
             f"{stats['avg_completed_move_count']:.0f} moves"
+        )
+    if stats["engine_games"]:
+        print(
+            f"  engine record (provenance-tagged): "
+            f"{stats['engine_wins']}W-{stats['engine_losses']}L-{stats['engine_draws']}D "
+            f"over {stats['engine_games']} completed games"
         )
     print()
     print(f"{'session':<8}  {'start':<19}  {'dur':>6}  {'moves':>4}  outcome")

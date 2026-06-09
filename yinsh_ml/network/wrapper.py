@@ -2,7 +2,10 @@
 
 import random
 import torch
-import coremltools as ct
+try:
+    import coremltools as ct  # only used for CoreML export (Mac inference)
+except ImportError:  # CUDA/Linux training boxes don't ship it; export is the sole user
+    ct = None
 import logging
 from typing import Optional, Tuple, NamedTuple, List
 import os

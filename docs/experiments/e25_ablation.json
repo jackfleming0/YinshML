@@ -1,0 +1,30 @@
+{
+  "model": "models/iter1_ema_2026-05-27/iter1_ema.pt",
+  "sims": 200,
+  "records": [
+    {
+      "a": "full",
+      "b": "flatpolicy",
+      "sims": 200,
+      "a_wins": 54,
+      "b_wins": 6,
+      "draws": 0,
+      "games": 60,
+      "a_score": 54.0,
+      "a_score_rate": 0.9,
+      "ci95": 0.07591047358566537
+    },
+    {
+      "a": "full",
+      "b": "blindvalue",
+      "sims": 200,
+      "a_wins": 60,
+      "b_wins": 0,
+      "draws": 0,
+      "games": 60,
+      "a_score": 60.0,
+      "a_score_rate": 1.0,
+      "ci95": 8.001666493091714e-06
+    }
+  ]
+}

@@ -88,7 +88,7 @@ for tag in $LR; do run_arm "$tag"; eval_arm "$tag"; done
 echo "=== H2H SLOPE SUMMARY (confirmatory) ==="
 $PY scripts/e19_summarize.py h2h_e24 || true
 echo
-echo "=== READ THE RESULT (docs/experiments/e24_phase1a.md) ==="
+echo "=== READ THE RESULT (docs/experiments/completed/e24_phase1a.md) ==="
 echo "PRIMARY = the value-head AUC trend in auc_e24/*.txt:"
 echo "  any LR's AUC rises across iters AND H2H >= 45% -> GREEN, extend that LR (Phase 1b)."
 echo "  AUC degrades + H2H reverts every iter           -> forgetting is the blocker -> Phase 2 build."
