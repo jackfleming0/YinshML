@@ -2585,6 +2585,14 @@ def play_games_inference_client(
     """
     from ..network.inference_server import ProcessEvaluatorClient
 
+    # Cap intra-op parallelism to 1 thread per worker. These are CPU-only
+    # processes (MCTS tree + encoding); parallelism comes from running MANY of
+    # them, not from torch threads. Without this, each worker grabs torch's
+    # default all-cores intra-op pool, so scaling to 32-64 workers on a big-core
+    # box oversubscribes catastrophically and wedges it (see commit 4a9d3be /
+    # the gen scripts). The server process owns the GPU and does the real math.
+    torch.set_num_threads(1)
+
     worker_logger = logging.getLogger(f"InferClient-{worker_id}")
     if not worker_logger.hasHandlers():
         handler = logging.StreamHandler()
