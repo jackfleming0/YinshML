@@ -88,7 +88,7 @@ the expensive swing.**
 
 #### E26 — High-budget-search distillation campaign  `RUNNING · reaimed to policy-distill`
 **What:** Distill targets from a stronger teacher (iter1_ema at 1600–3200+ sims) into the net — search manufactures the better signal, distillation banks it.
-**Outcome:** Pending — reaimed 2026-06-09 to distill the search-improved POLICY (value teacher undercut by E25). Verdict gate: distilled net beating frozen iter1_ema in H2H.
+**Outcome:** Pending — reaimed 2026-06-09 to distill the search-improved POLICY (value teacher undercut by E25). Verdict gate: distilled net beating frozen iter1_ema in H2H. **Teacher-gen now E20-accelerated** (`gen_distill_corpus.py --use-inference-server --inference-dtype bf16`): ~645 pos/min @48w/800sim on the 4090 (~4.7× old GPU best; 2M-position target ~52h, was ~10 days).
 → [details](docs/experiments/e26_distillation_campaign.md) · [box runbook](docs/experiments/e26_box_runbook.md)
 
 #### E21 — Model ensembling (averaged P/V), primarily as a teacher  `QUEUED · parked`

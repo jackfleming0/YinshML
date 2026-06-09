@@ -230,6 +230,23 @@ lever #1 only if a future run is provably self-play-throughput bound at the new 
 
 ---
 
+## Applied to E26 (2026-06-09) — the payoff
+
+Wired into the E26 teacher-corpus generator (`scripts/gen_distill_corpus.py
+--use-inference-server --inference-dtype bf16 --batch-size 64`), which previously
+used `mp.Pool` with one CUDA context per worker. The reusable `InferenceServerPool`
+(in `inference_server.py`) hosts the server + stable-id CPU workers for both self-play
+and corpus-gen. Measured on the 4090 at 800 sims (E26's regime):
+
+| gen path | pos/min | note |
+|---|---:|---|
+| old `--device cuda` @8 (its best) | 138 | per-worker CUDA contexts; regresses past ~8 |
+| old `--device cpu` @48 | — | killed at 20+ min (CPU forwards at 800 sims) |
+| **inference-server bf16 @48** | **~645** | **~4.7×**; coalesced batch 133, scales with workers |
+
+At ~38.7k pos/hr the 2M-position E26 target is ~52 h (was ~10 days via the old GPU path).
+Runbook: [`e26_box_runbook.md`](e26_box_runbook.md) Stage 1.
+
 ## Original scope (2026-06-01) — preserved for provenance
 
 > **Status at the time:** QUEUED, gated on a proven depth lever. Framed as

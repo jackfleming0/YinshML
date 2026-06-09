@@ -25,21 +25,31 @@ conda activate main; cd ~/YinshML && git pull
 # deps: pip install -r requirements.txt (minus coremltools, which we made optional)
 ```
 
-## Stage 1 — teacher data (the long pole)
+## Stage 1 — teacher data (the long pole) — use the E20 inference server
 ```bash
 M=models/iter1_ema_2026-05-27/iter1_ema.pt
 PYTHONPATH=~/YinshML PYTHONUNBUFFERED=1 nohup python -u scripts/gen_distill_corpus.py \
     --model $M --out expert_games/e26_teacher_800sim.npz \
-    --games 4000 --sims 800 --workers <W> --device <cpu|cuda> \
+    --games 42000 --sims 800 --workers 48 \
+    --use-inference-server --inference-dtype bf16 --batch-size 64 \
     --max-positions 2000000 --checkpoint-every 50 \
     > logs/e26_gen.log 2>&1 < /dev/null &
 ```
+- **`--use-inference-server` is the throughput path (E20):** one bf16 GPU server + N CPU
+  workers, no per-worker CUDA context. Measured on the 4090 (2026-06-09, 800 sims):
+  **48 workers = 2,256 positions / 3.5 min ≈ 645 pos/min ≈ 38.7k/hr** (mean coalesced
+  GPU batch 133). That's **~4.7× the old `--device cuda` best** (which caps at ~8 workers
+  then regresses — 138 pos/min) and dramatically faster than `--device cpu` (CPU forwards
+  at 800 sims are brutal — the old long pole). At 38.7k/hr, the 2M-position target is
+  **~52 h** (was ~10 days via the old GPU path).
+- **Knobs:** scale `--workers` toward the core count (192-core box); `--batch-size 64`
+  lets the server coalesce fat batches (the virtual-loss fix fills them). Raise `--sims`
+  for sharper targets — at high sims the win grows (forward dominates, bf16 helps most).
 - `--sims 800` is the teacher budget (higher = better targets; KL-to-prior grows with sims).
 - Saves top-K (K=64) visit-count policy + root value per main-game position. Checkpoints
   every 50 games; stops at `--max-positions`. **Watch:** `game N/… (total P/target)`.
-- **Throughput is the open question** — benchmark first (see below) to pick `--workers`,
-  `--sims`, and target size that fit the rental window. CPU workers fan across the 192
-  cores; GPU workers are fewer (GPU-mem bound) but faster per game. Benchmark decides.
+- Legacy `--device cpu|cuda` (per-worker model, no server) still works for small runs /
+  debugging; the inference-server path is strictly better for the big Stage-1.
 
 ## Stage 2 — distill (fast, GPU)
 ```bash
@@ -62,16 +72,22 @@ PYTHONPATH=~/YinshML python scripts/measure_h2h.py \
 - Color-balanced; read distilled's score with its ±CI (n=60 ≈ ±13pp — must clear it).
 - **>0.5 beyond CI → E26 worked.** ≈0.5 → no lift; the policy-distill lever didn't move it.
 
-## Throughput benchmark (run BEFORE committing the big Stage-1)
-A short gen run measures positions/min so Stage 1 can be sized to the window:
+## Throughput benchmark (sanity-check before the big Stage-1)
+Throughput is largely resolved (use `--use-inference-server`); a short run just
+confirms pos/min on the current box so Stage 1 can be sized to the rental window:
 ```bash
 PYTHONPATH=~/YinshML python scripts/gen_distill_corpus.py --model $M \
-    --out /tmp/bench.npz --games <W> --sims 800 --workers <W> --device cpu \
-    --max-positions 99999999 --checkpoint-every 9999    # let W games run, read the per-game timing
+    --out /tmp/bench.npz --games 48 --sims 800 --workers 48 \
+    --use-inference-server --inference-dtype bf16 --batch-size 64 \
+    --max-positions 99999999 --checkpoint-every 9999    # read the "done: N positions, X.Xm" line
 ```
-Positions/min × target ⇒ Stage-1 hours. Then size `--games`/`--max-positions` to fit.
+Positions/min × target ⇒ Stage-1 hours. Reference: ~645 pos/min @48w/800sim on the 4090.
+Watch the server's `mean coalesced batch` in the log — climbing with `--workers` confirms
+coalescing; if it plateaus and pos/min flattens, more workers won't help (see E20 runbook).
 
 ## Notes
-- Single GPU (4090, 24 GB). For GPU-worker gen, keep workers small (~8–16) to fit GPU mem;
-  for CPU-worker gen, scale workers toward the core count. Benchmark both if unsure.
+- Single GPU (4090, 24 GB). The inference-server path needs **one** model on the GPU
+  (the server), so workers are CPU-only and you scale them toward the core count without
+  GPU-mem pressure — that's the whole point vs the old `--device cuda` (one context/worker).
+- E20 throughput build (server + virtual-loss fix + bf16): `docs/experiments/e20_throughput_build.md`.
 - Corpus is 15ch (iter1's encoding); ~7.3 GB per 1M positions in RAM (251 GB box — fine).
