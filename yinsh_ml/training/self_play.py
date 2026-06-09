@@ -1292,28 +1292,37 @@ class MCTS:
         else:
             fpu_q = 0.0
 
-        # Q-vector. value() denominator (visits + virtual_losses) is safe
-        # here because we only consult q_visited where visited_mask=True
-        # (visit_count > 0 ⇒ adjusted_visits > 0).
+        # Q-vector with virtual loss as a *real loss*. Each in-flight sim
+        # subtracts a full loss (−1) from the numerator and counts in the
+        # denominator, so an in-flight node — even an unvisited leaf — is
+        # repelled. This is what lets concurrent sims in `search_batch` spread
+        # across DISTINCT leaves instead of all re-selecting the top-prior leaf
+        # and tripping the duplicate-leaf guard (which collapsed batches to ~1
+        # leaf/flush — see E20 throughput work). The previous formula ignored
+        # virtual loss for unvisited children entirely (FPU constant + a U-term
+        # with no visit denominator), so virtual loss was a no-op exactly where
+        # batching needed it.
+        #
+        # Crucially this reduces EXACTLY to the prior formula when no virtual
+        # loss is in flight (virt_losses all 0 — every serial `search()`
+        # selection, and the first sim of each batch): q_visited for visited
+        # children, FPU for untouched leaves, U = c_puct·π·√parent/(1+visits).
+        # So serial search is unchanged; only mid-batch selection differs.
         adjusted_visits = visits + virt_losses
-        # Avoid /0 in the unvisited slots; np.where below picks fpu_q anyway.
         safe_denom = np.where(adjusted_visits > 0, adjusted_visits, 1.0)
-        q_visited = value_sums / safe_denom
-        q_values = np.where(visited_mask, q_visited, fpu_q)
+        q_adjusted = (value_sums - virt_losses) / safe_denom
+        # adjusted_visits > 0 covers both real visits and in-flight leaves;
+        # only genuinely untouched leaves fall back to the FPU baseline.
+        q_values = np.where(adjusted_visits > 0, q_adjusted, fpu_q)
         scaled_q = self.value_weight * q_values
 
-        # U-vector. Original code uses two different formulas:
-        #   visited:   c_puct · π · √parent / (1 + visits)
-        #   unvisited: c_puct · π · √(parent + ε)    [no division]
-        # parent_visit_count >= 1 here (we short-circuited 0 above), so
-        # √(parent + ε) ≈ √parent — but we keep both terms separately to
-        # avoid drift if anyone later changes the early-return condition.
+        # U-vector: one formula, virtual loss in the denominator. parent visits
+        # >= 1 (the 0 case short-circuited above), so an untouched leaf
+        # (adjusted_visits == 0) gives c_puct·π·√parent — matching the old
+        # unvisited term to within ε.
         c_puct = self.c_puct  # constant across children of this MCTS
         sqrt_parent = np.sqrt(parent_visit_count)
-        sqrt_parent_eps = np.sqrt(parent_visit_count + epsilon)
-        u_visited = c_puct * priors * sqrt_parent / (1.0 + visits)
-        u_unvisited = c_puct * priors * sqrt_parent_eps
-        u_values = np.where(visited_mask, u_visited, u_unvisited)
+        u_values = c_puct * priors * sqrt_parent / (1.0 + adjusted_visits)
 
         # ε-noise for tiebreaking. One vector draw replaces N scalar draws.
         noise = np.random.uniform(0.0, epsilon, size=n)
