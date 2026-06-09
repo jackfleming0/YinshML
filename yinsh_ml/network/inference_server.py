@@ -43,9 +43,10 @@ just constructs the client and passes it as `evaluator=`.
 from __future__ import annotations
 
 import logging
+import multiprocessing as _mp
 import queue
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 import torch
@@ -269,6 +270,97 @@ class ProcessEvaluatorClient:
         # cost lands on the worker, not the single-threaded server, and
         # downstream softmax/masking is fp32-stable.
         return torch.from_numpy(logits_np).float(), torch.from_numpy(values_np)
+
+
+class InferenceServerPool:
+    """One GPU inference server + N persistent CPU worker processes.
+
+    The reusable orchestration behind the E20 build: start one
+    `run_inference_server` process (the only CUDA context) and spawn
+    `num_workers` worker processes, each bound to a stable
+    ``worker_id <-> response_queue`` (which is why this can't be a
+    ``ProcessPoolExecutor`` — pool workers are opaque and reused). Each worker
+    runs ``worker_entry(worker_id, request_queue, response_queue, result_queue,
+    stop_event, payloads[worker_id])`` and is expected to construct its own
+    `ProcessEvaluatorClient` and stream results onto ``result_queue``.
+
+    The caller owns result collection (counts, checkpointing, early-stop) by
+    draining ``pool.result_queue`` and may call ``pool.stop_event.set()`` to
+    ask workers to finish early. Used by both `SelfPlay` self-play and the E26
+    teacher-corpus generator.
+
+    Use as a context manager — ``__exit__`` sets stop, joins, and terminates
+    stragglers + the server. ``worker_entry`` and every payload must be
+    picklable (spawn start method).
+    """
+
+    def __init__(self, model_path, server_cfg, num_workers, worker_entry, payloads,
+                 *, mp_context=None, ready_timeout=180.0):
+        if len(payloads) != num_workers:
+            raise ValueError(f"need one payload per worker: {len(payloads)} != {num_workers}")
+        self.model_path = model_path
+        self.server_cfg = server_cfg
+        self.num_workers = num_workers
+        self.worker_entry = worker_entry
+        self.payloads = payloads
+        self.ctx = mp_context or _mp.get_context("spawn")
+        self.ready_timeout = ready_timeout
+        self.request_queue = None
+        self.response_queues = None
+        self.result_queue = None
+        self.stop_event = None
+        self.server = None
+        self.workers: List = []
+
+    def __enter__(self) -> "InferenceServerPool":
+        ctx = self.ctx
+        self.request_queue = ctx.Queue()
+        self.response_queues = [ctx.Queue() for _ in range(self.num_workers)]
+        self.result_queue = ctx.Queue()
+        self.stop_event = ctx.Event()
+        ready = ctx.Event()
+
+        self.server = ctx.Process(
+            target=run_inference_server,
+            args=(self.model_path, self.server_cfg, self.request_queue,
+                  self.response_queues, self.stop_event, ready),
+            name="InferenceServer",
+            daemon=True,
+        )
+        self.server.start()
+        if not ready.wait(timeout=self.ready_timeout):
+            self.stop_event.set()
+            self.server.join(timeout=10)
+            raise RuntimeError(
+                f"inference server did not become ready within {self.ready_timeout}s"
+            )
+
+        for wid in range(self.num_workers):
+            p = ctx.Process(
+                target=self.worker_entry,
+                args=(wid, self.request_queue, self.response_queues[wid],
+                      self.result_queue, self.stop_event, self.payloads[wid]),
+                name=f"MCTSWorker-{wid}",
+            )
+            p.start()
+            self.workers.append(p)
+        return self
+
+    def workers_alive(self) -> bool:
+        return any(p.is_alive() for p in self.workers)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.stop_event is not None:
+            self.stop_event.set()
+        for p in self.workers:
+            p.join(timeout=30)
+            if p.is_alive():
+                p.terminate()
+        if self.server is not None:
+            self.server.join(timeout=30)
+            if self.server.is_alive():
+                self.server.terminate()
+        return False
 
 
 def _configure_process_logger() -> None:
