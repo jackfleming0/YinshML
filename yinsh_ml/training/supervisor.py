@@ -455,6 +455,14 @@ class TrainingSupervisor:
         mcts_batch_size = self.mode_settings.get('mcts_batch_size', 32)
         # PR #12 Phase 2: shared evaluator across N threads, one model on GPU.
         use_shared_evaluator = bool(self.mode_settings.get('use_shared_evaluator', False))
+        # E20 throughput: process-based inference server. Workers stay separate
+        # processes (no GIL) and route leaf-eval batches to one GPU-resident
+        # server that coalesces across all of them. Mutually exclusive with
+        # use_shared_evaluator. See yinsh_ml/network/inference_server.py.
+        use_inference_server = bool(self.mode_settings.get('use_inference_server', False))
+        inference_server_max_wait_ms = float(
+            self.mode_settings.get('inference_server_max_wait_ms', 1.0)
+        )
         # Subtree reuse: carry MCTS tree across moves within each self-play game
         # (Track A polish item). Default on — disable via config for A/B testing.
         enable_subtree_reuse = bool(self.mode_settings.get('enable_subtree_reuse', True))
@@ -511,6 +519,8 @@ class TrainingSupervisor:
             'use_batched_mcts': use_batched_mcts,  # NEW: Enable batched MCTS
             'mcts_batch_size': mcts_batch_size,  # NEW: Batch size for leaf evaluation
             'use_shared_evaluator': use_shared_evaluator,  # PR #12 Phase 2
+            'use_inference_server': use_inference_server,  # E20 process-based coalescing
+            'inference_server_max_wait_ms': inference_server_max_wait_ms,
             'initial_temp': initial_temp,
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,

@@ -1,6 +1,7 @@
 """Network wrapper for YINSH ML model."""
 
 import random
+import numpy as np
 import torch
 try:
     import coremltools as ct  # only used for CoreML export (Mac inference)
@@ -669,6 +670,49 @@ class NetworkWrapper:
         finally:
             # Always release the batch tensor
             self._release_tensor(batch_tensor)
+
+    def predict_batch_encoded(self, encoded_batch, temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass on an already-encoded batch (skips per-state encoding).
+
+        Mirror of `predict_batch` minus the encode step: the caller supplies a
+        stacked array/tensor of shape (N, C, 11, 11) already in the encoder's
+        channel order. This is the seam the process-based inference server
+        (`yinsh_ml/network/inference_server.py`) uses — self-play workers
+        encode on the CPU (in parallel, off the GIL of any one process) and
+        ship compact fixed-size arrays, so `CppGameState`/`GameState` objects
+        never have to cross the process boundary (and `CppGameState` doesn't
+        pickle). Only the server runs the GPU forward.
+
+        Returns (policy_logits, values) exactly like `predict_batch`:
+        logits (N, total_moves), values (N, 1) — raw logits; caller masks /
+        softmaxes as needed.
+        """
+        if encoded_batch is None or len(encoded_batch) == 0:
+            raise ValueError("predict_batch_encoded called with empty batch")
+
+        if isinstance(encoded_batch, np.ndarray):
+            batch_tensor = torch.from_numpy(np.ascontiguousarray(encoded_batch)).float()
+        elif torch.is_tensor(encoded_batch):
+            batch_tensor = encoded_batch.float()
+        else:
+            batch_tensor = torch.as_tensor(np.asarray(encoded_batch)).float()
+
+        expected_c = 15 if self.use_enhanced_encoding else 6
+        if batch_tensor.dim() != 4 or batch_tensor.shape[1] != expected_c:
+            raise ValueError(
+                f"predict_batch_encoded expected (N, {expected_c}, 11, 11) for "
+                f"use_enhanced_encoding={self.use_enhanced_encoding}, got "
+                f"tuple(shape)={tuple(batch_tensor.shape)}."
+            )
+
+        batch_tensor = batch_tensor.to(self.device)
+        self.network.eval()
+        with torch.no_grad():
+            policy_logits, values = self.network(batch_tensor)
+            # Value already in [-1, 1] for both head modes — see predict_batch.
+            if temperature != 1.0:
+                policy_logits = policy_logits / temperature
+        return policy_logits, values
 
     def cleanup(self) -> None:
         """

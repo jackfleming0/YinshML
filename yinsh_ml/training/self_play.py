@@ -19,6 +19,7 @@ _SELF_PLAY_MP_CONTEXT = _mp.get_context('spawn')
 import time
 import tempfile
 import os
+import queue
 from pathlib import Path
 import concurrent.futures
 import psutil
@@ -1574,10 +1575,33 @@ class SelfPlay:
                  # each loading their own model. Default false keeps the
                  # existing ProcessPoolExecutor path unchanged.
                  use_shared_evaluator: bool = False,
+                 # --- Process-based inference server (E20 throughput) ---
+                 # When true and num_workers > 0, generate_games keeps workers
+                 # as separate PROCESSES (no GIL) but routes their leaf-eval
+                 # batches to one GPU-resident server process that coalesces
+                 # across all workers. One CUDA context total -> no command-
+                 # queue contention. This is the process-based alternative to
+                 # `use_shared_evaluator` (which coalesces but serializes MCTS
+                 # on the GIL). See yinsh_ml/network/inference_server.py.
+                 # Mutually exclusive with use_shared_evaluator.
+                 use_inference_server: bool = False,
+                 inference_server_max_wait_ms: float = 1.0,
                 ):
         """
         Initialize SelfPlay with explicit MCTS and temperature parameters.
         """
+        if use_inference_server and use_shared_evaluator:
+            raise ValueError(
+                "use_inference_server and use_shared_evaluator are mutually "
+                "exclusive: the first coalesces inference across processes, the "
+                "second across threads. Pick one."
+            )
+        if use_inference_server and opponent_model_path:
+            raise ValueError(
+                "use_inference_server does not support E22 cross-teacher "
+                "(opponent_model_path): the server holds a single model. Use "
+                "the ProcessPoolExecutor path for cross-teacher self-play."
+            )
         self.network = network
         self.num_workers = num_workers # Use the calculated number passed in
         self.metrics_logger = metrics_logger
@@ -1617,6 +1641,8 @@ class SelfPlay:
         self.use_batched_mcts = use_batched_mcts
         self.mcts_batch_size = mcts_batch_size
         self.use_shared_evaluator = use_shared_evaluator
+        self.use_inference_server = use_inference_server
+        self.inference_server_max_wait_ms = inference_server_max_wait_ms
 
         # T4.10: cumulative count of worker / thread crashes observed by
         # the parent across all calls to generate_games. Bumped from the
@@ -1880,6 +1906,144 @@ class SelfPlay:
             total_time = time.time() - start_time
             final_rate = games_completed / total_time if total_time > 0 else 0
             self.logger.info("\nGame generation complete:")
+            self.logger.info(f"- Games generated: {games_completed}/{num_games}")
+            self.logger.info(f"- Total time: {total_time:.1f} seconds")
+            self.logger.info(f"- Final rate: {final_rate:.2f} games/second")
+            return games_data
+
+        # ----- Process-based inference server (E20 throughput) -----------
+        # Workers stay PROCESSES (no GIL contention) but route their per-game
+        # leaf-eval batches to one GPU-resident server process that coalesces
+        # across all workers. One CUDA context total -> no command-queue
+        # serialization (the failure mode in GPU_SCALING_RESULTS.md). This is
+        # the process-based counterpart to the threaded shared-evaluator path
+        # above, which coalesces but stalls on the GIL because the C++ engine's
+        # pybind methods don't release it. See inference_server.py.
+        if self.use_inference_server:
+            from ..network.inference_server import run_inference_server
+            ctx = _SELF_PLAY_MP_CONTEXT
+            request_queue = ctx.Queue()
+            response_queues = [ctx.Queue() for _ in range(self.num_workers)]
+            result_queue = ctx.Queue()
+            stop_event = ctx.Event()
+            ready_event = ctx.Event()
+
+            # Size the server's coalescing ceiling to absorb every worker's
+            # flush arriving at once; cap for VRAM headroom on small GPUs.
+            server_max_batch = min(1024, max(self.mcts_batch_size * self.num_workers, 64))
+            server_cfg = {
+                'use_enhanced_encoding': self.mcts_config.get('use_enhanced_encoding', False),
+                'value_head_type': self.mcts_config.get('value_head_type', None),
+                'max_batch': server_max_batch,
+                'max_wait_ms': self.inference_server_max_wait_ms,
+            }
+            self.logger.info(
+                f"Inference-server mode — workers={self.num_workers} (processes), "
+                f"server max_batch={server_max_batch}, per-worker flush={self.mcts_batch_size}, "
+                f"max_wait={self.inference_server_max_wait_ms}ms"
+            )
+
+            server_proc = ctx.Process(
+                target=run_inference_server,
+                args=(model_path, server_cfg, request_queue, response_queues,
+                      stop_event, ready_event),
+                name="InferenceServer",
+                daemon=True,
+            )
+            server_proc.start()
+            if not ready_event.wait(timeout=180):
+                stop_event.set()
+                server_proc.join(timeout=10)
+                if 'model_path' in locals() and os.path.exists(model_path):
+                    try: os.unlink(model_path)
+                    except OSError: pass
+                raise RuntimeError("Inference server did not become ready within 180s")
+
+            # Round-robin game assignment across persistent worker processes
+            # (each worker owns a stable worker_id <-> response queue binding,
+            # which is why we can't use ProcessPoolExecutor here — it hands work
+            # to opaque, reused pool workers).
+            game_assignments = [[] for _ in range(self.num_workers)]
+            for gid in range(num_games):
+                game_assignments[gid % self.num_workers].append(gid)
+
+            workers = []
+            for wid in range(self.num_workers):
+                if not game_assignments[wid]:
+                    continue
+                p = ctx.Process(
+                    target=play_games_inference_client,
+                    args=(wid, game_assignments[wid], model_path, self.mcts_config,
+                          request_queue, response_queues[wid], result_queue),
+                    name=f"SelfPlayWorker-{wid}",
+                )
+                p.start()
+                workers.append(p)
+
+            received = 0
+            try:
+                while received < num_games:
+                    try:
+                        game_id, result = result_queue.get(timeout=5.0)
+                    except queue.Empty:
+                        # Deadlock guards (no hard signal from a segfaulted
+                        # process): break if the SERVER died (workers would
+                        # then block forever on a reply that never comes) or if
+                        # every worker has exited with results still short
+                        # (soft errors already arrive as (game_id, None)).
+                        if not server_proc.is_alive():
+                            missing = num_games - received
+                            self.worker_crash_count += missing
+                            self.logger.error(
+                                f"Inference server process died with {missing} "
+                                f"game(s) outstanding; aborting generation."
+                            )
+                            break
+                        if all(not p.is_alive() for p in workers):
+                            missing = num_games - received
+                            self.worker_crash_count += missing
+                            self.logger.error(
+                                f"Inference workers all exited with {missing} "
+                                f"game(s) unaccounted for; ending generation."
+                            )
+                            break
+                        continue
+                    received += 1
+                    if result is not None:
+                        states, policies, values, _temp_data, game_history = result
+                        games_data.append((states, policies, values, game_history))
+                        games_completed += 1
+                        if (games_completed % max(1, num_games // 10) == 0
+                                or games_completed == num_games):
+                            elapsed = time.time() - start_time
+                            rate = games_completed / elapsed if elapsed > 0 else 0
+                            self.logger.debug(
+                                f"Games Generated: {games_completed}/{num_games} "
+                                f"({rate:.2f} games/s)"
+                            )
+                    else:
+                        self.worker_crash_count += 1
+                        self.logger.warning(
+                            f"Inference-server worker returned None for game {game_id}."
+                        )
+            finally:
+                stop_event.set()
+                for p in workers:
+                    p.join(timeout=30)
+                    if p.is_alive():
+                        p.terminate()
+                server_proc.join(timeout=30)
+                if server_proc.is_alive():
+                    server_proc.terminate()
+                if 'model_path' in locals() and os.path.exists(model_path):
+                    try:
+                        os.unlink(model_path)
+                    except OSError:
+                        pass
+
+            total_time = time.time() - start_time
+            final_rate = games_completed / total_time if total_time > 0 else 0
+            self.logger.info("\nGame generation complete (inference server):")
             self.logger.info(f"- Games generated: {games_completed}/{num_games}")
             self.logger.info(f"- Total time: {total_time:.1f} seconds")
             self.logger.info(f"- Final rate: {final_rate:.2f} games/second")
@@ -2395,6 +2559,133 @@ def play_game_worker(
         return None
 
 
+def play_games_inference_client(
+        worker_id: int,
+        game_ids: List[int],
+        model_path: str,
+        mcts_config: Dict,
+        request_queue,
+        response_queue,
+        result_queue,
+) -> None:
+    """Persistent self-play worker process for the inference-server path.
+
+    Unlike `play_game_worker` (one game per ProcessPoolExecutor task, each
+    worker running the GPU forward itself), this is a long-lived process that
+    plays a *range* of games and never touches the GPU: all neural inference is
+    routed through `ProcessEvaluatorClient` -> the shared server process. The
+    worker builds a NetworkWrapper on **CPU** purely for its `state_encoder`
+    and to satisfy MCTS's `network` handle — `predict_batch` on it is never
+    called (the evaluator intercepts every batched leaf eval), so the worker
+    creates **no CUDA context**. That's the whole point: one context (the
+    server's) means no GPU command-queue contention.
+
+    Results are pushed to ``result_queue`` as ``(game_id, result_or_None)``;
+    the parent collects exactly ``len(all workers' game_ids)`` of them.
+    """
+    from ..network.inference_server import ProcessEvaluatorClient
+
+    worker_logger = logging.getLogger(f"InferClient-{worker_id}")
+    if not worker_logger.hasHandlers():
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        )
+        worker_logger.addHandler(handler)
+        worker_logger.propagate = False
+    worker_logger.setLevel(logging.INFO)
+
+    try:
+        # CPU-only network: encoder + a valid handle for MCTS. Never runs a
+        # forward pass — the evaluator does. Forcing CPU keeps CUDA out of the
+        # worker entirely.
+        from ..memory import TensorPool, TensorPoolConfig
+        local_tensor_pool = TensorPool(TensorPoolConfig(
+            initial_size=4, enable_statistics=False,
+            enable_adaptive_sizing=False, enable_tensor_reshaping=True,
+            auto_device_selection=False,
+        ))
+        use_enhanced_encoding = mcts_config.get('use_enhanced_encoding', False)
+        value_head_type = mcts_config.get('value_head_type', None)
+        network = NetworkWrapper(
+            device=torch.device('cpu'), tensor_pool=local_tensor_pool,
+            use_enhanced_encoding=use_enhanced_encoding, value_head_type=value_head_type,
+        )
+        network.load_model(model_path)
+        network.network.eval()
+        state_encoder = network.state_encoder
+
+        evaluator = ProcessEvaluatorClient(worker_id, request_queue, response_queue, state_encoder)
+
+        use_cpp_engine = bool(mcts_config.get('use_cpp_engine', False))
+        use_batched_mcts = mcts_config.get('use_batched_mcts', True)
+        mcts_batch_size = mcts_config.get('mcts_batch_size', 32)
+        if not use_batched_mcts:
+            # The singleton search() path calls network.predict_from_state on
+            # the (weight-loaded but GPU-less) CPU net, bypassing the evaluator
+            # -> correct but defeats coalescing. Inference-server mode is for
+            # batched self-play; surface the misconfig loudly.
+            worker_logger.warning(
+                "Inference-server worker running with use_batched_mcts=False; "
+                "leaf eval will NOT route through the shared server."
+            )
+
+        # Same exclusion set as play_game_worker — these keys aren't MCTS
+        # __init__ params. `evaluator` is injected locally (constructed here,
+        # never pickled from the parent).
+        mcts_init_config = {k: v for k, v in mcts_config.items()
+                            if k not in ['use_batched_mcts', 'mcts_batch_size',
+                                         'use_enhanced_encoding', 'use_cpp_engine',
+                                         'value_head_type', 'opponent_model_path']}
+        mcts_init_config['evaluator'] = evaluator
+
+        for game_id in game_ids:
+            if use_cpp_engine:
+                local_game_state_pool = None
+            else:
+                from ..memory import GameStatePool, GameStatePoolConfig
+                from ..game import GameState
+                local_game_state_pool = GameStatePool(GameStatePoolConfig(
+                    initial_size=50, enable_statistics=False, factory_func=GameState))
+
+            mcts = MCTS(
+                network=network,
+                game_state_pool=local_game_state_pool,
+                metrics_logger=None,
+                **mcts_init_config,
+            )
+            try:
+                result = _run_game_loop(
+                    mcts=mcts,
+                    state_encoder=state_encoder,
+                    use_cpp_engine=use_cpp_engine,
+                    local_game_state_pool=local_game_state_pool,
+                    game_id=game_id,
+                    worker_logger=worker_logger,
+                    use_batched_mcts=use_batched_mcts,
+                    mcts_batch_size=mcts_batch_size,
+                )
+                result_queue.put((game_id, result))
+            except Exception as e:
+                worker_logger.error(f"Error in game {game_id}: {e}", exc_info=True)
+                result_queue.put((game_id, None))
+            finally:
+                try:
+                    mcts.reset_tree()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        # Construction-time failure (model load, etc.): report None for every
+        # assigned game so the parent's counter completes instead of hanging.
+        worker_logger.error(f"Inference client {worker_id} fatal error: {e}", exc_info=True)
+        for game_id in game_ids:
+            try:
+                result_queue.put((game_id, None))
+            except Exception:
+                pass
+
+
 def play_game_thread(
         network: NetworkWrapper,
         evaluator,
@@ -2453,7 +2744,8 @@ def play_game_thread(
 
         mcts_init_config = {k: v for k, v in mcts_config.items()
                             if k not in ['use_batched_mcts', 'mcts_batch_size',
-                                         'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type']}
+                                         'use_enhanced_encoding', 'use_cpp_engine', 'value_head_type',
+                                         'opponent_model_path']}
 
         # The shared evaluator routes inference; MCTS still needs the
         # network reference for its state_encoder.

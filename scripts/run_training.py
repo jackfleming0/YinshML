@@ -314,6 +314,12 @@ def main() -> None:
         # PR #12 Phase 2: shared BatchedEvaluator across N MCTS threads.
         # Default off — explicit opt-in per config (see cloud_run_v1.yaml).
         'use_shared_evaluator': bool(sp.get('use_shared_evaluator', False)),
+        # E20 throughput: process-based inference server. Workers stay
+        # separate processes (no GIL) and route leaf-eval batches to one
+        # GPU-resident server that coalesces across all workers. Default off;
+        # mutually exclusive with use_shared_evaluator. Needs num_workers > 0.
+        'use_inference_server': bool(sp.get('use_inference_server', False)),
+        'inference_server_max_wait_ms': float(sp.get('inference_server_max_wait_ms', 1.0)),
         # Opt-in to the C++ bitboard engine (yinsh_ml/game_cpp). Default off
         # until each training config has been A/B'd against the Python
         # engine. When true, the GameStatePool is bypassed because the
