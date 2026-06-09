@@ -127,6 +127,8 @@ _NET = None
 
 def _init_worker(model_path, device):
     global _NET
+    import torch
+    torch.set_num_threads(1)  # cap each worker to 1 thread; N workers x all-cores oversubscribes
     from yinsh_ml.network.wrapper import NetworkWrapper
     _NET = NetworkWrapper(model_path=model_path, device=device)
     _NET.network.eval()

@@ -123,6 +123,11 @@ _NET = None
 
 def _init_worker(model_path, device):
     global _NET
+    import torch
+    # CRITICAL for many CPU workers: cap each process to 1 thread. torch defaults
+    # to all-cores intra-op parallelism, so N workers x ~ncores threads oversubscribe
+    # catastrophically (e.g. 48 workers on 192 cores -> ~1850 load, box wedged).
+    torch.set_num_threads(1)
     from yinsh_ml.network.wrapper import NetworkWrapper
     _NET = NetworkWrapper(model_path=model_path, device=device)
     _NET.network.eval()
