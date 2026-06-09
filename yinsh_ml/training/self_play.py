@@ -799,7 +799,14 @@ class MCTS:
                 visit_probs[np.argmax(visit_counts)] = 1.0
             else:
                 # Apply temperature scaling
-                visit_counts_temp = np.power(visit_counts, 1.0 / temp)
+                # Normalize by the max visit count before exponentiating. At high
+                # sims (large counts) + low temp (1/temp large), the raw
+                # visit_counts ** (1/temp) overflows float32 -> inf -> NaN probs
+                # (the E26 1600-sim crash: ~64% of games died in select_move).
+                # Dividing by a constant cancels in the normalization below, so
+                # this is identical to the old formula wherever it was finite.
+                _vc = visit_counts / visit_counts.max()
+                visit_counts_temp = np.power(_vc, 1.0 / temp)
                 # Normalize to get probabilities
                 total_visits_temp = visit_counts_temp.sum()
                 if total_visits_temp > 1e-6 : # Avoid division by zero
@@ -1042,7 +1049,14 @@ class MCTS:
                 visit_probs = np.zeros_like(visit_counts)
                 visit_probs[np.argmax(visit_counts)] = 1.0
             else:
-                visit_counts_temp = np.power(visit_counts, 1.0 / temp)
+                # Normalize by the max visit count before exponentiating. At high
+                # sims (large counts) + low temp (1/temp large), the raw
+                # visit_counts ** (1/temp) overflows float32 -> inf -> NaN probs
+                # (the E26 1600-sim crash: ~64% of games died in select_move).
+                # Dividing by a constant cancels in the normalization below, so
+                # this is identical to the old formula wherever it was finite.
+                _vc = visit_counts / visit_counts.max()
+                visit_counts_temp = np.power(_vc, 1.0 / temp)
                 total_visits_temp = visit_counts_temp.sum()
                 if total_visits_temp > 1e-6:
                     visit_probs = visit_counts_temp / total_visits_temp
