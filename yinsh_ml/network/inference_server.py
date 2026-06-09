@@ -145,7 +145,13 @@ def run_inference_server(
 
         try:
             logits_t, values_t = network.predict_batch_encoded(big, autocast_dtype=autocast_dtype)
-            logits_np = logits_t.detach().cpu().numpy()
+            # Ship the policy logits as fp16 to halve IPC payload. The policy is
+            # (batch, 7433) — ~3.8MB/forward as fp32 through mp.Queue, which
+            # becomes the bottleneck once the forward is bf16-fast (E20). Logits
+            # are only consumed as softmax priors (and under bf16 inference are
+            # only bf16-precise anyway), so fp16 on the wire is lossless in
+            # practice; the client upcasts to fp32. Values stay fp32 (tiny).
+            logits_np = logits_t.detach().to(torch.float16).cpu().numpy()
             values_np = values_t.detach().cpu().numpy()
         except Exception:
             logger.exception("predict_batch_encoded failed on a batch of %d; erroring %d requests",
@@ -259,7 +265,10 @@ class ProcessEvaluatorClient:
                 f"request {seq} (see server log)."
             )
 
-        return torch.from_numpy(logits_np), torch.from_numpy(values_np)
+        # Logits arrive fp16 (halved transport); upcast to fp32 here so the
+        # cost lands on the worker, not the single-threaded server, and
+        # downstream softmax/masking is fp32-stable.
+        return torch.from_numpy(logits_np).float(), torch.from_numpy(values_np)
 
 
 def _configure_process_logger() -> None:
