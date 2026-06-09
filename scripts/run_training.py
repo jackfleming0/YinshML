@@ -320,6 +320,9 @@ def main() -> None:
         # mutually exclusive with use_shared_evaluator. Needs num_workers > 0.
         'use_inference_server': bool(sp.get('use_inference_server', False)),
         'inference_server_max_wait_ms': float(sp.get('inference_server_max_wait_ms', 1.0)),
+        # Server forward precision: 'fp32' | 'bf16' | 'fp16'. Self-play is
+        # GPU-forward bound; bf16 on tensor cores raises throughput ~1.5-2x.
+        'inference_server_dtype': str(sp.get('inference_server_dtype', 'fp32')),
         # Opt-in to the C++ bitboard engine (yinsh_ml/game_cpp). Default off
         # until each training config has been A/B'd against the Python
         # engine. When true, the GameStatePool is bypassed because the

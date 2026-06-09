@@ -463,6 +463,7 @@ class TrainingSupervisor:
         inference_server_max_wait_ms = float(
             self.mode_settings.get('inference_server_max_wait_ms', 1.0)
         )
+        inference_server_dtype = str(self.mode_settings.get('inference_server_dtype', 'fp32'))
         # Subtree reuse: carry MCTS tree across moves within each self-play game
         # (Track A polish item). Default on — disable via config for A/B testing.
         enable_subtree_reuse = bool(self.mode_settings.get('enable_subtree_reuse', True))
@@ -521,6 +522,7 @@ class TrainingSupervisor:
             'use_shared_evaluator': use_shared_evaluator,  # PR #12 Phase 2
             'use_inference_server': use_inference_server,  # E20 process-based coalescing
             'inference_server_max_wait_ms': inference_server_max_wait_ms,
+            'inference_server_dtype': inference_server_dtype,
             'initial_temp': initial_temp,
             'final_temp': final_temp,
             'annealing_steps': annealing_steps,

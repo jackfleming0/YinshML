@@ -1595,6 +1595,10 @@ class SelfPlay:
                  # Mutually exclusive with use_shared_evaluator.
                  use_inference_server: bool = False,
                  inference_server_max_wait_ms: float = 1.0,
+                 # Inference precision for the server forward: 'fp32' | 'bf16' |
+                 # 'fp16'. Self-play is GPU-forward bound, so bf16 on tensor
+                 # cores raises throughput. Default fp32 = no behavior change.
+                 inference_server_dtype: str = 'fp32',
                 ):
         """
         Initialize SelfPlay with explicit MCTS and temperature parameters.
@@ -1652,6 +1656,7 @@ class SelfPlay:
         self.use_shared_evaluator = use_shared_evaluator
         self.use_inference_server = use_inference_server
         self.inference_server_max_wait_ms = inference_server_max_wait_ms
+        self.inference_server_dtype = inference_server_dtype
 
         # T4.10: cumulative count of worker / thread crashes observed by
         # the parent across all calls to generate_games. Bumped from the
@@ -1945,6 +1950,7 @@ class SelfPlay:
                 'value_head_type': self.mcts_config.get('value_head_type', None),
                 'max_batch': server_max_batch,
                 'max_wait_ms': self.inference_server_max_wait_ms,
+                'inference_dtype': self.inference_server_dtype,
             }
             self.logger.info(
                 f"Inference-server mode — workers={self.num_workers} (processes), "

@@ -33,7 +33,7 @@ from yinsh_ml.network.wrapper import NetworkWrapper
 from yinsh_ml.training.self_play import SelfPlay
 
 
-def build_selfplay(network, mode, workers, sims, batch_size, use_cpp, eval_mode):
+def build_selfplay(network, mode, workers, sims, batch_size, use_cpp, eval_mode, inference_dtype="fp32"):
     kwargs = dict(
         network=network,
         num_workers=workers,
@@ -53,6 +53,7 @@ def build_selfplay(network, mode, workers, sims, batch_size, use_cpp, eval_mode)
         kwargs["use_shared_evaluator"] = True
     elif mode == "inference_server":
         kwargs["use_inference_server"] = True
+        kwargs["inference_server_dtype"] = inference_dtype
     else:
         raise ValueError(f"unknown mode {mode}")
     return SelfPlay(**kwargs)
@@ -66,6 +67,8 @@ def main():
     p.add_argument("--sims", type=int, default=48)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--eval-mode", default="pure_neural", choices=["pure_neural", "hybrid"])
+    p.add_argument("--inference-dtype", default="fp32", choices=["fp32", "bf16", "fp16"],
+                   help="server forward precision (inference_server mode only)")
     p.add_argument("--no-cpp", action="store_true", help="disable the C++ engine (default: on)")
     p.add_argument("--use-enhanced-encoding", action="store_true")
     args = p.parse_args()
@@ -89,7 +92,8 @@ def main():
     for mode in modes:
         wlist = [0] if mode == "serial" else worker_counts
         for workers in wlist:
-            sp = build_selfplay(network, mode, workers, args.sims, args.batch_size, use_cpp, args.eval_mode)
+            sp = build_selfplay(network, mode, workers, args.sims, args.batch_size, use_cpp,
+                                args.eval_mode, inference_dtype=args.inference_dtype)
             t0 = time.time()
             games = sp.generate_games(args.games)
             dt = time.time() - t0

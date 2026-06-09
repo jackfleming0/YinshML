@@ -119,6 +119,13 @@ def run_inference_server(
     max_wait_s = float(server_cfg["max_wait_ms"]) / 1000.0
     idle_poll_s = float(server_cfg.get("idle_poll_ms", 50.0)) / 1000.0
 
+    # Inference precision. Self-play is GPU-forward bound (E20), so running the
+    # forward under bf16/fp16 autocast on the 4090's tensor cores raises the
+    # roofline directly. fp32 (None) is the default = no behavior change.
+    _dtype_map = {"fp32": None, "bf16": torch.bfloat16, "fp16": torch.float16}
+    autocast_dtype = _dtype_map.get(str(server_cfg.get("inference_dtype", "fp32")).lower())
+    logger.info("Inference precision: %s", server_cfg.get("inference_dtype", "fp32"))
+
     ready_event.set()
 
     total_requests = 0
@@ -137,7 +144,7 @@ def run_inference_server(
         total_forward_calls += 1
 
         try:
-            logits_t, values_t = network.predict_batch_encoded(big)
+            logits_t, values_t = network.predict_batch_encoded(big, autocast_dtype=autocast_dtype)
             logits_np = logits_t.detach().cpu().numpy()
             values_np = values_t.detach().cpu().numpy()
         except Exception:

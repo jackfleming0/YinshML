@@ -671,7 +671,8 @@ class NetworkWrapper:
             # Always release the batch tensor
             self._release_tensor(batch_tensor)
 
-    def predict_batch_encoded(self, encoded_batch, temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+    def predict_batch_encoded(self, encoded_batch, temperature: float = 1.0,
+                              autocast_dtype=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass on an already-encoded batch (skips per-state encoding).
 
         Mirror of `predict_batch` minus the encode step: the caller supplies a
@@ -682,6 +683,14 @@ class NetworkWrapper:
         ship compact fixed-size arrays, so `CppGameState`/`GameState` objects
         never have to cross the process boundary (and `CppGameState` doesn't
         pickle). Only the server runs the GPU forward.
+
+        ``autocast_dtype`` (e.g. ``torch.bfloat16`` / ``torch.float16``) runs
+        the forward under CUDA autocast — self-play inference is GPU-forward
+        bound (E20: GPU ~80% util, batches of ~127), and the 4090's tensor
+        cores run bf16/fp16 ~1.5-2x faster than fp32, so this raises the
+        roofline directly. Outputs are cast back to fp32 before return, so
+        downstream (numpy / IPC) is unchanged. ``None`` (default) = fp32,
+        identical to before. Ignored on CPU.
 
         Returns (policy_logits, values) exactly like `predict_batch`:
         logits (N, total_moves), values (N, 1) — raw logits; caller masks /
@@ -707,8 +716,17 @@ class NetworkWrapper:
 
         batch_tensor = batch_tensor.to(self.device)
         self.network.eval()
+        use_autocast = autocast_dtype is not None and self.device.type == "cuda"
         with torch.no_grad():
-            policy_logits, values = self.network(batch_tensor)
+            if use_autocast:
+                with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                    policy_logits, values = self.network(batch_tensor)
+                # Back to fp32 so downstream (numpy / IPC pickling / temperature)
+                # is dtype-stable regardless of the autocast dtype.
+                policy_logits = policy_logits.float()
+                values = values.float()
+            else:
+                policy_logits, values = self.network(batch_tensor)
             # Value already in [-1, 1] for both head modes — see predict_batch.
             if temperature != 1.0:
                 policy_logits = policy_logits / temperature
