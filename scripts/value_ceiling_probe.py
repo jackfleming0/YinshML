@@ -75,6 +75,10 @@ def main():
     ap.add_argument("--data", default="expert_games/hvh_full_game_15ch.npz")
     ap.add_argument("--full-net", action="store_true",
                     help="fine-tune trunk too (default: value head only).")
+    ap.add_argument("--from-scratch", action="store_true",
+                    help="random-init the WHOLE net (ignore --ckpt) and train from "
+                         "zero — the clean test of whether the ENCODING (not iter1's "
+                         "learned trunk) caps value AUC. Implies --full-net. §7.1.")
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--wd", type=float, default=0.0, help="weight decay (regularize overfit).")
@@ -118,8 +122,15 @@ def main():
     print(f"train decisive={(Ztr != 0).sum()} draws={(Ztr == 0).sum()} | "
           f"test decisive={(Zte != 0).sum()} draws={(Zte == 0).sum()}")
 
-    nw = NetworkWrapper(model_path=args.ckpt, device=device,
-                        use_enhanced_encoding=True)
+    channels = S.shape[1]
+    enhanced = (channels == 15)
+    print(f"corpus channels={channels} -> {'enhanced (15ch)' if enhanced else 'basic (6ch)'}")
+    if args.from_scratch:
+        args.full_net = True  # no pretrained backbone to freeze
+        nw = NetworkWrapper(model_path=None, device=device, use_enhanced_encoding=enhanced)
+        print("init: FROM SCRATCH (random weights) — testing the encoding's own value ceiling")
+    else:
+        nw = NetworkWrapper(model_path=args.ckpt, device=device, use_enhanced_encoding=enhanced)
     net = nw.network
     # infer value-bin count from a dummy forward
     with torch.no_grad():
