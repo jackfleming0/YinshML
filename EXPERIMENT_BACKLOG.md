@@ -69,6 +69,23 @@ Cheap, decisive, Mac-runnable. New tooling this session:
 `scripts/{eval_vs_sharkdp,eval_engine_vs_engine,smoke_sharkdp_bridge,value_ceiling_probe}.py`,
 `yinsh_ml/sharkdp/`, `third_party/sharkdp_yinsh/crates/yinsh_driver`.
 
+**Binding-constraint diagnostic (2026-06-09) — on-distribution corroboration + the policy leg.**
+Ran E25's two probes on iter1 (detail: [§9 of the value-ceiling doc](docs/experiments/e25_sharkdp_value_ceiling.md)).
+Both reinforce "value OUT" from a second, independent angle:
+- **On-distribution value-eval** (closes the §6.1 human-corpus caveat): iter1's OWN
+  200-sim self-play positions read **AUC 0.663** — *below* the 0.737 human number, not
+  above it. The ceiling is **not** a human-corpus artifact; strong play makes outcomes
+  *less* position-determined → tightens the ~0.74-Bayes-ceiling reading. (A 50-sim
+  corpus inflated it to **0.796** — corpus play-strength drives measured AUC; a caution
+  for the intrinsic-ceiling check above.)
+- **Head ablation:** flatpolicy (uniform prior + real value) loses **0.90**, blindvalue
+  (real prior + 0 value) loses **1.00** — both heads necessary, **policy load-bearing**.
+  The positive leg behind "MCTS leans on the policy prior." (Caveat: blindvalue=const-0
+  overstates value; ablation tests *necessity*, not *headroom*.)
+- **E26 consequence:** aim distillation at the **search-improved policy** (strong,
+  improvable), not value targets (saturated). Tooling: `gen_selfplay_labeled_corpus.py`,
+  `e25_ablation_h2h.py` (+ MCTS `ablate_policy`/`ablate_value` flags).
+
 ---
 
 ## Status snapshot (as of 2026-06-01 ~21:30 UTC) — symmetry run verdict + next-run strategy
@@ -443,7 +460,14 @@ exhausted *one class* of lever, not the space.
 So the untested lever is **inject a stronger, cleaner signal at scale** — the
 canonical thing that actually makes these systems strong. The board:
 
-### E25 — Binding-constraint diagnostic (Lever C)  `[cheap, do-FIRST — aims the big run]`
+### E25 — Binding-constraint diagnostic (Lever C)  `[RAN 2026-06-09 — value OUT (0.663 on-dist), policy binds]`
+
+> **Verdict (2026-06-09):** both probes ran (see the 2026-06-08 snapshot addendum +
+> value-ceiling doc §9). On-distribution value-AUC is **0.663** (below the 0.737
+> human number — the "human-noise artifact" hypothesis is **false**; the ceiling is
+> real and intrinsic). Ablation: **both heads necessary, policy load-bearing**
+> (flatpolicy 0.90 / blindvalue 1.00). → value-target work is mis-aimed; redirect to
+> **search budget + policy quality** and **encoding/capacity**.
 
 The cheap move that points the expensive ones. Two parts:
 - **Clean value-eval:** build a *representative* held-out set — strong **self-play /
@@ -462,7 +486,16 @@ The cheap move that points the expensive ones. Two parts:
   is labeled by *our own* play, so it's not fully independent — read it as
   "discrimination on in-distribution strong positions," not ground truth.
 
-### E26 — High-budget-search distillation campaign (Lever A)  `[the top bet — expert iteration done right]`
+### E26 — High-budget-search distillation campaign (Lever A)  `[REAIMED 2026-06-09 — policy-distill, not value]`
+
+> **E25 gate resolved (2026-06-09):** the value eval is at an intrinsic ceiling
+> (§9: 0.663 on-distribution), and no external engine exceeds iter1 (iter1 ≫ yngine >
+> sharkdp), so there is **no stronger teacher** and the value-distill half is
+> undercut. But search *does* manufacture a better **policy** (visit counts ≫ raw
+> prior, P1), and the ablation proves policy is the binding head. **Reaim E26: distill
+> the search-improved policy via high-sim self-distillation (iter1 searched harder),
+> treat value targets as secondary.** This is the one surviving target-improvement
+> lever; pair with encoding/capacity (A4 / richer representation).
 
 The principled root-cause fix: **the training target must EXCEED the student.**
 Generate data from a deliberately *stronger* teacher — iter1_ema (or the ensemble,

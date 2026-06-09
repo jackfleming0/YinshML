@@ -123,15 +123,13 @@ def play_and_encode(net, sims, dirichlet_alpha, seed, max_moves=400):
 
 # --- parallel worker: one NetworkWrapper per process ---
 _NET = None
-_CFG = None
 
 
 def _init_worker(model_path, device):
-    global _NET, _CFG
+    global _NET
     from yinsh_ml.network.wrapper import NetworkWrapper
     _NET = NetworkWrapper(model_path=model_path, device=device)
     _NET.network.eval()
-    _CFG = None
 
 
 def _worker(task):
@@ -149,8 +147,13 @@ def main(argv=None):
                     help="MCTS budget per move (strong: 400+; smoke: 16)")
     ap.add_argument("--dirichlet-alpha", type=float, default=0.3,
                     help="root noise for self-play diversity (0 = deterministic)")
-    ap.add_argument("--max-moves", type=int, default=400)
-    ap.add_argument("--max-positions", type=int, default=12000, help="subsample cap")
+    ap.add_argument("--max-moves", type=int, default=250,
+                    help="hard cap per game; keeps dirichlet-noised games that never "
+                         "close a 3-row win from dragging out (and stalling the pool)")
+    ap.add_argument("--max-positions", type=int, default=12000,
+                    help="target/subsample cap; generation STOPS once this many positions exist")
+    ap.add_argument("--checkpoint-every", type=int, default=20,
+                    help="re-save the corpus every N completed games (crash/kill safety)")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--device", default="auto", help="auto|cpu|mps|cuda (cpu recommended for workers>1)")
     ap.add_argument("--seed", type=int, default=0)
@@ -166,34 +169,60 @@ def main(argv=None):
     print(f"generating {args.games} neural self-play games @ {args.sims} sims "
           f"(dir_alpha={args.dirichlet_alpha}, workers={args.workers}, device={device or 'auto'})...")
 
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+
+    def save_corpus(states_list, values_list, tag):
+        """Concatenate, subsample to the cap, and write. Safe to call repeatedly."""
+        if not states_list:
+            return 0
+        states = np.concatenate(states_list, axis=0)
+        values = np.concatenate(values_list, axis=0)
+        if len(states) > args.max_positions:
+            rng = np.random.default_rng(args.seed)
+            idx = rng.choice(len(states), size=args.max_positions, replace=False)
+            states, values = states[idx], values[idx]
+        np.savez_compressed(args.out, states=states, values=values)
+        dec = int((values != 0).sum())
+        print(f"  [checkpoint {tag}] saved {len(states)} positions "
+              f"({dec} decisive, {len(states) - dec} draws) -> {args.out}", flush=True)
+        return len(states)
+
+    # imap_unordered streams results as each game finishes, so we can log progress,
+    # checkpoint incrementally, and STOP EARLY once we have enough positions — none
+    # of which pool.map() allowed (the original blind, all-or-nothing run).
     t0 = time.time()
+    states_list, values_list, total_pos, games_done = [], [], 0, 0
+    pool = None
     if args.workers > 1:
-        with mp.Pool(args.workers, initializer=_init_worker,
-                     initargs=(args.model, device)) as pool:
-            chunks = pool.map(_worker, tasks)
+        pool = mp.Pool(args.workers, initializer=_init_worker, initargs=(args.model, device))
+        result_iter = pool.imap_unordered(_worker, tasks)
     else:
         _init_worker(args.model, device)
-        chunks = []
-        for i, t in enumerate(tasks):
-            chunks.append(_worker(t))
-            n = sum(len(c[0]) for c in chunks)
-            print(f"  game {i+1}/{args.games}: +{len(chunks[-1][0])} positions "
-                  f"(total {n}) | {(time.time()-t0)/60:.1f}m elapsed")
+        result_iter = (_worker(t) for t in tasks)
 
-    states = np.concatenate([c[0] for c in chunks if len(c[0])], axis=0)
-    values = np.concatenate([c[1] for c in chunks if len(c[1])], axis=0)
+    try:
+        for st, vl in result_iter:
+            games_done += 1
+            if len(st):
+                states_list.append(st)
+                values_list.append(vl)
+                total_pos += len(st)
+            print(f"  game {games_done}/{args.games}: +{len(st)} positions "
+                  f"(total {total_pos}/{args.max_positions}) | {(time.time()-t0)/60:.1f}m elapsed",
+                  flush=True)
+            if games_done % args.checkpoint_every == 0:
+                save_corpus(states_list, values_list, f"g{games_done}")
+            if total_pos >= args.max_positions:
+                print(f"  reached target {args.max_positions} positions at game "
+                      f"{games_done}; stopping early", flush=True)
+                break
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
 
-    if len(states) > args.max_positions:
-        rng = np.random.default_rng(args.seed)
-        idx = rng.choice(len(states), size=args.max_positions, replace=False)
-        states, values = states[idx], values[idx]
-
-    dec = int((values != 0).sum())
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.out, states=states, values=values)
-    print(f"wrote {args.out}: {len(states)} positions "
-          f"({dec} decisive, {len(states) - dec} draws), states{states.shape} {states.dtype} "
-          f"| {(time.time()-t0)/60:.1f}m total")
+    n = save_corpus(states_list, values_list, "final")
+    print(f"done: {n} positions from {games_done} games | {(time.time()-t0)/60:.1f}m total", flush=True)
     return 0
 
 

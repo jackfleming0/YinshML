@@ -16,14 +16,18 @@ ABL_OUT=docs/experiments/e25_ablation.json
 LOG=docs/experiments/e25_run.log
 
 mkdir -p docs/experiments expert_games
-echo "=== E25 run started $(date) ===" | tee -a "$LOG"
+echo "=== E25 run started $(date) ===" | tee "$LOG"   # fresh log each run
 
 # --- Part 1a: in-distribution-strong corpus (neural-MCTS self-play, outcome-labeled) ---
-echo "[$(date +%H:%M:%S)] STEP 1: corpus gen (200 games @ 400 sims, 8 CPU workers)" | tee -a "$LOG"
+# 200 sims = iter1_ema's actual play regime; max-moves 250 prevents runaway games;
+# stops early at 8000 positions (the calibration sample size); checkpoints every 10
+# games so the run is crash-safe and observable.
+echo "[$(date +%H:%M:%S)] STEP 1: corpus gen (200 sims, 8 CPU workers, stop @ 8000 positions)" | tee -a "$LOG"
 $PY scripts/gen_selfplay_labeled_corpus.py \
     --model "$MODEL" --out "$CORPUS" \
-    --games 200 --sims 400 --workers 8 --device cpu \
-    --dirichlet-alpha 0.3 --max-positions 10000 2>&1 | tee -a "$LOG"
+    --games 250 --sims 200 --workers 8 --device cpu \
+    --dirichlet-alpha 0.3 --max-moves 250 \
+    --max-positions 8000 --checkpoint-every 10 2>&1 | tee -a "$LOG"
 
 # --- Part 1b: re-measure value-head discrimination on clean vs human corpora ---
 echo "[$(date +%H:%M:%S)] STEP 2: value-head calibration (clean corpus)" | tee -a "$LOG"

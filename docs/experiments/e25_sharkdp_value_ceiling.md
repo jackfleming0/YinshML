@@ -288,3 +288,67 @@ python scripts/value_ceiling_probe.py --full-net --device mps \
 - Results: `logs/iter1_ema_vs_sharkdp_d6_sims200.json`,
   `logs/sharkdp_d6_vs_yngine_s1000.txt`, `logs/value_ceiling_fullnet*.txt`
 - Related: `docs/experiments/e24_phase1a_results.md` (the plateau this explains)
+
+---
+
+## 9. Binding-constraint diagnostic — on-distribution value-eval + head ablation (2026-06-09)
+
+A separate E25 thread ran the two probes from the backlog's E25 entry on
+`iter1_ema`. Both **corroborate §5** and close the open caveat in §6.1 — the
+ceiling in §4 was measured on the *human* corpus; this measures it on the NN's
+**own** positions.
+
+### 9a. On-distribution value-eval — closes §6.1, and the ceiling is *lower* on strong play
+Generated iter1's **own** representative positions — 200-sim neural-MCTS self-play,
+8000 outcome-labeled decisive positions (`scripts/gen_selfplay_labeled_corpus.py`,
+held-out by construction) — and re-ran `value_head_calibration.py`:
+
+| corpus (n=8000, decisive) | AUC | sign-acc | corr |
+|---|---|---|---|
+| clean 200-sim self-play (NN's own dist.) | **0.663** | 0.600 | 0.316 |
+| human H-vs-H (the §4 corpus) | 0.737 | 0.646 | 0.378 |
+
+On the NN's own strong-play distribution the value head reads **0.663 — *below* the
+0.737 human number, not above.** So the ceiling is **not** a human-corpus artifact;
+it holds, and is *lower*, on home turf. Mechanism: stronger play → balanced games →
+the loser sits in neutral-looking positions before losing → the win/loss boundary
+blurs in feature space. Direct support for the **"~0.74 ≈ Bayes ceiling, one tempo
+flips the game"** reading in §5.2 — strong play makes outcomes *less*
+position-determined, so the relevant-distribution ceiling is nearer 0.66 than 0.74.
+
+**Methodological caution for the §7.1 intrinsic-ceiling check:** a 50-sim corpus
+(weaker play) gave an inflated **0.796** — weak play makes lopsided, easy-to-rank
+games. *Corpus play-strength drives the measured AUC*, so the intrinsic-ceiling
+probe must fix (and prefer) strong play, or it will over-report the ceiling.
+
+### 9b. Head ablation — the positive leg behind "MCTS leans on policy" (§5.3)
+Neutered one head at a time in MCTS (new `ablate_policy` / `ablate_value` flags on
+`self_play.py::MCTS`, default off) and played color-balanced H2H vs full, 60
+games/pairing @ 200 sims (`scripts/e25_ablation_h2h.py`):
+
+| pairing | full's score | W–L–D |
+|---|---|---|
+| full vs flatpolicy (uniform prior + real value) | **0.90** (±0.08) | 54–6–0 |
+| full vs blindvalue (real prior + 0 value) | **1.00** | 60–0–0 |
+
+**Both heads are necessary; neither is a free sacrifice.** This is the *positive*
+complement to §4's negative result: §4 showed the value head can't be *improved*;
+9b shows the **policy is load-bearing** — directly confirming the §5.3 inference
+that MCTS leans on the policy prior. Strength lives in policy + search, not value.
+
+**Caveats (honest):** `blindvalue` = constant-0 is a *biased* cut ("every position
+is a draw" is actively wrong in a decisive game), so 60–0 **overstates** value's
+importance vs a genuinely-uninformative random-value arm (a worthwhile refinement
+if this number ever turns load-bearing). And ablation measures **necessity, not
+headroom** — it confirms the current value head matters, not that a better one
+would help (§4 already answers that: it wouldn't).
+
+### 9c. Net
+No change to §5's direction — **reinforced from a second, independent angle.** Value
+is out (now confirmed on the NN's own distribution); policy is provably the binding
+head; the levers remain **search budget + policy quality** and **encoding /
+capacity**. The one forward consequence for E26: aim its distillation at the
+**search-improved policy** (the strong, improvable signal), not value targets
+(saturated). New tooling: `scripts/gen_selfplay_labeled_corpus.py`,
+`scripts/e25_ablation_h2h.py` (+ MCTS `ablate_policy`/`ablate_value` flags),
+`docs/experiments/e25_ablation.json`.
