@@ -82,7 +82,7 @@ NOT require the value head to spontaneously improve); distillation banks it.
 ## Key pointers
 - `EXPERIMENT_BACKLOG.md` → "Post-E24 lever board", E25, E26, E18, E20, E21, A4;
   Done entry "E24 Phase 1a".
-- `docs/experiments/e24_phase1a_results.md` — the full E24 result + lessons.
+- `docs/experiments/completed/e24_phase1a_results.md` — the full E24 result + lessons.
 - `scripts/value_head_calibration.py` — value-head AUC/Brier harness (use a
   **clean** `--data` corpus).
 - `scripts/measure_h2h.py` + the lr-tag-aware summarizer in `scripts/e19_summarize.py`

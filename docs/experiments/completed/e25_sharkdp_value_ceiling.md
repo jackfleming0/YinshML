@@ -287,7 +287,7 @@ python scripts/value_ceiling_probe.py --full-net --device mps \
   `scripts/smoke_sharkdp_bridge.py`, `scripts/value_ceiling_probe.py`
 - Results: `logs/iter1_ema_vs_sharkdp_d6_sims200.json`,
   `logs/sharkdp_d6_vs_yngine_s1000.txt`, `logs/value_ceiling_fullnet*.txt`
-- Related: `docs/experiments/e24_phase1a_results.md` (the plateau this explains)
+- Related: `docs/experiments/completed/e24_phase1a_results.md` (the plateau this explains)
 
 ---
 
