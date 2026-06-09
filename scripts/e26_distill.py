@@ -124,7 +124,7 @@ def main():
             value_loss = value_loss_fn(vl, v)
             loss = policy_loss + args.value_weight * value_loss
             opt.zero_grad(); loss.backward(); opt.step()
-            tot += float(loss); pl_s += float(policy_loss); vl_s += float(value_loss); nb += 1
+            tot += loss.item(); pl_s += policy_loss.item(); vl_s += value_loss.item(); nb += 1
         te_p, te_v = evaluate(te)
         print(f"{ep:>5}{tot/nb:>12.4f}{pl_s/nb:>10.4f}{vl_s/nb:>10.4f}{te_p:>10.4f}{te_v:>11.3f}")
 
