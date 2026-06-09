@@ -243,12 +243,10 @@ not full-trunk, not more data, not decisive spread-rich data.
 
 ## 7. Open follow-ups (ranked)
 
-1. **Intrinsic-ceiling check** (cheap, decisive): train a value head *hard* from
-   scratch on a large decisive corpus (`yngine_volume` / `boardspace_human_*`)
-   with a proper **game-split**. If even that caps ~0.74 → the ceiling is the
-   **encoding**, and the lever is a richer representation. If it clears 0.80 →
-   the encoding is fine and iter1's trunk just never learned it (reopens a
-   narrow corpus angle).
+1. **Intrinsic-ceiling check** (cheap, decisive) — **RESOLVED 2026-06-09 → §10.**
+   From-scratch on 1.6M decisive positions caps held-out AUC at **0.677** (train →
+   0.988): the ceiling is intrinsic/representational, not the encoding. The "richer
+   representation" angle is dented; the "narrow corpus" angle stays closed.
 2. **Search + policy levers** — the redirect implied by §5.
 3. **sharkdp depth sweep** (d8/d10) to make it a graded benchmark; mine the
    CodinGame leaderboard for a second competitive opponent.
@@ -352,3 +350,47 @@ capacity**. The one forward consequence for E26: aim its distillation at the
 (saturated). New tooling: `scripts/gen_selfplay_labeled_corpus.py`,
 `scripts/e25_ablation_h2h.py` (+ MCTS `ablate_policy`/`ablate_value` flags),
 `docs/experiments/e25_ablation.json`.
+
+---
+
+## 10. Intrinsic-ceiling check (§7.1) — RESOLVED: the ceiling is the *game*, not the encoding (2026-06-09)
+
+The §7.1 follow-up, run on a CUDA box (RTX 4090). Trained a value net **from
+random init** ("from scratch") hard on **1.6M decisive `yngine_volume` positions**
+(6ch), contiguous game-split (gap=1000), 20 epochs
+(`value_ceiling_probe.py --from-scratch`; [box runbook](e25_71_box_runbook.md)).
+The question: can *any* net read >0.74 of win/loss off this representation given
+unlimited fit, or is the ceiling intrinsic?
+
+| | epoch 1 | epoch 10 | epoch 20 |
+|---|---|---|---|
+| train AUC | 0.700 | 0.967 | **0.988** |
+| **test AUC** | **0.677** (peak) | 0.610 | 0.599 |
+
+**The net memorizes the training set almost perfectly (train → 0.988) but held-out
+value AUC peaks at 0.677 (epoch 1) and only *declines* as it overfits** — never
+approaching 0.74, let alone the 0.80 that would have meant "encoding's fine, iter1's
+trunk just never learned it."
+
+**Verdict: the ~0.74 value ceiling is REPRESENTATIONAL / INTRINSIC** — not a
+data-spread problem, not a training problem, and (the new bit) **not even an
+encoding-richness problem.** A fresh net with ample capacity to fit can't generalize
+past ~0.68. The §5.2 "≈0.74 near the Bayes ceiling for static YINSH value" reading
+stands.
+
+This **closes the asymmetric-interpretation caveat from the box runbook**: the 6ch
+peak (0.677) lands *below* the 15ch numbers (§4 full-net ~0.70; §9a on-distribution
+0.663), so all three encodings/distributions converge in the same ~0.66–0.70 band →
+the 6ch caveat is moot; the channels are not the wall.
+
+**Consequence for the board:** value discrimination is now a dead lever via *every*
+route tested — more data, decisive spread, frozen-head retrain, full-trunk retrain,
+from-scratch, 6ch and 15ch. It also **dents the "throw capacity at value" version of
+Lever D**: a 34M-param net memorizing to train-AUC 0.988 didn't move held-out, so a
+merely *bigger* trunk won't either. (A4 / E17 test *different* mechanisms — value-head
+*form* and *equivariance* — not raw capacity, so they're not ruled out by this.)
+The surviving levers are unchanged: **search + policy** (E26) is the bet.
+
+New tooling: `scripts/value_ceiling_probe.py --from-scratch`,
+`scripts/subsample_npz_prefix.py` (stream a prefix out of the 40 GB-decompressed
+`yngine_volume.npz` without materializing it).

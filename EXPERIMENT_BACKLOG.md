@@ -195,7 +195,7 @@ Reverse-chronological. Detail files in `docs/experiments/completed/`.
 
 #### E25 — Binding-constraint diagnostic  `DONE · value head OUT`
 **What:** sharkdp benchmark + clean on-distribution value-eval + policy-vs-value MCTS ablation, to find the real binding constraint before committing big compute.
-**Outcome:** Value head OUT — on-distribution AUC **0.663** (intrinsic ceiling, not a human-noise artifact); ablation shows policy is load-bearing; no engine exceeds iter1. Redirect to search/policy + encoding.
+**Outcome:** Value head OUT — on-distribution AUC **0.663** (intrinsic ceiling, not a human-noise artifact); ablation shows policy is load-bearing; no engine exceeds iter1. Intrinsic-ceiling check (§7.1/§10) closed it: from-scratch on 1.6M positions caps held-out AUC at **0.677** while train→0.988 → not data, not encoding. Redirect to search/policy.
 → [details](docs/experiments/completed/e25_sharkdp_value_ceiling.md)
 
 #### E24 — Real self-play campaign — Phase 1a LR sweep  `DONE · NOT_STRONGER (LR is not the lever)`
