@@ -48,6 +48,9 @@ def main():
                     help="save the last epoch instead of the best-test-polCE epoch "
                          "(default = save best; distillation overfits, so last is usually worse)")
     ap.add_argument("--device", default=None)
+    ap.add_argument("--limit", type=int, default=0,
+                    help="use only the first N positions of the corpus (0 = all). "
+                         "For learning-curve subset distills; corpus should be pre-shuffled.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
@@ -56,6 +59,8 @@ def main():
 
     d = np.load(args.data)
     S, PIDX, PPROB, V = d["states"], d["policy_idx"], d["policy_prob"], d["values"].astype(np.float32)
+    if args.limit and args.limit < len(S):
+        S, PIDX, PPROB, V = S[:args.limit], PIDX[:args.limit], PPROB[:args.limit], V[:args.limit]
     n = len(S); n_te = int(n * args.test_frac)
     rng = np.random.default_rng(args.seed); perm = rng.permutation(n)
     te, tr = perm[:n_te], perm[n_te:]
