@@ -249,3 +249,35 @@ parity/consistency tests.
 GPU was busy, process alive — and only a *data/error-rate* check caught it
 (64% of games erroring, value targets biased). When a long run "looks healthy,"
 check the output distribution and per-unit error rate, not just liveness.
+
+---
+
+## §7 — measure_h2h.py was not color-balanced (RESOLVED 2026-06-10)
+
+`scripts/measure_h2h.py` assigned the `--white` model to the white (first-player)
+side in **every** game — no color alternation — despite the E26 runbook claiming
+it was color-balanced. The E26 de-risk H2H exposed this: distilled (always white)
+went 37-23 (0.617), which *looked* like a win, but running the mirror (distilled
+as black: 26-34) and combining gave a **color-balanced 0.525 ± 0.089** — not
+distinguishable from iter1. The 37-23 was almost entirely a first-player edge
+(white scored 0.592 across both directions).
+
+**Framing caveat (important):** 0.592 is the first-player win rate **at our models'
+current strength with this MCTS budget** — NOT evidence that YINSH is inherently
+white-advantaged. It may shrink or vanish at stronger play. Color-balancing is the
+right fix precisely because it makes *no assumption* about the size or sign of the
+asymmetry — it just controls for it empirically.
+
+**Fix (commit <this>):** alternate which model plays white each game; report the
+verdict **by model** (`by_model` in the JSON), keep `wins` (by board color) as the
+first-player diagnostic. Backward-compatible (existing `wins`/`config`/`games` keys
+preserved).
+
+**Open audit:** any prior verdict from this harness run in a single color direction
+(potentially E19/E22/E24/E25) is confounded by the first-player edge by up to ~0.09.
+Re-examine before trusting those win rates — a "0.53" treatment that always played
+white may actually be ≤0.5 balanced.
+
+**Lesson (recurring):** "color-balanced" was asserted in docs but never verified in
+code. Assertions about measurement methodology need a positive control — here, a
+self-vs-self run should read ~0.50 by model and expose the first-player rate.
