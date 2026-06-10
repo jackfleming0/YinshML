@@ -44,6 +44,9 @@ def main():
     ap.add_argument("--value-weight", type=float, default=0.5)
     ap.add_argument("--test-frac", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save-last", action="store_true",
+                    help="save the last epoch instead of the best-test-polCE epoch "
+                         "(default = save best; distillation overfits, so last is usually worse)")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
@@ -110,6 +113,7 @@ def main():
     print(f"{'epoch':>5}{'train_loss':>12}{'pol_loss':>10}{'val_loss':>10}{'te_polCE':>10}{vmetric:>11}")
     print("-" * 58)
     idx = np.array(tr)
+    best_te = float('inf'); best_state = None; best_ep = 0
     for ep in range(1, args.epochs + 1):
         net.train(); np.random.shuffle(idx)
         tot = pl_s = vl_s = nb = 0.0
@@ -126,10 +130,23 @@ def main():
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item(); pl_s += policy_loss.item(); vl_s += value_loss.item(); nb += 1
         te_p, te_v = evaluate(te)
-        print(f"{ep:>5}{tot/nb:>12.4f}{pl_s/nb:>10.4f}{vl_s/nb:>10.4f}{te_p:>10.4f}{te_v:>11.3f}")
+        is_best = te_p < best_te
+        if is_best:
+            best_te, best_ep = te_p, ep
+            best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
+        print(f"{ep:>5}{tot/nb:>12.4f}{pl_s/nb:>10.4f}{vl_s/nb:>10.4f}{te_p:>10.4f}{te_v:>11.3f}"
+              f"{'  *best' if is_best else ''}")
 
-    torch.save(net.state_dict(), args.out)
-    print(f"\nsaved distilled student -> {args.out}")
+    # Save the BEST checkpoint (lowest test policy-CE), not the last: distillation
+    # overfits (test polCE bottoms then rises while train loss keeps dropping), so
+    # the last epoch is usually worse. --save-last restores the old behavior.
+    if args.save_last or best_state is None:
+        torch.save(net.state_dict(), args.out)
+        print(f"\nsaved distilled student (LAST epoch) -> {args.out}")
+    else:
+        torch.save(best_state, args.out)
+        print(f"\nsaved distilled student (BEST: epoch {best_ep}/{args.epochs}, "
+              f"te_polCE={best_te:.4f}) -> {args.out}")
     print("Next: H2H vs FROZEN iter1 (the only verdict):")
     print(f"  python scripts/measure_h2h.py --white {args.out} --black {args.init} "
           f"--white-label distilled --black-label iter1 --games 60 --output logs/e26_h2h.json")
