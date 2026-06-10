@@ -586,6 +586,36 @@ class MCTS:
                 (1 - epsilon_mix) * child.prior_prob + epsilon_mix * noise[i]
             )
 
+    def root_child_stats(self):
+        """Per-child targets for the current cached root: ``{policy_index:
+        (q_value, prior)}``.
+
+        Beyond the visit-count policy (what `search_batch` returns), this exposes
+        each candidate move's **search value** (q) and **network prior** — the
+        signals a YINSH-puzzle / richer-distillation corpus needs ("does this
+        move matter" = q gap; "did search find a non-obvious move" = high visits
+        + low prior). Call right after a search and BEFORE `advance_root`.
+
+        - ``q_value`` is in the root side-to-move POV (same frame as
+          `last_root_value`), so a winning move reads high.
+        - ``prior`` is the root prior; root Dirichlet noise is mixed in, but
+          ``epsilon_mix`` tapers to ~0 by mid-game, so decisive late-game
+          positions (the puzzle-worthy ones) carry clean priors.
+
+        Returns ``{}`` when subtree reuse is off or no search has run.
+        """
+        root = self._cached_root
+        if root is None or not root.children:
+            return {}
+        out = {}
+        for move, child in root.children.items():
+            try:
+                idx = int(self.state_encoder.move_to_index(move))
+            except Exception:
+                continue
+            out[idx] = (float(child.value()), float(child.prior_prob))
+        return out
+
     def get_temperature(self, move_number: int) -> float:
         """
         Calculate temperature based on linear annealing schedule with clamping.

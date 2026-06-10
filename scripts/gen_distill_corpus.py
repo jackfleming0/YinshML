@@ -102,7 +102,7 @@ def play_and_capture(net, sims, dirichlet_alpha, seed, max_moves=250,
     mcts = make_mcts(net, sims, dirichlet_alpha, evaluator=evaluator)
     rng = np.random.default_rng(seed)
     state = GameState()
-    states, pidx, pprob, vals = [], [], [], []
+    states, pidx, pprob, pq, pprior, vals = [], [], [], [], [], []
     mc = 0
     while not state.is_terminal() and mc < max_moves:
         valid = state.get_valid_moves()
@@ -111,8 +111,16 @@ def play_and_capture(net, sims, dirichlet_alpha, seed, max_moves=250,
         policy = mcts.search_batch(state, mc, batch_size=batch_size)   # search-improved policy
         if state.phase == GamePhase.MAIN_GAME:
             ti, tp = _topk(np.asarray(policy, np.float32))
+            # Puzzle-grade extras: per-move search value (q) + raw network prior,
+            # aligned to the top-k visit indices. q gap => "does the move matter";
+            # high visits + low prior => "search found a non-obvious move".
+            cstats = mcts.root_child_stats()   # {idx: (q, prior)}
+            tq = np.zeros(TOPK, np.float32); tpr = np.zeros(TOPK, np.float32)
+            for j, idx in enumerate(ti):
+                if idx >= 0 and idx in cstats:
+                    tq[j], tpr[j] = cstats[idx]
             states.append(np.asarray(encoder.encode_state(state), np.float32))
-            pidx.append(ti); pprob.append(tp)
+            pidx.append(ti); pprob.append(tp); pq.append(tq); pprior.append(tpr)
             vals.append(np.float32(getattr(mcts, "last_root_value", 0.0)))  # search value, STM POV
         temp = mcts.get_temperature(mc)
         sel = select_move(policy, valid, encoder, temp, rng)
@@ -122,9 +130,11 @@ def play_and_capture(net, sims, dirichlet_alpha, seed, max_moves=250,
         mc += 1
     if not states:
         z = (np.empty((0, 15, 11, 11), np.float32), np.empty((0, TOPK), np.int32),
+             np.empty((0, TOPK), np.float32), np.empty((0, TOPK), np.float32),
              np.empty((0, TOPK), np.float32), np.empty((0,), np.float32))
         return z
-    return (np.stack(states), np.stack(pidx), np.stack(pprob), np.asarray(vals, np.float32))
+    return (np.stack(states), np.stack(pidx), np.stack(pprob),
+            np.stack(pq), np.stack(pprior), np.asarray(vals, np.float32))
 
 
 _NET = None
@@ -186,6 +196,8 @@ def _gen_inference_worker(worker_id, request_queue, response_queue, result_queue
                 result_queue.put((np.empty((0, 15, 11, 11), np.float32),
                                   np.empty((0, TOPK), np.int32),
                                   np.empty((0, TOPK), np.float32),
+                                  np.empty((0, TOPK), np.float32),
+                                  np.empty((0, TOPK), np.float32),
                                   np.empty((0,), np.float32)))
     except Exception:
         import traceback
@@ -225,19 +237,24 @@ def main(argv=None):
     print(f"E26 teacher gen: {args.games} games @ {args.sims} sims, workers={args.workers}, "
           f"device={device or 'auto'}, target={args.max_positions} positions", flush=True)
 
-    S, PI, PP, V = [], [], [], []
+    S, PI, PP, PQ, PPR, V = [], [], [], [], [], []
     total, t0 = 0, time.time()
 
     def save(tag):
         if not S:
             return 0
         states = np.concatenate(S); pidx = np.concatenate(PI)
-        pprob = np.concatenate(PP); vals = np.concatenate(V)
+        pprob = np.concatenate(PP); pq = np.concatenate(PQ)
+        pprior = np.concatenate(PPR); vals = np.concatenate(V)
         if len(states) > args.max_positions:
             r = np.random.default_rng(args.seed).choice(len(states), args.max_positions, replace=False)
-            states, pidx, pprob, vals = states[r], pidx[r], pprob[r], vals[r]
+            states, pidx, pprob, pq, pprior, vals = (
+                states[r], pidx[r], pprob[r], pq[r], pprior[r], vals[r])
+        # policy_q = per-move search value (STM POV); policy_prior = raw net prior.
+        # Both top-k-aligned with policy_idx. Puzzle-grade extras; existing
+        # consumers (e26_distill) read only states/policy_idx/policy_prob/values.
         np.savez_compressed(args.out, states=states, policy_idx=pidx,
-                            policy_prob=pprob, values=vals)
+                            policy_prob=pprob, policy_q=pq, policy_prior=pprior, values=vals)
         print(f"  [checkpoint {tag}] {len(states)} positions -> {args.out}", flush=True)
         return len(states)
 
@@ -272,7 +289,7 @@ def main(argv=None):
             received = 0
             while received < args.games:
                 try:
-                    st, ti, tp, vl = pool.result_queue.get(timeout=5.0)
+                    st, ti, tp, tq, tpr, vl = pool.result_queue.get(timeout=5.0)
                 except _queue.Empty:
                     if not pool.server.is_alive() or not pool.workers_alive():
                         print("  inference workers/server exited early; stopping", flush=True)
@@ -280,7 +297,7 @@ def main(argv=None):
                     continue
                 received += 1
                 if len(st):
-                    S.append(st); PI.append(ti); PP.append(tp); V.append(vl); total += len(st)
+                    S.append(st); PI.append(ti); PP.append(tp); PQ.append(tq); PPR.append(tpr); V.append(vl); total += len(st)
                 print(f"  game {received}/{args.games}: +{len(st)} (total {total}/{args.max_positions}) "
                       f"| {(time.time()-t0)/60:.1f}m", flush=True)
                 if received % args.checkpoint_every == 0:
@@ -301,9 +318,9 @@ def main(argv=None):
         it = (_worker(t) for t in tasks)
         pool = None
     try:
-        for gi, (st, ti, tp, vl) in enumerate(it, 1):
+        for gi, (st, ti, tp, tq, tpr, vl) in enumerate(it, 1):
             if len(st):
-                S.append(st); PI.append(ti); PP.append(tp); V.append(vl); total += len(st)
+                S.append(st); PI.append(ti); PP.append(tp); PQ.append(tq); PPR.append(tpr); V.append(vl); total += len(st)
             print(f"  game {gi}/{args.games}: +{len(st)} (total {total}/{args.max_positions}) "
                   f"| {(time.time()-t0)/60:.1f}m", flush=True)
             if gi % args.checkpoint_every == 0:
