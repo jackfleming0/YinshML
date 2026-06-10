@@ -15,10 +15,40 @@ from yinsh_ml.heuristics.evaluator import YinshHeuristics
 from yinsh_ml.utils.encoding import StateEncoder
 
 
-def make_mcts(net):
+class PriorOnlyPlayer:
+    """search=0 baseline: play straight from the network's raw policy prior,
+    no MCTS. Tests whether a better-distilled POLICY helps in play *before* any
+    search washes out prior differences — the purest read on policy quality.
+    Duck-types the MCTS surface play_game uses (search_batch / get_temperature /
+    advance_root). A mild temperature gives game variety (deterministic nets
+    would otherwise replay one game); the schedule matches the MCTS sides."""
+
+    def __init__(self, net):
+        self.net = net
+
+    def search_batch(self, state, move_number, batch_size=32):
+        probs, _ = self.net.predict_from_state(state)
+        if torch.is_tensor(probs):
+            probs = probs.detach().cpu().numpy()
+        return np.asarray(probs, dtype=np.float32).reshape(-1)
+
+    def get_temperature(self, move_number):
+        return max(0.1, 0.5 - 0.4 * (move_number / 20.0))  # 0.5 -> 0.1 over 20 plies
+
+    def advance_root(self, move):
+        pass
+
+
+def make_player(net, sims, late_sims):
+    """sims<=0 -> prior-only (no search). Otherwise MCTS at a FIXED budget
+    (`late_sims=None` => same as `sims`); pass `late_sims` only if you
+    deliberately want an early/late split (see the --sims help)."""
+    if sims is None or sims <= 0:
+        return PriorOnlyPlayer(net)
     return MCTS(
         network=net, evaluation_mode='pure_neural', heuristic_evaluator=None,
-        heuristic_weight=0.0, num_simulations=96, late_simulations=64,
+        heuristic_weight=0.0, num_simulations=sims,
+        late_simulations=(late_sims if late_sims is not None else sims),
         simulation_switch_ply=20, c_puct=1.0, dirichlet_alpha=0.0,
         value_weight=1.0, max_depth=300, epsilon_mix_start=0.0,
         epsilon_mix_end=0.0, epsilon_mix_taper_moves=1, initial_temp=0.5,
@@ -87,6 +117,14 @@ def main():
     ap.add_argument('--white-label', default='white')
     ap.add_argument('--black-label', default='black')
     ap.add_argument('--games', type=int, default=15)
+    ap.add_argument('--sims', type=int, default=96,
+                    help='MCTS budget per move (FIXED for the whole game by default — a '
+                         'clean x-axis for a budget sweep). 0 = prior-only, no search. '
+                         'For a sweep: 0, 200, 400, 800, 1600, 3200.')
+    ap.add_argument('--late-sims', type=int, default=None,
+                    help='optional early/late split: sims for ply>=20. Default None = fixed '
+                         '(= --sims). Only set this if you deliberately want a split (e.g. to '
+                         'mirror a self-play recipe); a sweep should leave it unset.')
     ap.add_argument('--output', required=True)
     ap.add_argument('--seed', type=int, default=20260528)
     args = ap.parse_args()
@@ -113,10 +151,10 @@ def main():
     for i in range(args.games):
         a_is_white = (i % 2 == 0)   # alternate which model plays white
         if a_is_white:
-            wm, bm = make_mcts(nw_a), make_mcts(nw_b)
+            wm, bm = make_player(nw_a, args.sims, args.late_sims), make_player(nw_b, args.sims, args.late_sims)
             wlabel, blabel = args.white_label, args.black_label
         else:
-            wm, bm = make_mcts(nw_b), make_mcts(nw_a)
+            wm, bm = make_player(nw_b, args.sims, args.late_sims), make_player(nw_a, args.sims, args.late_sims)
             wlabel, blabel = args.black_label, args.white_label
         g = play_game(wm, bm, rng)
         g['game_id'] = i
@@ -144,7 +182,9 @@ def main():
                        'games': games}, f)
     n = max(1, args.games)
     a, b, dr = by_model[args.white_label], by_model[args.black_label], by_model['draw']
-    print(f'[{time.strftime("%H:%M:%S")}] Final (color-balanced): '
+    budget = 'prior-only (sims=0)' if args.sims <= 0 else (
+        f'sims={args.sims}' + (f'/{args.late_sims} (split)' if args.late_sims is not None else ' (fixed)'))
+    print(f'[{time.strftime("%H:%M:%S")}] Final (color-balanced, {budget}): '
           f'{args.white_label} {a} - {b} {args.black_label} (draws {dr})')
     print(f'  {args.white_label} score = {a/n:.3f}  |  first-player(white) win rate '
           f'= {wins["white"]/n:.3f} (at these models\' strength, not an inherent game property)')
