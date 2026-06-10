@@ -2317,6 +2317,14 @@ const puzzleTallyEl = document.getElementById("puzzle-tally");
 const puzzlePoolSel = document.getElementById("puzzle-pool");
 const puzzleDiffSel = document.getElementById("puzzle-difficulty");
 
+// Sims for the reveal-line search. Higher budget = a deeper, more convincing
+// principal variation (the PV depth is gated by per-node visit counts). 400
+// symmetric = 1600 effective, still under the 8000 async threshold so it runs
+// sync; ~2-4s on the prod MPS box for a deliberate "show me why" action.
+const PUZZLE_LINE_SIMS = 400;
+const PUZZLE_LINE_STEP_MS = 650;
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function _parsePos(s) {
   return { col: s[0], row: parseInt(s.slice(1), 10) };
 }
@@ -2347,10 +2355,13 @@ async function loadNextPuzzle() {
   const pz = state.puzzle;
   if (!pz) return;
   _setPuzzleFeedback(null, "");
-  if (puzzleRevealBtn) puzzleRevealBtn.hidden = false;
+  if (puzzleRevealBtn) { puzzleRevealBtn.hidden = false; puzzleRevealBtn.textContent = "Show solution"; }
   state.hoverArrow = null;
   state.selectedSource = null;
   pz.phase = "loading";
+  pz.gen = (pz.gen || 0) + 1;   // invalidates any in-flight line playback
+  pz._line = null;
+  pz._bestMove = null;
   if (puzzlePrompt) puzzlePrompt.textContent = "Loading puzzle…";
 
   const params = new URLSearchParams();
@@ -2503,7 +2514,86 @@ function _revealPuzzleSolution(data, { yourMove, outcome }) {
     html += `<span class="pz-detail">Also accepted: ${others.map((m) => `${m.source}→${m.destination}`).join(", ")}.</span>`;
   }
   _setPuzzleFeedback(outcome === "correct" ? "correct" : "reveal", html);
+
+  // The "why": play the engine's line out on the board. Auto-run it when the
+  // user was wrong (that's the moment the consequence teaches); offer it as a
+  // button when they were right.
+  state.puzzle._bestMove = best || null;
+  if (best && outcome !== "correct") {
+    revealEngineLine(best);
+  } else if (best) {
+    if (puzzleRevealBtn) { puzzleRevealBtn.hidden = false; puzzleRevealBtn.textContent = "▶ Watch the engine's line"; }
+  } else if (puzzleRevealBtn) {
+    puzzleRevealBtn.hidden = true;
+  }
+}
+
+// Search the puzzle position live, then play the engine's principal variation
+// out on the board, move by move. The line starts from the puzzle's answer
+// (accept move) so it reads as "this is the move — here's where it goes."
+async function revealEngineLine(bestMove) {
+  const pz = state.puzzle;
+  if (!pz) return;
+  const gen = pz.gen;
   if (puzzleRevealBtn) puzzleRevealBtn.hidden = true;
+  _setPuzzleFeedback("reveal", `<strong>Searching the engine's line…</strong><span class="pz-detail">A couple seconds.</span>`);
+  // Build an eval payload from the CURRENT puzzle position (board not yet
+  // mutated), forcing enough sims that the search produces a PV.
+  const payload = { ...currentPayload(), num_sims: PUZZLE_LINE_SIMS, top_k: 8 };
+  let data = null;
+  try {
+    data = await requestEvaluationData(payload, PUZZLE_LINE_SIMS);
+  } catch (e) { data = null; }
+  if (pz.gen !== gen) return;                 // a new puzzle loaded mid-search
+  const moves = (data && data.top_moves) || [];
+  // Prefer the PV that starts with the puzzle's answer; else any PV available.
+  let entry = moves.find((m) => m.source === bestMove.source && m.destination === bestMove.destination
+    && m.principal_variation && m.principal_variation.length);
+  if (!entry) entry = moves.find((m) => m.principal_variation && m.principal_variation.length);
+  if (!entry || !entry.principal_variation.length) {
+    // Fall back to the static arrow + text already shown.
+    _setPuzzleFeedback("reveal", `<strong>Solution: ${bestMove.source}→${bestMove.destination}</strong><span class="pz-detail">eval ${_fmtEval(bestMove.q)}. (No deeper line at this budget.)</span>`);
+    if (puzzleRevealBtn) puzzleRevealBtn.hidden = true;
+    return;
+  }
+  pz._line = entry.principal_variation;
+  await playEngineLine(pz._line, gen);
+}
+
+async function playEngineLine(pvSteps, gen) {
+  const pz = state.puzzle;
+  if (!pz || !pvSteps || !pvSteps.length) return;
+  state.busy = true;
+  state.hoverArrow = null;
+  let prev = new Map(state.pieces);
+  try {
+    for (const step of pvSteps) {
+      if (pz.gen !== gen) return;             // aborted by a new puzzle
+      const next = new Map();
+      for (const p of step.position_after.pieces) next.set(p.pos, p.piece);
+      await animateMove({ move: step.move, prevPieces: prev, newPieces: next });
+      if (pz.gen !== gen) return;
+      applyNewPosition(step.position_after);
+      render();
+      prev = new Map(state.pieces);
+      await _sleep(PUZZLE_LINE_STEP_MS);
+    }
+  } finally {
+    state.busy = false;
+  }
+  if (pz.gen !== gen) return;
+  _setPuzzleFeedback("reveal", `<strong>The engine's line.</strong><span class="pz-detail">${pvSteps.length} half-moves of best play. The eval each side faced is why ${pz._bestMove ? pz._bestMove.source + "→" + pz._bestMove.destination : "that move"} wins.</span>`);
+  if (puzzleRevealBtn) { puzzleRevealBtn.hidden = false; puzzleRevealBtn.textContent = "↻ Replay line"; }
+}
+
+async function replayEngineLine() {
+  const pz = state.puzzle;
+  if (!pz || !pz._line || state.busy) return;
+  applyNewPosition({ pieces: pz.data.pieces, phase: pz.data.phase, side_to_move: pz.data.side_to_move, move_maker: null });
+  state.hoverArrow = pz._bestMove ? { from: _parsePos(pz._bestMove.source), to: _parsePos(pz._bestMove.destination) } : null;
+  render();
+  await _sleep(400);
+  await playEngineLine(pz._line, pz.gen);
 }
 
 function _renderPuzzlePanel() {
@@ -2585,7 +2675,13 @@ if (newSessionBtn) newSessionBtn.addEventListener("click", () => enterLauncher("
 
 // Puzzle controls
 if (puzzleNextBtn) puzzleNextBtn.addEventListener("click", () => { if (state.puzzle) loadNextPuzzle(); });
-if (puzzleRevealBtn) puzzleRevealBtn.addEventListener("click", () => forfeitPuzzle());
+if (puzzleRevealBtn) puzzleRevealBtn.addEventListener("click", () => {
+  const pz = state.puzzle;
+  if (!pz) return;
+  if (pz.phase === "solving") { forfeitPuzzle(); return; }   // give up → reveal
+  if (pz._line) { replayEngineLine(); return; }              // already have the line → replay
+  if (pz._bestMove) { revealEngineLine(pz._bestMove); return; } // correct → watch it
+});
 if (puzzlePoolSel) puzzlePoolSel.addEventListener("change", () => {
   if (state.puzzle) { state.puzzle.filters.pool = puzzlePoolSel.value; loadNextPuzzle(); }
 });
