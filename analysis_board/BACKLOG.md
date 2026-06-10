@@ -16,18 +16,25 @@ the **low-latency / few-sims** path (fast difficulty tier, instant move hints),
 better *policy prior* than iter1, but search washes the edge out. Color-balanced
 H2H vs iter1 across a fixed budget sweep (2026-06-10):
 
-| sims | distilled vs iter1 |
+| sims | distilled WR vs iter1 (±95% CI) |
 |---|---|
-| **0 (prior-only)** | **0.65 ± 0.07** — clearly stronger |
-| 48 | 0.54 |
-| 64 | 0.52 |
-| 96 | 0.51 |
-| 200+ | ~0.50 (wash) |
+| **0 (prior-only)** | **0.65 ± 0.07** — robustly stronger (n=200) |
+| 16 | 0.41 ± 0.08 |
+| 32 | 0.45 ± 0.08 |
+| 48 | 0.54 ± 0.08 |
+| 64 | 0.52 ± 0.08 |
+| 96 | 0.51 ± 0.09 |
+| 200 | 0.55 ± 0.08 |
+| 400 | 0.63 ± 0.08 |
 
-So at the **instant / low-search end the distilled net is a free strength
-upgrade** (better play, zero extra compute); at the board's strong/analysis
-budget (≥~100 sims, deployed cap 1600) it's a wash with iter1 — *don't* swap it
-in there.
+**Robust claim:** at **sims=0 the distilled net is a clear free strength upgrade**
+(0.65, n=200) — better instant play, zero extra compute. That's what this item
+rests on. At search budgets ≥16 the curve is **noisy around 0.5** (±0.08 at
+n=150 can't resolve the small differences), with two marginal outliers (16 low,
+400 high) that are most likely noise across 8 comparisons. So: confidently use
+the distilled net at the **instant / fast-tier** end; at the strong/analysis
+budget treat it as a wash with iter1 (the search-budget data doesn't support a
+clean claim either way).
 
 **Concrete uses:**
 - A **"Fast" / casual difficulty tier**: instant moves that are meaningfully
