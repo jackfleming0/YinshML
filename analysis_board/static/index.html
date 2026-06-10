@@ -39,6 +39,10 @@
             <span class="job-title">Review a game</span>
             <span class="job-desc">Load a Board Game Arena game and step through it with engine commentary.</span>
           </button>
+          <button type="button" class="job-card" data-job="puzzles">
+            <span class="job-title">Solve puzzles</span>
+            <span class="job-desc">Find the best move in real positions, graded against the engine.</span>
+          </button>
         </div>
       </div>
 
@@ -368,6 +372,46 @@
           <button id="review-prev" class="secondary" disabled>← prev</button>
           <button id="review-next" class="secondary" disabled>next →</button>
         </div>
+      </section>
+
+      <section class="block puzzle-block" id="puzzle-block" hidden>
+        <div class="puzzle-prompt" id="puzzle-prompt">Loading puzzle…</div>
+        <div class="puzzle-chips" id="puzzle-chips">
+          <span class="puzzle-chip" id="puzzle-pool-chip" hidden></span>
+          <span class="puzzle-chip" id="puzzle-diff-chip" hidden></span>
+          <span class="puzzle-chip puzzle-chip-muted" id="puzzle-score-chip" hidden></span>
+        </div>
+        <div class="puzzle-feedback" id="puzzle-feedback" hidden></div>
+        <div class="puzzle-actions">
+          <button id="puzzle-reveal" class="link-button">Show solution</button>
+          <button id="puzzle-next" class="primary">Next puzzle →</button>
+        </div>
+        <div class="puzzle-session">
+          <span class="puzzle-streak" id="puzzle-streak">Streak 0</span>
+          <span class="puzzle-tally" id="puzzle-tally">0 / 0 solved</span>
+        </div>
+        <details class="puzzle-filters" id="puzzle-filters">
+          <summary>Filters</summary>
+          <div class="puzzle-filter-grid">
+            <label class="field">
+              <span>Type</span>
+              <select id="puzzle-pool">
+                <option value="">Any</option>
+                <option value="find_win">Find the win</option>
+                <option value="hold">Hold the position</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Difficulty</span>
+              <select id="puzzle-difficulty">
+                <option value="">Any</option>
+                <option value="easy">Easy</option>
+                <option value="med">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+            </label>
+          </div>
+        </details>
       </section>
 
       <section class="block result" id="result">

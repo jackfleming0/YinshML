@@ -103,6 +103,10 @@ const state = {
   playSessionId: _uuid(),    // sent with every /api/move so server-side logs
                              // can be reconstructed into discrete games offline.
                              // Regenerated on Clear / startGame / setup→play.
+  puzzle: null,              // null outside Puzzle mode. When active:
+                             //   { id, data, phase: "solving"|"revealed",
+                             //     attemptsLeft, seen:Set, filters:{pool,difficulty},
+                             //     solved, attempted, streak }
 };
 
 
@@ -302,6 +306,10 @@ boardEl.addEventListener("click", (ev) => {
   if (state.mode === "setup") {
     if (!state.armedTool) return;
     handlePlace(ev.clientX, ev.clientY, state.armedTool);
+    return;
+  }
+  if (state.mode === "puzzle") {
+    handlePuzzleClick(ev.clientX, ev.clientY);
     return;
   }
   handlePlayClick(ev.clientX, ev.clientY);
@@ -1355,6 +1363,7 @@ function applyModeStyling(mode) {
   document.body.classList.toggle("mode-setup", mode === "setup");
   document.body.classList.toggle("mode-play", mode === "play");
   document.body.classList.toggle("mode-review", mode === "review");
+  document.body.classList.toggle("mode-puzzle", mode === "puzzle");
 
   paletteBlock.classList.toggle("hidden-in-play", mode !== "setup");
   playControls.hidden = mode !== "play";
@@ -1366,11 +1375,15 @@ function applyModeStyling(mode) {
   // AND by a `body.mode-review` CSS rule — the latter exists so a stale
   // `hidden=false` from a prior session doesn't bleed through.
   if (reviewBlock) reviewBlock.hidden = mode !== "review";
+  // Puzzle panel is gated by `hidden` in DOM AND body.mode-puzzle CSS, same as
+  // the review block — clear the attr so the panel actually shows in puzzle mode.
+  if (puzzleBlock) puzzleBlock.hidden = mode !== "puzzle";
 
   const sub = document.getElementById("sidebar-subtitle");
   if (sub) {
     if (mode === "setup") sub.textContent = "Compose a position, ask the network.";
     else if (mode === "review") sub.textContent = "Step through a BGA replay with engine analysis.";
+    else if (mode === "puzzle") sub.textContent = "Find the best move — graded against the engine.";
     else sub.textContent = "Play YINSH — vs yourself or the engine.";
   }
 }
@@ -1392,6 +1405,12 @@ async function setMode(mode) {
   if (state.mode === "review" && mode !== "review") {
     exitReviewMode({ silent: true });
   }
+  // Leaving Puzzle mode: drop the session and clear any solution arrow so it
+  // doesn't bleed into the next mode's board.
+  if (state.mode === "puzzle" && mode !== "puzzle") {
+    state.puzzle = null;
+    state.hoverArrow = null;
+  }
   state.mode = mode;
   applyModeStyling(mode);
   state.selectedSource = null;
@@ -1408,6 +1427,21 @@ async function setMode(mode) {
     moveHistoryEl.innerHTML = "";
     updateUndoBtn();
     enterReviewMode();
+    render();
+    return;
+  }
+
+  if (mode === "puzzle") {
+    boardHint.textContent = "Click a ring of the side to move, then a destination, to answer.";
+    setArmedTool(null);
+    if (state.game) endGameSession();
+    state.history = [];
+    state.gameOver = false;
+    state.winner = null;
+    moveHistoryEl.innerHTML = "";
+    gameSetupBlock.hidden = true;
+    gameStatusBlock.hidden = true;
+    await enterPuzzleMode();
     render();
     return;
   }
@@ -2265,6 +2299,248 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+// ---------- Puzzle trainer ----------
+// Reuses the play-mode ring-select interaction and the board's arrow overlay.
+// The only new wire vs Play: the intended move goes to /api/puzzles/check
+// (grade + reveal) instead of /api/move (apply). Session state lives in
+// state.puzzle; nothing is persisted (no accounts on the board).
+const puzzleBlock = document.getElementById("puzzle-block");
+const puzzlePrompt = document.getElementById("puzzle-prompt");
+const puzzlePoolChip = document.getElementById("puzzle-pool-chip");
+const puzzleDiffChip = document.getElementById("puzzle-diff-chip");
+const puzzleScoreChip = document.getElementById("puzzle-score-chip");
+const puzzleFeedback = document.getElementById("puzzle-feedback");
+const puzzleNextBtn = document.getElementById("puzzle-next");
+const puzzleRevealBtn = document.getElementById("puzzle-reveal");
+const puzzleStreakEl = document.getElementById("puzzle-streak");
+const puzzleTallyEl = document.getElementById("puzzle-tally");
+const puzzlePoolSel = document.getElementById("puzzle-pool");
+const puzzleDiffSel = document.getElementById("puzzle-difficulty");
+
+function _parsePos(s) {
+  return { col: s[0], row: parseInt(s.slice(1), 10) };
+}
+function _fmtEval(q) {
+  if (typeof q !== "number") return "?";
+  return (q >= 0 ? "+" : "") + q.toFixed(2);
+}
+function _setChip(el, text) {
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = false;
+}
+
+async function enterPuzzleMode() {
+  if (!state.puzzle) {
+    state.puzzle = {
+      id: null, data: null, phase: "loading", attemptsLeft: 1,
+      seen: new Set(), filters: { pool: "", difficulty: "" },
+      solved: 0, attempted: 0, streak: 0,
+    };
+    if (puzzlePoolSel) state.puzzle.filters.pool = puzzlePoolSel.value;
+    if (puzzleDiffSel) state.puzzle.filters.difficulty = puzzleDiffSel.value;
+  }
+  await loadNextPuzzle();
+}
+
+async function loadNextPuzzle() {
+  const pz = state.puzzle;
+  if (!pz) return;
+  _setPuzzleFeedback(null, "");
+  if (puzzleRevealBtn) puzzleRevealBtn.hidden = false;
+  state.hoverArrow = null;
+  state.selectedSource = null;
+  pz.phase = "loading";
+  if (puzzlePrompt) puzzlePrompt.textContent = "Loading puzzle…";
+
+  const params = new URLSearchParams();
+  if (pz.filters.pool) params.set("pool", pz.filters.pool);
+  if (pz.filters.difficulty) params.set("difficulty", pz.filters.difficulty);
+  // Cap the exclude list so the URL can't grow unbounded across a long session.
+  const seenArr = Array.from(pz.seen).slice(-200);
+  if (seenArr.length) params.set("exclude", seenArr.join(","));
+
+  try {
+    const res = await fetch(`/api/puzzles/next?${params.toString()}`);
+    const data = await res.json();
+    if (!data.ok) {
+      if (puzzlePrompt) puzzlePrompt.textContent = (data.errors || ["no puzzles available"]).join(" · ");
+      return;
+    }
+    pz.id = data.id;
+    pz.data = data;
+    pz.phase = "solving";
+    pz.attemptsLeft = 1;
+    pz.seen.add(data.id);
+    state.legalMoves = data.legal_moves || [];
+    applyNewPosition({
+      pieces: data.pieces, phase: data.phase,
+      side_to_move: data.side_to_move, move_maker: null,
+    });
+    _renderPuzzlePanel();
+    render();
+  } catch (e) {
+    if (puzzlePrompt) puzzlePrompt.textContent = "Failed to load puzzle: " + e.message;
+  }
+}
+
+function handlePuzzleClick(px, py) {
+  const pz = state.puzzle;
+  if (!pz || pz.phase !== "solving" || state.busy) return;
+  const near = pixelToBoardPos(px, py);
+  if (!near) { state.selectedSource = null; render(); return; }
+  const { col, row } = near;
+  const posStr = `${col}${row}`;
+  const side = currentSide();
+  const sideRing = side === "WHITE" ? "WHITE_RING" : "BLACK_RING";
+  const pieceHere = state.pieces.get(posKey(col, row));
+
+  // Selected source + clicked a legal destination → submit the answer.
+  if (state.selectedSource) {
+    const dests = legalDestinationsFrom(state.selectedSource);
+    if (dests.some((d) => d.col === col && d.row === row)) {
+      const move = {
+        type: "MOVE_RING",
+        source: `${state.selectedSource.col}${state.selectedSource.row}`,
+        destination: posStr,
+      };
+      state.selectedSource = null;
+      submitPuzzleMove(move);
+      return;
+    }
+  }
+  // Click own ring with available moves → select it.
+  if (pieceHere === sideRing) {
+    const hasMoves = state.legalMoves.some((m) => m.type === "MOVE_RING" && m.source === posStr);
+    if (hasMoves) { state.selectedSource = { col, row }; render(); return; }
+  }
+  state.selectedSource = null;
+  render();
+}
+
+async function submitPuzzleMove(move) {
+  const pz = state.puzzle;
+  if (!pz || pz.phase !== "solving") return;
+  state.busy = true;
+  try {
+    const res = await fetch("/api/puzzles/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: pz.id, move }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      setStatus((data.errors || ["check failed"]).join(" · "), "error");
+      return;
+    }
+    if (data.correct) {
+      pz.attempted += 1; pz.solved += 1; pz.streak += 1; pz.phase = "revealed";
+      _revealPuzzleSolution(data, { yourMove: move, outcome: "correct" });
+    } else if (pz.attemptsLeft > 0) {
+      // Retry once — keep the position, nudge, don't reveal yet.
+      pz.attemptsLeft -= 1;
+      state.selectedSource = null;
+      _setPuzzleFeedback("retry", `<strong>Not the best.</strong><span class="pz-detail">Try once more — the solution shows after this.</span>`);
+      render();
+    } else {
+      pz.attempted += 1; pz.streak = 0; pz.phase = "revealed";
+      _revealPuzzleSolution(data, { yourMove: move, outcome: "missed" });
+    }
+    _renderPuzzleSession();
+  } catch (e) {
+    setStatus("Puzzle check failed: " + e.message, "error");
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function forfeitPuzzle() {
+  const pz = state.puzzle;
+  if (!pz || pz.phase !== "solving") return;
+  try {
+    // Empty move never matches → server returns the answer key with correct:false.
+    const res = await fetch("/api/puzzles/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: pz.id, move: {} }),
+    });
+    const data = await res.json();
+    if (!data.ok) return;
+    pz.attempted += 1; pz.streak = 0; pz.phase = "revealed";
+    _revealPuzzleSolution(data, { yourMove: null, outcome: "revealed" });
+    _renderPuzzleSession();
+  } catch (e) {
+    setStatus("Could not load solution: " + e.message, "error");
+  }
+}
+
+function _revealPuzzleSolution(data, { yourMove, outcome }) {
+  const best = (data.accept_moves || [])[0];
+  state.selectedSource = null;
+  if (best) {
+    state.hoverArrow = { from: _parsePos(best.source), to: _parsePos(best.destination) };
+  }
+  render();
+
+  let html;
+  if (outcome === "correct") {
+    html = `<strong>✓ Best move.</strong>`;
+    if (data.matched) html += `<span class="pz-detail">${data.matched.source}→${data.matched.destination} · eval ${_fmtEval(data.matched.q)}.</span>`;
+  } else if (best) {
+    html = `<strong>Solution: ${best.source}→${best.destination}</strong><span class="pz-detail">eval ${_fmtEval(best.q)}.`;
+    if (yourMove) {
+      const yq = data.your_move && data.your_move.q != null
+        ? ` Your ${yourMove.source}→${yourMove.destination} drops to ${_fmtEval(data.your_move.q)}.`
+        : ` Your ${yourMove.source}→${yourMove.destination} wasn't among the best.`;
+      html += yq;
+    }
+    html += `</span>`;
+  } else {
+    html = `<strong>No solution available.</strong>`;
+  }
+  const others = (data.accept_moves || []).slice(1);
+  if (others.length) {
+    html += `<span class="pz-detail">Also accepted: ${others.map((m) => `${m.source}→${m.destination}`).join(", ")}.</span>`;
+  }
+  _setPuzzleFeedback(outcome === "correct" ? "correct" : "reveal", html);
+  if (puzzleRevealBtn) puzzleRevealBtn.hidden = true;
+}
+
+function _renderPuzzlePanel() {
+  const d = state.puzzle.data;
+  if (!d) return;
+  if (puzzlePrompt) puzzlePrompt.textContent = d.prompt;
+  _setChip(puzzlePoolChip, d.pool === "find_win" ? "Find the win" : "Hold the position");
+  if (puzzleDiffChip) {
+    puzzleDiffChip.textContent = ({ easy: "Easy", med: "Medium", hard: "Hard" })[d.difficulty] || d.difficulty;
+    puzzleDiffChip.dataset.diff = d.difficulty;
+    puzzleDiffChip.hidden = false;
+  }
+  const sc = d.scores || { WHITE: 0, BLACK: 0 };
+  const markers = d.tags && d.tags.markers != null ? ` · ${d.tags.markers} markers` : "";
+  _setChip(puzzleScoreChip, `Score ${sc.WHITE}–${sc.BLACK}${markers}`);
+  _renderPuzzleSession();
+}
+
+function _renderPuzzleSession() {
+  const pz = state.puzzle;
+  if (!pz) return;
+  if (puzzleStreakEl) puzzleStreakEl.textContent = `Streak ${pz.streak}`;
+  if (puzzleTallyEl) puzzleTallyEl.textContent = `${pz.solved} / ${pz.attempted} solved`;
+}
+
+function _setPuzzleFeedback(kind, html) {
+  if (!puzzleFeedback) return;
+  if (!html) {
+    puzzleFeedback.hidden = true;
+    puzzleFeedback.innerHTML = "";
+    return;
+  }
+  puzzleFeedback.hidden = false;
+  puzzleFeedback.className = "puzzle-feedback" + (kind ? ` is-${kind}` : "");
+  puzzleFeedback.innerHTML = html;
+}
+
 // ---------- Boot ----------
 applyModeStyling(state.mode);
 applyOpponentStyling(state.opponent);
@@ -2296,6 +2572,9 @@ if (launcherEl) {
       } else if (job === "review") {
         leaveLauncher();
         setMode("review");
+      } else if (job === "puzzles") {
+        leaveLauncher();
+        setMode("puzzle");
       }
     });
   });
@@ -2303,6 +2582,16 @@ if (launcherEl) {
 const launcherPlayBackBtn = $("launcher-play-back");
 if (launcherPlayBackBtn) launcherPlayBackBtn.addEventListener("click", () => showLauncherStep("jobs"));
 if (newSessionBtn) newSessionBtn.addEventListener("click", () => enterLauncher("jobs"));
+
+// Puzzle controls
+if (puzzleNextBtn) puzzleNextBtn.addEventListener("click", () => { if (state.puzzle) loadNextPuzzle(); });
+if (puzzleRevealBtn) puzzleRevealBtn.addEventListener("click", () => forfeitPuzzle());
+if (puzzlePoolSel) puzzlePoolSel.addEventListener("change", () => {
+  if (state.puzzle) { state.puzzle.filters.pool = puzzlePoolSel.value; loadNextPuzzle(); }
+});
+if (puzzleDiffSel) puzzleDiffSel.addEventListener("change", () => {
+  if (state.puzzle) { state.puzzle.filters.difficulty = puzzleDiffSel.value; loadNextPuzzle(); }
+});
 
 // Landing = the launcher gate (pick a job → configure → drop into the board),
 // not a bare empty board.

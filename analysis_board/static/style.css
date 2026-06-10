@@ -379,6 +379,104 @@ body.mode-review .play-controls {
   display: none;
 }
 
+/* Puzzle-mode-only block. Like Review, the screen is dominated by the board +
+   the puzzle panel — nothing the user can mutate, no engine spoiler panel. */
+body:not(.mode-puzzle) .puzzle-block { display: none; }
+body.mode-puzzle .opponent-block,
+body.mode-puzzle .status-block,
+body.mode-puzzle .settings-block,
+body.mode-puzzle .palette-block,
+body.mode-puzzle .setup-actions-block,
+body.mode-puzzle .game-setup-block,
+body.mode-puzzle .game-status-block,
+body.mode-puzzle .review-block,
+body.mode-puzzle .history-block,
+body.mode-puzzle .result,
+body.mode-puzzle .play-controls {
+  display: none;
+}
+
+/* ---------- Puzzle panel ---------- */
+.puzzle-block { padding: 16px; }
+.puzzle-prompt {
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+.puzzle-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.puzzle-chip {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  border: 1px solid var(--rule);
+}
+.puzzle-chip-muted { text-transform: none; font-weight: 500; letter-spacing: 0; }
+.puzzle-chip[data-diff="easy"] { color: var(--positive); }
+.puzzle-chip[data-diff="med"]  { color: var(--warn); }
+.puzzle-chip[data-diff="hard"] { color: var(--negative); }
+
+.puzzle-feedback {
+  margin-top: 14px;
+  padding: 11px 13px;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  background: var(--surface-2);
+  border-left: 3px solid var(--ink-faint);
+}
+.puzzle-feedback strong { font-weight: 700; }
+.puzzle-feedback.is-correct { border-left-color: var(--positive); }
+.puzzle-feedback.is-retry   { border-left-color: var(--warn); }
+.puzzle-feedback.is-reveal  { border-left-color: var(--negative); }
+.puzzle-feedback .pz-detail { color: var(--ink-dim); margin-top: 4px; display: block; font-size: 0.83rem; }
+
+.puzzle-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+}
+.puzzle-actions .primary { flex: 1; }
+.puzzle-actions #puzzle-reveal[hidden] { display: none; }
+
+.puzzle-session {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+.puzzle-streak { font-weight: 600; color: var(--accent-dim); }
+
+.puzzle-filters { margin-top: 12px; }
+.puzzle-filters > summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+  list-style: none;
+}
+.puzzle-filters > summary::-webkit-details-marker { display: none; }
+.puzzle-filter-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
 .review-block { padding: 16px; }
 .review-title {
   margin: 0 0 6px 0;

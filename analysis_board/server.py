@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import sys
 import threading
 import time
@@ -1464,6 +1465,160 @@ def api_import_bga():  # type: ignore[no-untyped-def]
     log.info("BGA import succeeded for table %s (%d steps)", table_id, len(playback["steps"]))
     return jsonify({"ok": True, "table_id": table_id, "cached": False, **playback})
 
+
+
+# ---------------------------------------------------------------------------
+# Puzzle trainer (chess.com-style tactics).
+#
+# The bank is curated offline by scripts/puzzles/curate_puzzles.py from a
+# teacher self-play corpus and committed to the repo, so `yinsh-redeploy`
+# (git pull + restart) picks up a new bank with no extra deploy steps. Each
+# puzzle already carries the exact pieces/side_to_move/phase/scores shape
+# build_state() consumes. The answer key (accept_moves + distractors) is held
+# server-side and only revealed by /api/puzzles/check after an attempt.
+PUZZLE_BANK_PATH = Path(
+    os.environ.get(
+        "YNS_PUZZLE_BANK",
+        str(Path(__file__).resolve().parent / "data" / "puzzle_bank.json"),
+    )
+)
+_puzzles_by_id: Dict[str, Dict[str, Any]] = {}
+_puzzles_loaded = False
+
+
+def _ensure_puzzles() -> None:
+    """Load the puzzle bank once, lazily, on first puzzle request."""
+    global _puzzles_loaded  # noqa: PLW0603
+    if _puzzles_loaded:
+        return
+    _puzzles_loaded = True
+    if not PUZZLE_BANK_PATH.exists():
+        log.warning("puzzle bank not found at %s (puzzle mode disabled)", PUZZLE_BANK_PATH)
+        return
+    try:
+        with open(PUZZLE_BANK_PATH) as f:
+            bank = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:  # noqa: BLE001
+        log.error("failed to load puzzle bank: %s", e)
+        return
+    for p in bank.get("puzzles", []):
+        _puzzles_by_id[p["id"]] = p
+    log.info("loaded %d puzzles from %s", len(_puzzles_by_id), PUZZLE_BANK_PATH)
+
+
+def _public_puzzle(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Puzzle as sent to the client — position only, answer key stripped."""
+    stm = p["side_to_move"]
+    side_word = stm.capitalize()
+    prompt = (
+        f"{side_word} to move — find the winning move."
+        if p["pool"] == "find_win"
+        else f"{side_word} to move — find the move that holds the position."
+    )
+    return {
+        "id": p["id"],
+        "pool": p["pool"],
+        "difficulty": p["difficulty"],
+        "side_to_move": stm,
+        "phase": p["phase"],
+        "scores": p["scores"],
+        "pieces": p["pieces"],
+        "prompt": prompt,
+        "n_accept": len(p.get("accept_moves", [])),
+        "tags": p.get("tags", {}),
+    }
+
+
+@app.route("/api/puzzles/next")
+def api_puzzles_next():  # type: ignore[no-untyped-def]
+    """Return a random puzzle matching optional pool/difficulty filters.
+
+    Query params: pool=find_win|hold, difficulty=easy|med|hard,
+    exclude=comma-separated ids already seen this session.
+    """
+    _ensure_puzzles()
+    if not _puzzles_by_id:
+        return jsonify({"ok": False, "errors": ["no puzzle bank loaded"]}), 200
+    pool = request.args.get("pool")
+    difficulty = request.args.get("difficulty")
+    exclude = {s for s in (request.args.get("exclude") or "").split(",") if s}
+
+    filtered = [
+        p for p in _puzzles_by_id.values()
+        if (not pool or p["pool"] == pool) and (not difficulty or p["difficulty"] == difficulty)
+    ]
+    if not filtered:
+        return jsonify({"ok": False, "errors": ["no puzzles match that filter"]}), 200
+    # Prefer unseen; fall back to the full filtered set once the user has
+    # cycled through everything (so a session never dead-ends).
+    candidates = [p for p in filtered if p["id"] not in exclude] or filtered
+    chosen = random.choice(candidates)
+    payload = _public_puzzle(chosen)
+    # Attach legal moves so the board's ring-select interaction works without
+    # leaking the engine's eval (legality is not a spoiler — the user could
+    # discover every legal move by trying). Built fresh from the position.
+    try:
+        gs = build_state(chosen)
+        payload["legal_moves"] = _legal_moves_payload(gs.get_valid_moves())
+    except Exception as e:  # noqa: BLE001
+        log.error("puzzle %s failed to build legal moves: %s", chosen["id"], e)
+        payload["legal_moves"] = []
+    return jsonify({"ok": True, "remaining": len(candidates), **payload})
+
+
+@app.route("/api/puzzles/check", methods=["POST"])
+def api_puzzles_check():  # type: ignore[no-untyped-def]
+    """Grade an attempt against the puzzle's answer key and reveal it.
+
+    Body: {id, move: {source, destination, type}}. Correct iff the move
+    matches any accept_move (source+destination). If it matches a known trap
+    distractor, the trap's q is surfaced so the UI can explain the cost.
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    _ensure_puzzles()
+    pid = payload.get("id")
+    p = _puzzles_by_id.get(pid)
+    if p is None:
+        return jsonify({"ok": False, "errors": [f"unknown puzzle id {pid!r}"]}), 200
+    move = payload.get("move") or {}
+    src, dst = move.get("source"), move.get("destination")
+    matched = next(
+        (m for m in p["accept_moves"] if m["source"] == src and m["destination"] == dst), None
+    )
+    trap = next(
+        (m for m in p["distractors"] if m["source"] == src and m["destination"] == dst), None
+    )
+    return jsonify({
+        "ok": True,
+        "id": pid,
+        "correct": matched is not None,
+        "matched": matched,
+        "your_move": {"source": src, "destination": dst, "q": (trap or {}).get("q")},
+        "is_known_trap": trap is not None,
+        "accept_moves": p["accept_moves"],
+        "distractors": p["distractors"],
+        "metrics": p.get("metrics", {}),
+        "pool": p["pool"],
+    })
+
+
+@app.route("/api/puzzles/stats")
+def api_puzzles_stats():  # type: ignore[no-untyped-def]
+    """Bank composition for the filter UI."""
+    _ensure_puzzles()
+    from collections import Counter
+    pools, diffs, cross = Counter(), Counter(), Counter()
+    for p in _puzzles_by_id.values():
+        pools[p["pool"]] += 1
+        diffs[p["difficulty"]] += 1
+        cross[f'{p["pool"]}/{p["difficulty"]}'] += 1
+    return jsonify({
+        "ok": True,
+        "total": len(_puzzles_by_id),
+        "by_pool": dict(pools),
+        "by_difficulty": dict(diffs),
+        "by_pool_difficulty": dict(cross),
+    })
 
 
 def main() -> None:
