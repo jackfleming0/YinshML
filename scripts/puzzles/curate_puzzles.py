@@ -78,6 +78,15 @@ def parse_args():
                    help="A 'trap' is a rejected move with q <= best_q - this gap.")
     p.add_argument("--max-distractors", type=int, default=4)
     p.add_argument("--limit", type=int, default=0, help="Debug: only load first N positions.")
+
+    # --- human-origin pool ("watch the engine crush a human position") ---
+    p.add_argument("--source-tag", default="selfplay",
+                   help="Stamp each puzzle's origin: 'selfplay' (e26) or 'human'.")
+    p.add_argument("--require-divergence", action="store_true",
+                   help="Human pool only: keep positions where the human's actual move "
+                        "is NOT in the engine's accept set. The obvious human move is the "
+                        "foil; the engine's deeper move is the answer — that contrast is "
+                        "the teaching. Needs a 'human_move_idx' array in the npz.")
     return p.parse_args()
 
 
@@ -93,10 +102,15 @@ def main():
     q = d["policy_q"].astype(np.float64)
     prior = d["policy_prior"].astype(np.float64)
     values = d["values"].astype(np.float64)
+    # The human's actual move per position (same encoder index space as policy_idx),
+    # present only in human-labeled corpora. -1 where unknown.
+    human_move_idx = d["human_move_idx"].astype(np.int32) if "human_move_idx" in d.files \
+        else np.full(S.shape[0], -1, np.int32)
     if args.limit:
-        S, idx, prob, q, prior, values = (a[:args.limit] for a in (S, idx, prob, q, prior, values))
+        S, idx, prob, q, prior, values, human_move_idx = (
+            a[:args.limit] for a in (S, idx, prob, q, prior, values, human_move_idx))
     N = S.shape[0]
-    print(f"  {N:,} positions, {S.shape[1]}ch states")
+    print(f"  {N:,} positions, {S.shape[1]}ch states  (source={args.source_tag})")
 
     # -----------------------------------------------------------------------
     # Stage A: position metadata (vectorised, straight off the state tensor)
@@ -155,9 +169,18 @@ def main():
         acc = build_accept(require_pos)
         af, br, cliff, trap, n_acc = cliff_and_traps(acc)
         worthy = sel & (n_acc >= 1) & (cliff >= args.min_cliff)
+        # Teaching contrast: the human's obvious move ≠ the engine's accept set.
+        # acc is in ranked-slot order, so are ID; check membership of the human
+        # index among the accepted slots' move indices.
+        acc_move_idx = np.where(acc, ID, -1)                       # -1 for non-accepted slots
+        human_in_accept = (acc_move_idx == human_move_idx[:, None]).any(1)
+        diverges = (~human_in_accept) & (human_move_idx >= 0)
+        if args.require_divergence:
+            worthy = worthy & diverges
         pools[name] = dict(sel=worthy, accept=acc, accept_floor=af, best_reject=br,
-                           cliff=cliff, trap=trap, n_accept=n_acc)
-        print(f"\n[{name}] candidates: pool={int(sel.sum()):,}  puzzle-worthy={int(worthy.sum()):,}")
+                           cliff=cliff, trap=trap, n_accept=n_acc, diverges=diverges)
+        extra = f"  divergent={int((worthy & diverges).sum()):,}" if (human_move_idx >= 0).any() else ""
+        print(f"\n[{name}] candidates: pool={int(sel.sum()):,}  puzzle-worthy={int(worthy.sum()):,}{extra}")
 
     # -----------------------------------------------------------------------
     # Stage C: stratified sampling within each pool
@@ -219,7 +242,9 @@ def main():
                 markers=markers[gi], score_diff=score_diff[gi], centrality=centrality[gi],
                 value=values[gi], best_q=best_q[gi], accept_floor=info["accept_floor"][gi],
                 cliff=info["cliff"][gi], trap=info["trap"][gi],
-                max_distractors=args.max_distractors))
+                max_distractors=args.max_distractors,
+                source_tag=args.source_tag, human_move_idx=int(human_move_idx[gi]),
+                diverges=bool(info["diverges"][gi])))
 
     # -----------------------------------------------------------------------
     out = {
@@ -239,7 +264,8 @@ def main():
 
 def _serialise_puzzle(encoder, pool, gi, diff_lab, *, state, ID_row, P_row, Q_row, PR_row,
                       VAL_row, accept_ranked, markers, score_diff, centrality, value,
-                      best_q, accept_floor, cliff, trap, max_distractors):
+                      best_q, accept_floor, cliff, trap, max_distractors,
+                      source_tag="selfplay", human_move_idx=-1, diverges=False):
     gs = encoder.decode_state(state)
     side = gs.current_player                       # true side to move (decoded from sentinel)
     pieces = [{"pos": str(pos), "piece": piece.name} for pos, piece in gs.board.pieces.items()]
@@ -268,9 +294,25 @@ def _serialise_puzzle(encoder, pool, gi, diff_lab, *, state, ID_row, P_row, Q_ro
     reject_ranks.sort(key=lambda r: -PR_row[r])
     distractors = [move_dict(r) for r in reject_ranks[:max_distractors]]
 
+    # The human's actual move (the "obvious" foil) — decoded for the reveal so
+    # the UI can show "a human played X; the engine's deeper move is Y" and the
+    # line makes the why visible. None for self-play puzzles.
+    human_move = None
+    if human_move_idx is not None and human_move_idx >= 0:
+        try:
+            hmv = encoder.index_to_move(int(human_move_idx), side)
+            human_move = {
+                "type": hmv.type.name,
+                "source": str(hmv.source),
+                "destination": str(hmv.destination) if hmv.destination is not None else None,
+            }
+        except Exception:  # noqa: BLE001 — out-of-range/odd index, just omit
+            human_move = None
+
     return {
-        "id": f"{'fw' if pool=='find_win' else 'hold'}_{gi:06d}",
+        "id": f"{source_tag[:1]}{'fw' if pool=='find_win' else 'hl'}_{gi:06d}",
         "pool": pool,
+        "source": source_tag,
         "source_index": gi,
         "difficulty": diff_lab,
         "side_to_move": side.name,
@@ -279,6 +321,8 @@ def _serialise_puzzle(encoder, pool, gi, diff_lab, *, state, ID_row, P_row, Q_ro
         "pieces": pieces,
         "accept_moves": accept_moves,
         "distractors": distractors,
+        "human_move": human_move,
+        "human_diverges": bool(diverges),
         "metrics": {
             "best_q": round(float(best_q), 4),
             "accept_floor": round(float(accept_floor), 4),
