@@ -222,3 +222,30 @@ for every input, that's the smell that something is broken upstream.
 Positive controls (deliberately different inputs that SHOULD produce
 different labels) catch this; uniform-looking output should always be
 investigated.
+
+---
+
+## §6 — High-sim visit-count temperature overflow (RESOLVED 2026-06-09)
+
+Surfaced running the E26 high-budget teacher-gen at 1600 sims (a regime the
+E20 throughput build made affordable). ~64% of games crashed in `select_move`
+with `ValueError: Probabilities contain NaN`.
+
+**Root cause:** `MCTS` move-selection scaled the visit policy with
+`visit_counts ** (1.0 / temp)` (float32) in both `search()` and `search_batch()`.
+At high sims (large counts) and low temperature (`1/temp` large, e.g. 1600^20),
+the result **overflows float32 → inf → NaN** policy. 800 sims mostly stayed
+under the threshold; 1600 sims blew past it. Worse than a crash: the surviving
+games were biased *away* from sharp late-game low-temp states — exactly the
+decisive positions a teacher corpus wants.
+
+**Fix (commit 9b964e4):** normalize by the max visit count before exponentiating
+(`(visit_counts / visit_counts.max()) ** (1/temp)`); the base is then in [0,1]
+and can't overflow, and the constant cancels in the normalization so it's
+*identical wherever the old formula was finite*. Verified numerically + 51 MCTS
+parity/consistency tests.
+
+**Lesson (same family as §5):** the bug was invisible to a naive health check —
+GPU was busy, process alive — and only a *data/error-rate* check caught it
+(64% of games erroring, value targets biased). When a long run "looks healthy,"
+check the output distribution and per-unit error rate, not just liveness.

@@ -88,7 +88,7 @@ the expensive swing.**
 
 #### E26 — High-budget-search distillation campaign  `RUNNING · reaimed to policy-distill`
 **What:** Distill targets from a stronger teacher (iter1_ema at 1600–3200+ sims) into the net — search manufactures the better signal, distillation banks it.
-**Outcome:** Pending — reaimed 2026-06-09 to distill the search-improved POLICY (value teacher undercut by E25). Verdict gate: distilled net beating frozen iter1_ema in H2H. **Teacher-gen now E20-accelerated** (`gen_distill_corpus.py --use-inference-server --inference-dtype bf16`): ~645 pos/min @48w/800sim on the 4090 (~4.7× old GPU best; 2M-position target ~52h, was ~10 days).
+**Outcome:** Pending — reaimed 2026-06-09 to distill the search-improved POLICY (value teacher undercut by E25). Verdict gate: distilled net beating frozen iter1_ema in H2H. **Teacher-gen now E20-accelerated** (`gen_distill_corpus.py --use-inference-server --inference-dtype bf16`): ~645 pos/min @48w/800sim on the 4090 (~4.7× old GPU best; 2M-position target ~52h, was ~10 days). RUNNING 2026-06-09: 250k @1600sim de-risk → distill → H2H, then a full puzzle-grade 800-sim corpus. Two fixes landed mid-campaign: high-sim visit-count overflow (`TECH_DEBT.md` §6) and the gen now also stores `policy_q`/`policy_prior` per move (puzzle-grade — see Unscoped ideas).
 → [details](docs/experiments/e26_distillation_campaign.md) · [box runbook](docs/experiments/e26_box_runbook.md)
 
 #### E21 — Model ensembling (averaged P/V), primarily as a teacher  `QUEUED · parked`
@@ -295,6 +295,15 @@ detail file. Promote one by writing its detail file and a `Pending —` entry ab
 - **C3 — Skip-connection value head.** ~$30. Stack-rank sum 12.
 - **D2 — Yngine + self-play data hybrid pretrain.** ~20h, ~$30. Stack-rank sum 12.
 - **D3 — Filter yngine corpus by decisiveness.** ~4h re-pretrain, ~$7. Stack-rank sum 14.
+- **YINSH puzzle mode (product, not a strength experiment).** Mine the E26 teacher
+  corpus for puzzles: position + "play a top engine move." The gen now stores the
+  needed signals per position (commit 9e0775a) — `policy_idx`/`policy_prob` (top-64
+  visit policy = answer key), `policy_q` (per-move search value → "does the move
+  matter" / fair within-ε acceptance), `policy_prior` (raw net prior → high-visits +
+  low-prior = "search found a non-obvious move" = difficulty). To build: a mining
+  pass (concentration filter + Zobrist dedup + phase/theme tags + difficulty grading)
+  → a puzzle mode on the deployed analysis board. Seedable from the overnight
+  800-sim corpus.
 
 ---
 
