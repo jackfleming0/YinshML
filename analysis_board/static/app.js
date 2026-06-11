@@ -2316,6 +2316,7 @@ const puzzleStreakEl = document.getElementById("puzzle-streak");
 const puzzleTallyEl = document.getElementById("puzzle-tally");
 const puzzlePoolSel = document.getElementById("puzzle-pool");
 const puzzleDiffSel = document.getElementById("puzzle-difficulty");
+const puzzleSourceSel = document.getElementById("puzzle-source");
 
 // Sims for the reveal-line search. Higher budget = a deeper, more convincing
 // principal variation (the PV depth is gated by per-node visit counts). 400
@@ -2342,11 +2343,12 @@ async function enterPuzzleMode() {
   if (!state.puzzle) {
     state.puzzle = {
       id: null, data: null, phase: "loading", attemptsLeft: 1,
-      seen: new Set(), filters: { pool: "", difficulty: "" },
+      seen: new Set(), filters: { pool: "", difficulty: "", source: "" },
       solved: 0, attempted: 0, streak: 0,
     };
     if (puzzlePoolSel) state.puzzle.filters.pool = puzzlePoolSel.value;
     if (puzzleDiffSel) state.puzzle.filters.difficulty = puzzleDiffSel.value;
+    if (puzzleSourceSel) state.puzzle.filters.source = puzzleSourceSel.value;
   }
   await loadNextPuzzle();
 }
@@ -2367,6 +2369,7 @@ async function loadNextPuzzle() {
   const params = new URLSearchParams();
   if (pz.filters.pool) params.set("pool", pz.filters.pool);
   if (pz.filters.difficulty) params.set("difficulty", pz.filters.difficulty);
+  if (pz.filters.source) params.set("source", pz.filters.source);
   // Cap the exclude list so the URL can't grow unbounded across a long session.
   const seenArr = Array.from(pz.seen).slice(-200);
   if (seenArr.length) params.set("exclude", seenArr.join(","));
@@ -2513,13 +2516,25 @@ function _revealPuzzleSolution(data, { yourMove, outcome }) {
   if (others.length) {
     html += `<span class="pz-detail">Also accepted: ${others.map((m) => `${m.source}→${m.destination}`).join(", ")}.</span>`;
   }
-  _setPuzzleFeedback(outcome === "correct" ? "correct" : "reveal", html);
+  // Human-origin pool: the teaching contrast. The human's obvious move is the
+  // foil; the engine's deeper move is the answer; the line reveals why.
+  if (data.human_move) {
+    const hm = data.human_move;
+    const hq = hm.q != null ? ` (eval ${_fmtEval(hm.q)})` : "";
+    const youToo = data.played_human_move ? "You played it too — the obvious move. " : "";
+    html += `<span class="pz-detail">${youToo}A human here played <strong>${hm.source}→${hm.destination}</strong>${hq}. The engine goes deeper — watch the line.</span>`;
+  }
+  // Preserve the solution + human-contrast text so the line-search status and
+  // final message augment it rather than wiping the teaching point.
+  state.puzzle._revealHtml = html;
+  state.puzzle._revealKind = outcome === "correct" ? "correct" : "reveal";
+  _setPuzzleFeedback(state.puzzle._revealKind, html);
 
   // The "why": play the engine's line out on the board. Auto-run it when the
-  // user was wrong (that's the moment the consequence teaches); offer it as a
-  // button when they were right.
+  // user was wrong, OR for any human-origin puzzle (the contrast IS the point,
+  // so the line plays even on a correct answer). Otherwise offer it as a button.
   state.puzzle._bestMove = best || null;
-  if (best && outcome !== "correct") {
+  if (best && (outcome !== "correct" || data.source === "human")) {
     revealEngineLine(best);
   } else if (best) {
     if (puzzleRevealBtn) { puzzleRevealBtn.hidden = false; puzzleRevealBtn.textContent = "▶ Watch the engine's line"; }
@@ -2535,8 +2550,11 @@ async function revealEngineLine(bestMove) {
   const pz = state.puzzle;
   if (!pz) return;
   const gen = pz.gen;
+  const baseHtml = pz._revealHtml || "";
+  const baseKind = pz._revealKind || "reveal";
   if (puzzleRevealBtn) puzzleRevealBtn.hidden = true;
-  _setPuzzleFeedback("reveal", `<strong>Searching the engine's line…</strong><span class="pz-detail">A couple seconds.</span>`);
+  // Augment the preserved solution/contrast text — don't wipe it.
+  _setPuzzleFeedback(baseKind, baseHtml + `<span class="pz-detail">Searching the engine's line…</span>`);
   // Build an eval payload from the CURRENT puzzle position (board not yet
   // mutated), forcing enough sims that the search produces a PV.
   const payload = { ...currentPayload(), num_sims: PUZZLE_LINE_SIMS, top_k: 8 };
@@ -2551,8 +2569,8 @@ async function revealEngineLine(bestMove) {
     && m.principal_variation && m.principal_variation.length);
   if (!entry) entry = moves.find((m) => m.principal_variation && m.principal_variation.length);
   if (!entry || !entry.principal_variation.length) {
-    // Fall back to the static arrow + text already shown.
-    _setPuzzleFeedback("reveal", `<strong>Solution: ${bestMove.source}→${bestMove.destination}</strong><span class="pz-detail">eval ${_fmtEval(bestMove.q)}. (No deeper line at this budget.)</span>`);
+    // No deeper line — keep the solution/contrast text as-is.
+    _setPuzzleFeedback(baseKind, baseHtml || `<strong>Solution: ${bestMove.source}→${bestMove.destination}</strong><span class="pz-detail">eval ${_fmtEval(bestMove.q)}.</span>`);
     if (puzzleRevealBtn) puzzleRevealBtn.hidden = true;
     return;
   }
@@ -2582,7 +2600,9 @@ async function playEngineLine(pvSteps, gen) {
     state.busy = false;
   }
   if (pz.gen !== gen) return;
-  _setPuzzleFeedback("reveal", `<strong>The engine's line.</strong><span class="pz-detail">${pvSteps.length} half-moves of best play. The eval each side faced is why ${pz._bestMove ? pz._bestMove.source + "→" + pz._bestMove.destination : "that move"} wins.</span>`);
+  const base = pz._revealHtml || "";
+  const kind = pz._revealKind || "reveal";
+  _setPuzzleFeedback(kind, base + `<span class="pz-detail">▶ Engine's line played out above (${pvSteps.length} half-moves) — that's the why.</span>`);
   if (puzzleRevealBtn) { puzzleRevealBtn.hidden = false; puzzleRevealBtn.textContent = "↻ Replay line"; }
 }
 
@@ -2600,7 +2620,8 @@ function _renderPuzzlePanel() {
   const d = state.puzzle.data;
   if (!d) return;
   if (puzzlePrompt) puzzlePrompt.textContent = d.prompt;
-  _setChip(puzzlePoolChip, d.pool === "find_win" ? "Find the win" : "Hold the position");
+  const poolLabel = d.pool === "find_win" ? "Find the win" : "Hold the position";
+  _setChip(puzzlePoolChip, d.source === "human" ? "Human game" : poolLabel);
   if (puzzleDiffChip) {
     puzzleDiffChip.textContent = ({ easy: "Easy", med: "Medium", hard: "Hard" })[d.difficulty] || d.difficulty;
     puzzleDiffChip.dataset.diff = d.difficulty;
@@ -2687,6 +2708,9 @@ if (puzzlePoolSel) puzzlePoolSel.addEventListener("change", () => {
 });
 if (puzzleDiffSel) puzzleDiffSel.addEventListener("change", () => {
   if (state.puzzle) { state.puzzle.filters.difficulty = puzzleDiffSel.value; loadNextPuzzle(); }
+});
+if (puzzleSourceSel) puzzleSourceSel.addEventListener("change", () => {
+  if (state.puzzle) { state.puzzle.filters.source = puzzleSourceSel.value; loadNextPuzzle(); }
 });
 
 // Landing = the launcher gate (pick a job → configure → drop into the board),

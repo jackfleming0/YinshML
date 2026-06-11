@@ -1476,48 +1476,56 @@ def api_import_bga():  # type: ignore[no-untyped-def]
 # puzzle already carries the exact pieces/side_to_move/phase/scores shape
 # build_state() consumes. The answer key (accept_moves + distractors) is held
 # server-side and only revealed by /api/puzzles/check after an attempt.
-PUZZLE_BANK_PATH = Path(
-    os.environ.get(
-        "YNS_PUZZLE_BANK",
-        str(Path(__file__).resolve().parent / "data" / "puzzle_bank.json"),
-    )
+PUZZLE_BANK_DIR = Path(
+    os.environ.get("YNS_PUZZLE_BANK_DIR", str(Path(__file__).resolve().parent / "data"))
 )
 _puzzles_by_id: Dict[str, Dict[str, Any]] = {}
 _puzzles_loaded = False
 
 
 def _ensure_puzzles() -> None:
-    """Load the puzzle bank once, lazily, on first puzzle request."""
+    """Load every ``*_bank.json`` under the puzzle dir once, lazily. Multiple
+    banks (self-play + human-origin) merge into one id-keyed pool; ids are
+    source-prefixed at curation so they never collide."""
     global _puzzles_loaded  # noqa: PLW0603
     if _puzzles_loaded:
         return
     _puzzles_loaded = True
-    if not PUZZLE_BANK_PATH.exists():
-        log.warning("puzzle bank not found at %s (puzzle mode disabled)", PUZZLE_BANK_PATH)
+    banks = sorted(PUZZLE_BANK_DIR.glob("*_bank.json"))
+    if not banks:
+        log.warning("no *_bank.json under %s (puzzle mode disabled)", PUZZLE_BANK_DIR)
         return
-    try:
-        with open(PUZZLE_BANK_PATH) as f:
-            bank = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:  # noqa: BLE001
-        log.error("failed to load puzzle bank: %s", e)
-        return
-    for p in bank.get("puzzles", []):
-        _puzzles_by_id[p["id"]] = p
-    log.info("loaded %d puzzles from %s", len(_puzzles_by_id), PUZZLE_BANK_PATH)
+    for path in banks:
+        try:
+            with open(path) as f:
+                bank = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:  # noqa: BLE001
+            log.error("failed to load puzzle bank %s: %s", path, e)
+            continue
+        n = 0
+        for p in bank.get("puzzles", []):
+            _puzzles_by_id[p["id"]] = p
+            n += 1
+        log.info("loaded %d puzzles from %s", n, path.name)
+    log.info("puzzle pool: %d total", len(_puzzles_by_id))
 
 
 def _public_puzzle(p: Dict[str, Any]) -> Dict[str, Any]:
     """Puzzle as sent to the client — position only, answer key stripped."""
     stm = p["side_to_move"]
     side_word = stm.capitalize()
-    prompt = (
-        f"{side_word} to move — find the winning move."
-        if p["pool"] == "find_win"
-        else f"{side_word} to move — find the move that holds the position."
-    )
+    source = p.get("source", "selfplay")
+    if source == "human":
+        # The human's move is the foil, revealed on /check — not leaked here.
+        prompt = f"{side_word} to move — a human played here. Find the move the engine would crush it with."
+    elif p["pool"] == "find_win":
+        prompt = f"{side_word} to move — find the winning move."
+    else:
+        prompt = f"{side_word} to move — find the move that holds the position."
     return {
         "id": p["id"],
         "pool": p["pool"],
+        "source": source,
         "difficulty": p["difficulty"],
         "side_to_move": stm,
         "phase": p["phase"],
@@ -1541,11 +1549,14 @@ def api_puzzles_next():  # type: ignore[no-untyped-def]
         return jsonify({"ok": False, "errors": ["no puzzle bank loaded"]}), 200
     pool = request.args.get("pool")
     difficulty = request.args.get("difficulty")
+    source = request.args.get("source")   # selfplay | human
     exclude = {s for s in (request.args.get("exclude") or "").split(",") if s}
 
     filtered = [
         p for p in _puzzles_by_id.values()
-        if (not pool or p["pool"] == pool) and (not difficulty or p["difficulty"] == difficulty)
+        if (not pool or p["pool"] == pool)
+        and (not difficulty or p["difficulty"] == difficulty)
+        and (not source or p.get("source", "selfplay") == source)
     ]
     if not filtered:
         return jsonify({"ok": False, "errors": ["no puzzles match that filter"]}), 200
@@ -1588,6 +1599,12 @@ def api_puzzles_check():  # type: ignore[no-untyped-def]
     trap = next(
         (m for m in p["distractors"] if m["source"] == src and m["destination"] == dst), None
     )
+    # The human's actual move (the teaching foil). If the user played it, flag
+    # that — "you played exactly what the human did; the engine goes deeper."
+    human_move = p.get("human_move")
+    played_human_move = bool(
+        human_move and human_move.get("source") == src and human_move.get("destination") == dst
+    )
     return jsonify({
         "ok": True,
         "id": pid,
@@ -1599,6 +1616,9 @@ def api_puzzles_check():  # type: ignore[no-untyped-def]
         "distractors": p["distractors"],
         "metrics": p.get("metrics", {}),
         "pool": p["pool"],
+        "source": p.get("source", "selfplay"),
+        "human_move": human_move,
+        "played_human_move": played_human_move,
     })
 
 

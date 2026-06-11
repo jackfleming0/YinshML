@@ -83,10 +83,15 @@ def parse_args():
     p.add_argument("--source-tag", default="selfplay",
                    help="Stamp each puzzle's origin: 'selfplay' (e26) or 'human'.")
     p.add_argument("--require-divergence", action="store_true",
-                   help="Human pool only: keep positions where the human's actual move "
-                        "is NOT in the engine's accept set. The obvious human move is the "
-                        "foil; the engine's deeper move is the answer — that contrast is "
-                        "the teaching. Needs a 'human_move_idx' array in the npz.")
+                   help="Human pool: switch worthiness from the self-play CLIFF test to the "
+                        "human-vs-engine GAP test. Keep positions where the human's move "
+                        "diverges from the engine's best AND is meaningfully worse (see "
+                        "--human-gap). The obvious human move is the foil; the engine's "
+                        "deeper move is the answer; the gap is the lesson. Needs "
+                        "'human_move_idx' in the npz.")
+    p.add_argument("--human-gap", type=float, default=0.12,
+                   help="Human pool: min (best_q - human_move_q) for a teaching position. "
+                        "A human move outside the engine's top-64 counts as max gap.")
     return p.parse_args()
 
 
@@ -135,6 +140,12 @@ def main():
     nlegal = VAL.sum(1)
     best_q = Qm.max(1)
 
+    # The human move's q (human pool). Match the human index among the move
+    # slots; -inf where the human move isn't even in the engine's top-64 (a
+    # deep miss — counts as the maximum possible gap below best_q).
+    hm_slot = (ID == human_move_idx[:, None]) & (human_move_idx[:, None] >= 0)
+    human_q = np.where(hm_slot.any(1), np.where(hm_slot, Q, -np.inf).max(1), -np.inf)
+
     near = Q >= (best_q[:, None] - args.accept_delta)
     top5 = np.zeros_like(VAL)
     top5[:, :5] = VAL[:, :5]
@@ -168,19 +179,22 @@ def main():
     for name, sel, require_pos in (("find_win", is_win, True), ("hold", is_hold, False)):
         acc = build_accept(require_pos)
         af, br, cliff, trap, n_acc = cliff_and_traps(acc)
-        worthy = sel & (n_acc >= 1) & (cliff >= args.min_cliff)
-        # Teaching contrast: the human's obvious move ≠ the engine's accept set.
-        # acc is in ranked-slot order, so are ID; check membership of the human
-        # index among the accepted slots' move indices.
-        acc_move_idx = np.where(acc, ID, -1)                       # -1 for non-accepted slots
+        # Teaching contrast: human's obvious move ≠ the engine's accept set.
+        # acc / ID are both in ranked-slot order.
+        acc_move_idx = np.where(acc, ID, -1)
         human_in_accept = (acc_move_idx == human_move_idx[:, None]).any(1)
         diverges = (~human_in_accept) & (human_move_idx >= 0)
         if args.require_divergence:
-            worthy = worthy & diverges
+            # Human pool: worthiness = the human-vs-engine gap, NOT the self-play
+            # cliff. Keep positions where the human diverged AND left ≥ human_gap
+            # of value on the table relative to the engine's best.
+            gap_ok = human_q <= (best_q - args.human_gap)
+            worthy = sel & (n_acc >= 1) & diverges & gap_ok
+        else:
+            worthy = sel & (n_acc >= 1) & (cliff >= args.min_cliff)
         pools[name] = dict(sel=worthy, accept=acc, accept_floor=af, best_reject=br,
                            cliff=cliff, trap=trap, n_accept=n_acc, diverges=diverges)
-        extra = f"  divergent={int((worthy & diverges).sum()):,}" if (human_move_idx >= 0).any() else ""
-        print(f"\n[{name}] candidates: pool={int(sel.sum()):,}  puzzle-worthy={int(worthy.sum()):,}{extra}")
+        print(f"\n[{name}] candidates: pool={int(sel.sum()):,}  puzzle-worthy={int(worthy.sum()):,}")
 
     # -----------------------------------------------------------------------
     # Stage C: stratified sampling within each pool
@@ -244,7 +258,7 @@ def main():
                 cliff=info["cliff"][gi], trap=info["trap"][gi],
                 max_distractors=args.max_distractors,
                 source_tag=args.source_tag, human_move_idx=int(human_move_idx[gi]),
-                diverges=bool(info["diverges"][gi])))
+                human_q=float(human_q[gi]), diverges=bool(info["diverges"][gi])))
 
     # -----------------------------------------------------------------------
     out = {
@@ -265,7 +279,8 @@ def main():
 def _serialise_puzzle(encoder, pool, gi, diff_lab, *, state, ID_row, P_row, Q_row, PR_row,
                       VAL_row, accept_ranked, markers, score_diff, centrality, value,
                       best_q, accept_floor, cliff, trap, max_distractors,
-                      source_tag="selfplay", human_move_idx=-1, diverges=False):
+                      source_tag="selfplay", human_move_idx=-1, human_q=float("-inf"),
+                      diverges=False):
     gs = encoder.decode_state(state)
     side = gs.current_player                       # true side to move (decoded from sentinel)
     pieces = [{"pos": str(pos), "piece": piece.name} for pos, piece in gs.board.pieces.items()]
@@ -305,6 +320,9 @@ def _serialise_puzzle(encoder, pool, gi, diff_lab, *, state, ID_row, P_row, Q_ro
                 "type": hmv.type.name,
                 "source": str(hmv.source),
                 "destination": str(hmv.destination) if hmv.destination is not None else None,
+                # q of the human's move (null if it wasn't in the engine's top-64);
+                # best_q - this = how much value the human left behind.
+                "q": round(float(human_q), 4) if human_q != float("-inf") else None,
             }
         except Exception:  # noqa: BLE001 — out-of-range/odd index, just omit
             human_move = None
