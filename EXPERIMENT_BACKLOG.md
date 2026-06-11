@@ -56,19 +56,23 @@ constraint, and it resolved decisively:
 surviving levers are:
 - **Lever B — test-time compute (free, ship now):** **E18** (deploy symmetric
   MCTS, +6–22 pp, no training) + simply playing at higher MCTS budget.
-- **Lever A — search-improved *policy* distillation:** **E26** (reaimed) —
-  distill iter1 searched at very high budget into the net; the one surviving
-  target-improvement lever.
+- **Lever A — search-improved *policy* distillation:** **E26 — DONE · STRONGER.**
+  Distilling iter1's high-budget search policy beat frozen iter1 (~0.60 @ ≥400
+  sims, ~1.5× search-efficiency). First plateau-break; the lever works. Next:
+  iterate the loop from the new stronger net (`e26_lc_full`) as teacher.
 - **Lever D — architecture / capacity:** **A4** (scalar regression value head),
   a bigger trunk, or **E17** (D2-equivariant net).
 - **Lever E — ensemble-teacher:** **E21** — viable as E26's teacher *if* we can
   find decorrelated members; the ~1h mode-b probe is the cheap test.
 
-**Recommended sequence:** ship **E18 + higher play-time sims** (free) → run
-**E26** policy-distillation → escalate to **architecture/capacity** (A4 / E17)
-only if E26 stalls. **Discipline is unchanged: the only verdict is H2H vs the
-FIXED champion `iter1_ema`; change one variable at a time; cheap diagnostics aim
-the expensive swing.**
+**Recommended sequence:** E18 + higher play-time sims (free) and **E26
+policy-distillation are both DONE and positive.** Next: **(1)** promote
+`e26_lc_full` to champion via a fresh ≥400-sim gate, then **(2)** iterate the
+distill loop with it as the high-sim teacher (compounding) → escalate to
+**architecture/capacity** (A4 / E17) only if the iterated loop stalls.
+**Discipline is unchanged: the only verdict is H2H vs the FIXED champion (now
+gate at ≥400 sims, not 96 — see Finding 7); change one variable at a time; cheap
+diagnostics aim the expensive swing.**
 
 > **Meta-finding that frames everything:** nothing built since has beaten
 > `iter1_ema_2026-05-27`. Not E6, not the dropout-fix lineage, not the symmetry
@@ -85,11 +89,6 @@ the expensive swing.**
 **What:** Ship the validated symmetric-MCTS inference path (averages one net over the 4 D2 transforms) to the analysis board — zero new training, free strength bump.
 **Outcome:** Pending — gate is just the deploy action (`git push` + `yinsh-redeploy`). Validated: D6 opening concentration 0.857→0.214, iter1 WR 48%→54%.
 → [details](docs/experiments/e18_symmetric_mcts_deploy.md)
-
-#### E26 — High-budget-search distillation campaign  `RUNNING · reaimed to policy-distill`
-**What:** Distill targets from a stronger teacher (iter1_ema at 1600–3200+ sims) into the net — search manufactures the better signal, distillation banks it.
-**Outcome:** Pending — reaimed 2026-06-09 to distill the search-improved POLICY (value teacher undercut by E25). Verdict gate: distilled net beating frozen iter1_ema in H2H. **Teacher-gen now E20-accelerated** (`gen_distill_corpus.py --use-inference-server --inference-dtype bf16`): ~645 pos/min @48w/800sim on the 4090 (~4.7× old GPU best; 2M-position target ~52h, was ~10 days). RUNNING 2026-06-09: 250k @1600sim de-risk → distill → H2H, then a full puzzle-grade 800-sim corpus. Two fixes landed mid-campaign: high-sim visit-count overflow (`TECH_DEBT.md` §6) and the gen now also stores `policy_q`/`policy_prior` per move (puzzle-grade — see Unscoped ideas).
-→ [details](docs/experiments/e26_distillation_campaign.md) · [box runbook](docs/experiments/e26_box_runbook.md)
 
 #### E21 — Model ensembling (averaged P/V), primarily as a teacher  `QUEUED · parked`
 **What:** Average decorrelated evaluators (N models × 4 transforms via the E8 harness); teacher-mode distillation is the real lever, player-mode a cheap probe.
@@ -193,6 +192,11 @@ on battle-tested paths.
 
 Reverse-chronological. Detail files in `docs/experiments/completed/`.
 
+#### E26 — High-budget-search policy distillation  `DONE · STRONGER (first plateau-break since iter1_ema)`
+**What:** Distill the search-improved POLICY of iter1_ema (teacher @ 800–1600 sims) into a fresh net; search manufactures the better signal, distillation banks it. Verdict gate: distilled net beating frozen iter1_ema in H2H.
+**Outcome:** STRONGER at tournament search — distilled beats iter1 **0.59–0.63 @ sims ≥ 400** (every CI clear of 0.50; 400: 0.589 n=192 SPRT / 0.588 n=250 h2h; 1600: 0.630 n=92 SPRT). Worth a **~1.5× search-efficiency multiplier (~60–70 Elo)**: distilled@400 beats iter1@400 (0.589) but loses to iter1@800 (0.433) → ≈0.57 of a search-doubling. The strength-vs-search curve is **U-shaped** (raw-prior 0.65 @ 0 sims → trough ~0.41–0.51 @ 16–96 → ~0.60 plateau @ ≥400); E26 first read as a null only because the old H2H gate at ~64–96 sims sat in the trough — **gate at ≥400 sims, not 96.** (The 0.82 @ 800 SPRT point is early-stop bias; true ≈0.62.) Corpus data-sufficient from ~150k positions. Bonus: test-time D2 averaging is **null on the distilled net** (0.504) — refines E8 (the net is already symmetry-consistent), and high-sim MCTS is CPU/tree-bound so the E20 server doesn't speed deep search.
+→ [details](docs/experiments/completed/e26_distillation_campaign.md) · [results](docs/experiments/e26_overnight_results/)
+
 #### E25 — Binding-constraint diagnostic  `DONE · value head OUT`
 **What:** sharkdp benchmark + clean on-distribution value-eval + policy-vs-value MCTS ablation, to find the real binding constraint before committing big compute.
 **Outcome:** Value head OUT — on-distribution AUC **0.663** (intrinsic ceiling, not a human-noise artifact); ablation shows policy is load-bearing; no engine exceeds iter1. Intrinsic-ceiling check (§7.1/§10) closed it: from-scratch on 1.6M positions caps held-out AUC at **0.677** while train→0.988 → not data, not encoding. Redirect to search/policy.
@@ -245,7 +249,7 @@ Reverse-chronological. Detail files in `docs/experiments/completed/`.
 
 #### E8 — Symmetric MCTS at inference (D2 averaging)  `DONE · validated & deployed`
 **What:** Average policy+value over the 4 D2 board symmetries at each MCTS leaf, forcing symmetric inference output regardless of weight asymmetry.
-**Outcome:** Breaks ~75% of opening path-dependence (A5 72%→40%) plus a +6 to +22 pp WR bonus from leaf-noise reduction; shipped to the analysis board (commit 09a6d86). Deploy = E18.
+**Outcome:** Breaks ~75% of opening path-dependence (A5 72%→40%) plus a +6 to +22 pp WR bonus from leaf-noise reduction; shipped to the analysis board (commit 09a6d86). Deploy = E18. **Caveat (E26, 2026-06-11):** the gain is asymmetry-correction — it is **null on the distilled net** (`e26_lc_full` + D2 = 0.504 vs plain, n=250), which is already symmetry-consistent. Model-dependent; cheap E11 diagnostic on a distilled net would confirm it can skip the symmetric-MCTS path.
 → [details](docs/experiments/completed/e8_symmetric_mcts.md)
 
 #### L1/L2 — Dropout(0.3→0) + label smoothing  `DONE · both validated`
@@ -330,6 +334,13 @@ The priors that shape the ranking. If any is wrong, the ranking changes.
 6. **Cross-architecture eval infra is fragile** — the `use_enhanced_encoding`
    flag must be plumbed through every eval path; several bare-`NetworkWrapper`
    sites remain (→ F1).
+7. **Strength-vs-search is non-monotonic; gate at tournament sims.** E26's
+   distilled net is U-shaped vs iter1 (0.65 raw-prior → ~0.45 trough at 16–96
+   sims → ~0.60 plateau at ≥400). A single-sim-count H2H can land anywhere on
+   that curve — the old ~96-sim gate sat in the trough and read a real
+   plateau-break as a null. Gate at ≥400 sims, and prefer the iso-strength
+   search-efficiency multiplier over a single point. SPRT early-accepts are
+   WR-biased toward the boundary — trust fixed-N or near-cap estimates.
 
 ---
 

@@ -1,0 +1,63 @@
+{
+  "config": {
+    "anchor": "models/iter1_frozen.pt",
+    "anchor_label": "anchor:models/iter1_frozen",
+    "candidates": [
+      "models/e26_lc_full.pt"
+    ],
+    "mode": "sprt",
+    "num_games": 40,
+    "num_simulations": 400,
+    "opening_sample_plies": 20,
+    "opening_temperature": 1.0,
+    "sprt": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.05,
+      "beta": 0.05,
+      "max_games": 300
+    },
+    "seed": 42,
+    "device": "cuda",
+    "engine": "self_play.MCTS.search_batch"
+  },
+  "results": [
+    {
+      "candidate_path": "models/e26_lc_full.pt",
+      "candidate_label": "models/e26_lc_full",
+      "anchor_path": "models/iter1_frozen.pt",
+      "candidate_wr": 0.5885416666666666,
+      "candidate_wins": 113,
+      "anchor_wins": 79,
+      "draws": 0,
+      "cand_white_wins": 58,
+      "cand_black_wins": 55,
+      "ci95_lo": 0.517861400096107,
+      "ci95_hi": 0.6557482926351614,
+      "verdict": "STRONGER",
+      "sprt": {
+        "label": "models/e26_lc_full",
+        "decision": "STRONGER",
+        "games": 192,
+        "cand_wins": 113,
+        "anchor_wins": 79,
+        "draws": 0,
+        "cand_white_wins": 58,
+        "cand_black_wins": 55,
+        "llr": 2.973995363894302,
+        "llr_lower": -2.9444389791664403,
+        "llr_upper": 2.9444389791664403,
+        "wr_decisive": 0.5885416666666666,
+        "ci95_lo": 0.517861400096107,
+        "ci95_hi": 0.6557482926351614,
+        "p0": 0.5,
+        "p1": 0.6,
+        "alpha": 0.05,
+        "beta": 0.05,
+        "max_games": 300
+      },
+      "seconds": 7436.709974527359
+    }
+  ],
+  "elapsed_seconds": 7437.223311185837
+}
