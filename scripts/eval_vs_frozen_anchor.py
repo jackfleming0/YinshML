@@ -78,14 +78,25 @@ def _build_wrapper_for_checkpoint(path: Path, device: str) -> NetworkWrapper:
     return NetworkWrapper(model_path=str(path), device=device)
 
 
-def build_batched_mcts(net: NetworkWrapper, sims: int) -> BatchedMCTS:
+def build_batched_mcts(net: NetworkWrapper, sims: int, d2_transforms: int = 0) -> BatchedMCTS:
     """Pure-neural batched MCTS, matching `run_anchor_eval`'s `_build_anchor_mcts`
     (subtree reuse off so one instance is safe to reuse across games — every
-    search_batch call builds a fresh root from the passed state)."""
+    search_batch call builds a fresh root from the passed state).
+
+    ``d2_transforms`` in {2, 4} plugs a ``SymmetrizingEvaluator`` into the
+    ``evaluator=`` seam, so every leaf is evaluated as the average over the D2
+    board symmetries (test-time symmetry averaging). 0 (default) = plain
+    single-orientation evaluation.
+    """
+    evaluator = None
+    if d2_transforms:
+        from yinsh_ml.network.symmetrized_evaluator import SymmetrizingEvaluator
+        evaluator = SymmetrizingEvaluator(net, num_transforms=d2_transforms)
     return BatchedMCTS(
         network=net,
         evaluation_mode="pure_neural",
         heuristic_evaluator=None,
+        evaluator=evaluator,
         num_simulations=sims,
         late_simulations=sims,
         simulation_switch_ply=10_000,
@@ -268,6 +279,18 @@ def main():
                         help="Total games per candidate (split half white / half black).")
     parser.add_argument("--num-simulations", type=int, default=64,
                         help="MCTS sims/move. 64 matches the validation-gate budget.")
+    parser.add_argument("--anchor-simulations", type=int, default=None,
+                        help="Anchor MCTS sims/move. Default: same as --num-simulations "
+                             "(symmetric match). Set to a different value for asymmetric "
+                             "iso-strength matches (e.g. candidate@400 vs anchor@800 to "
+                             "measure the search-efficiency multiplier).")
+    parser.add_argument("--candidate-d2", type=int, default=0, choices=[0, 2, 4],
+                        help="Test-time D2 symmetry averaging for the candidate: "
+                             "0=off, 2=C2 (identity+180°), 4=full D2 (+2 reflections). "
+                             "Each leaf is evaluated as the average over the board "
+                             "symmetries. Costs Nx the GPU forward.")
+    parser.add_argument("--anchor-d2", type=int, default=0, choices=[0, 2, 4],
+                        help="Same as --candidate-d2 but for the anchor.")
     parser.add_argument("--opening-sample-plies", type=int, default=20,
                         help="Sample (not argmax) for the first N plies to diversify "
                              "games. 0 = deterministic (a balanced color split then "
@@ -316,9 +339,11 @@ def main():
     logger.info(f"Loading frozen anchor {anchor_label} from {args.anchor}")
     anchor_net = _build_wrapper_for_checkpoint(args.anchor, device=args.device)
     anchor_net.load_model(str(args.anchor))
-    anchor_mcts = build_batched_mcts(anchor_net, args.num_simulations)
+    anchor_sims = args.anchor_simulations if args.anchor_simulations is not None else args.num_simulations
+    anchor_mcts = build_batched_mcts(anchor_net, anchor_sims, d2_transforms=args.anchor_d2)
     resolved_device = str(anchor_net.device)
-    logger.info(f"Device: {resolved_device}, batched MCTS sims/move: {args.num_simulations}, "
+    logger.info(f"Device: {resolved_device}, batched MCTS sims/move: cand={args.num_simulations} "
+                f"anchor={anchor_sims}, "
                 f"{half}+{half} games/candidate, opening: {args.opening_sample_plies} plies "
                 f"@ temp {args.opening_temperature}")
 
@@ -333,7 +358,7 @@ def main():
         logger.info(f"  {cand_label} vs {anchor_label} ...")
         cand_net = _build_wrapper_for_checkpoint(cand_path, device=args.device)
         cand_net.load_model(str(cand_path))
-        cand_mcts = build_batched_mcts(cand_net, args.num_simulations)
+        cand_mcts = build_batched_mcts(cand_net, args.num_simulations, d2_transforms=args.candidate_d2)
 
         pair_t0 = time.time()
         if args.sprt:
@@ -435,6 +460,9 @@ def main():
                 "mode": "sprt" if args.sprt else "fixed_n",
                 "num_games": args.num_games,
                 "num_simulations": args.num_simulations,
+                "anchor_simulations": anchor_sims,
+                "candidate_d2": args.candidate_d2,
+                "anchor_d2": args.anchor_d2,
                 "opening_sample_plies": args.opening_sample_plies,
                 "opening_temperature": args.opening_temperature,
                 "sprt": ({"p0": args.sprt_p0, "p1": args.sprt_p1,
