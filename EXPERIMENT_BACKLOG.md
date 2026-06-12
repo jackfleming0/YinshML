@@ -30,7 +30,45 @@ without a clear next step, read the **Current state** section below first.
 
 ---
 
-## Current state (2026-06-09) — the binding constraint is the value head, and it's OUT
+## Current state (2026-06-12) — E26 broke the plateau; now find out if it compounds
+
+E26 (high-budget-search **policy** distillation) is the **first plateau-break
+since iter1_ema** — `e26_lc_full` beats frozen iter1 at ≥400 sims (~0.59–0.63),
+worth a ~1.5× search-efficiency multiplier. That banks a *one-time* search
+premium. The whole superhuman thesis now rests on one untested question:
+**does expert iteration compound, or saturate after banking the premium once?**
+
+**The program (2026-06-12), sequenced for cost** — agent/dev labor is a prepaid
+free resource, so behavior-preserving speedups come free and the scarce resources
+are *trust in the foundation* and *wall-clock to the decisive answer*, not dollars
+(the whole near-term program is ~$25–45 of 4090 box time @ $1.12/hr):
+
+1. **E29(a) free speedups + bf16 flip** — gate parallelism, corpus batch width,
+   `inference_server_dtype: bf16`. Free to build, cut every paid run, zero
+   downside. **Do first.**
+2. **E27 — compounding distillation loop (primary, ~$13–27/turn).** Promote
+   `e26_lc_full` (≥400-sim gate) → regenerate 1600-sim corpus from it → distill
+   `e26.2` → gate vs `e26_lc_full`. **Gate-2 is the load-bearing result**:
+   compounds ⇒ flywheel (iterate; escalate E29(b)); saturates ⇒ redirect to
+   capacity (A4 cheap, then E17).
+3. **E28 — opening-value map (Route A, ~$0).** Runs *now* on the existing E26
+   corpus, parallel to everything; reads opening value off cached search Q. The
+   cheap diagnostic that aims/triggers the expensive opening spend (E30/E31).
+4. **A4 (~$5) + E30 placement rider (~$5–9)** — cheap probes off the E27 corpus;
+   A4 may redirect the loop's target design, E30 is gated by E28.
+5. **Conditional:** E29(b) parity-gated C++ search and E31 full opening sweep —
+   only once E27 confirms you'll crank repeatedly / an attractor is found. E17
+   only if the loop stalls *and* A4 doesn't unlock the value head.
+
+Detail: [[e27]] · [[e28]] · [[e29]] · [[e30]] · [[e31]] · [[e17]] · [[a4]].
+
+**Discipline unchanged:** the only verdict is H2H vs the FIXED champion, **gate at
+≥400 sims** (Finding 7, not 96); color-balance; distrust SPRT early-accepts; change
+one variable at a time; cheap diagnostics aim the expensive swing.
+
+---
+
+## Prior state (2026-06-09) — the binding constraint is the value head, and it's OUT
 
 Four swings at the post-iter1 plateau — **E19** (search depth), **E22**
 (cross-teacher decisiveness), **E24** (LR sweep) — all came back NOT_STRONGER.
@@ -83,7 +121,39 @@ diagnostics aim the expensive swing.**
 
 ## Active / queued
 
-### Plateau-break levers (current focus)
+### Post-E26 program (current focus, 2026-06-12)
+
+#### E27 — Compounding distillation loop (E26 iterated)  `QUEUED · primary`
+**What:** Promote `e26_lc_full` (≥400-sim gate) → regenerate a 1600-sim corpus from it → distill `e26.2` → gate vs frozen `e26_lc_full`. The AlphaZero compounding move.
+**Outcome:** Pending — Gate-2 is load-bearing: `e26.2` beats `e26_lc_full` @≥400 ⇒ flywheel (iterate, escalate E29b); ties ⇒ saturated, redirect to capacity (A4/E17). ~$13–27/turn. Free value-target rider tests the head E24 couldn't move.
+→ [details](docs/experiments/e27_compounding_distillation_loop.md)
+
+#### E28 — Opening-value map from cached search Q-values (Route A)  `QUEUED · ~$0, do early`
+**What:** Read opening value off the **existing** E26 corpus — placement-node search Q + visits, Zobrist-deduped (canonicalizes order-independent configs), clustered and characterized human-readably. The correct, cheap version of "map the openings" (strong evaluator, no ~10¹⁴ enumeration).
+**Outcome:** Pending — diagnostic that aims the opening spend. Clean ⇒ park E31/E30 (robustness audit only); placement misvaluation ⇒ promotes E30+E31 (a strength lever E25 never checked — it measured value aggregate, not placement).
+→ [details](docs/experiments/e28_opening_value_map.md)
+
+#### E29 — Search-path optimization (throughput + parity-gated C++)  `QUEUED · (a) do-first / (b) deferred`
+**What:** Cut the cost of every paid high-sim run (≥400-sim gates + 1600-sim gen are CPU/tree-bound). (a) behavior-preserving — bf16, gate parallelism, corpus batch width (free, no downside); (b) behavior-changing — C++/tree-op search (free to build, **not** free to trust; parity-gate vs Python).
+**Outcome:** Pending — (a) ship now; (b) parity-gated + deployed only after E27 confirms the loop compounds (payoff = cheaper *turns*). Don't optimize the non-binding inference path just because labor is free.
+→ [details](docs/experiments/e29_search_path_optimization.md)
+
+#### E30 — Placement-value grounding (re-scoped to opening quality)  `QUEUED · rider, gated by E28`
+**What:** Distill deep-search VALUE into RING_PLACEMENT positions (opening_theory H1: value head structurally blind during placement). Already coded (`search_consistency_placement_only`); rides the E27 corpus. Re-scoped: not a strength-ceiling lever (E25), an opening-quality/path-dependence one.
+**Outcome:** Pending — gated by E28. Metric re-scoped from value-AUC to opening diversity (placement entropy → human ~4.0 spread, orbit decorrelation) + main-game non-regression. Untested, not refuted (only ran bundled in the failed symmetry run).
+→ [details](docs/experiments/e30_placement_value_grounding.md)
+
+#### E31 — Opening-map strength-gradient sweep (Route B)  `QUEUED · conditional / parked`
+**What:** Rigorous opening valuation isolating opening- from play-quality — ~20 clustered openings × ≥3 strengths × 500 games, same model both sides, fixed openings at strength (≥400 sims), Δ-from-first-mover baseline. The model-strength *gradient* is the signal.
+**Outcome:** Pending — triggered by E28 (real attractor) or an E27 stall. Run the 4K-game first pass before the full 40K sweep. ~$27–40 full / ~$5–7 first pass. Formalizes `opening_map/DESIGN.md`.
+→ [details](docs/experiments/e31_opening_map_sweep.md)
+
+#### E17 — D2-equivariant network  `QUEUED · tertiary / Lever D`
+**What:** Bake D2 symmetry into the architecture (vs E8 inference-averaging / E16 loss-reg). E26 corollary: the distilled net already learned symmetry → the arch spends capacity relearning it; equivariance hands those params back to evaluation — the headroom A4/E25 say the value head needs.
+**Outcome:** Pending — cheap E11 weight-symmetry pre-check on `e26_lc_full` first; escalate to the full re-pretrain only if E27 stalls *and* A4 doesn't unlock the value head. ~$17–34 + impl risk.
+→ [details](docs/experiments/e17_equivariant_network.md)
+
+### Plateau-break levers (prior focus)
 
 #### E18 — Deploy symmetric MCTS (L3a/E8) to the analysis board  `QUEUED · do-first`
 **What:** Ship the validated symmetric-MCTS inference path (averages one net over the 4 D2 transforms) to the analysis board — zero new training, free strength bump.
@@ -289,9 +359,6 @@ Reverse-chronological. Detail files in `docs/experiments/completed/`.
 Candidate experiments that exist only as a line item — not yet scoped into a
 detail file. Promote one by writing its detail file and a `Pending —` entry above.
 
-- **E17 — D2-equivariant network.** Bake symmetry into the architecture instead
-  of averaging it at inference (E8) or regularizing toward it (E16). A real
-  Lever-D candidate; deferred when E11 confirmed H_W was fixable via E16.
 - **E12 / E13 / E15 — residual-25% diagnostics** (sim sweep, more games,
   augmentation-coverage audit). Deferred once E11 confirmed H_W — see the
   [E11 detail file](docs/experiments/completed/e11_weight_symmetry_check.md).
